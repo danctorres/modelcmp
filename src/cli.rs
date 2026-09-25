@@ -4,7 +4,9 @@ use crate::app::COLS;
 use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
-use crate::view::{compare_rows, detail_lines, pick, priced, task_frontier, truncate, verdict, via, visible};
+use crate::view::{
+    compare_rows, detail_lines, frontier_legend, pick, priced, task_frontier, truncate, verdict, via, visible,
+};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +34,8 @@ type Result<T = ()> = std::result::Result<T, Exit>;
 #[derive(Serialize)]
 struct Price<'a> {
     provider: &'a str,
+    /// The provider's model id: what a harness or API call takes
+    id: &'a str,
     available: bool,
     /// Where you have access: harnesses (opencode, claude, ...) and "env" for an API key
     via: &'a [String],
@@ -43,6 +47,7 @@ impl<'a> From<&'a Offer> for Price<'a> {
     fn from(o: &'a Offer) -> Self {
         Price {
             provider: &o.provider,
+            id: &o.id,
             available: o.available,
             via: &o.via,
             input_per_mtok: o.input,
@@ -318,13 +323,14 @@ pub fn tasks(data: &Data, store: &Store, json: bool) -> Result {
             .collect();
         return print_json(&v);
     }
+    println!("{}\n", frontier_legend(true));
     for t in TASKS {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
-        println!("  use for:     {}", t.when);
-        let front: Vec<String> = front(t).iter().map(|(m, s)| priced(m, *s)).collect();
-        println!("  best/price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
+        println!("  use for:         {}", t.when);
+        let front: Vec<String> = front(t).iter().map(|(m, s)| priced(m, *s, true)).collect();
+        println!("  best per price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
         if !t.benches.is_empty() {
-            println!("  benchmarks:  {}", t.benches.join(", "));
+            println!("  benchmarks:      {}", t.benches.join(", "));
         }
         println!();
     }

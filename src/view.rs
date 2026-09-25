@@ -71,9 +71,10 @@ pub fn frontier<'m, T: Copy>(
 /// A task's price frontier, cheapest first: each entry costs more and scores higher, the last
 /// being the best model for the task. Each price level keeps only its best entry, since models
 /// that close in price are not worth choosing between. Models without a price or a score are
-/// left out.
+/// left out, as are those under the `low` tier's floor: the frontier is a recommendation, and
+/// cheap alone is not one.
 pub fn task_frontier<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task) -> Vec<(&'a Model, f64)> {
-    let ranked = fit::rank(models, t);
+    let ranked: Vec<_> = fit::rank(models, t).into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
     let mut v = frontier(&ranked, |(m, _)| m, |m| fit::fit(m, t));
     // Dearest first so dedup keeps the best of each level, then back to cheapest first.
     v.sort_by(|a, b| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
@@ -99,9 +100,19 @@ pub fn usd(x: f64) -> String {
     if x == 0.0 { "free".into() } else { format!("${}", money(x)) }
 }
 
-/// `name $price (score)` for a frontier entry.
-pub fn priced(m: &Model, s: f64) -> String {
-    format!("{} {} ({s:.0})", m.name, usd(m.cost().unwrap_or(0.0)))
+/// What a frontier line shows, for the tasks panel and `modelcmp tasks`, which adds the key.
+pub fn frontier_legend(keyed: bool) -> String {
+    format!(
+        "best per price: name{}, $ blended 3:1 in:out per 1M tokens, (task percentile: rank among Epoch's models, \
+         not a quality gap), cheapest first and the best last; only models in the top half",
+        if keyed { " [key]" } else { "" }
+    )
+}
+
+/// `name $price (score)` for a frontier entry, `name [key] $price (score)` with `keyed`.
+pub fn priced(m: &Model, s: f64, keyed: bool) -> String {
+    let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
+    format!("{}{key} {} ({s:.0})", m.name, usd(m.cost().unwrap_or(0.0)))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
@@ -230,16 +241,17 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         }
     }
     v.push(String::new());
-    v.push("  providers ($ per 1M tokens in / out):".into());
+    v.push("  providers (model id, $ per 1M tokens in / out):".into());
     let mut offers: Vec<&Offer> = m.offers.iter().collect();
     // Available first, then cheapest; unknown price ("-") last.
     let cost = |o: &Offer| Some(o.input + o.output).filter(|c| *c > 0.0).unwrap_or(f64::MAX);
     offers.sort_by(|a, b| b.available.cmp(&a.available).then(cost(a).total_cmp(&cost(b))));
     for o in offers {
         v.push(format!(
-            "    {} {:<28}{:>8} {:>8}  {}",
+            "    {} {:<20}{:<34}{:>8} {:>8}  {}",
             if o.available { "●" } else { " " },
-            truncate(&o.provider_name, 28),
+            truncate(&o.provider_name, 19),
+            truncate(&o.id, 33),
             money(o.input),
             money(o.output),
             o.via.join(", ")
@@ -331,6 +343,7 @@ fn best(
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 

@@ -107,8 +107,11 @@ pub fn col_about(col: usize) -> String {
 
 pub const HELP: &[(&str, &str)] = &[
     ("j k ↓ ↑", "move; a count repeats, as in 3j; past the last row back to the first"),
-    ("h l ← →", "pick a column; the top border says what it means"),
-    ("0 $ w b", "first / last column; next / previous group: prices, benchmarks, Via"),
+    ("h l ← →", "pick a column; the top border says what it means; in compare, pick a model"),
+    (
+        "0 $ w b",
+        "first / last column; next / previous group: prices, benchmarks, Via; in compare, 0 $ pick the first / last model",
+    ),
     ("s", "sort by the column; again reverses"),
     ("enter", "details: every benchmark, price per provider"),
     ("> <", "minimum / maximum for the column, e.g. > 70 enter on Coding"),
@@ -122,7 +125,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("C", "compare marked models: cheapest, best coder, most coding per $"),
     (
         "/",
-        "filter by name, developer, Via or note, words in any order (anthropic opus), a typo forgiven when nothing matches (opsu); / again starts a new search, esc clears",
+        "filter by name, developer, Via or note, words in any order (anthropic opus), a typo forgiven when nothing matches (opsu); / again starts a new search, esc clears; in compare, filters the rows",
     ),
     ("c", "clear everything: filters, bounds, task, marks"),
     ("a", "all models, including ones you have no access to; again: yours only"),
@@ -141,7 +144,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("?", "this help"),
     (
         "mouse",
-        "click a row to select it, again for details; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column",
+        "click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column",
     ),
     ("qq", "quit; the first q asks. esc closes an overlay or the filter"),
 ];
@@ -301,6 +304,12 @@ pub enum Mouse {
     Scroll(isize),
     /// Click on row `n` of the table (an index into `rows`).
     Row(usize),
+    /// Right click on row `n`: mark it, as `m` does, without moving; a selection becomes marks.
+    Mark(usize),
+    /// Ctrl click on row `n`: toggle it in the selection on its own, keeping the rest.
+    Pick(usize),
+    /// Shift click or left drag to row `n`: extend the selection to it as a visual range.
+    Extend(usize),
     /// Horizontal wheel: columns to move the cursor, negative is left.
     Cols(isize),
     /// Click on a column header.
@@ -356,14 +365,21 @@ pub struct App {
     /// Indices into `data.models`, in display order.
     pub rows: Vec<usize>,
     pub table: TableState,
-    pub marked: Vec<String>,
     pub only_marked: bool,
     /// Row where `V` started a visual range; the range runs to the cursor.
     pub visual: Option<usize>,
+    /// Rows picked one by one with ctrl click; selected along with the visual range.
+    pub picked: Vec<usize>,
     pub view: View,
     pub input: Input,
     /// Scroll offset of the detail, compare and help views. The renderer clamps it.
     pub scroll: u16,
+    /// The model under the cursor in the compare view, moved with `h l`.
+    pub compare_sel: usize,
+    /// First model the compare view shows, set by the renderer so the cursor stays in view.
+    pub compare_x: usize,
+    /// Filter on the compare view's rows, typed with `/` there.
+    pub compare_query: String,
     /// Rows visible in the body, set by the renderer; drives page movement.
     pub page: u16,
     /// First of the columns right of Dev shown when they do not all fit; the renderer keeps
@@ -398,12 +414,15 @@ impl App {
             typos: false,
             rows: vec![],
             table: TableState::default().with_selected(0),
-            marked: vec![],
             only_marked: false,
             visual: None,
+            picked: vec![],
             view: View::Table,
             input: Input::None,
             scroll: 0,
+            compare_sel: 0,
+            compare_x: 0,
+            compare_query: String::new(),
             page: 20,
             hscroll: 0,
             count: 0,
@@ -422,6 +441,7 @@ impl App {
             self.vals.iter().filter_map(|v| v[c]).map(|v| (COLS[c].show)(v).chars().count()).max().unwrap_or(0)
         });
         self.data = data;
+        self.compare_sel = self.compare_sel.min(self.marked_models().len().saturating_sub(1));
         self.rebuild();
     }
 
@@ -438,7 +458,16 @@ impl App {
         self.table.select(Some(i.min(self.rows.len().saturating_sub(1))));
     }
 
+    /// What `/` edits: the compare view filters its rows, everywhere else the table's models.
+    pub fn search_target(&mut self) -> &mut String {
+        if self.view == View::Compare { &mut self.compare_query } else { &mut self.query }
+    }
+
+    /// The model under the cursor: the row in the table and details, the column in compare.
     pub fn current(&self) -> Option<&Model> {
+        if self.view == View::Compare {
+            return self.marked_models().get(self.compare_sel).copied();
+        }
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
     }
 
@@ -448,14 +477,32 @@ impl App {
         Some(a.min(b)..=a.max(b))
     }
 
-    /// Keys of the models a command acts on: in the table the visual range, else the marked
+    /// Whether rows are selected: a visual range, picked rows, or both.
+    pub fn selecting(&self) -> bool {
+        self.visual.is_some() || !self.picked.is_empty()
+    }
+
+    /// Whether row `k` is in the selection.
+    pub fn is_selected(&self, k: usize) -> bool {
+        self.visual_range().is_some_and(|r| r.contains(&k)) || self.picked.contains(&k)
+    }
+
+    fn deselect(&mut self) {
+        self.visual = None;
+        self.picked.clear();
+    }
+
+    /// Keys of the models a command acts on: in the table the selection, else the marked
     /// models, else the current one; elsewhere the current one.
     fn targets(&self) -> Vec<String> {
-        match self.visual_range() {
-            _ if self.view != View::Table => {}
-            Some(r) => return self.rows[r].iter().map(|&i| self.data.models[i].key.clone()).collect(),
-            None if !self.marked.is_empty() => return self.marked.clone(),
-            None => {}
+        if self.view == View::Table {
+            if self.selecting() {
+                let key = |k: usize| self.data.models[self.rows[k]].key.clone();
+                return (0..self.rows.len()).filter(|&k| self.is_selected(k)).map(key).collect();
+            }
+            if !self.store.marked.is_empty() {
+                return self.store.marked.clone();
+            }
         }
         self.current().map(|m| vec![m.key.clone()]).unwrap_or_default()
     }
@@ -478,7 +525,7 @@ impl App {
     }
 
     pub fn marked_models(&self) -> Vec<&Model> {
-        self.marked.iter().filter_map(|k| self.data.models.iter().find(|m| m.key == *k)).collect()
+        self.store.marked.iter().filter_map(|k| self.data.models.iter().find(|m| m.key == *k)).collect()
     }
 
     /// Models passing every filter but the frontier, ignoring the ones on column `skip`, so a
@@ -493,7 +540,7 @@ impl App {
                 self.typos,
             )
             .is_some()
-                && (!marked || self.marked.contains(&m.key) || (self.favs && self.store.is_fav(&m.key)))
+                && (!marked || self.store.marked.contains(&m.key) || (self.favs && self.store.is_fav(&m.key)))
                 && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
                 && (skip == VIA || self.via.is_empty() || self.via.iter().any(|h| m.via.contains(h)))
                 && self
@@ -506,9 +553,9 @@ impl App {
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
-        // The rows move, so a visual range would cover other models.
-        self.visual = None;
-        let keep = self.current().map(|m| m.key.clone());
+        // The rows move, so a selection would cover other models.
+        self.deselect();
+        let keep = self.rows.get(self.selected()).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
         let matching = |app: &Self| -> Vec<usize> { app.filtered(usize::MAX).map(|(i, _)| i).collect() };
         self.typos = false;
         let mut rows = matching(self);
@@ -665,14 +712,11 @@ impl App {
 
     fn toggle_mark(&mut self) {
         let Some(key) = self.current().map(|m| m.key.clone()) else { return };
-        match self.marked.iter().position(|k| *k == key) {
+        match self.store.marked.iter().position(|k| *k == key) {
             Some(i) => {
-                self.marked.remove(i);
+                self.store.marked.remove(i);
             }
-            None => self.marked.push(key),
-        }
-        if self.view == View::Table {
-            self.move_by(1);
+            None => self.store.marked.push(key),
         }
         if self.only_marked {
             self.rebuild();
@@ -759,14 +803,65 @@ impl App {
                 _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             };
         }
+        if let (View::Compare, Input::None, Mouse::Cols(n)) = (&self.view, &self.input, &m) {
+            return self.table_key(KeyCode::Char(if *n < 0 { 'h' } else { 'l' }), n.abs());
+        }
         if self.view != View::Table || self.input != Input::None {
             return None;
         }
         match m {
             Mouse::Cols(n) => return self.table_key(KeyCode::Char(if n < 0 { 'h' } else { 'l' }), n.abs()),
             Mouse::Row(n) if n < self.rows.len() => {
-                if n == self.selected() {
+                // A plain click replaces the selection, as in a file manager.
+                if self.selecting() {
+                    self.deselect();
+                    self.select(n);
+                } else if n == self.selected() {
                     return self.table_key(KeyCode::Enter, 1);
+                } else {
+                    self.select(n);
+                }
+            }
+            Mouse::Mark(n) if n < self.rows.len() => {
+                let inside = self.is_selected(n);
+                if self.selecting() {
+                    for k in self.targets() {
+                        if !self.store.marked.contains(&k) {
+                            self.store.marked.push(k);
+                        }
+                    }
+                    self.deselect();
+                }
+                self.select(n);
+                if inside {
+                    if self.only_marked {
+                        self.rebuild();
+                    }
+                } else {
+                    self.toggle_mark();
+                }
+                return Some(Effect::Save);
+            }
+            Mouse::Pick(n) if n < self.rows.len() => {
+                // The range, if any, becomes picked rows, then the clicked row toggles.
+                if let Some(r) = self.visual.take().map(|a| a.min(self.selected())..=a.max(self.selected())) {
+                    for k in r {
+                        if !self.picked.contains(&k) {
+                            self.picked.push(k);
+                        }
+                    }
+                }
+                match self.picked.iter().position(|&k| k == n) {
+                    Some(i) => {
+                        self.picked.remove(i);
+                    }
+                    None => self.picked.push(n),
+                }
+                self.select(n);
+            }
+            Mouse::Extend(n) if !self.rows.is_empty() => {
+                if self.visual.is_none() {
+                    self.visual = Some(self.selected());
                 }
                 self.select(n);
             }
@@ -787,12 +882,22 @@ impl App {
     fn table_key(&mut self, code: KeyCode, n: isize) -> Option<Effect> {
         let table = self.view == View::Table;
         // Keys that act on the current model, which help and compare hide.
-        let row = table || self.view == View::Detail;
+        let row = table || matches!(self.view, View::Detail | View::Compare);
         match code {
             KeyCode::Char('h') | KeyCode::Left if table => self.col = (self.col + NCOLS - n as usize % NCOLS) % NCOLS,
             KeyCode::Char('l') | KeyCode::Right if table => self.col = (self.col + n as usize) % NCOLS,
+            KeyCode::Char('h') | KeyCode::Left if self.view == View::Compare => {
+                self.compare_sel = step(self.compare_sel, -n, self.marked_models().len());
+            }
+            KeyCode::Char('l') | KeyCode::Right if self.view == View::Compare => {
+                self.compare_sel = step(self.compare_sel, n, self.marked_models().len());
+            }
             KeyCode::Char('0') if table => self.col = 0,
             KeyCode::Char('$') if table => self.col = NCOLS - 1,
+            KeyCode::Char('0') if self.view == View::Compare => self.compare_sel = 0,
+            KeyCode::Char('$') if self.view == View::Compare => {
+                self.compare_sel = self.marked_models().len().saturating_sub(1);
+            }
             KeyCode::Char('w') if table => {
                 for _ in 0..n {
                     let end = if self.col == NCOLS - 1 { 0 } else { NCOLS - 1 };
@@ -820,7 +925,7 @@ impl App {
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
             KeyCode::Char('M') if table => {
-                self.only_marked = !self.only_marked && !self.marked.is_empty();
+                self.only_marked = !self.only_marked && !self.store.marked.is_empty();
                 self.rebuild();
             }
             KeyCode::Char('c') if table => {
@@ -832,17 +937,20 @@ impl App {
                 if self.task.take().is_some() {
                     (self.sort_col, self.descending) = (PRICE, false);
                 }
-                self.marked.clear();
+                self.store.marked.clear();
                 self.only_marked = false;
                 self.favs = false;
                 self.rebuild();
+                return Some(Effect::Save);
             }
             KeyCode::Char('q') => self.input = Input::Quit,
             KeyCode::Esc => {
-                if !table {
+                if self.view == View::Compare && !self.compare_query.is_empty() {
+                    self.compare_query.clear();
+                } else if !table {
                     self.view = View::Table;
-                } else if self.visual.is_some() {
-                    self.visual = None;
+                } else if self.selecting() {
+                    self.deselect();
                 } else if !self.query.is_empty() {
                     self.query.clear();
                     self.rebuild();
@@ -853,7 +961,11 @@ impl App {
             KeyCode::Char('f') if row => return self.flag(Store::is_fav, Store::toggle_fav, "favorited"),
             KeyCode::Char('e') if row => return self.flag(Store::is_excluded, Store::toggle_excluded, "excluded"),
             KeyCode::Char('V') if table => {
-                self.visual = if self.visual.is_some() { None } else { Some(self.selected()) };
+                if self.selecting() {
+                    self.deselect();
+                } else {
+                    self.visual = Some(self.selected());
+                }
             }
             KeyCode::Char('n') if row => {
                 let m = self.current()?;
@@ -872,32 +984,40 @@ impl App {
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
             KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
-            KeyCode::Char('m') if table && self.visual.is_some() => {
+            KeyCode::Char('m') if table && self.selecting() => {
                 let keys = self.targets();
-                if keys.iter().all(|k| self.marked.contains(k)) {
-                    self.marked.retain(|k| !keys.contains(k));
+                if keys.iter().all(|k| self.store.marked.contains(k)) {
+                    self.store.marked.retain(|k| !keys.contains(k));
                 } else {
                     for k in keys {
-                        if !self.marked.contains(&k) {
-                            self.marked.push(k);
+                        if !self.store.marked.contains(&k) {
+                            self.store.marked.push(k);
                         }
                     }
                 }
                 self.rebuild();
+                return Some(Effect::Save);
             }
-            KeyCode::Char('m') if row => self.toggle_mark(),
+            KeyCode::Char('m') if row && self.view != View::Compare => {
+                self.toggle_mark();
+                return Some(Effect::Save);
+            }
             KeyCode::Char('C') => {
-                // A visual range is what gets compared.
-                if table && self.visual.is_some() {
-                    self.marked = self.targets();
-                    self.visual = None;
+                // A selection is what gets compared.
+                let save = table && self.selecting();
+                if save {
+                    self.store.marked = self.targets();
+                    self.deselect();
                 }
-                if self.marked.len() >= 2 {
+                if self.store.marked.len() >= 2 {
                     self.view = View::Compare;
                     self.scroll = 0;
+                    self.compare_sel = 0;
+                    self.compare_x = 0;
                 } else {
                     self.status = "mark 2+ models with m, then press C".into();
                 }
+                return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
             KeyCode::Enter if self.view == View::Tasks => {
@@ -921,9 +1041,11 @@ impl App {
                 self.scroll = 0;
             }
             // A new search starts empty; esc brings the previous one back.
-            KeyCode::Char('/') if table => {
-                self.input = Input::Search { cur: 0, was: std::mem::take(&mut self.query) };
-                self.rebuild();
+            KeyCode::Char('/') if table || self.view == View::Compare => {
+                self.input = Input::Search { cur: 0, was: std::mem::take(self.search_target()) };
+                if table {
+                    self.rebuild();
+                }
             }
             KeyCode::Char('a') if table => {
                 self.all = !self.all;
@@ -942,20 +1064,24 @@ impl App {
     fn input_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
         match &mut self.input {
             Input::Search { cur, was } => {
+                let compare = self.view == View::Compare;
+                let query = if compare { &mut self.compare_query } else { &mut self.query };
                 match code {
                     KeyCode::Enter => self.input = Input::None,
                     KeyCode::Esc => {
-                        self.query = std::mem::take(was);
+                        *query = std::mem::take(was);
                         self.input = Input::None;
                     }
                     KeyCode::Down | KeyCode::Up => {
                         self.move_by(if code == KeyCode::Down { 1 } else { -1 });
                         return None;
                     }
-                    _ if edit(&mut self.query, cur, code, mods, |_| true) => {}
+                    _ if edit(query, cur, code, mods, |_| true) => {}
                     _ => return None,
                 }
-                self.rebuild();
+                if !compare {
+                    self.rebuild();
+                }
             }
             Input::Note { text, cur } => match code {
                 KeyCode::Enter => {
@@ -1325,7 +1451,7 @@ mod tests {
         press(&mut a, "?");
         assert_eq!(press(&mut a, "y"), None);
         press(&mut a, "n f ");
-        assert_eq!((&a.input, a.marked.len()), (&Input::None, 0));
+        assert_eq!((&a.input, a.store.marked.len()), (&Input::None, 0));
         assert!(!a.store.is_fav(&a.current().unwrap().key.clone()));
     }
 
@@ -1507,6 +1633,15 @@ mod tests {
     }
 
     #[test]
+    fn a_task_starts_at_the_low_tier() {
+        let mut a = app();
+        a.data.models.push(model("weak", true, Some(30.0), 0.01));
+        a.data.models.push(model("edge", true, Some(49.6), 0.05));
+        let front: Vec<&str> = a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.as_str()).collect();
+        assert_eq!(front, ["edge", "mini", "gpt55"], "cheap alone is no recommendation; 49.6 shows as 50");
+    }
+
+    #[test]
     fn a_task_keeps_the_best_of_each_price_level() {
         let mut a = app();
         a.data.models.push(model("flash", true, Some(70.0), 1.5));
@@ -1547,15 +1682,32 @@ mod tests {
         let mut a = app();
         assert_eq!(press(&mut a, "C"), None);
         assert_eq!(a.view, View::Table);
-        press(&mut a, "mm");
-        assert_eq!(a.marked, vec!["gpt55", "opus5"]);
+        press(&mut a, "mjm");
+        assert_eq!(a.store.marked, vec!["gpt55", "opus5"]);
         press(&mut a, "M");
         assert_eq!(keys(&a), ["gpt55", "opus5"]);
         press(&mut a, "M");
         assert_eq!(a.rows.len(), 3);
         press(&mut a, "C");
         assert_eq!(a.view, View::Compare);
+        press(&mut a, "ll");
+        assert_eq!(a.compare_sel, 0, "l moves over the models and wraps");
+        press(&mut a, "h");
+        assert_eq!(a.compare_sel, 1, "h wraps the other way");
+        press(&mut a, "0");
+        assert_eq!(a.compare_sel, 0, "0 picks the first model");
+        press(&mut a, "$");
+        assert_eq!(a.compare_sel, 1, "$ picks the last model");
+        assert_eq!(press(&mut a, "o"), Some(Effect::Open("https://x/opus5".into())), "o opens the selected model");
+        press(&mut a, "/eci");
+        assert_eq!((a.compare_query.as_str(), a.query.as_str()), ("eci", ""), "/ in compare filters its rows");
+        code(&mut a, KeyCode::Enter);
         assert_eq!(a.input, Input::None);
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.view, a.compare_query.as_str()), (&View::Compare, ""), "esc clears the filter first");
+        assert_eq!(a.input, Input::None);
+        press(&mut a, "$f");
+        assert_eq!(a.selected(), 1, "f on the compared model leaves the table row alone");
         press(&mut a, "q");
         assert_eq!(a.input, Input::Quit, "q asks to quit from any view");
         code(&mut a, KeyCode::Esc);
@@ -1563,9 +1715,9 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table, "esc closes the overlay");
         press(&mut a, "Mc");
-        assert!(a.marked.is_empty() && !a.only_marked, "c clears the marks too");
+        assert!(a.store.marked.is_empty() && !a.only_marked, "c clears the marks too");
         assert_eq!(a.rows.len(), 3);
-        press(&mut a, "Gfggmm");
+        press(&mut a, "Gfggmjm");
         press(&mut a, "MF");
         assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "m and F together: marked or favorite");
         press(&mut a, "F");
@@ -1586,13 +1738,13 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.visual, a.rows.len()), (None, 3), "esc cancels the range only");
         press(&mut a, "ggVjm");
-        assert_eq!(a.marked, ["gpt55", "opus5"]);
+        assert_eq!(a.store.marked, ["gpt55", "opus5"]);
         press(&mut a, "Gf");
         assert!(a.store.is_fav("gpt55") && a.store.is_fav("opus5") && !a.store.is_fav("mini"), "f on the marks");
         press(&mut a, "ggVjm");
-        assert!(a.marked.is_empty(), "m on an all-marked range unmarks it");
+        assert!(a.store.marked.is_empty(), "m on an all-marked range unmarks it");
         press(&mut a, "ggVGC");
-        assert_eq!((a.view, a.marked.len()), (View::Compare, 3), "C compares the range");
+        assert_eq!((a.view, a.store.marked.len()), (View::Compare, 3), "C compares the range");
     }
 
     #[test]
@@ -1611,6 +1763,17 @@ mod tests {
         assert_eq!(keys(&a), ["gpt55"], "F shows favorites only");
         press(&mut a, "c");
         assert_eq!(a.rows.len(), 3, "c clears it");
+    }
+
+    #[test]
+    fn a_refresh_that_drops_models_keeps_the_cursors_valid() {
+        let mut a = app();
+        press(&mut a, "mjmC$");
+        assert_eq!((&a.view, a.compare_sel), (&View::Compare, 1));
+        let one = Data { models: a.data.models.drain(..1).collect(), ..Data::default() };
+        a.refreshed(Ok(one));
+        assert_eq!((a.compare_sel, a.rows.len(), a.selected()), (0, 1, 0), "clamped to the models left");
+        assert_eq!(a.current().map(|m| m.key.as_str()), Some("gpt55"));
     }
 
     #[test]
@@ -1640,6 +1803,40 @@ mod tests {
         assert_eq!(a.selected(), 1);
         assert_eq!(a.mouse(Mouse::Row(9)), None, "past the end is ignored");
         assert_eq!(a.selected(), 1);
+        a.mouse(Mouse::Mark(2));
+        assert_eq!((a.selected(), a.store.marked.len()), (2, 1), "right click marks and stays");
+        a.mouse(Mouse::Mark(2));
+        assert!(a.store.marked.is_empty(), "again unmarks");
+        a.mouse(Mouse::Row(0));
+        a.mouse(Mouse::Extend(1));
+        a.mouse(Mouse::Extend(9));
+        assert_eq!(a.visual_range(), Some(0..=2), "a drag selects from the click, clamped to the end");
+        a.mouse(Mouse::Row(2));
+        assert_eq!((a.visual, &a.view, a.selected()), (None, &View::Table, 2), "a plain click drops the range");
+        a.mouse(Mouse::Extend(0));
+        a.mouse(Mouse::Pick(1));
+        assert_eq!(
+            (a.visual, &a.picked, a.selected()),
+            (None, &vec![0, 2], 1),
+            "ctrl click: the range becomes picks, the row toggles off"
+        );
+        a.mouse(Mouse::Pick(1));
+        assert!(a.is_selected(1) && !a.is_selected(9));
+        assert_eq!(press(&mut a, "C"), Some(Effect::Save));
+        assert_eq!((&a.view, a.store.marked.len(), a.selecting()), (&View::Compare, 3, false), "C compares the picks");
+        code(&mut a, KeyCode::Esc);
+        a.store.marked.clear();
+        a.mouse(Mouse::Row(0));
+        a.mouse(Mouse::Extend(1));
+        a.mouse(Mouse::Mark(2));
+        assert_eq!((a.selecting(), a.store.marked.len()), (false, 3), "right click: the range becomes marks too");
+        a.store.marked.clear();
+        a.mouse(Mouse::Row(0));
+        a.mouse(Mouse::Extend(1));
+        a.mouse(Mouse::Mark(0));
+        assert_eq!((a.selecting(), a.store.marked.len(), a.selected()), (false, 2, 0), "inside the range: no unmark");
+        a.store.marked.clear();
+        a.mouse(Mouse::Row(1));
         a.mouse(Mouse::Header(1));
         assert_eq!((a.col, a.sort_col, a.descending), (1, 1, false));
         a.mouse(Mouse::Header(1));

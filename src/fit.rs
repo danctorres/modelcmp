@@ -33,6 +33,7 @@ pub struct Task {
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
 /// not be about code. Math and factual-recall benchmarks stay out.
 /// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
+/// Listed in decision order: coding, then the cheaper pick, then the rest.
 pub const TASKS: &[Task] = &[
     Task {
         name: "coding",
@@ -49,6 +50,13 @@ pub const TASKS: &[Task] = &[
             "GSO-Bench",
             "Aider polyglot",
         ],
+    },
+    Task {
+        name: "value",
+        about: "coding per dollar, among models ≥50th percentile on coding",
+        when: "routine coding that needs no top reasoning: the good enough, cheaper pick",
+        need: Need::Coder,
+        benches: &[],
     },
     Task {
         name: "agentic",
@@ -82,6 +90,13 @@ pub const TASKS: &[Task] = &[
         ],
     },
     Task {
+        name: "overall",
+        about: "Epoch Capabilities Index",
+        when: "a tiebreaker, or work that fits no other task",
+        need: Need::None,
+        benches: &[],
+    },
+    Task {
         name: "vision",
         about: "image input (ranked by overall capability)",
         when: "screenshots, UI mockups, diagrams as input",
@@ -93,20 +108,6 @@ pub const TASKS: &[Task] = &[
         about: "≥200k context (ranked by overall capability)",
         when: "a whole repo, a long log or many files in one prompt; the window fits, not proof it is used well",
         need: Need::LongContext,
-        benches: &[],
-    },
-    Task {
-        name: "value",
-        about: "coding per dollar, among models ≥50th percentile on coding",
-        when: "routine coding that needs no top reasoning: the good enough, cheaper pick",
-        need: Need::Coder,
-        benches: &[],
-    },
-    Task {
-        name: "overall",
-        about: "Epoch Capabilities Index",
-        when: "a tiebreaker, or work that fits no task above",
-        need: Need::None,
         benches: &[],
     },
 ];

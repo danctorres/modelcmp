@@ -18,7 +18,7 @@ cargo install --path .
 ```
 
 Data is downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`.
-Favorites, exclusions and notes live in `~/.config/modelcmp/user.json`.
+Favorites, marks, exclusions and notes live in `~/.config/modelcmp/user.json`.
 
 ## TUI
 
@@ -36,8 +36,8 @@ column.
 | Key | Action |
 |-----|--------|
 | `j` `k` | move; a count repeats, as in `3j`; past the last row back to the first |
-| `h` `l` | pick a column |
-| `0` `$` `w` `b` | first / last column; next / previous group: prices, benchmarks, Via |
+| `h` `l` | pick a column; in compare, pick a model for `o` `x` `y` |
+| `0` `$` `w` `b` | first / last column; next / previous group: prices, benchmarks, Via; in compare, `0` `$` pick the first / last model |
 | `s` | sort by the column; again reverses |
 | `enter` | details: every benchmark, price per provider |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
@@ -49,7 +49,7 @@ column.
 | `e` `f` with marks | act on every marked model, not just the one under the cursor |
 | `M` | marked models only; with `F`, marked and favorites |
 | `C` | compare marked models: cheapest, best coder, most coding per $ |
-| `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears |
+| `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare, filters the rows |
 | `c` | clear filters, bounds, task and marks |
 | `a` | all models, including ones you have no access to |
 | `f` `F` | favorite / favorites only |
@@ -62,14 +62,14 @@ column.
 | `r` | refresh data now |
 | `t` | tasks: what each one measures, when to use it, the best model per price; `enter` shows those models in the table, best first, each row cheaper and scoring lower |
 | `?` | help |
-| mouse | click a row to select it, again for details; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column |
+| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column |
 | `qq` | quit; the first `q` asks. `esc` closes an overlay or the filter |
 
 ## CLI
 
 ```sh
 modelcmp list                                  # models you have access to
-modelcmp list --task coding                    # best model per price level, cheapest first
+modelcmp list --task coding                    # best model per price level scoring 50+, cheapest first
 modelcmp list --task coding --tier mid         # just one: the cheapest scoring 75+
 modelcmp list --min coding=70 --sort price     # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
@@ -82,7 +82,7 @@ modelcmp exclude llama                         # have it, can't use it; --rm to 
 modelcmp tasks                                 # what each task measures, when to use it, best per price
 ```
 
-Tasks: `coding`, `agentic`, `reasoning`, `vision`, `long-context`, `value`, `overall`.
+Tasks: `coding`, `value`, `agentic`, `reasoning`, `overall`, `vision`, `long-context`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
 `tasks` leave excluded models out; plain `list` shows them marked `✗`. `--tier` picks one
@@ -103,9 +103,10 @@ modelcmp tasks --json                          # choose the task by its "when"; 
 modelcmp list --task coding --tier mid --json  # the one model to use
 ```
 
-Each JSON model carries `key`, `excluded`, `price`, `context`, `eci`, per-task `tasks`
-percentiles. `show` and `compare` add every benchmark score and every
-provider's price.
+Each JSON model carries `key`, `excluded`, `price` (with the provider's model `id`, the
+string a harness takes), `context`, `eci`, per-task `tasks` percentiles. `show` and
+`compare` add every benchmark score and every provider's price. `tasks` prints each
+frontier entry as `name [key] $price (percentile)`.
 
 ## Data
 

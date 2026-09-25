@@ -1,4 +1,4 @@
-//! Favorites, exclusions and notes, keyed by model key. ~/.config/modelcmp/user.json
+//! Favorites, marks, exclusions and notes, keyed by model key. ~/.config/modelcmp/user.json
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,6 +10,8 @@ pub struct Store {
     #[serde(skip)]
     path: PathBuf,
     pub favorites: BTreeSet<String>,
+    /// Marks (`m` in the TUI) outlive a session, like favorites.
+    pub marked: Vec<String>,
     /// Models you have but cannot use; tasks and recommendations skip them.
     pub excluded: BTreeSet<String>,
     pub notes: BTreeMap<String, String>,
