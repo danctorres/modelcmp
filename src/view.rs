@@ -100,7 +100,7 @@ pub fn usd(x: f64) -> String {
     if x == 0.0 { "free".into() } else { format!("${}", money(x)) }
 }
 
-/// What a frontier line shows, for the tasks panel and `modelcmp tasks`, which adds the key.
+/// What a frontier line shows, for the recommend panel and `modelcmp recommend`, which adds the key.
 pub fn frontier_legend(keyed: bool) -> String {
     format!(
         "best per price: name{}, $ blended 3:1 in:out per 1M tokens, (task percentile: rank among Epoch's models, \

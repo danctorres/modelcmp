@@ -12,7 +12,7 @@ pub struct Store {
     pub favorites: BTreeSet<String>,
     /// Marks (`m` in the TUI) outlive a session, like favorites.
     pub marked: Vec<String>,
-    /// Models you have but cannot use; tasks and recommendations skip them.
+    /// Models you have but cannot use; recommendations skip them.
     pub excluded: BTreeSet<String>,
     pub notes: BTreeMap<String, String>,
 }

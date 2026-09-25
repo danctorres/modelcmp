@@ -36,17 +36,17 @@ column.
 | Key | Action |
 |-----|--------|
 | `j` `k` | move; a count repeats, as in `3j`; past the last row back to the first |
-| `h` `l` | pick a column; in compare, pick a model for `o` `x` `y` |
-| `0` `$` `w` `b` | first / last column; next / previous group: prices, benchmarks, Via; in compare, `0` `$` pick the first / last model |
+| `h` `l` | pick a column, scrolling the ones right of Dev; `‹` `›` mark columns off screen, `▲` `▼` on the left border rows above or below; in compare and recommend, pick a model for `o` `x` `y` `f` `e` `n`, with the same marks for models off screen |
+| `0` `$` `w` `b` | first / last column; next / previous group: prices, benchmarks, Via; in compare and recommend, `0` `$` pick the first / last model |
 | `s` | sort by the column; again reverses |
 | `enter` | details: every benchmark, price per provider |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
 | `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, `space` toggles several |
-| `(` `)` `^d` `^u` | half a page up / down |
+| `(` `)` `^d` `^u` | half a page up / down; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
 | `gg` `G` `3gg` | top / bottom / row 3 |
 | `m` | mark the model |
 | `V` | select a range of rows: move to extend it, then `m` `e` `f` or `C` act on all of it; `esc` cancels |
-| `e` `f` with marks | act on every marked model, not just the one under the cursor |
+| `e` `f` on a mark | act on every marked model, not just the one under the cursor |
 | `M` | marked models only; with `F`, marked and favorites |
 | `C` | compare marked models: cheapest, best coder, most coding per $ |
 | `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare, filters the rows |
@@ -54,15 +54,15 @@ column.
 | `a` | all models, including ones you have no access to |
 | `f` `F` | favorite / favorites only |
 | `n` | note for the model |
-| `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but tasks (`t` and its best per price) skip it |
+| `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but recommendations (`R` and `--task`) skip it |
 | typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` `^←` `^→` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on openrouter.ai |
 | `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |
 | `r` | refresh data now |
-| `t` | tasks: what each one measures, when to use it, the best model per price; `enter` shows those models in the table, best first, each row cheaper and scoring lower |
+| `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
 | `?` | help |
-| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column |
+| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
 | `qq` | quit; the first `q` asks. `esc` closes an overlay or the filter |
 
 ## CLI
@@ -79,13 +79,13 @@ modelcmp open sonnet                           # its web page
 modelcmp fav sonnet                            # --rm to remove
 modelcmp note sonnet "fast enough for refactors"   # without text shows it, --rm deletes it
 modelcmp exclude llama                         # have it, can't use it; --rm to include again
-modelcmp tasks                                 # what each task measures, when to use it, best per price
+modelcmp recommend                             # best model per price for each task, what it measures, when to use it
 ```
 
-Tasks: `coding`, `value`, `agentic`, `reasoning`, `overall`, `vision`, `long-context`.
+Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`, `long-context`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
-`tasks` leave excluded models out; plain `list` shows them marked `✗`. `--tier` picks one
+`recommend` leave excluded models out; plain `list` shows them marked `✗`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
 the best; the best when none reaches the floor. Scores are percentiles among the models
 Epoch benchmarked. `--all`
@@ -99,13 +99,13 @@ than an empty list.
 For agents:
 
 ```sh
-modelcmp tasks --json                          # choose the task by its "when"; each has its frontier
+modelcmp recommend --json                      # choose the task by its "when"; each has its frontier
 modelcmp list --task coding --tier mid --json  # the one model to use
 ```
 
 Each JSON model carries `key`, `excluded`, `price` (with the provider's model `id`, the
 string a harness takes), `context`, `eci`, per-task `tasks` percentiles. `show` and
-`compare` add every benchmark score and every provider's price. `tasks` prints each
+`compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (percentile)`.
 
 ## Data

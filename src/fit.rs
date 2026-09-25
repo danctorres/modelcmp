@@ -33,8 +33,15 @@ pub struct Task {
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
 /// not be about code. Math and factual-recall benchmarks stay out.
 /// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
-/// Listed in decision order: coding, then the cheaper pick, then the rest.
+/// Listed with the general pick first, then in decision order: coding, the cheaper pick, the rest.
 pub const TASKS: &[Task] = &[
+    Task {
+        name: "overall",
+        about: "Epoch Capabilities Index",
+        when: "a tiebreaker, or work that fits no other task",
+        need: Need::None,
+        benches: &[],
+    },
     Task {
         name: "coding",
         about: "writing and fixing code",
@@ -88,13 +95,6 @@ pub const TASKS: &[Task] = &[
             "Mystery Game Puzzles",
             "Chess Puzzles",
         ],
-    },
-    Task {
-        name: "overall",
-        about: "Epoch Capabilities Index",
-        when: "a tiebreaker, or work that fits no other task",
-        need: Need::None,
-        benches: &[],
     },
     Task {
         name: "vision",

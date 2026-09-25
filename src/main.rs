@@ -92,7 +92,7 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Exclude a model you have but cannot use: --task and tasks leave it out (`e` in the TUI)
+    /// Exclude a model you have but cannot use: --task and recommend leave it out (`e` in the TUI)
     Exclude {
         model: String,
         /// Include it again
@@ -108,8 +108,8 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// What each task measures, when to pick a model high on it and the best model per price (`t` in the TUI)
-    Tasks {
+    /// The best model per price for each task, what the task measures and when to use it (`R` in the TUI)
+    Recommend {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -175,6 +175,6 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Fav { model, rm } => cli::fav(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
-        Cmd::Tasks { json } => cli::tasks(&data, &store, json),
+        Cmd::Recommend { json } => cli::recommend(&data, &store, json),
     }
 }

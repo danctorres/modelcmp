@@ -64,7 +64,7 @@ struct ModelOut<'a> {
     available: bool,
     via: &'a [String],
     favorite: bool,
-    /// You have it but cannot use it; --task and tasks skip it
+    /// You have it but cannot use it; --task and recommend skip it
     excluded: bool,
     note: Option<&'a str>,
     price: Option<Price<'a>>,
@@ -305,8 +305,8 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
     Ok(())
 }
 
-/// What each task measures, when to pick a model high on it, and its benchmarks.
-pub fn tasks(data: &Data, store: &Store, json: bool) -> Result {
+/// The best model per price for each task, what it measures and when to use it.
+pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     // The frontier among the models you have and can use, as `list --task` gives it.
     let front =
         |t| task_frontier(visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)), t);

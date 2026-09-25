@@ -2,9 +2,9 @@
 //! so every key is unit-testable.
 
 use crate::data::{Data, Model};
-use crate::fit::{self, TASKS, Task};
+use crate::fit::{TASKS, Task};
 use crate::store::Store;
-use crate::view::{LEVELS, ctx, frontier, hits, level_label, money, score, task_frontier, task_score, visible};
+use crate::view::{LEVELS, ctx, hits, level_label, money, score, task_frontier, task_score, visible};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::{Ordering, Reverse};
@@ -107,10 +107,10 @@ pub fn col_about(col: usize) -> String {
 
 pub const HELP: &[(&str, &str)] = &[
     ("j k ↓ ↑", "move; a count repeats, as in 3j; past the last row back to the first"),
-    ("h l ← →", "pick a column; the top border says what it means; in compare, pick a model"),
+    ("h l ← →", "pick a column; the top border says what it means; in compare and recommend, pick a model"),
     (
         "0 $ w b",
-        "first / last column; next / previous group: prices, benchmarks, Via; in compare, 0 $ pick the first / last model",
+        "first / last column; next / previous group: prices, benchmarks, Via; in compare and recommend, 0 $ pick the first / last model",
     ),
     ("s", "sort by the column; again reverses"),
     ("enter", "details: every benchmark, price per provider"),
@@ -120,7 +120,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("gg G 3gg", "top / bottom / row 3"),
     ("m", "mark the model"),
     ("V", "select a range of rows: move to extend it, then m e f or C act on all of it; esc cancels"),
-    ("e f with marks", "act on every marked model, not just the one under the cursor"),
+    ("e f on a mark", "act on every marked model, not just the one under the cursor"),
     ("M", "show marked models only; with F, marked and favorites"),
     ("C", "compare marked models: cheapest, best coder, most coding per $"),
     (
@@ -131,15 +131,15 @@ pub const HELP: &[(&str, &str)] = &[
     ("a", "all models, including ones you have no access to; again: yours only"),
     ("f F", "favorite / show favorites only"),
     ("n", "note for the model"),
-    ("e", "exclude the model: you have it but cannot use it; tasks skip it"),
+    ("e", "exclude the model: you have it but cannot use it; recommendations skip it"),
     ("typing", "← → ^a ^e move, alt-b alt-f ^← ^→ by word; ^w alt-d delete a word, ^u ^k to the start / end"),
     ("y Y", "copy the model id (provider/model) / the model name"),
     ("o", "open the model on openrouter.ai"),
     ("x", "open a harness on the model in a new terminal; asks which when Via lists several"),
     ("r", "refresh data now (auto every 24h)"),
     (
-        "t",
-        "tasks: what each one measures, when to use it, the best model per price; enter shows those models in the table: best first, each row down cheaper and scoring lower",
+        "R",
+        "recommend: the best model per price for each task, what the task measures and when to use it; h l pick a model for o x y f e n; enter shows the task's models in the table: best first, each row down cheaper and scoring lower",
     ),
     ("?", "this help"),
     (
@@ -155,7 +155,7 @@ pub enum View {
     Detail,
     Compare,
     Help,
-    Tasks,
+    Recommend,
 }
 
 #[derive(PartialEq, Debug)]
@@ -318,6 +318,8 @@ pub enum Mouse {
     Menu(usize),
     /// Click on entry `n` of the open dropdown or harness list.
     Item(usize),
+    /// Click outside the open dropdown or harness list: close it.
+    Outside,
 }
 
 /// `provider/model` of the offer you'd pay, as harnesses name it.
@@ -355,10 +357,11 @@ pub struct App {
     pub dev: Vec<String>,
     /// Harnesses (or "env") picked from the Via dropdown; empty is any.
     pub via: Vec<String>,
-    /// Task whose price frontier the table shows, picked in the tasks overlay.
+    /// Task whose price frontier the table shows, picked in the recommend overlay.
     pub task: Option<&'static Task>,
-    /// Cursor in the tasks overlay.
+    /// Cursor in the recommend overlay: the task, and the model on its best-per-price line.
     pub task_cur: usize,
+    pub task_sel: usize,
     pub query: String,
     /// The query matched nothing as typed, so it is matched allowing a typo per word.
     pub typos: bool,
@@ -410,6 +413,7 @@ impl App {
             via: vec![],
             task: None,
             task_cur: 0,
+            task_sel: 0,
             query: String::new(),
             typos: false,
             rows: vec![],
@@ -463,12 +467,22 @@ impl App {
         if self.view == View::Compare { &mut self.compare_query } else { &mut self.query }
     }
 
-    /// The model under the cursor: the row in the table and details, the column in compare.
+    /// The model under the cursor: the row in the table and details, the column in compare,
+    /// the one picked on the task's line in recommend.
     pub fn current(&self) -> Option<&Model> {
         if self.view == View::Compare {
             return self.marked_models().get(self.compare_sel).copied();
         }
+        if self.view == View::Recommend {
+            let front = self.task_frontier(&TASKS[self.task_cur]);
+            return front.get(self.task_sel.min(front.len().saturating_sub(1))).map(|&(m, _)| m);
+        }
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
+    }
+
+    /// The sideways model cursor of the open overlay: compare's, else recommend's.
+    fn across_sel(&mut self) -> &mut usize {
+        if self.view == View::Compare { &mut self.compare_sel } else { &mut self.task_sel }
     }
 
     /// Rows of the visual range, in order.
@@ -492,19 +506,21 @@ impl App {
         self.picked.clear();
     }
 
-    /// Keys of the models a command acts on: in the table the selection, else the marked
-    /// models, else the current one; elsewhere the current one.
+    /// Keys of the models a command acts on: in the table the selection, else every marked
+    /// model when the current one is marked (as a file manager acts on the selection only from
+    /// inside it, so stale marks never widen an action on an unmarked row), else the current one.
     fn targets(&self) -> Vec<String> {
+        let cur = self.current().map(|m| m.key.clone());
         if self.view == View::Table {
             if self.selecting() {
                 let key = |k: usize| self.data.models[self.rows[k]].key.clone();
                 return (0..self.rows.len()).filter(|&k| self.is_selected(k)).map(key).collect();
             }
-            if !self.store.marked.is_empty() {
+            if cur.as_ref().is_some_and(|k| self.store.marked.contains(k)) {
                 return self.store.marked.clone();
             }
         }
-        self.current().map(|m| vec![m.key.clone()]).unwrap_or_default()
+        cur.map(|k| vec![k]).unwrap_or_default()
     }
 
     /// Sets a flag on every target, or clears it when all of them have it. Ends a visual range
@@ -520,6 +536,7 @@ impl App {
         if keys.len() > 1 {
             self.status = format!("{}{verb} {} models", if on { "" } else { "un" }, keys.len());
         }
+        self.deselect();
         self.rebuild();
         (!keys.is_empty()).then_some(Effect::Save)
     }
@@ -553,9 +570,11 @@ impl App {
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
-        // The rows move, so a selection would cover other models.
-        self.deselect();
-        let keep = self.rows.get(self.selected()).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
+        // The rows move, so the selection follows its models by key and drops the ones filtered out.
+        let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
+        let anchor = self.visual.and_then(key_of);
+        let picked: Vec<String> = self.picked.iter().filter_map(|&k| key_of(k)).collect();
+        let keep = key_of(self.selected());
         let matching = |app: &Self| -> Vec<usize> { app.filtered(usize::MAX).map(|(i, _)| i).collect() };
         self.typos = false;
         let mut rows = matching(self);
@@ -566,9 +585,9 @@ impl App {
         }
         let ms = &self.data.models;
         if let Some(t) = self.task {
-            // Excluded models and ones without a price or data for the task drop out.
-            rows.retain(|&i| !self.store.is_excluded(&ms[i].key));
-            rows = frontier(&rows, |i| &ms[i], |m| fit::fit(m, t));
+            // The same line the recommend panel and `list --task` show.
+            let front: Vec<&str> = self.task_frontier(t).iter().map(|(m, _)| m.key.as_str()).collect();
+            rows.retain(|&i| front.contains(&ms[i].key.as_str()));
         }
         if numeric(self.sort_col).is_some() {
             let desc = self.descending;
@@ -603,8 +622,11 @@ impl App {
             (lo != hi).then_some(if COLS[c].lower_better { (lo, hi) } else { (hi, lo) })
         });
         self.rows = rows;
-        let sel = keep.and_then(|k| self.rows.iter().position(|&i| self.data.models[i].key == k));
-        self.select(sel.unwrap_or(0));
+        let pos = |k: &str| self.rows.iter().position(|&i| self.data.models[i].key == k);
+        let sel = keep.and_then(|k| pos(&k)).unwrap_or(0);
+        self.visual = anchor.and_then(|k| pos(&k));
+        self.picked = picked.iter().filter_map(|k| pos(k)).collect();
+        self.select(sel);
     }
 
     /// A background refresh finished.
@@ -650,8 +672,8 @@ impl App {
             *sel = step(*sel, n, len);
         } else if self.view == View::Table {
             self.select(step(self.selected(), n, self.rows.len()));
-        } else if self.view == View::Tasks {
-            self.task_cur = step(self.task_cur, n, TASKS.len());
+        } else if self.view == View::Recommend {
+            (self.task_cur, self.task_sel) = (step(self.task_cur, n, TASKS.len()), 0);
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
         }
@@ -662,8 +684,8 @@ impl App {
             *sel = row.min(len - 1);
         } else if self.view == View::Table {
             self.select(row);
-        } else if self.view == View::Tasks {
-            self.task_cur = row.min(TASKS.len() - 1);
+        } else if self.view == View::Recommend {
+            (self.task_cur, self.task_sel) = (row.min(TASKS.len() - 1), 0);
         } else {
             self.scroll = row.min(u16::MAX as usize) as u16;
         }
@@ -800,10 +822,12 @@ impl App {
                     self.input_key(key, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
+                // Outside, or anything else that is not an entry: close it.
                 _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             };
         }
-        if let (View::Compare, Input::None, Mouse::Cols(n)) = (&self.view, &self.input, &m) {
+        // The sideways wheel moves the model cursor wherever h and l do.
+        if let (View::Compare | View::Recommend, Input::None, Mouse::Cols(n)) = (&self.view, &self.input, &m) {
             return self.table_key(KeyCode::Char(if *n < 0 { 'h' } else { 'l' }), n.abs());
         }
         if self.view != View::Table || self.input != Input::None {
@@ -881,23 +905,29 @@ impl App {
     /// Keys other than motions when no prompt or list is open.
     fn table_key(&mut self, code: KeyCode, n: isize) -> Option<Effect> {
         let table = self.view == View::Table;
-        // Keys that act on the current model, which help and compare hide.
-        let row = table || matches!(self.view, View::Detail | View::Compare);
+        // Keys that act on the current model, which only help hides.
+        let row = table || matches!(self.view, View::Detail | View::Compare | View::Recommend);
+        // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
+        let across = match self.view {
+            View::Compare => Some(self.marked_models().len()),
+            View::Recommend => Some(self.task_frontier(&TASKS[self.task_cur]).len()),
+            _ => None,
+        };
         match code {
             KeyCode::Char('h') | KeyCode::Left if table => self.col = (self.col + NCOLS - n as usize % NCOLS) % NCOLS,
             KeyCode::Char('l') | KeyCode::Right if table => self.col = (self.col + n as usize) % NCOLS,
-            KeyCode::Char('h') | KeyCode::Left if self.view == View::Compare => {
-                self.compare_sel = step(self.compare_sel, -n, self.marked_models().len());
+            KeyCode::Char('h') | KeyCode::Left if across.is_some() => {
+                let (len, sel) = (across?, self.across_sel());
+                *sel = step((*sel).min(len.saturating_sub(1)), -n, len);
             }
-            KeyCode::Char('l') | KeyCode::Right if self.view == View::Compare => {
-                self.compare_sel = step(self.compare_sel, n, self.marked_models().len());
+            KeyCode::Char('l') | KeyCode::Right if across.is_some() => {
+                let (len, sel) = (across?, self.across_sel());
+                *sel = step((*sel).min(len.saturating_sub(1)), n, len);
             }
             KeyCode::Char('0') if table => self.col = 0,
             KeyCode::Char('$') if table => self.col = NCOLS - 1,
-            KeyCode::Char('0') if self.view == View::Compare => self.compare_sel = 0,
-            KeyCode::Char('$') if self.view == View::Compare => {
-                self.compare_sel = self.marked_models().len().saturating_sub(1);
-            }
+            KeyCode::Char('0') if across.is_some() => *self.across_sel() = 0,
+            KeyCode::Char('$') if across.is_some() => *self.across_sel() = across?.saturating_sub(1),
             KeyCode::Char('w') if table => {
                 for _ in 0..n {
                     let end = if self.col == NCOLS - 1 { 0 } else { NCOLS - 1 };
@@ -957,7 +987,10 @@ impl App {
                 }
             }
             KeyCode::Char('?') => self.view = if self.view == View::Help { View::Table } else { View::Help },
-            KeyCode::Char('t') => self.view = if self.view == View::Tasks { View::Table } else { View::Tasks },
+            KeyCode::Char('R') => {
+                self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
+                self.task_sel = 0;
+            }
             KeyCode::Char('f') if row => return self.flag(Store::is_fav, Store::toggle_fav, "favorited"),
             KeyCode::Char('e') if row => return self.flag(Store::is_excluded, Store::toggle_excluded, "excluded"),
             KeyCode::Char('V') if table => {
@@ -995,6 +1028,7 @@ impl App {
                         }
                     }
                 }
+                self.deselect();
                 self.rebuild();
                 return Some(Effect::Save);
             }
@@ -1020,7 +1054,7 @@ impl App {
                 return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
-            KeyCode::Enter if self.view == View::Tasks => {
+            KeyCode::Enter if self.view == View::Recommend => {
                 let t = &TASKS[self.task_cur];
                 self.task = Some(t);
                 // On the frontier the priciest is the best: each row down is cheaper and scores lower.
@@ -1185,6 +1219,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::data::Offer;
+    use crate::fit;
+    use crate::view::frontier;
 
     fn model(key: &str, available: bool, coding: Option<f64>, price: f64) -> Model {
         let mut m = Model {
@@ -1611,13 +1647,16 @@ mod tests {
     #[test]
     fn picking_a_task_shows_its_frontier() {
         let mut a = app();
-        press(&mut a, "tjj");
+        press(&mut a, "Rjj");
         assert_eq!(a.task_cur, 2);
         press(&mut a, "G");
         assert_eq!(a.task_cur, TASKS.len() - 1);
         press(&mut a, "gg");
         assert_eq!(a.task_cur, 0, "the cursor stays inside the list");
-        let front: Vec<&str> = a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.as_str()).collect();
+        assert_eq!(TASKS[0].name, "overall", "the general pick comes first");
+        press(&mut a, "2gg");
+        let front: Vec<&str> =
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, the best last; llama4 has no access");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.view, View::Table);
@@ -1637,7 +1676,8 @@ mod tests {
         let mut a = app();
         a.data.models.push(model("weak", true, Some(30.0), 0.01));
         a.data.models.push(model("edge", true, Some(49.6), 0.05));
-        let front: Vec<&str> = a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.as_str()).collect();
+        let front: Vec<&str> =
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
         assert_eq!(front, ["edge", "mini", "gpt55"], "cheap alone is no recommendation; 49.6 shows as 50");
     }
 
@@ -1645,19 +1685,27 @@ mod tests {
     fn a_task_keeps_the_best_of_each_price_level() {
         let mut a = app();
         a.data.models.push(model("flash", true, Some(70.0), 1.5));
-        let front: Vec<&str> = a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.as_str()).collect();
+        let front: Vec<&str> =
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
         assert_eq!(front, ["flash", "gpt55"], "flash beats mini at about the same price");
+        let data = Data { models: a.data.models.drain(..).collect(), ..Data::default() };
+        a.set_data(data);
+        press(&mut a, "R2gg");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(keys(&a), ["gpt55", "flash"], "enter shows the same line as the panel");
     }
 
     #[test]
-    fn excluded_models_leave_the_tasks() {
+    fn excluded_models_leave_the_recommendations() {
         let mut a = app();
-        let front = |a: &App| a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
+        let front = |a: &App| {
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>()
+        };
         assert_eq!(press(&mut a, "e"), Some(Effect::Save));
         assert!(a.store.is_excluded("gpt55"));
         assert_eq!(a.rows.len(), 3, "the table still shows it");
         assert_eq!(front(&a), ["mini"]);
-        press(&mut a, "t");
+        press(&mut a, "Rj");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["mini"], "nor does the table");
         press(&mut a, "c");
@@ -1666,15 +1714,64 @@ mod tests {
     }
 
     #[test]
-    fn t_toggles_the_tasks_overlay() {
+    fn shift_r_toggles_the_recommend_overlay() {
         let mut a = app();
-        press(&mut a, "t");
-        assert_eq!(a.view, View::Tasks);
-        press(&mut a, "t");
-        assert_eq!(a.view, View::Table, "t again closes it");
-        press(&mut a, "t");
+        press(&mut a, "R");
+        assert_eq!(a.view, View::Recommend);
+        press(&mut a, "R");
+        assert_eq!(a.view, View::Table, "R again closes it");
+        press(&mut a, "R");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table, "esc closes it too");
+    }
+
+    #[test]
+    fn recommend_moves_a_model_cursor_that_the_row_keys_act_on() {
+        let mut a = app();
+        press(&mut a, "R");
+        assert!(a.current().is_none(), "overall has no data in this fixture, so nothing is picked");
+        press(&mut a, "j");
+        let front: Vec<String> =
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
+        assert_eq!(front, ["mini", "gpt55"], "cheapest first, best last");
+        assert_eq!(a.current().unwrap().key, "mini", "the cursor starts on the cheapest");
+        press(&mut a, "l");
+        assert_eq!(a.current().unwrap().key, "gpt55");
+        press(&mut a, "l");
+        assert_eq!(a.current().unwrap().key, "mini", "wraps");
+        press(&mut a, "h");
+        assert_eq!(a.current().unwrap().key, "gpt55", "and back");
+        press(&mut a, "0");
+        assert_eq!(a.current().unwrap().key, "mini");
+        a.mouse(Mouse::Cols(1));
+        assert_eq!(a.current().unwrap().key, "gpt55", "the sideways wheel moves the model cursor as in compare");
+        press(&mut a, "0$");
+        assert_eq!(a.current().unwrap().key, "gpt55");
+        assert_eq!(
+            press(&mut a, "o"),
+            Some(Effect::Open(a.current().unwrap().url.clone())),
+            "o opens the picked model"
+        );
+        assert!(matches!(press(&mut a, "y"), Some(Effect::Copy(id)) if id.contains("gpt55")));
+        assert_eq!(press(&mut a, "e"), Some(Effect::Save), "e excludes it, so it leaves the line");
+        assert_eq!(a.current().unwrap().key, "mini", "the cursor lands on what is left");
+        press(&mut a, "$j");
+        assert_eq!((a.task_cur, a.task_sel), (2, 0), "j k move between tasks and start at the cheapest");
+        press(&mut a, "k$RR");
+        assert_eq!(a.task_sel, 0, "so does reopening");
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selection() {
+        let mut a = app();
+        press(&mut a, "Vj");
+        let same = Data { models: a.data.models.drain(..).collect(), ..Data::default() };
+        a.refreshed(Ok(same));
+        assert_eq!((a.visual_range(), a.selected()), (Some(0..=1), 1), "the range follows its models");
+        a.mouse(Mouse::Pick(2));
+        let same = Data { models: a.data.models.drain(..).collect(), ..Data::default() };
+        a.refreshed(Ok(same));
+        assert_eq!(a.picked, [0, 1, 2], "so do picked rows");
     }
 
     #[test]
@@ -1740,7 +1837,12 @@ mod tests {
         press(&mut a, "ggVjm");
         assert_eq!(a.store.marked, ["gpt55", "opus5"]);
         press(&mut a, "Gf");
-        assert!(a.store.is_fav("gpt55") && a.store.is_fav("opus5") && !a.store.is_fav("mini"), "f on the marks");
+        assert!(a.store.is_fav("mini") && !a.store.is_fav("gpt55"), "f on an unmarked row acts on it alone");
+        press(&mut a, "Gfggf");
+        assert!(
+            a.store.is_fav("gpt55") && a.store.is_fav("opus5") && !a.store.is_fav("mini"),
+            "f on a mark: all marks"
+        );
         press(&mut a, "ggVjm");
         assert!(a.store.marked.is_empty(), "m on an all-marked range unmarks it");
         press(&mut a, "ggVGC");
@@ -1855,7 +1957,7 @@ mod tests {
         a.mouse(Mouse::Menu(1));
         assert!(matches!(a.input, Input::Menu { col: 1, .. }));
         a.mouse(Mouse::Scroll(1));
-        a.mouse(Mouse::Header(0));
+        a.mouse(Mouse::Outside);
         assert_eq!((a.input == Input::None, a.col), (true, 1), "a click outside closes the dropdown");
         a.mouse(Mouse::Menu(1));
         assert_eq!(a.mouse(Mouse::Item(9)), None);
