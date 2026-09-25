@@ -1,0 +1,893 @@
+//! Terminal shell: owns the terminal, the input loop and the refresh thread, and draws `App`.
+//! Redraws only on input or when a background refresh lands.
+
+//!
+//! The table is drawn straight into the buffer: one pass over the visible rows, no widget
+//! allocations per frame. Colours come from the terminal's 16-colour palette, so a themed
+//! terminal themes modelcmp too, and nothing paints a background over a transparent one.
+
+use crate::app::{
+    App, BEST, COLS, Effect, HELP, Input, NCOLS, NOTES, PRICE, VIA, View, col_about, col_name, has_menu, menu_rows,
+};
+use crate::data::{self, Data, Model};
+use crate::fit::{self, TASKS};
+use crate::store::Store;
+use crate::view::{compare_rows, detail_lines, level, money, truncate, verdict};
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Widget};
+use ratatui::{DefaultTerminal, Frame};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
+
+type Refresh = Receiver<Result<Data, String>>;
+
+pub fn run(force: bool) -> Result<(), String> {
+    let cached = if force { None } else { data::load_cache() };
+    let data = match cached {
+        Some(d) => d,
+        None => {
+            eprintln!("downloading model data (models.dev + Epoch AI)…");
+            data::load(true)?.0
+        }
+    };
+    let mut app = App::new(data, Store::load());
+    let mut rx = None;
+    if app.data.stale() && app.refresh().is_some() {
+        rx = Some(spawn_refresh());
+    }
+    let mut terminal = ratatui::init();
+    let res = event_loop(&mut app, &mut terminal, rx);
+    ratatui::restore();
+    res
+}
+
+fn spawn_refresh() -> Refresh {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(data::refresh());
+    });
+    rx
+}
+
+fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refresh>) -> Result<(), String> {
+    let mut dirty = true;
+    loop {
+        if dirty {
+            terminal.draw(|f| draw(app, f)).map_err(|e| e.to_string())?;
+            dirty = false;
+        }
+        // Block on input; wake periodically only while a refresh is in flight.
+        let timeout = if rx.is_some() { Duration::from_millis(200) } else { Duration::from_secs(3600) };
+        // Handle every queued event before the next draw, so a held key never falls behind.
+        let mut wait = timeout;
+        while event::poll(wait).map_err(|e| e.to_string())? {
+            wait = Duration::ZERO;
+            if let Event::Key(k) = event::read().map_err(|e| e.to_string())?
+                && k.kind == KeyEventKind::Press
+            {
+                match app.key(k) {
+                    Some(Effect::Quit) => return Ok(()),
+                    Some(Effect::Save) => {
+                        if let Err(e) = app.store.save() {
+                            app.status = format!("could not save: {e}");
+                        }
+                    }
+                    Some(Effect::Open(url)) => {
+                        app.status = match open::that_detached(&url) {
+                            Ok(()) => format!("opened {url}"),
+                            Err(e) => format!("could not open {url}: {e}"),
+                        }
+                    }
+                    Some(Effect::Copy(text)) => {
+                        app.status =
+                            if copy(&text) { format!("copied {text}") } else { "no clipboard tool found".into() };
+                    }
+                    Some(Effect::Refresh) => rx = Some(spawn_refresh()),
+                    Some(Effect::Launch(cmd)) => {
+                        // The harness gets the whole terminal; input is only read on this thread, so nothing competes for it.
+                        ratatui::restore();
+                        let res = Command::new(&cmd[0]).args(&cmd[1..]).status();
+                        *terminal = ratatui::init();
+                        terminal.clear().map_err(|e| e.to_string())?;
+                        let line = cmd.join(" ");
+                        app.status = match res {
+                            Ok(s) if s.success() => format!("back from {line}"),
+                            Ok(s) => format!("{line} exited with {s}"),
+                            Err(e) => format!("could not run {line}: {e}"),
+                        };
+                    }
+                    None => {}
+                }
+            }
+            dirty = true;
+        }
+        let done = rx.as_ref().and_then(|r| match r.try_recv() {
+            Ok(res) => Some(res),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err("refresh thread died".into())),
+        });
+        if let Some(res) = done {
+            rx = None;
+            app.refreshed(res);
+            dirty = true;
+        }
+    }
+}
+
+/// Pipe `text` into the first clipboard tool that runs.
+fn copy(text: &str) -> bool {
+    let tools: &[&[&str]] = if cfg!(target_os = "macos") {
+        &[&["pbcopy"]]
+    } else {
+        &[&["clip.exe"], &["wl-copy"], &["xclip", "-selection", "clipboard"], &["xsel", "--clipboard", "--input"]]
+    };
+    tools.iter().any(|argv| {
+        let mut tool = Command::new(argv[0]);
+        tool.args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        let Ok(mut child) = tool.spawn() else { return false };
+        let written =
+            child.stdin.take().is_some_and(|mut s| std::io::Write::write_all(&mut s, text.as_bytes()).is_ok());
+        written && child.wait().is_ok_and(|s| s.success())
+    })
+}
+
+// ---------- drawing ----------
+
+/// Blank columns between two table columns.
+const GAP: u16 = 2;
+const NAME_MIN: u16 = 16;
+/// Key reminders in the status bar, most dispensable first. `s`, `> <` and `p` act on the
+/// column picked with `h l`; `u`, `C` and `c` show once they would do something.
+fn hints(app: &App) -> Vec<&'static str> {
+    match app.view {
+        View::Table => {
+            let mut v = vec![
+                "space mark",
+                "f fav",
+                "y copy id",
+                "enter details",
+                "x launch",
+                "> < bound",
+                "p best per price",
+                "a all",
+                "F favorites",
+                "s sort",
+                "h l column",
+            ];
+            if has_menu(app.col) {
+                v.push("d dropdown");
+            }
+            if !app.marked.is_empty() {
+                v.push("M marked only");
+            }
+            if app.marked.len() >= 2 {
+                v.push("C compare");
+            }
+            if !app.query.is_empty()
+                || !app.bounds.is_empty()
+                || app.dev.is_some()
+                || app.via.is_some()
+                || app.frontier.is_some()
+                || app.only_marked
+                || app.favs
+            {
+                v.push("c clear");
+            }
+            v.extend(["/ filter", "? help"]);
+            v
+        }
+        View::Detail => vec!["f fav", "n note", "y copy id", "o open", "x launch", "j k scroll", "esc back"],
+        View::Help | View::Compare => vec!["j k scroll", "esc back"],
+    }
+}
+
+// The terminal's own palette, so the colours are whatever the rice set. Text stays the default foreground.
+const ACCENT: Color = Color::Magenta;
+const KEY: Color = Color::Cyan;
+const MUTED: Color = Color::DarkGray;
+const GOOD: Color = Color::Green;
+const BAD: Color = Color::Red;
+const MARK: Color = Color::Magenta;
+const FAV: Color = Color::Yellow;
+/// Each developer and harness gets a stable colour from these; the five harness names all differ.
+const DEVS: [Color; 5] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green];
+/// Price levels (`view::LEVELS`) from free to the most expensive.
+const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
+const BOLD: Modifier = Modifier::BOLD;
+
+const fn fg(c: Color) -> Style {
+    Style::new().fg(c)
+}
+
+fn dev_color(dev: &str) -> Color {
+    DEVS[dev.bytes().map(usize::from).sum::<usize>() % DEVS.len()]
+}
+
+fn draw(app: &mut App, f: &mut Frame) {
+    let area = f.area();
+    if area.height < 4 || area.width < 4 {
+        return;
+    }
+    let body = Rect { height: area.height - 1, ..area };
+    let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
+    let age = app.data.age().as_secs();
+    let age = if age < 3600 { format!("{}m", age / 60) } else { format!("{}h", age / 3600) };
+    let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, col_name(app.sort_col));
+    // What the column under the cursor means, centred and cut to clear the wider of the name
+    // (` ◆ modelcmp ` and its corner) and the sort on either side.
+    let side = 14.max(sort.chars().count() + 2);
+    let room = (body.width as usize).saturating_sub(2 * side).max(1);
+    let about = truncate(&format!(" {}: {} ", col_name(app.col), col_about(app.col)), room);
+    let frame = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(fg(MUTED))
+        .title_top(Line::from(" ◆ modelcmp ").style(fg(ACCENT).add_modifier(BOLD)))
+        .title_top(Line::from(about).style(fg(MUTED)).centered())
+        .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
+        .title_bottom(Line::from(format!(" models.dev + Epoch AI · data {age} old ")).style(fg(MUTED)).right_aligned());
+    let inner = frame.inner(body);
+    app.page = inner.height.saturating_sub(1);
+    let buf = f.buffer_mut();
+    frame.render(body, buf);
+    table(buf, inner, app);
+    let cursor = status(buf, bar, app);
+    let lines = match app.view {
+        View::Table => None,
+        View::Help => Some(("keys".to_string(), help())),
+        View::Detail => app.current().map(|m| {
+            let star = if app.store.is_fav(&m.key) { "★ " } else { "" };
+            (format!("{star}{}", m.name), detail(m, &app.store))
+        }),
+        View::Compare => Some(("compare".into(), compare(&app.marked_models()))),
+    };
+    if let Some((title, lines)) = lines {
+        overlay(buf, area, &title, lines, &mut app.scroll);
+    }
+    if app.input == Input::Quit {
+        let keys = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
+        let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
+        overlay(buf, area, "quit?", lines, &mut 0);
+    }
+    if let Some(x) = cursor {
+        f.set_cursor_position((x, bar.y));
+    }
+}
+
+/// Column layout relative to the table's left edge. A numeric column is as wide as its header
+/// plus the sort arrow or its widest value, so neighbours always sit `GAP` apart whatever the filter.
+struct Layout {
+    name_w: u16,
+    dev_w: u16,
+    /// The numeric columns that fit: (index into `COLS`, x, width).
+    cols: Vec<(usize, u16, u16)>,
+    /// Where the "Via", "Best for" and "Notes" columns start and their widths, if there is room.
+    via: Option<(u16, u16)>,
+    best: Option<(u16, u16)>,
+    notes: Option<(u16, u16)>,
+    /// The first column right of Dev shown (0 is Price, the last Notes), for `App::hscroll`.
+    first: usize,
+}
+
+/// Width of the "Best for" column: room for the two longest task names `fit::best_for` can list.
+fn best_w() -> u16 {
+    let mut n: Vec<usize> = TASKS.iter().map(|t| t.name.len()).collect();
+    n.sort_unstable();
+    (n.iter().rev().take(2).sum::<usize>() + 2) as u16
+}
+
+fn layout(width: u16, app: &App) -> Layout {
+    let ms = &app.data.models;
+    // Headers need room for the sort arrow, and a dropdown's for its " ▾".
+    let widths: [u16; COLS.len()] = std::array::from_fn(|i| {
+        let c = &COLS[i];
+        let head = c.name.chars().count() + 1 + if has_menu(i + 2) { 2 } else { 0 };
+        head.max(app.widths[i]) as u16
+    });
+    let dev_w = ms.iter().map(|m| m.developer.chars().count()).max().unwrap_or(0).clamp(6, 12) as u16;
+    let via_w =
+        ms.iter().map(|m| m.via.iter().map(|v| v.len() + 1).sum::<usize>()).max().unwrap_or(0).clamp(6, 24) as u16;
+    let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(str::len).max().unwrap_or(0).clamp(6, 40) as u16;
+    let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
+    // The columns right of Dev scroll sideways: only as far as it takes to show the selected
+    // one, keeping the last position otherwise. Model and Dev stay put.
+    let ws: Vec<u16> = widths.into_iter().chain([via_w, best_w(), notes_w]).collect();
+    let fixed: u16 = ws.iter().map(|w| w + GAP).sum::<u16>() + dev_w + GAP;
+    let name_w = width.saturating_sub(2 + fixed).clamp(NAME_MIN, longest.max(NAME_MIN));
+    let mut x = 2 + name_w + GAP + dev_w + GAP;
+    let room = width.saturating_sub(x) + GAP;
+    let first = match app.col.checked_sub(2) {
+        Some(s) => {
+            let (mut lo, mut used) = (s, ws[s] + GAP);
+            while lo > 0 && used + ws[lo - 1] + GAP <= room {
+                lo -= 1;
+                used += ws[lo] + GAP;
+            }
+            app.hscroll.clamp(lo, s)
+        }
+        None => 0,
+    };
+    let (mut cols, mut tail) = (Vec::with_capacity(COLS.len()), [None; 3]);
+    for (k, &w) in ws.iter().enumerate().skip(first) {
+        if x + w > width {
+            break;
+        }
+        match k.checked_sub(COLS.len()) {
+            Some(t) => tail[t] = Some((x, w)),
+            None => cols.push((k, x, w)),
+        }
+        x += w + GAP;
+    }
+    Layout { name_w, dev_w, cols, via: tail[0], best: tail[1], notes: tail[2], first }
+}
+
+/// Header plus as many rows as fit in `area`, scrolled so the selection stays in view.
+fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
+    if area.height == 0 {
+        return;
+    }
+    let Layout { name_w, dev_w, cols, via, best, notes, first } = layout(area.width, app);
+    app.hscroll = first;
+    let arrow = |i: usize| match i == app.sort_col {
+        true if app.descending => "▼",
+        true => "▲",
+        false => "",
+    };
+    let header = |i: usize| match i == app.col {
+        true => fg(ACCENT).add_modifier(BOLD | Modifier::REVERSED),
+        false => fg(ACCENT).add_modifier(BOLD),
+    };
+    let (y, name_x, dev_x) = (area.y, area.x + 2, area.x + 2 + name_w + GAP);
+    let (nw, dw) = (name_w as usize, dev_w as usize);
+    buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
+    buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
+    if first > 0 {
+        // Columns scrolled off to the left.
+        buf.set_stringn(dev_x + dev_w, y, "‹", 1, fg(MUTED));
+    }
+    for &(i, x, w) in &cols {
+        let text = format!("{}{}{}", arrow(i + 2), COLS[i].name, if has_menu(i + 2) { " ▾" } else { "" });
+        buf.set_stringn(area.x + x, y, format!("{text:>w$}", w = w as usize), w as usize, header(i + 2));
+    }
+    if let Some((x, w)) = via {
+        buf.set_stringn(area.x + x, y, format!("Via{} ▾", arrow(VIA)), w as usize, header(VIA));
+    }
+    for (c, at) in [(BEST, best), (NOTES, notes)] {
+        if let Some((x, w)) = at {
+            buf.set_stringn(area.x + x, y, format!("{}{}", col_name(c), arrow(c)), w as usize, header(c));
+        }
+    }
+
+    let height = area.height as usize - 1;
+    let sel = app.table.selected().unwrap_or(0).min(app.rows.len().saturating_sub(1));
+    let top = app.table.offset().clamp(sel.saturating_sub(height.saturating_sub(1)), sel);
+    *app.table.offset_mut() = top;
+    let ext = app.ext;
+    let any = app.data.models.iter().any(|m| m.available);
+    for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
+        let y = area.y + 1 + (k - top) as u16;
+        let m = &app.data.models[r];
+        // The selection is a reverse-video bar; colours stay off it so it reads as one.
+        let base = if k == sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+        let tint = |c: Color| if k == sel { base } else { fg(c) };
+        buf.set_style(Rect { y, height: 1, ..area }, base);
+        if app.store.is_fav(&m.key) {
+            buf.set_stringn(area.x, y, "★", 1, tint(FAV));
+        }
+        if app.marked.contains(&m.key) {
+            buf.set_stringn(area.x + 1, y, "●", 1, tint(MARK).add_modifier(BOLD));
+        }
+        let name = if m.available || !any { base } else { tint(MUTED) };
+        buf.set_stringn(name_x, y, &m.name, nw, name);
+        buf.set_stringn(dev_x, y, &m.developer, dw, tint(dev_color(&m.developer)));
+        for &(i, x, w) in &cols {
+            let Some(v) = app.vals[r][i] else {
+                buf.set_stringn(area.x + x + w - 1, y, "-", 1, tint(MUTED));
+                continue;
+            };
+            let style = match ext[i] {
+                // The blended price is coloured by level, so its colour says the same thing on every screen.
+                _ if i + 2 == PRICE => tint(LEVEL[level(v)]),
+                Some((best, _)) if v == best => base.patch(fg(GOOD)).add_modifier(BOLD),
+                Some((_, worst)) if v == worst => base.patch(fg(BAD)),
+                _ => base,
+            };
+            let w = w as usize;
+            buf.set_stringn(area.x + x, y, format!("{:>w$}", (COLS[i].show)(v)), w, style);
+        }
+        if let Some((x, w)) = via {
+            let (mut x, end) = (area.x + x, area.x + x + w);
+            for (j, h) in m.via.iter().enumerate() {
+                if j > 0 {
+                    x = buf.set_stringn(x, y, ", ", end.saturating_sub(x) as usize, base).0;
+                }
+                x = buf.set_stringn(x, y, h, end.saturating_sub(x) as usize, tint(dev_color(h))).0;
+            }
+        }
+        if let Some((x, w)) = best {
+            buf.set_stringn(area.x + x, y, fit::best_for(m).join(", "), w as usize, tint(MUTED));
+        }
+        if let (Some((x, w)), Some(note)) = (notes, app.store.note(&m.key)) {
+            buf.set_stringn(area.x + x, y, note, w as usize, base.add_modifier(Modifier::ITALIC));
+        }
+    }
+    if let Input::Menu { col, items, sel, query, .. } = &app.input {
+        let x = match (*col, via) {
+            (VIA, Some((x, _))) => area.x + x,
+            _ => cols.iter().find(|c| c.0 + 2 == *col).map_or(dev_x, |c| area.x + c.1),
+        };
+        dropdown(buf, area, x, *col, items, &menu_rows(items, query), *sel);
+    }
+}
+
+/// The list under a header opened with `d`, each entry with how many models it would show,
+/// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
+/// listed; the width fits every entry so the box keeps still while typing.
+fn dropdown(buf: &mut Buffer, area: Rect, x: u16, col: usize, items: &[(String, usize)], rows: &[usize], sel: usize) {
+    let label_w = items.iter().map(|(s, _)| s.chars().count()).max().unwrap_or(0);
+    let n_w = items.iter().map(|(_, n)| n.to_string().len()).max().unwrap_or(0);
+    let w = ((label_w + n_w + 6) as u16).min(area.width);
+    let h = (rows.len() as u16 + 2).min(area.height.saturating_sub(1));
+    if h < 3 {
+        return;
+    }
+    let rect = Rect::new(x.saturating_sub(2).min(area.right() - w).max(area.x), area.y + 1, w, h);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(ACCENT));
+    let inner = block.inner(rect);
+    Clear.render(rect, buf);
+    block.render(rect, buf);
+    let shown = inner.height as usize;
+    let top = sel.saturating_sub(shown - 1);
+    for (k, &i) in rows.iter().enumerate().skip(top).take(shown) {
+        let (label, n) = &items[i];
+        let y = inner.y + (k - top) as u16;
+        let base = if k == sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+        // Entries keep the colour they have in the table, off the selection bar like there.
+        let color = match i {
+            0 => Color::Reset,
+            _ if col == PRICE => LEVEL[i - 1],
+            _ => dev_color(label),
+        };
+        let tint = |c: Color| if k == sel { base } else { fg(c) };
+        buf.set_style(Rect { y, height: 1, ..inner }, base);
+        let x = buf.set_stringn(inner.x + 1, y, format!("{label:<label_w$}  "), label_w + 2, tint(color)).0;
+        buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, tint(MUTED));
+    }
+}
+
+/// A solid label like a bar module; returns the column after it.
+fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) -> u16 {
+    buf.set_stringn(x, y, format!(" {text} "), max as usize, fg(Color::Black).bg(color).add_modifier(BOLD)).0
+}
+
+/// Returns the cursor column while a search, note or bound is being typed.
+fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
+    let width = area.width as usize;
+    let (mode, color) = match (&app.input, &app.view) {
+        (Input::Search, _) => ("SEARCH", Color::Blue),
+        (Input::Note(_), _) => ("NOTE", Color::Blue),
+        (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
+        (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
+        (Input::Quit, _) => ("QUIT", Color::Red),
+        (Input::None, View::Table) => ("NORMAL", Color::Magenta),
+        (Input::None, View::Help) => ("HELP", Color::Cyan),
+        (Input::None, View::Detail) => ("DETAIL", Color::Cyan),
+        (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
+    };
+    let mut x = pill(buf, area.x, area.y, mode, color, area.width) + 1;
+    if app.input == Input::Quit {
+        // The question is in a box in the middle of the screen.
+        return None;
+    }
+    let prompt = match &app.input {
+        Input::Search => Some(format!("/{}", app.query)),
+        Input::Note(text) => Some(format!("note: {text}")),
+        Input::Bound { col, min, text } => Some(format!("{} {} {text}", col_name(*col), if *min { "≥" } else { "≤" })),
+        Input::Menu { col, query, typing, .. } => Some(match (*typing, query.is_empty()) {
+            (false, true) => format!("{} ▾", col_name(*col)),
+            _ => format!("{} ▾ /{query}", col_name(*col)),
+        }),
+        Input::Quit | Input::None => None,
+    };
+    if let Some(text) = prompt {
+        let (menu, typing) = match app.input {
+            Input::Menu { typing, .. } => (true, typing),
+            _ => (false, true),
+        };
+        let hint = match (menu, typing) {
+            (true, false) => "j k move  / search  enter pick  esc cancel",
+            (true, true) => "↓ ↑ move  enter pick  esc clear",
+            _ => "enter apply  esc cancel",
+        };
+        let hx = area.right().saturating_sub(hint.len() as u16 + 1);
+        let (nx, _) = buf.set_stringn(x, area.y, &text, hx.saturating_sub(x) as usize, Style::new());
+        buf.set_stringn(hx, area.y, hint, hint.len(), fg(MUTED));
+        return typing.then_some(nx.min(area.right().saturating_sub(1)));
+    }
+    let any = app.data.models.iter().any(|m| m.available);
+    let scope = match (app.all, any) {
+        (false, true) => "available",
+        (false, false) => "all (no access found)",
+        (true, _) => "all",
+    };
+    let mut parts = vec![(format!("{} {scope}", app.rows.len()), Color::Reset)];
+    if app.favs {
+        parts.push(("★ only".into(), FAV));
+    }
+    if !app.marked.is_empty() {
+        parts.push((format!("{} marked{}", app.marked.len(), if app.only_marked { " only" } else { "" }), MARK));
+    }
+    if !app.query.is_empty() {
+        parts.push((format!("/{}", app.query), Color::Yellow));
+    }
+    if let Some(col) = app.frontier {
+        parts.push((format!("best {} per price", col_name(col)), Color::Yellow));
+    }
+    if let Some(dev) = &app.dev {
+        parts.push((format!("Dev={dev}"), Color::Yellow));
+    }
+    if let Some(via) = &app.via {
+        parts.push((format!("Via={via}"), Color::Yellow));
+    }
+    for &(col, lo, hi) in &app.bounds {
+        let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
+        // The level label would repeat what the number says.
+        let shown = match crate::app::numeric(col) {
+            _ if col == PRICE => money(v),
+            Some(c) => (c.show)(v),
+            None => v.to_string(),
+        };
+        parts.push((format!("{}{sign}{shown}", col_name(col)), Color::Yellow));
+    }
+    if app.refreshing {
+        parts.push(("⟳ refreshing".into(), Color::Yellow));
+    }
+    if !app.status.is_empty() {
+        parts.push((app.status.clone(), GOOD));
+    }
+    // Key hints fill what the left side leaves free; whole hints drop from the front on
+    // narrow terminals, and `? help` is the last to go.
+    let left = x as usize + parts.iter().map(|(p, _)| p.chars().count() + 3).sum::<usize>();
+    let all = hints(app);
+    let mut hints = &all[..];
+    while hints.len() > 1 && left + hints.join("  ").chars().count() + 1 > width {
+        hints = &hints[1..];
+    }
+    let right = hints.join("  ").chars().count() as u16;
+    let limit = area.right().saturating_sub(right + 1);
+    for (i, (text, color)) in parts.iter().enumerate() {
+        if i > 0 {
+            x = buf.set_stringn(x, area.y, " · ", limit.saturating_sub(x) as usize, fg(MUTED)).0;
+        }
+        x = buf.set_stringn(x, area.y, text, limit.saturating_sub(x) as usize, fg(*color)).0;
+    }
+    // Hints: the key in colour, what it does in plain text.
+    let mut x = area.right().saturating_sub(right);
+    for (i, hint) in hints.iter().enumerate() {
+        let (key, what) = hint.split_once(' ').unwrap_or((hint, ""));
+        x = buf.set_stringn(x, area.y, key, width, fg(KEY).add_modifier(BOLD)).0;
+        x = buf.set_stringn(x, area.y, format!(" {what}"), width, Style::new()).0;
+        if i + 1 < hints.len() {
+            x = buf.set_stringn(x, area.y, "  ", width, Style::new()).0;
+        }
+    }
+    None
+}
+
+/// A centred rounded box showing `lines` from `scroll` on, which is clamped to the content.
+fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>, scroll: &mut u16) {
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let w = (widest + 4).max(title.chars().count() as u16 + 6).min(area.width);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+    let shown = h.saturating_sub(2) as usize;
+    *scroll = (*scroll).min(lines.len().saturating_sub(shown) as u16);
+    let footer = if lines.len() > shown {
+        format!(" {}-{} of {} · j k scroll · esc closes ", *scroll + 1, *scroll as usize + shown, lines.len())
+    } else {
+        " esc closes ".into()
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(fg(ACCENT))
+        .title_top(Line::from(format!(" {title} ")).style(fg(ACCENT).add_modifier(BOLD)))
+        .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
+    let inner = block.inner(rect);
+    Clear.render(rect, buf);
+    block.render(rect, buf);
+    for (line, y) in lines.into_iter().skip(*scroll as usize).zip(inner.y..inner.bottom()) {
+        line.render(Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 }, buf);
+    }
+}
+
+fn heading(text: &str) -> Line<'static> {
+    Line::from(text.to_string()).style(fg(ACCENT).add_modifier(BOLD))
+}
+
+fn help() -> Vec<Line<'static>> {
+    let key_w = HELP.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let mut v: Vec<Line> = HELP
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![Span::styled(format!("{k:<key_w$}  "), fg(KEY).add_modifier(BOLD)), Span::raw(*what)])
+        })
+        .collect();
+    v.push(Line::default());
+    v.push(heading("Columns (green: best shown, red: worst)"));
+    for c in 0..NCOLS {
+        v.push(Line::from(vec![Span::styled(format!("{:<11}", col_name(c)), fg(KEY)), Span::raw(col_about(c))]));
+    }
+    v.push(Line::default());
+    v.push(heading("Tasks"));
+    for t in TASKS {
+        v.push(Line::from(vec![Span::styled(format!("{:<11}", t.name), fg(KEY)), Span::raw(t.about)]));
+    }
+    v.push(Line::default());
+    v.push(Line::from(format!("Favorites and notes: {}", crate::store::path().display())).style(fg(MUTED)));
+    v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
+    v
+}
+
+/// Every detail line, with `key:` labels and section headings coloured.
+fn detail(m: &Model, store: &Store) -> Vec<Line<'static>> {
+    let is_label = |k: &str| k.len() < 16 && k.trim().chars().all(|c| c.is_alphabetic() || c == ' ');
+    detail_lines(m, store)
+        .into_iter()
+        .skip(1) // the name is the title
+        .map(|s| match s.split_once(':') {
+            Some((k, v)) if s.starts_with("  ") && is_label(k) => {
+                Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(v.to_string())])
+            }
+            _ if s.ends_with(':') => heading(&s),
+            _ => Line::from(s),
+        })
+        .collect()
+}
+
+/// The verdict, then the marked models side by side with the best value of each row in green.
+fn compare(models: &[&Model]) -> Vec<Line<'static>> {
+    let rows = compare_rows(models);
+    let mut out = vec![heading("verdict:")];
+    out.extend(verdict_lines(models));
+    out.push(Line::default());
+    let label_w = rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
+    let widths: Vec<usize> =
+        (0..models.len()).map(|i| rows.iter().map(|r| r.cells[i].chars().count()).max().unwrap_or(0)).collect();
+    out.extend(rows.into_iter().map(|r| {
+        let mut spans = vec![Span::styled(format!("{:<label_w$}", r.label), fg(KEY))];
+        for (i, c) in r.cells.into_iter().enumerate() {
+            let style = if r.best == Some(i) { fg(GOOD).add_modifier(BOLD) } else { Style::new() };
+            spans.push(Span::styled(format!("  {c:>w$}", w = widths[i]), style));
+        }
+        Line::from(spans)
+    }));
+    out
+}
+
+/// The verdict as a small table: question, winner in green, margin dimmed.
+fn verdict_lines(models: &[&Model]) -> Vec<Line<'static>> {
+    let rows = verdict(models);
+    let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
+    let (w0, w1) = (w(0), w(1));
+    rows.into_iter()
+        .map(|[q, win, margin]| {
+            Line::from(vec![
+                Span::styled(format!("  {q:<w0$}  "), fg(KEY)),
+                Span::styled(format!("{win:<w1$}  "), fg(GOOD).add_modifier(BOLD)),
+                Span::styled(margin, fg(MUTED)),
+            ])
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ECI;
+    use crate::data::Offer;
+    use ratatui::crossterm::event::KeyCode;
+
+    fn model(name: &str, dev: &str, eci: Option<f64>, price: f64) -> Model {
+        Model {
+            key: name.into(),
+            name: name.into(),
+            developer: dev.into(),
+            available: true,
+            via: vec!["opencode".into()],
+            eci,
+            context: 200_000,
+            offers: vec![Offer {
+                provider: "p".into(),
+                id: name.into(),
+                input: price,
+                output: price,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn app() -> App {
+        let models = vec![model("opus", "anthropic", Some(150.0), 5.0), model("flash", "google", Some(120.0), 0.1)];
+        App::new(Data { models, ..Default::default() }, Store::default())
+    }
+
+    fn render(app: &mut App, width: u16, height: u16) -> (Buffer, Vec<String>) {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        table(&mut buf, Rect { height: height - 1, ..area }, app);
+        status(&mut buf, Rect { y: height - 1, height: 1, ..area }, app);
+        let lines = (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_owned())
+            .collect();
+        (buf, lines)
+    }
+
+    fn words(line: &str) -> Vec<&str> {
+        line.split_whitespace().collect()
+    }
+
+    #[test]
+    fn wide_table_shows_every_column_and_extremes() {
+        let mut a = app();
+        let (buf, lines) = render(&mut a, 200, 5);
+        let header = "Model Dev ▾ ▼Price ▾ $in $out Ctx ECI Coding Agentic Reason Math \
+                      Value Code/$ Via ▾ Best for Notes";
+        assert_eq!(words(&lines[0]), words(header));
+        let via = lines[2].find("opencode").expect(&lines[2]);
+        assert_eq!(
+            buf[(lines[2][..via].chars().count() as u16, 2)].fg,
+            dev_color("opencode"),
+            "harnesses are coloured"
+        );
+        assert_eq!(&words(&lines[1])[..7], ["opus", "anthropic", "5.0", "5.0", "5.0", "200k", "150"]);
+        assert_eq!(&words(&lines[2])[..7], ["flash", "google", "0.10", "0.10", "0.10", "200k", "120"]);
+        assert!(lines[4].starts_with(" NORMAL  2 available"), "{}", lines[4]);
+        assert!(lines[4].ends_with("d dropdown  / filter  ? help"), "{}", lines[4]);
+        assert!(buf[(0, 1)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
+        assert_eq!(buf[(2, 2)].fg, Color::Reset, "names are plain text");
+        assert_eq!(buf[(20, 2)].fg, dev_color("google"));
+        // Screen column of a byte offset: `▾` takes several bytes.
+        let x = |i: usize| lines[2][..i].chars().count() as u16;
+        assert_eq!(buf[(x(lines[2].find("120").unwrap()), 2)].fg, BAD, "the lowest ECI shown is red");
+        assert_eq!(buf[(x(lines[2].rfind("0.10").unwrap()), 2)].fg, GOOD, "the cheapest $out is green");
+        assert_eq!(
+            buf[(x(lines[2].find("0.10").unwrap()), 2)].fg,
+            LEVEL[1],
+            "the blended price takes its level's colour"
+        );
+    }
+
+    #[test]
+    fn dropdown_opens_under_its_header() {
+        let mut a = app();
+        a.col = 1;
+        let (_, lines) = render(&mut a, 170, 8);
+        assert!(lines[7].ends_with("d dropdown  / filter  ? help"), "{}", lines[7]);
+        a.key(KeyCode::Char('d').into());
+        let (buf, lines) = render(&mut a, 170, 8);
+        let dev = lines[0].find("Dev").unwrap() - 2;
+        assert!(lines[1][dev..].starts_with("╭──────────────╮"), "{}", lines[1]);
+        assert_eq!(&words(&lines[2])[1..4], ["│", "any", "2"]);
+        assert_eq!(&words(&lines[3])[..3], ["│", "anthropic", "1"]);
+        assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
+        assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
+        for c in "/anth".chars() {
+            a.key(KeyCode::Char(c).into());
+        }
+        let (_, lines) = render(&mut a, 170, 8);
+        assert_eq!(&words(&lines[3])[..3], ["│", "anthropic", "1"], "only matches are listed");
+        assert!(lines[4][dev..].starts_with("╰"), "{}", lines[4]);
+        assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
+    }
+
+    #[test]
+    fn narrow_table_drops_columns_and_hints_without_panicking() {
+        let mut a = app();
+        let (_, lines) = render(&mut a, 44, 4);
+        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "▼Price", "▾"], "the cursor starts on Price");
+        assert!(lines[3].ends_with("? help"), "{}", lines[3]);
+        assert!(!lines[3].contains("space mark"), "hints that do not fit are dropped whole");
+        // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
+        a.col = NCOLS - 1;
+        let (_, lines) = render(&mut a, 44, 4);
+        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "‹", "Notes"]);
+        a.col = VIA;
+        let (_, lines) = render(&mut a, 44, 4);
+        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "‹", "Via", "▾"]);
+        for _ in 0..3 {
+            a.key(KeyCode::Char('h').into());
+        }
+        let (_, lines) = render(&mut a, 44, 4);
+        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Value"], "scrolls back only as far as needed");
+        a.key(KeyCode::Char('l').into());
+        let (_, lines) = render(&mut a, 44, 4);
+        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Value"], "{}", lines[0]);
+        a.col = 0;
+        let (_, lines) = render(&mut a, 44, 4);
+        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "▼Price", "▾"]);
+        for (w, h) in [(1, 1), (3, 2), (0, 0), (30, 3), (12, 1)] {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            table(&mut buf, area, &mut a);
+            status(&mut buf, area, &a);
+        }
+    }
+
+    #[test]
+    fn scrolls_to_keep_the_selection_visible() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        data.models.extend((0..20).map(|i| model(&format!("m{i}"), "x", Some(i as f64), 1.0)));
+        a.set_data(data);
+        a.col = ECI;
+        a.key(KeyCode::Char('s').into());
+        a.table.select(Some(15));
+        let (_, lines) = render(&mut a, 60, 6);
+        assert_eq!(words(&lines[4])[0], "m6", "row 15 (m6) is the last of the 4 visible rows");
+        a.table.select(Some(0));
+        let (_, lines) = render(&mut a, 60, 6);
+        assert_eq!(words(&lines[1])[0], "opus", "scrolls back up");
+    }
+
+    #[test]
+    fn prompts_show_the_text_and_the_cursor() {
+        let mut a = app();
+        a.input = Input::Search;
+        a.query = "gem".into();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 4));
+        let line: String = (0..14).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(line, " SEARCH  /gem ");
+        a.input = Input::Bound { col: 3, min: true, text: "4".into() };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        status(&mut buf, Rect::new(0, 0, 40, 1), &a);
+        assert_eq!((0..15).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  $in ≥ 4");
+    }
+
+    #[test]
+    fn every_view_draws_at_any_size() {
+        for (w, h) in [(120, 30), (60, 10), (20, 5), (4, 4), (3, 3)] {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            for view in [View::Table, View::Help, View::Detail, View::Compare] {
+                let mut a = app();
+                a.marked = vec!["opus".into(), "flash".into()];
+                a.view = view;
+                term.draw(|f| draw(&mut a, f)).unwrap();
+            }
+        }
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
+        let mut a = app();
+        a.col = ECI;
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let top: String = (0..100).map(|x| term.backend().buffer()[(x, 0)].symbol()).collect();
+        assert!(top.starts_with("╭ ◆ modelcmp ──"), "{top}");
+        assert!(top.ends_with("─ ▼ by Price ╮"), "{top}");
+        let (l, r) = top.split_once(" ECI: Epoch Capabilities Index, overall capability ").unwrap();
+        assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
+        let bottom: String = (0..100).map(|x| term.backend().buffer()[(x, 6)].symbol()).collect();
+        assert!(bottom.contains("models.dev + Epoch AI"), "{bottom}");
+        assert_eq!(a.page, 4, "8 lines minus status bar, two borders and the header");
+    }
+
+    #[test]
+    fn overlays_fit_and_scroll() {
+        let area = Rect::new(0, 0, 30, 6);
+        let mut buf = Buffer::empty(area);
+        let mut scroll = 99;
+        overlay(&mut buf, area, "keys", help(), &mut scroll);
+        assert_eq!(buf[(0, 0)].symbol(), "╭");
+        assert_eq!(buf[(0, 0)].fg, ACCENT);
+        assert_eq!(scroll as usize, help().len() - 4, "scroll is clamped to the content");
+        let a = app();
+        let text: Vec<String> = detail(&a.data.models[0], &a.store).iter().map(ToString::to_string).collect();
+        assert!(text.iter().any(|l| l.starts_with("  developer:  anthropic")), "{text:?}");
+        let rows = compare(&a.marked_models());
+        assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
+        assert!(rows.iter().any(|l| l.to_string().starts_with("model")));
+    }
+}
