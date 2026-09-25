@@ -2,8 +2,9 @@
 //! so every key is unit-testable.
 
 use crate::data::{self, Data, Model};
+use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
-use crate::view::{LEVELS, ctx, frontier, level_label, money, score, task_score, visible};
+use crate::view::{LEVELS, ctx, frontier, level_label, money, score, task_frontier, task_score, visible};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::{Ordering, Reverse};
@@ -38,7 +39,7 @@ fn positive(x: f64) -> Option<f64> {
 
 /// Prices from the offer you'd pay, then the Epoch index, the task percentiles and the
 /// Artificial Analysis indices.
-pub const COLS: [Col; 11] = [
+pub const COLS: [Col; 10] = [
     Col {
         lower_better: true,
         show: money,
@@ -72,13 +73,7 @@ pub const COLS: [Col; 11] = [
         ..col("Reason", "mean percentile (0-100) on reasoning benchmarks", |m| task_score(m, "reasoning"))
     },
     Col { task: Some("math"), ..col("Math", "mean percentile (0-100) on math benchmarks", |m| task_score(m, "math")) },
-    col("Value", "ECI percentile divided by Price, as a percentile (0-100); only models at or above median ECI", |m| {
-        task_score(m, "value")
-    }),
-    Col {
-        show: |v| format!("{v:.1}"),
-        ..col("Code/$", "Coding divided by Price", |m| Some(task_score(m, "coding")? / m.blended()?))
-    },
+    col("Code/$", "Coding divided by Price, as a percentile (0-100)", |m| m.fit.get("value").copied()),
 ];
 
 /// Text columns before the numbers: 0 is the model name, 1 its developer. `VIA` follows them.
@@ -135,10 +130,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("s", "sort by the column; again reverses"),
     ("enter", "details: every benchmark, price per provider"),
     ("> <", "minimum / maximum for the column, e.g. > 70 enter on Coding"),
-    ("d", "dropdown on the Dev, Price and Via headers (▾): one developer, price level or harness; / searches it"),
+    ("d", "dropdown on the Dev, Price and Via headers (▾); / searches it, space toggles several"),
     ("( ) ^d ^u", "half a page up / down"),
     ("gg G 3gg", "top / bottom / row 3"),
-    ("space", "mark the model"),
+    ("m", "mark the model"),
     ("M", "show marked models only; with F, marked and favorites"),
     ("C", "compare marked models: cheapest, best coder, most coding per $"),
     (
@@ -146,14 +141,16 @@ pub const HELP: &[(&str, &str)] = &[
         "best model per price level on a benchmark column: cheapest first, each row down costs more and scores higher",
     ),
     ("/", "filter by name; esc clears"),
-    ("c", "clear everything: filters, bounds, frontier, marks"),
+    ("c", "clear everything: filters, bounds, frontier, task ranking, marks"),
     ("a", "all models, including ones you have no access to; again: yours only"),
     ("f F", "favorite / show favorites only"),
     ("n", "note for the model"),
+    ("typing", "← → ^a ^e move, alt-b alt-f by word; ^w alt-d delete a word, ^u ^k to the start / end"),
     ("y Y", "copy the model id (provider/model) / the model name"),
     ("o", "open the model on openrouter.ai"),
     ("x", "launch a harness with the model: the Via filter's, else the first in Via; quit it to come back"),
     ("r", "refresh data now (auto every 24h)"),
+    ("t", "tasks: what each one measures, when to use it, the best model per price; enter ranks the table by it"),
     ("?", "this help"),
     ("qq", "quit; the first q asks. esc closes an overlay or the filter"),
 ];
@@ -164,18 +161,26 @@ pub enum View {
     Detail,
     Compare,
     Help,
+    Tasks,
 }
 
 #[derive(PartialEq, Debug)]
 pub enum Input {
     None,
-    Search,
-    Note(String),
+    /// Typing `App::query`; `cur` is the cursor's byte offset in it.
+    Search {
+        cur: usize,
+    },
+    Note {
+        text: String,
+        cur: usize,
+    },
     /// Typing a minimum (`>`) or maximum (`<`) for column `col`.
     Bound {
         col: usize,
         min: bool,
         text: String,
+        cur: usize,
     },
     /// The dropdown under the Dev or $ header: each entry and how many models it would show,
     /// "any" first. `sel` indexes the entries matching `query`, see `menu_rows`.
@@ -184,6 +189,7 @@ pub enum Input {
         items: Vec<(String, usize)>,
         sel: usize,
         query: String,
+        cur: usize,
         /// Typing into `query`, after `/`.
         typing: bool,
     },
@@ -195,6 +201,73 @@ pub enum Input {
 pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
     let q = query.to_lowercase();
     (0..items.len()).filter(|&i| i == 0 || items[i].0.to_lowercase().contains(&q)).collect()
+}
+
+/// Readline-style editing of a prompt with the cursor at byte `cur`: ← → ^b ^f move by a
+/// character, alt-b alt-f by a word, home end ^a ^e to the ends; backspace and delete drop a
+/// character, ^w and alt-d a word, ^u and ^k the line before / after the cursor. `accept` says
+/// which characters are typed. True when the key was one of these.
+pub fn edit(
+    text: &mut String,
+    cur: &mut usize,
+    code: KeyCode,
+    mods: KeyModifiers,
+    accept: impl Fn(char) -> bool,
+) -> bool {
+    let (ctrl, alt) = (mods.contains(KeyModifiers::CONTROL), mods.contains(KeyModifiers::ALT));
+    let prev = text[..*cur].chars().next_back().map_or(0, |c| *cur - c.len_utf8());
+    let next = text[*cur..].chars().next().map_or(*cur, |c| *cur + c.len_utf8());
+    // Start of the word before the cursor, and end of the word after it.
+    let word_start = {
+        let end = text[..*cur].trim_end().len();
+        text[..end].rfind(char::is_whitespace).map_or(0, |i| i + 1)
+    };
+    let word_end = {
+        let rest = &text[*cur..];
+        let start = rest.len() - rest.trim_start().len();
+        *cur + start + rest[start..].find(char::is_whitespace).unwrap_or(rest.len() - start)
+    };
+    let to = match code {
+        KeyCode::Left => prev,
+        KeyCode::Right => next,
+        KeyCode::Home => 0,
+        KeyCode::End => text.len(),
+        KeyCode::Char(c) if ctrl || alt => {
+            // Where the cursor goes, and what is cut.
+            let (to, cut) = match (c, ctrl) {
+                ('b', true) => (prev, None),
+                ('f', true) => (next, None),
+                ('a', true) => (0, None),
+                ('e', true) => (text.len(), None),
+                ('b', false) => (word_start, None),
+                ('f', false) => (word_end, None),
+                ('u', true) => (0, Some(0..*cur)),
+                ('k', true) => (*cur, Some(*cur..text.len())),
+                ('w', true) => (word_start, Some(word_start..*cur)),
+                ('d', false) => (*cur, Some(*cur..word_end)),
+                _ => return false,
+            };
+            if let Some(range) = cut {
+                text.replace_range(range, "");
+            }
+            to
+        }
+        KeyCode::Backspace => {
+            text.replace_range(prev..*cur, "");
+            prev
+        }
+        KeyCode::Delete => {
+            text.replace_range(*cur..next, "");
+            *cur
+        }
+        KeyCode::Char(c) if accept(c) => {
+            text.insert(*cur, c);
+            *cur + c.len_utf8()
+        }
+        _ => return false,
+    };
+    *cur = to;
+    true
 }
 
 /// What the shell must do after a key.
@@ -240,12 +313,16 @@ pub struct App {
     pub descending: bool,
     /// (column, min, max) filters set with `>` and `<`.
     pub bounds: Vec<(usize, f64, f64)>,
-    /// Developer picked from the Dev dropdown.
-    pub dev: Option<String>,
-    /// Harness (or "env") picked from the Via dropdown.
-    pub via: Option<String>,
+    /// Developers picked from the Dev dropdown; empty is any.
+    pub dev: Vec<String>,
+    /// Harnesses (or "env") picked from the Via dropdown; empty is any.
+    pub via: Vec<String>,
     /// Column whose price frontier is shown, set with `p`.
     pub frontier: Option<usize>,
+    /// Task the table is ranked for, picked in the tasks overlay; replaces the column sort.
+    pub task: Option<&'static Task>,
+    /// Cursor in the tasks overlay.
+    pub task_cur: usize,
     pub query: String,
     /// Indices into `data.models`, in display order.
     pub rows: Vec<usize>,
@@ -282,9 +359,11 @@ impl App {
             sort_col: PRICE,
             descending: true,
             bounds: vec![],
-            dev: None,
-            via: None,
+            dev: vec![],
+            via: vec![],
             frontier: None,
+            task: None,
+            task_cur: 0,
             query: String::new(),
             rows: vec![],
             table: TableState::default().with_selected(0),
@@ -344,8 +423,8 @@ impl App {
         visible(&self.data, &self.store, self.all, favs).filter(move |&(i, m)| {
             (q.is_empty() || m.key.contains(&q) || data::norm(&m.developer).contains(&q))
                 && (!marked || self.marked.contains(&m.key) || (self.favs && self.store.is_fav(&m.key)))
-                && (skip == 1 || self.dev.as_ref().is_none_or(|d| *d == m.developer))
-                && (skip == VIA || self.via.as_ref().is_none_or(|h| m.via.contains(h)))
+                && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
+                && (skip == VIA || self.via.is_empty() || self.via.iter().any(|h| m.via.contains(h)))
                 && self
                     .bounds
                     .iter()
@@ -362,7 +441,14 @@ impl App {
         if let Some(c) = self.frontier.and_then(numeric) {
             rows = frontier(&rows, |i| &ms[i], c.get);
         }
-        if numeric(self.sort_col).is_some() {
+        if let Some(t) = self.task {
+            // Best fit first; models without data for the task drop out.
+            rows.retain(|&i| fit::fit(&ms[i], t).is_some());
+            rows.sort_by(|&a, &b| {
+                let (x, y) = (fit::fit(&ms[a], t).unwrap_or(0.0), fit::fit(&ms[b], t).unwrap_or(0.0));
+                y.total_cmp(&x).then_with(|| ms[a].name.cmp(&ms[b].name))
+            });
+        } else if numeric(self.sort_col).is_some() {
             let desc = self.descending;
             // Blanks last either way, names breaking ties.
             rows.sort_by(|&a, &b| {
@@ -422,10 +508,18 @@ impl App {
         Some(Effect::Refresh)
     }
 
+    /// The task's price frontier among the models the filters let through: cheapest first,
+    /// the best model last.
+    pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
+        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m), t)
+    }
+
     fn move_by(&mut self, n: isize) {
         if self.view == View::Table {
             let i = self.selected().saturating_add_signed(n);
             self.select(i);
+        } else if self.view == View::Tasks {
+            self.task_cur = self.task_cur.saturating_add_signed(n).min(TASKS.len() - 1);
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
         }
@@ -434,6 +528,8 @@ impl App {
     fn go_to(&mut self, row: usize) {
         if self.view == View::Table {
             self.select(row);
+        } else if self.view == View::Tasks {
+            self.task_cur = row.min(TASKS.len() - 1);
         } else {
             self.scroll = row.min(u16::MAX as usize) as u16;
         }
@@ -456,7 +552,7 @@ impl App {
             let mut names: Vec<(String, usize)> = counts.into_iter().map(|(d, n)| (d.to_string(), n)).collect();
             names.sort_by_key(|&(_, n)| Reverse(n));
             let current = if self.col == 1 { &self.dev } else { &self.via };
-            let picked = current.as_ref().and_then(|d| names.iter().position(|(x, _)| x == d));
+            let picked = current.first().and_then(|d| names.iter().position(|(x, _)| x == d));
             (names, picked)
         } else {
             let items = LEVELS
@@ -470,8 +566,14 @@ impl App {
             (items, max.and_then(|v| LEVELS.iter().position(|&e| e == v)))
         };
         items.insert(0, ("any".into(), ms.len()));
-        self.input =
-            Input::Menu { col: self.col, items, sel: picked.map_or(0, |i| i + 1), query: String::new(), typing: false };
+        self.input = Input::Menu {
+            col: self.col,
+            items,
+            sel: picked.map_or(0, |i| i + 1),
+            query: String::new(),
+            cur: 0,
+            typing: false,
+        };
     }
 
     fn toggle_mark(&mut self) {
@@ -496,7 +598,7 @@ impl App {
             return Some(Effect::Quit);
         }
         if self.input != Input::None {
-            return self.input_key(k.code, ctrl);
+            return self.input_key(k.code, k.modifiers);
         }
         self.status.clear();
         let mut count = std::mem::take(&mut self.count);
@@ -549,7 +651,7 @@ impl App {
                 self.rebuild();
             }
             KeyCode::Char(c @ ('>' | '<')) if table && numeric(self.col).is_some() => {
-                self.input = Input::Bound { col: self.col, min: c == '>', text: String::new() };
+                self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
@@ -572,9 +674,10 @@ impl App {
             KeyCode::Char('c') if table => {
                 self.query.clear();
                 self.bounds.clear();
-                self.dev = None;
-                self.via = None;
+                self.dev.clear();
+                self.via.clear();
                 self.frontier = None;
+                self.task = None;
                 self.marked.clear();
                 self.only_marked = false;
                 self.favs = false;
@@ -590,6 +693,7 @@ impl App {
                 }
             }
             KeyCode::Char('?') => self.view = if self.view == View::Help { View::Table } else { View::Help },
+            KeyCode::Char('t') => self.view = if self.view == View::Tasks { View::Table } else { View::Tasks },
             KeyCode::Char('f') if row => {
                 let key = self.current()?.key.clone();
                 self.store.toggle_fav(&key);
@@ -600,7 +704,8 @@ impl App {
             }
             KeyCode::Char('n') if row => {
                 let m = self.current()?;
-                self.input = Input::Note(self.store.note(&m.key).unwrap_or("").to_string());
+                let text = self.store.note(&m.key).unwrap_or("").to_string();
+                self.input = Input::Note { cur: text.len(), text };
             }
             KeyCode::Char('o') if row => return Some(Effect::Open(self.current()?.url.clone())),
             KeyCode::Char('x') if row => {
@@ -613,21 +718,32 @@ impl App {
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
             KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
-            KeyCode::Char(' ') if row => self.toggle_mark(),
+            KeyCode::Char('m') if row => self.toggle_mark(),
             KeyCode::Char('C') => {
                 if self.marked.len() >= 2 {
                     self.view = View::Compare;
                     self.scroll = 0;
                 } else {
-                    self.status = "mark 2+ models with space, then press C".into();
+                    self.status = "mark 2+ models with m, then press C".into();
                 }
             }
             KeyCode::Char('r') => return self.refresh(),
+            KeyCode::Enter if self.view == View::Tasks => {
+                let t = &TASKS[self.task_cur];
+                self.task = Some(t);
+                self.view = View::Table;
+                self.rebuild();
+                self.select(0);
+                self.status = match self.current() {
+                    Some(m) => format!("best for {}: {}; enter for details, c clears", t.name, m.name),
+                    None => format!("no model has data for {}", t.name),
+                };
+            }
             KeyCode::Enter if table && self.current().is_some() => {
                 self.view = View::Detail;
                 self.scroll = 0;
             }
-            KeyCode::Char('/') if table => self.input = Input::Search,
+            KeyCode::Char('/') if table => self.input = Input::Search { cur: self.query.len() },
             KeyCode::Char('a') if table => {
                 self.all = !self.all;
                 self.rebuild();
@@ -642,9 +758,9 @@ impl App {
     }
 
     /// Keys while typing a search, a note or a bound.
-    fn input_key(&mut self, code: KeyCode, ctrl: bool) -> Option<Effect> {
+    fn input_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
         match &mut self.input {
-            Input::Search => {
+            Input::Search { cur } => {
                 match code {
                     KeyCode::Enter => self.input = Input::None,
                     KeyCode::Esc => {
@@ -655,32 +771,25 @@ impl App {
                         self.move_by(if code == KeyCode::Down { 1 } else { -1 });
                         return None;
                     }
-                    KeyCode::Backspace => drop(self.query.pop()),
-                    KeyCode::Char('u') if ctrl => self.query.clear(),
-                    KeyCode::Char(c) if !ctrl => self.query.push(c),
+                    _ if edit(&mut self.query, cur, code, mods, |_| true) => {}
                     _ => return None,
                 }
                 self.rebuild();
             }
-            Input::Note(buf) => match code {
+            Input::Note { text, cur } => match code {
                 KeyCode::Enter => {
-                    let text = std::mem::take(buf);
+                    let text = std::mem::take(text);
                     self.input = Input::None;
                     let key = self.current()?.key.clone();
                     self.store.set_note(&key, &text);
                     return Some(Effect::Save);
                 }
                 KeyCode::Esc => self.input = Input::None,
-                KeyCode::Backspace => drop(buf.pop()),
-                KeyCode::Char('u') if ctrl => buf.clear(),
-                KeyCode::Char(c) if !ctrl => buf.push(c),
-                _ => {}
+                _ => drop(edit(text, cur, code, mods, |_| true)),
             },
-            Input::Bound { col, min, text } => match code {
+            Input::Bound { col, min, text, cur } => match code {
                 KeyCode::Esc => self.input = Input::None,
-                KeyCode::Backspace => drop(text.pop()),
-                KeyCode::Char('u') if ctrl => text.clear(),
-                KeyCode::Char(c @ ('0'..='9' | '.')) => text.push(c),
+                _ if edit(text, cur, code, mods, |c| matches!(c, '0'..='9' | '.')) => {}
                 KeyCode::Enter => {
                     if let Ok(v) = text.parse::<f64>() {
                         let (col, lo, hi) =
@@ -694,7 +803,7 @@ impl App {
                 }
                 _ => {}
             },
-            Input::Menu { col, items, sel, query, typing } => {
+            Input::Menu { col, items, sel, query, cur, typing } => {
                 let rows = menu_rows(items, query);
                 let last = rows.len() - 1;
                 match code {
@@ -704,10 +813,12 @@ impl App {
                         let (col, i) = (*col, rows[*sel]);
                         let name = std::mem::take(&mut items[i].0);
                         self.input = Input::None;
-                        if col == 1 {
-                            self.dev = (i > 0).then_some(name);
-                        } else if col == VIA {
-                            self.via = (i > 0).then_some(name);
+                        if col == 1 || col == VIA {
+                            let list = if col == 1 { &mut self.dev } else { &mut self.via };
+                            list.clear();
+                            if i > 0 {
+                                list.push(name);
+                            }
                         } else {
                             // A price level replaces the Price maximum; "any" drops it.
                             self.bounds.retain(|&(c, lo, _)| c != PRICE || lo.is_finite());
@@ -717,18 +828,23 @@ impl App {
                         }
                         self.rebuild();
                     }
+                    // Space adds or drops the entry, keeping the dropdown open; on "any" it drops all.
+                    KeyCode::Char(' ') if *col == 1 || *col == VIA => {
+                        let i = rows[*sel];
+                        let list = if *col == 1 { &mut self.dev } else { &mut self.via };
+                        match list.iter().position(|d| *d == items[i].0) {
+                            _ if i == 0 => list.clear(),
+                            Some(k) => drop(list.remove(k)),
+                            None => list.push(items[i].0.clone()),
+                        }
+                        self.rebuild();
+                    }
                     // Esc while searching drops the search but keeps the entry under the bar.
                     KeyCode::Esc if *typing => {
-                        (*sel, *typing) = (rows[*sel], false);
+                        (*sel, *typing, *cur) = (rows[*sel], false, 0);
                         query.clear();
                     }
-                    KeyCode::Backspace | KeyCode::Char(_) if *typing => {
-                        match code {
-                            KeyCode::Backspace => drop(query.pop()),
-                            KeyCode::Char('u') if ctrl => query.clear(),
-                            KeyCode::Char(c) if !ctrl => query.push(c),
-                            _ => return None,
-                        }
+                    _ if *typing && edit(query, cur, code, mods, |_| true) => {
                         // The first match, so that enter picks it.
                         *sel = menu_rows(items, query).len().min(2) - 1;
                     }
@@ -834,7 +950,7 @@ mod tests {
         assert_eq!(menu(&a), [("any", 3), ("openai", 2), ("anthropic", 1)]);
         press(&mut a, "j");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.dev.as_deref(), keys(&a)), (Some("openai"), vec!["gpt55", "mini"]));
+        assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
         press(&mut a, "ld");
         assert_eq!(menu(&a), [("any", 2), ("free", 0), ("≤$0.5", 0), ("≤$2", 1), ("≤$5", 1), ("≤$15", 2)]);
@@ -850,7 +966,7 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.bounds.len(), keys(&a).len()), (0, 2));
         press(&mut a, "c");
-        assert_eq!((a.dev.as_deref(), keys(&a).len()), (None, 3));
+        assert_eq!((a.dev.len(), keys(&a).len()), (0, 3));
     }
 
     #[test]
@@ -862,9 +978,9 @@ mod tests {
         assert_eq!(menu(&a), [("any", 3), ("codex", 2), ("opencode", 2), ("claude", 1)]);
         press(&mut a, "/cla");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.via.as_deref(), keys(&a)), (Some("claude"), vec!["opus5"]));
+        assert_eq!((a.via.as_slice(), keys(&a)), (&["claude".to_string()][..], vec!["opus5"]));
         press(&mut a, "c");
-        assert_eq!((a.via.as_deref(), keys(&a).len()), (None, 3));
+        assert_eq!((a.via.len(), keys(&a).len()), (0, 3));
     }
 
     #[test]
@@ -876,12 +992,12 @@ mod tests {
         }
         let cmd = |h: &str, id: &str| Some(Effect::Launch(vec![h.into(), "--model".into(), id.into()]));
         assert_eq!(press(&mut a, "x"), cmd("codex", "gpt55"), "first row, gpt55, first in Via");
-        a.via = Some("opencode".into());
+        a.via = vec!["opencode".into()];
         assert_eq!(press(&mut a, "x"), cmd("opencode", "p/gpt55"), "opencode takes provider/model");
         press(&mut a, "j");
         assert_eq!(press(&mut a, "x"), cmd("claude", "opus5"), "a filter the model lacks falls back");
         press(&mut a, "a");
-        a.via = None;
+        a.via.clear();
         a.rebuild();
         let llama = a.rows.iter().position(|&r| a.data.models[r].key == "llama4").unwrap();
         a.select(llama);
@@ -896,7 +1012,7 @@ mod tests {
         press(&mut a, "ld/OPEN");
         assert!(matches!(&a.input, Input::Menu { query, sel: 1, typing: true, .. } if query == "OPEN"));
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.dev.as_deref(), Some("openai"), "enter picks the first match");
+        assert_eq!(a.dev, ["openai"], "enter picks the first match");
         press(&mut a, "d/anth");
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
@@ -907,7 +1023,89 @@ mod tests {
         press(&mut a, "/zzz");
         assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "no match leaves only any");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.dev, None);
+        assert!(a.dev.is_empty());
+    }
+
+    #[test]
+    fn ctrl_w_deletes_a_word_in_every_prompt() {
+        let mut a = app();
+        press(&mut a, "nfast enough  ");
+        ctrl(&mut a, 'w');
+        assert_eq!(a.input, Input::Note { text: "fast ".into(), cur: 5 }, "trailing spaces go with the word");
+        ctrl(&mut a, 'w');
+        ctrl(&mut a, 'w');
+        assert_eq!(a.input, Input::Note { text: String::new(), cur: 0 });
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "/gpt 5");
+        ctrl(&mut a, 'w');
+        assert_eq!((a.query.as_str(), keys(&a).len()), ("gpt ", 1));
+        ctrl(&mut a, 'u');
+        assert_eq!((a.query.as_str(), keys(&a).len()), ("", 3));
+        code(&mut a, KeyCode::Esc);
+        a.col = 1;
+        press(&mut a, "d/anth");
+        ctrl(&mut a, 'w');
+        assert!(matches!(&a.input, Input::Menu { query, sel: 1, .. } if query.is_empty()));
+    }
+
+    #[test]
+    fn prompts_edit_around_a_cursor() {
+        let mut a = App::new(Data::default(), Store::default());
+        let note = |a: &App| match &a.input {
+            Input::Note { text, cur } => (text.clone(), *cur),
+            _ => unreachable!(),
+        };
+        a.input = Input::Note { text: "über fast".into(), cur: 9 };
+        let alt = |a: &mut App, c: char| a.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        alt(&mut a, 'b');
+        assert_eq!(note(&a), ("über fast".into(), 6), "alt-b to the word start");
+        code(&mut a, KeyCode::Left);
+        code(&mut a, KeyCode::Backspace);
+        assert_eq!(note(&a), ("übe fast".into(), 4), "backspace drops the multibyte char before");
+        code(&mut a, KeyCode::Delete);
+        press(&mut a, "r");
+        assert_eq!(note(&a), ("überfast".into(), 5));
+        ctrl(&mut a, 'a');
+        alt(&mut a, 'd');
+        assert_eq!(note(&a), (String::new(), 0), "alt-d drops the word after");
+        press(&mut a, "one two");
+        ctrl(&mut a, 'b');
+        ctrl(&mut a, 'b');
+        ctrl(&mut a, 'u');
+        assert_eq!(note(&a), ("wo".into(), 0), "ctrl-u drops what is before the cursor");
+        ctrl(&mut a, 'f');
+        ctrl(&mut a, 'k');
+        code(&mut a, KeyCode::Home);
+        code(&mut a, KeyCode::End);
+        code(&mut a, KeyCode::Right);
+        assert_eq!(note(&a), ("w".into(), 1), "ctrl-k drops the rest; end stays put");
+        alt(&mut a, 'f');
+        assert_eq!(note(&a), ("w".into(), 1));
+        // A bound only takes digits, wherever the cursor is.
+        a.input = Input::Bound { col: PRICE, min: true, text: "15".into(), cur: 1 };
+        press(&mut a, "x.");
+        assert!(matches!(&a.input, Input::Bound { text, cur: 2, .. } if text == "1.5"));
+    }
+
+    #[test]
+    fn space_toggles_several_dropdown_entries() {
+        let mut a = app();
+        a.col = 1;
+        press(&mut a, "dj ");
+        assert!(matches!(a.input, Input::Menu { .. }), "the dropdown stays open");
+        assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
+        press(&mut a, "j ");
+        assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "both developers show");
+        press(&mut a, "k ");
+        assert_eq!((a.dev.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
+        press(&mut a, "/open ");
+        assert_eq!(a.dev, ["anthropic", "openai"], "space toggles while searching too");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "k ");
+        assert!(a.dev.is_empty(), "space on any drops them all");
+        press(&mut a, "jj");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.dev.as_slice(), &a.input), (&["anthropic".to_string()][..], &Input::None), "enter picks one");
     }
 
     #[test]
@@ -989,7 +1187,7 @@ mod tests {
         assert_eq!(a.current().unwrap().key, "mini");
         ctrl(&mut a, 'u');
         assert_eq!(a.current().unwrap().key, "gpt55");
-        press(&mut a, "16l");
+        press(&mut a, "15l");
         assert_eq!(a.col, PRICE, "counted column moves wrap around");
     }
 
@@ -1037,7 +1235,7 @@ mod tests {
     fn search_filters_and_esc_clears() {
         let mut a = app();
         press(&mut a, "/opus");
-        assert_eq!(a.input, Input::Search);
+        assert_eq!(a.input, Input::Search { cur: 4 });
         assert_eq!(a.rows.len(), 1);
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.input, Input::None);
@@ -1049,11 +1247,45 @@ mod tests {
     }
 
     #[test]
+    fn picking_a_task_ranks_the_table() {
+        let mut a = app();
+        press(&mut a, "tjj");
+        assert_eq!(a.task_cur, 2);
+        press(&mut a, "G");
+        assert_eq!(a.task_cur, TASKS.len() - 1);
+        press(&mut a, "gg");
+        assert_eq!(a.task_cur, 0, "the cursor stays inside the list");
+        let front: Vec<&str> = a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.as_str()).collect();
+        assert_eq!(front, ["mini", "gpt55"], "cheapest first, the best last; llama4 has no access");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.view, View::Table);
+        assert_eq!(a.task.map(|t| t.name), Some("coding"));
+        assert_eq!(keys(&a), ["gpt55", "mini"], "best coder first, models without the score dropped");
+        assert_eq!(a.selected(), 0);
+        assert!(a.status.starts_with("best for coding: gpt55"), "{}", a.status);
+        press(&mut a, "c");
+        assert!(a.task.is_none());
+        assert_eq!(a.rows.len(), 3, "c restores the column sort");
+    }
+
+    #[test]
+    fn t_toggles_the_tasks_overlay() {
+        let mut a = app();
+        press(&mut a, "t");
+        assert_eq!(a.view, View::Tasks);
+        press(&mut a, "t");
+        assert_eq!(a.view, View::Table, "t again closes it");
+        press(&mut a, "t");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Table, "esc closes it too");
+    }
+
+    #[test]
     fn mark_only_marked_and_compare() {
         let mut a = app();
         assert_eq!(press(&mut a, "C"), None);
         assert_eq!(a.view, View::Table);
-        press(&mut a, "  ");
+        press(&mut a, "mm");
         assert_eq!(a.marked, vec!["gpt55", "opus5"]);
         press(&mut a, "M");
         assert_eq!(keys(&a), ["gpt55", "opus5"]);
@@ -1071,7 +1303,7 @@ mod tests {
         press(&mut a, "Mc");
         assert!(a.marked.is_empty() && !a.only_marked, "c clears the marks too");
         assert_eq!(a.rows.len(), 3);
-        press(&mut a, "gg  Gf");
+        press(&mut a, "ggmmGf");
         press(&mut a, "MF");
         assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "m and F together: marked or favorite");
         press(&mut a, "F");

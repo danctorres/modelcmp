@@ -12,7 +12,7 @@ use crate::app::{
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
-use crate::view::{compare_rows, detail_lines, level, money, truncate, verdict};
+use crate::view::{compare_rows, detail_lines, level, money, priced, truncate, verdict};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::layout::Rect;
@@ -147,7 +147,7 @@ fn hints(app: &App) -> Vec<&'static str> {
     match app.view {
         View::Table => {
             let mut v = vec![
-                "space mark",
+                "m mark",
                 "f fav",
                 "y copy id",
                 "enter details",
@@ -170,19 +170,21 @@ fn hints(app: &App) -> Vec<&'static str> {
             }
             if !app.query.is_empty()
                 || !app.bounds.is_empty()
-                || app.dev.is_some()
-                || app.via.is_some()
+                || !app.dev.is_empty()
+                || !app.via.is_empty()
                 || app.frontier.is_some()
+                || app.task.is_some()
                 || app.only_marked
                 || app.favs
             {
                 v.push("c clear");
             }
-            v.extend(["/ filter", "? help"]);
+            v.extend(["/ filter", "t tasks", "? help"]);
             v
         }
         View::Detail => vec!["f fav", "n note", "y copy id", "o open", "x launch", "j k scroll", "esc back"],
         View::Help | View::Compare => vec!["j k scroll", "esc back"],
+        View::Tasks => vec!["j k move", "enter best models first", "esc back"],
     }
 }
 
@@ -239,6 +241,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     let lines = match app.view {
         View::Table => None,
         View::Help => Some(("keys".to_string(), help())),
+        View::Tasks => Some(("tasks".to_string(), tasks(app))),
         View::Detail => app.current().map(|m| {
             let star = if app.store.is_fav(&m.key) { "★ " } else { "" };
             (format!("{star}{}", m.name), detail(m, &app.store))
@@ -246,6 +249,17 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Compare => Some(("compare".into(), compare(&app.marked_models()))),
     };
     if let Some((title, lines)) = lines {
+        if app.view == View::Tasks {
+            // Blocks are 4 or 5 lines; the cursor's block starts at the first line naming its task.
+            let start = lines
+                .iter()
+                .position(|l| l.spans.first().is_some_and(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
+            if let Some(start) = start {
+                let shown = area.height.saturating_sub(2) as usize;
+                let lo = (start + 5).saturating_sub(shown).min(start);
+                app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
+            }
+        }
         overlay(buf, area, &title, lines, &mut app.scroll);
     }
     if app.input == Input::Quit {
@@ -420,17 +434,29 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
             (VIA, Some((x, _))) => area.x + x,
             _ => cols.iter().find(|c| c.0 + 2 == *col).map_or(dev_x, |c| area.x + c.1),
         };
-        dropdown(buf, area, x, *col, items, &menu_rows(items, query), *sel);
+        let picked = if *col == 1 { &app.dev } else { &app.via };
+        dropdown(buf, area, x, *col, items, &menu_rows(items, query), *sel, picked);
     }
 }
 
 /// The list under a header opened with `d`, each entry with how many models it would show,
 /// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
-/// listed; the width fits every entry so the box keeps still while typing.
-fn dropdown(buf: &mut Buffer, area: Rect, x: u16, col: usize, items: &[(String, usize)], rows: &[usize], sel: usize) {
+/// listed; the width fits every entry so the box keeps still while typing. `picked` entries
+/// carry a check mark.
+#[allow(clippy::too_many_arguments)]
+fn dropdown(
+    buf: &mut Buffer,
+    area: Rect,
+    x: u16,
+    col: usize,
+    items: &[(String, usize)],
+    rows: &[usize],
+    sel: usize,
+    picked: &[String],
+) {
     let label_w = items.iter().map(|(s, _)| s.chars().count()).max().unwrap_or(0);
     let n_w = items.iter().map(|(_, n)| n.to_string().len()).max().unwrap_or(0);
-    let w = ((label_w + n_w + 6) as u16).min(area.width);
+    let w = ((label_w + n_w + 8) as u16).min(area.width);
     let h = (rows.len() as u16 + 2).min(area.height.saturating_sub(1));
     if h < 3 {
         return;
@@ -454,7 +480,9 @@ fn dropdown(buf: &mut Buffer, area: Rect, x: u16, col: usize, items: &[(String, 
         };
         let tint = |c: Color| if k == sel { base } else { fg(c) };
         buf.set_style(Rect { y, height: 1, ..inner }, base);
-        let x = buf.set_stringn(inner.x + 1, y, format!("{label:<label_w$}  "), label_w + 2, tint(color)).0;
+        let mark = if picked.contains(label) { "✓ " } else { "  " };
+        let x = buf.set_stringn(inner.x + 1, y, mark, 2, tint(color)).0;
+        let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, tint(color)).0;
         buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, tint(MUTED));
     }
 }
@@ -468,13 +496,14 @@ fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) ->
 fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let width = area.width as usize;
     let (mode, color) = match (&app.input, &app.view) {
-        (Input::Search, _) => ("SEARCH", Color::Blue),
-        (Input::Note(_), _) => ("NOTE", Color::Blue),
+        (Input::Search { .. }, _) => ("SEARCH", Color::Blue),
+        (Input::Note { .. }, _) => ("NOTE", Color::Blue),
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
         (Input::None, View::Help) => ("HELP", Color::Cyan),
+        (Input::None, View::Tasks) => ("TASKS", Color::Cyan),
         (Input::None, View::Detail) => ("DETAIL", Color::Cyan),
         (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
     };
@@ -483,30 +512,35 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         // The question is in a box in the middle of the screen.
         return None;
     }
+    // The prompt's label, the text being typed and the cursor's byte offset in it.
     let prompt = match &app.input {
-        Input::Search => Some(format!("/{}", app.query)),
-        Input::Note(text) => Some(format!("note: {text}")),
-        Input::Bound { col, min, text } => Some(format!("{} {} {text}", col_name(*col), if *min { "≥" } else { "≤" })),
-        Input::Menu { col, query, typing, .. } => Some(match (*typing, query.is_empty()) {
-            (false, true) => format!("{} ▾", col_name(*col)),
-            _ => format!("{} ▾ /{query}", col_name(*col)),
+        Input::Search { cur } => Some(("/".to_string(), &app.query, *cur)),
+        Input::Note { text, cur } => Some(("note: ".to_string(), text, *cur)),
+        Input::Bound { col, min, text, cur } => {
+            Some((format!("{} {} ", col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
+        }
+        Input::Menu { col, query, cur, typing, .. } => Some(match (*typing, query.is_empty()) {
+            (false, true) => (format!("{} ▾", col_name(*col)), query, *cur),
+            _ => (format!("{} ▾ /", col_name(*col)), query, *cur),
         }),
         Input::Quit | Input::None => None,
     };
-    if let Some(text) = prompt {
+    if let Some((label, typed, cur)) = prompt {
+        let text = format!("{label}{typed}");
         let (menu, typing) = match app.input {
             Input::Menu { typing, .. } => (true, typing),
             _ => (false, true),
         };
         let hint = match (menu, typing) {
-            (true, false) => "j k move  / search  enter pick  esc cancel",
-            (true, true) => "↓ ↑ move  enter pick  esc clear",
+            (true, false) => "j k move  / search  enter pick  space toggle  esc close",
+            (true, true) => "↓ ↑ move  enter pick  space toggle  esc clear",
             _ => "enter apply  esc cancel",
         };
         let hx = area.right().saturating_sub(hint.len() as u16 + 1);
-        let (nx, _) = buf.set_stringn(x, area.y, &text, hx.saturating_sub(x) as usize, Style::new());
+        buf.set_stringn(x, area.y, &text, hx.saturating_sub(x) as usize, Style::new());
         buf.set_stringn(hx, area.y, hint, hint.len(), fg(MUTED));
-        return typing.then_some(nx.min(area.right().saturating_sub(1)));
+        let cx = x + (label.chars().count() + typed[..cur].chars().count()) as u16;
+        return typing.then_some(cx.min(area.right().saturating_sub(1)));
     }
     let any = app.data.models.iter().any(|m| m.available);
     let scope = match (app.all, any) {
@@ -527,11 +561,14 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     if let Some(col) = app.frontier {
         parts.push((format!("best {} per price", col_name(col)), Color::Yellow));
     }
-    if let Some(dev) = &app.dev {
-        parts.push((format!("Dev={dev}"), Color::Yellow));
+    if let Some(t) = app.task {
+        parts.push((format!("best for {}", t.name), Color::Yellow));
     }
-    if let Some(via) = &app.via {
-        parts.push((format!("Via={via}"), Color::Yellow));
+    if !app.dev.is_empty() {
+        parts.push((format!("Dev={}", app.dev.join(",")), Color::Yellow));
+    }
+    if !app.via.is_empty() {
+        parts.push((format!("Via={}", app.via.join(",")), Color::Yellow));
     }
     for &(col, lo, hi) in &app.bounds {
         let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
@@ -622,14 +659,52 @@ fn help() -> Vec<Line<'static>> {
         v.push(Line::from(vec![Span::styled(format!("{:<11}", col_name(c)), fg(KEY)), Span::raw(col_about(c))]));
     }
     v.push(Line::default());
-    v.push(heading("Tasks"));
-    for t in TASKS {
-        v.push(Line::from(vec![Span::styled(format!("{:<11}", t.name), fg(KEY)), Span::raw(t.about)]));
-    }
-    v.push(Line::default());
     v.push(Line::from(format!("Favorites and notes: {}", crate::store::path().display())).style(fg(MUTED)));
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
     v
+}
+
+/// One block per task: what it is, when to pick a model high on it, its benchmarks and the
+/// best model for it right now. The cursor's block is highlighted; enter ranks the table by it.
+fn tasks(app: &App) -> Vec<Line<'static>> {
+    let mut v = Vec::new();
+    for (i, t) in TASKS.iter().enumerate() {
+        let name = if i == app.task_cur {
+            fg(KEY).add_modifier(BOLD | Modifier::REVERSED)
+        } else {
+            fg(KEY).add_modifier(BOLD)
+        };
+        v.push(Line::from(vec![Span::styled(format!(" {} ", t.name), name), Span::raw(format!(" {}", t.about))]));
+        v.push(Line::from(vec![Span::styled("  use for:     ", fg(MUTED)), Span::raw(t.when)]));
+        v.push(Line::from(vec![
+            Span::styled("  best/price:  ", fg(MUTED)),
+            Span::styled(frontier_line(app, t), fg(GOOD)),
+        ]));
+        if !t.benches.is_empty() {
+            v.push(Line::from(vec![Span::styled("  benchmarks:  ", fg(MUTED)), Span::raw(t.benches.join(", "))]));
+        }
+        v.push(Line::default());
+    }
+    v.push(Line::from("CLI: modelcmp tasks · modelcmp recommend <task>").style(fg(MUTED)));
+    v
+}
+
+/// `name $price (score)` along the task's price frontier, cheapest first and the best last;
+/// a long frontier keeps its cheapest entries and the best.
+fn frontier_line(app: &App, t: &fit::Task) -> String {
+    let front = app.task_frontier(t);
+    if front.is_empty() {
+        return "no data".into();
+    }
+    let entry = |(m, s): &(&Model, f64)| priced(m, *s);
+    let mut parts: Vec<String> = front.iter().take(4).map(entry).collect();
+    if front.len() > 5 {
+        parts.push("…".into());
+    }
+    if front.len() > 4 {
+        parts.push(entry(&front[front.len() - 1]));
+    }
+    parts.join(" · ")
 }
 
 /// Every detail line, with `key:` labels and section headings coloured.
@@ -736,7 +811,7 @@ mod tests {
         let mut a = app();
         let (buf, lines) = render(&mut a, 200, 5);
         let header = "Model Dev ▾ ▼Price ▾ $in $out Ctx ECI Coding Agentic Reason Math \
-                      Value Code/$ Via ▾ Best for Notes";
+                      Code/$ Via ▾ Best for Notes";
         assert_eq!(words(&lines[0]), words(header));
         let via = lines[2].find("opencode").expect(&lines[2]);
         assert_eq!(
@@ -747,7 +822,7 @@ mod tests {
         assert_eq!(&words(&lines[1])[..7], ["opus", "anthropic", "5.0", "5.0", "5.0", "200k", "150"]);
         assert_eq!(&words(&lines[2])[..7], ["flash", "google", "0.10", "0.10", "0.10", "200k", "120"]);
         assert!(lines[4].starts_with(" NORMAL  2 available"), "{}", lines[4]);
-        assert!(lines[4].ends_with("d dropdown  / filter  ? help"), "{}", lines[4]);
+        assert!(lines[4].ends_with("d dropdown  / filter  t tasks  ? help"), "{}", lines[4]);
         assert!(buf[(0, 1)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
         assert_eq!(buf[(2, 2)].fg, Color::Reset, "names are plain text");
         assert_eq!(buf[(20, 2)].fg, dev_color("google"));
@@ -767,11 +842,11 @@ mod tests {
         let mut a = app();
         a.col = 1;
         let (_, lines) = render(&mut a, 170, 8);
-        assert!(lines[7].ends_with("d dropdown  / filter  ? help"), "{}", lines[7]);
+        assert!(lines[7].ends_with("d dropdown  / filter  t tasks  ? help"), "{}", lines[7]);
         a.key(KeyCode::Char('d').into());
         let (buf, lines) = render(&mut a, 170, 8);
         let dev = lines[0].find("Dev").unwrap() - 2;
-        assert!(lines[1][dev..].starts_with("╭──────────────╮"), "{}", lines[1]);
+        assert!(lines[1][dev..].starts_with("╭────────────────╮"), "{}", lines[1]);
         assert_eq!(&words(&lines[2])[1..4], ["│", "any", "2"]);
         assert_eq!(&words(&lines[3])[..3], ["│", "anthropic", "1"]);
         assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
@@ -791,7 +866,7 @@ mod tests {
         let (_, lines) = render(&mut a, 44, 4);
         assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "▼Price", "▾"], "the cursor starts on Price");
         assert!(lines[3].ends_with("? help"), "{}", lines[3]);
-        assert!(!lines[3].contains("space mark"), "hints that do not fit are dropped whole");
+        assert!(!lines[3].contains("m mark"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 44, 4);
@@ -799,14 +874,14 @@ mod tests {
         a.col = VIA;
         let (_, lines) = render(&mut a, 44, 4);
         assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "‹", "Via", "▾"]);
-        for _ in 0..3 {
+        for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
-        let (_, lines) = render(&mut a, 44, 4);
-        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Value"], "scrolls back only as far as needed");
+        let (_, lines) = render(&mut a, 46, 4);
+        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Code/$"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
-        let (_, lines) = render(&mut a, 44, 4);
-        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Value"], "{}", lines[0]);
+        let (_, lines) = render(&mut a, 46, 4);
+        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Code/$"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 44, 4);
         assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "▼Price", "▾"]);
@@ -837,13 +912,15 @@ mod tests {
     #[test]
     fn prompts_show_the_text_and_the_cursor() {
         let mut a = app();
-        a.input = Input::Search;
+        a.input = Input::Search { cur: 3 };
         a.query = "gem".into();
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 4));
         let line: String = (0..14).map(|x| buf[(x, 0)].symbol()).collect();
         assert_eq!(line, " SEARCH  /gem ");
-        a.input = Input::Bound { col: 3, min: true, text: "4".into() };
+        a.input = Input::Search { cur: 1 };
+        assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 2), "the cursor sits inside the text");
+        a.input = Input::Bound { col: 3, min: true, text: "4".into(), cur: 1 };
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         status(&mut buf, Rect::new(0, 0, 40, 1), &a);
         assert_eq!((0..15).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  $in ≥ 4");
@@ -853,10 +930,11 @@ mod tests {
     fn every_view_draws_at_any_size() {
         for (w, h) in [(120, 30), (60, 10), (20, 5), (4, 4), (3, 3)] {
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-            for view in [View::Table, View::Help, View::Detail, View::Compare] {
+            for view in [View::Table, View::Help, View::Detail, View::Compare, View::Tasks] {
                 let mut a = app();
                 a.marked = vec!["opus".into(), "flash".into()];
                 a.view = view;
+                a.task_cur = 3;
                 term.draw(|f| draw(&mut a, f)).unwrap();
             }
         }

@@ -4,7 +4,8 @@ use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
 use crate::view::{
-    compare_rows, ctx, detail_lines, frontier, money, score, task_score, truncate, verdict, via, visible,
+    compare_rows, ctx, detail_lines, frontier, money, priced, score, task_frontier, task_score, truncate, verdict, via,
+    visible,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -135,7 +136,7 @@ fn table(models: &[&Model], store: &Store, show_avail: bool) {
             ctx(m.context),
             score(m.eci),
             score(task_score(m, "coding")),
-            task_score(m, "coding").zip(m.blended()).map_or("-".into(), |(c, p)| format!("{:.1}", c / p)),
+            score(m.fit.get("value").copied()),
             score(task_score(m, "reasoning")),
             score(task_score(m, "math")),
             truncate(&via(&m.via), 22),
@@ -158,8 +159,8 @@ pub struct ListOpts {
     pub task: Option<&'static Task>,
     pub all: bool,
     pub favorites: bool,
-    pub dev: Option<String>,
-    pub via: Option<String>,
+    pub dev: Vec<String>,
+    pub via: Vec<String>,
     pub limit: usize,
     pub max_price: Option<f64>,
     pub frontier: bool,
@@ -168,11 +169,11 @@ pub struct ListOpts {
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     let mut models: Vec<&Model> = visible(data, store, o.all, o.favorites).map(|(_, m)| m).collect();
-    if let Some(d) = &o.dev {
-        models.retain(|m| m.developer.eq_ignore_ascii_case(d));
+    if !o.dev.is_empty() {
+        models.retain(|m| o.dev.iter().any(|d| m.developer.eq_ignore_ascii_case(d)));
     }
-    if let Some(h) = &o.via {
-        models.retain(|m| m.via.iter().any(|v| v.eq_ignore_ascii_case(h)));
+    if !o.via.is_empty() {
+        models.retain(|m| m.via.iter().any(|v| o.via.iter().any(|h| v.eq_ignore_ascii_case(h))));
     }
     if let Some(p) = o.max_price {
         models.retain(|m| m.blended().is_some_and(|b| b <= p));
@@ -190,6 +191,11 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         models.sort_by(|a, b| a.cost().partial_cmp(&b.cost()).unwrap_or(std::cmp::Ordering::Equal));
         scores = None;
     }
+    // Over every ranked model, before the limit cuts the list.
+    let front: Vec<String> = match (o.task, o.frontier) {
+        (Some(t), false) => task_frontier(models.iter().copied(), t).iter().map(|(m, s)| priced(m, *s)).collect(),
+        _ => vec![],
+    };
     if o.limit > 0 {
         models.truncate(o.limit);
     }
@@ -204,6 +210,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     if let (Some(t), Some(s)) = (o.task, scores) {
         let top: Vec<String> = models.iter().zip(s).take(3).map(|(m, s)| format!("{} ({s:.0})", m.name)).collect();
         println!("\nbest for {}: {}", t.name, top.join(", "));
+        println!("best per price: {}", front.join(", "));
     }
     Ok(())
 }
@@ -269,4 +276,16 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>) -> Resu
         }
     }
     Ok(())
+}
+
+/// What each task measures, when to pick a model high on it, and its benchmarks.
+pub fn tasks() {
+    for t in TASKS {
+        println!("{}  {}  (modelcmp recommend {})", t.name, t.about, t.name);
+        println!("  use for:     {}", t.when);
+        if !t.benches.is_empty() {
+            println!("  benchmarks:  {}", t.benches.join(", "));
+        }
+        println!();
+    }
 }

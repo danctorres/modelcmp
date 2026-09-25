@@ -67,6 +67,25 @@ pub fn frontier<'m, T: Copy>(
         .collect()
 }
 
+/// A task's price frontier, cheapest first: each entry costs more and scores higher, the last
+/// being the best model for the task. Models without a price or a score are left out.
+pub fn task_frontier<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task) -> Vec<(&'a Model, f64)> {
+    let ranked = fit::rank(models, t);
+    let mut v = frontier(&ranked, |(m, _)| m, |m| fit::fit(m, t));
+    v.sort_by(|a, b| a.0.cost().partial_cmp(&b.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
+    v
+}
+
+/// `$1.5`, or `free`.
+pub fn usd(x: f64) -> String {
+    if x == 0.0 { "free".into() } else { format!("${}", money(x)) }
+}
+
+/// `name $price (score)` for a frontier entry.
+pub fn priced(m: &Model, s: f64) -> String {
+    format!("{} {} ({s:.0})", m.name, usd(m.cost().unwrap_or(0.0)))
+}
+
 pub fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.into() } else { s.chars().take(n - 1).chain(['…']).collect() }
 }
@@ -198,7 +217,6 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
 /// that print the same tie, and the winner cell names every tied model. With fewer than two
 /// models to compare, the winner is `-`.
 pub fn verdict(models: &[&Model]) -> Vec<[String; 3]> {
-    let usd = |x: f64| if x == 0.0 { "free".into() } else { format!("${}", money(x)) };
     let coding = |m: &Model| task_score(m, "coding");
     vec![
         best(models, "cheaper", Model::cost, false, usd),

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 /// A benchmark scored by fewer models than this gives no percentile: the pool is too small.
 pub const MIN_POOL: usize = 10;
-/// Models below this overall percentile never count as "value": cheap alone is not enough.
+/// Models below this coding percentile are never recommended for "value": cheap alone is not enough.
 pub const VALUE_FLOOR: f64 = 50.0;
 
 pub enum Need {
@@ -17,20 +17,25 @@ pub enum Need {
     Tools,
     Vision,
     LongContext,
+    /// At or above `VALUE_FLOOR` on coding.
+    Coder,
 }
 
 pub struct Task {
     pub name: &'static str,
     pub about: &'static str,
+    /// When a model high on this task is the right pick.
+    pub when: &'static str,
     pub benches: &'static [&'static str],
     pub need: Need,
 }
 
-/// "overall" = Epoch Capabilities Index. "value" = capability per dollar (computed after prices are known).
+/// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
 pub const TASKS: &[Task] = &[
     Task {
         name: "coding",
         about: "writing and fixing code",
+        when: "fixing a bug, adding a feature to an existing repo, refactors: code that must compile and pass tests",
         need: Need::None,
         benches: &[
             "DeepSWE",
@@ -46,6 +51,7 @@ pub const TASKS: &[Task] = &[
     Task {
         name: "agentic",
         about: "multi-step tool use, long autonomous tasks",
+        when: "unattended multi-step runs: migrate, run tests, fix what breaks; recovering from errors without drifting",
         need: Need::Tools,
         benches: &[
             "APEX-Agents",
@@ -61,6 +67,7 @@ pub const TASKS: &[Task] = &[
     Task {
         name: "reasoning",
         about: "hard science questions, puzzles, abstraction",
+        when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
         need: Need::None,
         benches: &[
             "GPQA diamond",
@@ -75,6 +82,7 @@ pub const TASKS: &[Task] = &[
     Task {
         name: "math",
         about: "competition and research math",
+        when: "numerical code, cryptography, statistics, proving an algorithm's complexity; rarely needed otherwise",
         need: Need::None,
         benches: &[
             "FrontierMath-Tiers-1-3-v2-Private",
@@ -88,23 +96,38 @@ pub const TASKS: &[Task] = &[
     Task {
         name: "knowledge",
         about: "factual recall, low hallucination",
+        when: "questions about an API, a library's flags or a protocol, where a low scorer invents details",
         need: Need::None,
         benches: &["SimpleQA Verified", "MMLU", "TriviaQA"],
     },
-    Task { name: "vision", about: "image input (ranked by overall capability)", need: Need::Vision, benches: &[] },
+    Task {
+        name: "vision",
+        about: "image input (ranked by overall capability)",
+        when: "screenshots, UI mockups, diagrams as input",
+        need: Need::Vision,
+        benches: &[],
+    },
     Task {
         name: "long-context",
         about: "≥200k context (ranked by overall capability)",
+        when: "a whole repo, a long log or many files in one prompt; the window fits, not proof it is used well",
         need: Need::LongContext,
         benches: &[],
     },
     Task {
         name: "value",
-        about: "capability per dollar, among models ≥50th percentile overall",
+        about: "coding per dollar, among models ≥50th percentile on coding",
+        when: "routine coding that needs no top reasoning: the good enough, cheaper pick",
+        need: Need::Coder,
+        benches: &[],
+    },
+    Task {
+        name: "overall",
+        about: "Epoch Capabilities Index",
+        when: "a tiebreaker, or work that fits no task above",
         need: Need::None,
         benches: &[],
     },
-    Task { name: "overall", about: "Epoch Capabilities Index", need: Need::None, benches: &[] },
 ];
 
 pub fn task(name: &str) -> Option<&'static Task> {
@@ -156,16 +179,10 @@ pub fn percentiles<'a>(
     out
 }
 
-/// "value": overall percentile per blended dollar, itself ranked as a percentile,
-/// only for models at or above `VALUE_FLOOR` so that cheap weak models do not win.
+/// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
+/// model with both. The task only counts models at or above `VALUE_FLOOR` (see `Need::Coder`).
 pub fn add_value(models: &mut [Model]) {
-    let raw: Vec<Option<f64>> = models
-        .iter()
-        .map(|m| {
-            let overall = *m.fit.get("overall")?;
-            (overall >= VALUE_FLOOR).then_some(overall / m.blended()?)
-        })
-        .collect();
+    let raw: Vec<Option<f64>> = models.iter().map(|m| Some(m.fit.get("coding")? / m.blended()?)).collect();
     let all: Vec<f64> = raw.iter().flatten().copied().collect();
     for (m, v) in models.iter_mut().zip(raw) {
         if let Some(v) = v {
@@ -181,6 +198,7 @@ pub fn fit(m: &Model, t: &Task) -> Option<f64> {
         Need::Tools => m.tool_call,
         Need::Vision => m.vision,
         Need::LongContext => m.context >= 200_000,
+        Need::Coder => m.fit.get("coding").is_some_and(|&c| c >= VALUE_FLOOR),
     };
     if ok { m.fit.get(t.name).copied() } else { None }
 }
@@ -250,14 +268,15 @@ mod tests {
 
     #[test]
     fn value_needs_capability() {
-        let mk = |overall: f64, price: f64| Model {
-            fit: scores(&[("overall", overall)]),
+        let mk = |coding: f64, price: f64| Model {
+            fit: scores(&[("coding", coding)]),
             offers: vec![Offer { input: price, output: price, ..Default::default() }],
             ..Default::default()
         };
         let mut models = [mk(25.0, 0.01), mk(70.0, 1.0), mk(90.0, 10.0)];
         add_value(&mut models);
-        assert!(!models[0].fit.contains_key("value"), "cheap but weak");
+        assert!(models[0].fit.contains_key("value"), "the ratio is shown for every model");
+        assert!(fit(&models[0], task("value").unwrap()).is_none(), "cheap but weak");
         assert!(models[1].fit["value"] > models[2].fit["value"]);
     }
 }

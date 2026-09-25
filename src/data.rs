@@ -184,6 +184,8 @@ fn cache_path() -> PathBuf {
 pub fn load_cache() -> Option<Data> {
     let bytes = std::fs::read(cache_path()).ok()?;
     let mut d: Data = serde_json::from_slice(&bytes).ok()?;
+    // Derived from cached fields, so a change to the formula applies without a re-download.
+    crate::fit::add_value(&mut d.models);
     d.apply_available();
     Some(d)
 }

@@ -27,7 +27,7 @@ modelcmp
 ```
 
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output),
-$in, $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason, Math, Value,
+$in, $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason, Math,
 Code/$, Via, Best for, Note. Task columns are mean percentiles (0-100) across the task's
 benchmarks, ranked against every model Epoch has evaluated. Move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
@@ -40,22 +40,24 @@ column.
 | `s` | sort by the column; again reverses |
 | `enter` | details: every benchmark, price per provider |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
-| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it |
+| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, `space` toggles several |
 | `(` `)` `^d` `^u` | half a page up / down |
 | `gg` `G` `3gg` | top / bottom / row 3 |
-| `space` | mark the model |
+| `m` | mark the model |
 | `M` | marked models only; with `F`, marked and favorites |
 | `C` | compare marked models: cheapest, best coder, most coding per $ |
 | `p` | price frontier on a benchmark column: cheapest first, each row costs more and scores higher |
 | `/` | filter by name; `esc` clears |
-| `c` | clear filters, bounds, frontier and marks |
+| `c` | clear filters, bounds, frontier, task ranking and marks |
 | `a` | all models, including ones you have no access to |
 | `f` `F` | favorite / favorites only |
 | `n` | note for the model |
+| typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on openrouter.ai |
 | `x` | launch a harness with the model; quit it to come back |
 | `r` | refresh data now |
+| `t` | tasks: what each one measures, when to use it, the best model per price; `enter` ranks the table by it |
 | `?` | help |
 | `qq` | quit; the first `q` asks. `esc` closes an overlay or the filter |
 
@@ -65,13 +67,14 @@ column.
 modelcmp list                          # models you have access to
 modelcmp list --task coding -n 10      # ranked by task fit
 modelcmp list --task coding --frontier # best model per price level, cheapest first
-modelcmp list --max-price 2 --via opencode --dev anthropic
+modelcmp list --max-price 2 --via opencode --dev anthropic --dev openai
 modelcmp recommend agentic             # top 5 for a task
 modelcmp show sonnet                   # everything about one model
 modelcmp compare sonnet gpt-5 --json   # side by side, with a verdict
 modelcmp open sonnet                   # its web page
 modelcmp fav add sonnet
 modelcmp note sonnet "fast enough for refactors"
+modelcmp tasks                         # what each task measures, when to use it
 modelcmp refresh                       # re-download data
 ```
 

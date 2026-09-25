@@ -43,12 +43,12 @@ enum Cmd {
         /// Favorites only
         #[arg(short, long)]
         favorites: bool,
-        /// One developer only, e.g. anthropic (the Dev dropdown, `d`, in the TUI)
+        /// Only these developers, e.g. --dev anthropic --dev openai (the Dev dropdown, `d`, in the TUI)
         #[arg(long)]
-        dev: Option<String>,
-        /// Only models you have through this harness (opencode, claude, codex, gemini) or env (the Via dropdown, `d`, in the TUI)
+        dev: Vec<String>,
+        /// Only models you have through these harnesses (opencode, claude, codex, gemini) or env; repeatable (the Via dropdown, `d`, in the TUI)
         #[arg(long)]
-        via: Option<String>,
+        via: Vec<String>,
         /// Max blended price ($/1M tokens, 3:1 input:output)
         #[arg(long)]
         max_price: Option<f64>,
@@ -69,9 +69,9 @@ enum Cmd {
         /// Include models you have no access to
         #[arg(short, long)]
         all: bool,
-        /// Only models you have through this harness (opencode, claude, codex, gemini) or env (the Via dropdown, `d`, in the TUI)
+        /// Only models you have through these harnesses (opencode, claude, codex, gemini) or env; repeatable (the Via dropdown, `d`, in the TUI)
         #[arg(long)]
-        via: Option<String>,
+        via: Vec<String>,
         /// Max blended price ($/1M tokens, 3:1 input:output)
         #[arg(long)]
         max_price: Option<f64>,
@@ -107,6 +107,8 @@ enum Cmd {
     },
     /// Show a model's note, or set it (empty text deletes)
     Note { model: String, text: Option<String> },
+    /// What each task measures and when to pick a model high on it (`t` in the TUI)
+    Tasks,
     /// Re-download data
     Refresh,
 }
@@ -124,6 +126,10 @@ fn main() {
 }
 
 fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
+    if let Cmd::Tasks = cmd {
+        cli::tasks();
+        return Ok(());
+    }
     if let Cmd::Refresh = cmd {
         let data = data::refresh()?;
         let with_bench = data.models.iter().filter(|m| m.eci.is_some()).count();
@@ -153,7 +159,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
                 task: task(Some(t)),
                 all,
                 favorites: false,
-                dev: None,
+                dev: vec![],
                 via,
                 limit,
                 max_price,
@@ -166,6 +172,6 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Open { model } => cli::open(&data, &model),
         Cmd::Fav { action, model } => cli::fav(&data, &mut store, action == "add", &model),
         Cmd::Note { model, text } => cli::note(&data, &mut store, &model, text.as_deref()),
-        Cmd::Refresh => unreachable!(),
+        Cmd::Tasks | Cmd::Refresh => unreachable!(),
     }
 }
