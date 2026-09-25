@@ -1,6 +1,6 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
-use crate::app::COLS;
+use crate::app::{COLS, model_id};
 use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
@@ -179,6 +179,8 @@ pub struct ListOpts {
     pub via: Vec<String>,
     pub limit: usize,
     pub json: bool,
+    /// Print only `provider/model` per line, for a shell substitution.
+    pub id: bool,
 }
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
@@ -220,6 +222,12 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     }
     if o.json {
         return print_json(&models.iter().map(|m| out(m, store, false)).collect::<Vec<_>>());
+    }
+    if o.id {
+        for m in &models {
+            println!("{}", model_id(m));
+        }
+        return Ok(());
     }
     if models.is_empty() {
         println!("no models match");

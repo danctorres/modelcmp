@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
@@ -197,8 +197,8 @@ pub fn load_cache() -> Option<Data> {
     Some(d)
 }
 
-/// Ask each installed harness which models it can use. A missing or failing harness reports nothing.
-// ponytail: no timeout; `opencode models` takes ~4s and runs on the refresh thread, never the UI.
+/// Ask each installed harness which models it can use. A missing, failing or hung harness
+/// reports nothing, so a refresh always finishes.
 fn harness_models() -> BTreeMap<String, Vec<String>> {
     let on_path =
         |bin: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()));
@@ -208,15 +208,38 @@ fn harness_models() -> BTreeMap<String, Vec<String>> {
             let ids = match probe {
                 Probe::Provider(p) => on_path(bin).then(|| vec![format!("{p}/*")])?,
                 Probe::List(args) => {
-                    let out =
-                        std::process::Command::new(bin).args(*args).output().ok().filter(|o| o.status.success())?;
-                    let text = String::from_utf8_lossy(&out.stdout);
-                    text.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect()
+                    let out = run(bin, args, Duration::from_secs(30))?;
+                    out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect()
                 }
             };
             Some((bin.to_string(), ids))
         })
         .collect()
+}
+
+/// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit`.
+// ponytail: stdout is read after exit, so more than the pipe holds (64K) blocks the child until
+// the limit kills it; the harnesses print a few KB.
+fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut child =
+        Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if start.elapsed() >= limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    let mut text = String::new();
+    child.stdout.take()?.read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache.
@@ -792,6 +815,16 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_returns_output_and_gives_up_on_hangs() {
+        assert_eq!(run("sh", &["-c", "echo a/b"], Duration::from_secs(5)).as_deref(), Some("a/b\n"));
+        assert_eq!(run("sh", &["-c", "exit 1"], Duration::from_secs(5)), None, "a failure reports nothing");
+        assert_eq!(run("no-such-binary-xyz", &[], Duration::from_secs(5)), None, "so does a missing harness");
+        let t = Instant::now();
+        assert_eq!(run("sleep", &["10"], Duration::from_millis(200)), None, "a hang is killed");
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn names_join() {

@@ -67,6 +67,9 @@ enum Cmd {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
+        /// Only the model ids a harness takes (provider/model), one per line: `codex -m $(modelcmp list --task coding --tier mid --id)`
+        #[arg(long, conflicts_with = "json")]
+        id: bool,
     },
     /// Everything about one model
     Show {
@@ -159,14 +162,14 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // clap has already validated task names against fit::TASKS.
     let task = |t: Option<String>| t.and_then(|t| fit::task(&t));
     match cmd {
-        Cmd::List { task: t, tier, sort, min, max, all, favorites, dev, via, limit, json } => {
+        Cmd::List { task: t, tier, sort, min, max, all, favorites, dev, via, limit, json, id } => {
             let bounds = min
                 .into_iter()
                 .map(|(c, v)| (c, v, f64::INFINITY))
                 .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
                 .collect();
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
-            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, favorites, dev, via, limit, json };
+            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, favorites, dev, via, limit, json, id };
             cli::list(&data, &store, &opts)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),

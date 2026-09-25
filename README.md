@@ -71,6 +71,7 @@ column.
 modelcmp list                                  # models you have access to
 modelcmp list --task coding                    # best model per price level scoring 50+, cheapest first
 modelcmp list --task coding --tier mid         # just one: the cheapest scoring 75+
+modelcmp list --task coding --tier mid --id    # only its provider/model, for codex -m $(...)
 modelcmp list --min coding=70 --sort price     # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet                           # everything about one model
@@ -101,6 +102,7 @@ For agents:
 ```sh
 modelcmp recommend --json                      # choose the task by its "when"; each has its frontier
 modelcmp list --task coding --tier mid --json  # the one model to use
+opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just provider/model
 ```
 
 Each JSON model carries `key`, `excluded`, `price` (with the provider's model `id`, the
@@ -120,6 +122,9 @@ frontier entry as `name [key] $price (percentile)`.
 ```sh
 cargo fmt && cargo clippy -- -D warnings && cargo test
 ```
+
+CI runs the same on every push. Pushing a `v*` tag builds a release binary and attaches it
+to a GitHub release.
 
 `app.rs` holds all state and key handling with no I/O, so every key is unit tested.
 `tui.rs` owns the terminal and the refresh thread, `cli.rs` the subcommands, `data.rs`
