@@ -1688,7 +1688,7 @@ mod tests {
         let front: Vec<&str> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
         assert_eq!(front, ["flash", "gpt55"], "flash beats mini at about the same price");
-        let data = Data { models: a.data.models.drain(..).collect(), ..Data::default() };
+        let data = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
         a.set_data(data);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
@@ -1765,11 +1765,11 @@ mod tests {
     fn a_refresh_keeps_the_selection() {
         let mut a = app();
         press(&mut a, "Vj");
-        let same = Data { models: a.data.models.drain(..).collect(), ..Data::default() };
+        let same = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
         a.refreshed(Ok(same));
         assert_eq!((a.visual_range(), a.selected()), (Some(0..=1), 1), "the range follows its models");
         a.mouse(Mouse::Pick(2));
-        let same = Data { models: a.data.models.drain(..).collect(), ..Data::default() };
+        let same = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
         a.refreshed(Ok(same));
         assert_eq!(a.picked, [0, 1, 2], "so do picked rows");
     }
