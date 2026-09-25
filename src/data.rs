@@ -96,6 +96,29 @@ impl Model {
         self.price().map(|o| (3.0 * o.input + o.output) / 4.0)
     }
 
+    /// The model's pages, (site, url): models.dev when its developer offers it, as models.dev
+    /// has pages only under the lab (`openai/gpt-5.5`, not a reseller's); Epoch AI when it has
+    /// benchmarked the model, whose name is then Epoch's; OpenRouter always, `url`.
+    pub fn links(&self) -> Vec<(&'static str, String)> {
+        let dev = norm(&self.developer);
+        let md = self.offers.iter().find(|o| !dev.is_empty() && norm(&short_org(&o.provider)) == dev);
+        let epoch = (self.eci.is_some() || !self.scores.is_empty()).then(|| {
+            let slug: Vec<String> = self
+                .name
+                .to_lowercase()
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(String::from)
+                .collect();
+            ("epoch.ai", format!("https://epoch.ai/models/{}", slug.join("-")))
+        });
+        md.map(|o| ("models.dev", format!("https://models.dev/models/{}/{}/", o.provider, o.id)))
+            .into_iter()
+            .chain(epoch)
+            .chain([("openrouter.ai", self.url.clone())])
+            .collect()
+    }
+
     /// `cost`, but never 0, for dividing by.
     pub fn blended(&self) -> Option<f64> {
         self.cost().filter(|p| *p > 0.0)
@@ -161,8 +184,11 @@ impl Data {
     /// name matches the models you have first, and all of them only if none of yours match.
     pub fn find(&self, query: &str) -> Result<&Model, Vec<&Model>> {
         let q = norm(query);
-        // By key, or by a provider's id for it: "granite-4.0-h-micro" is OpenRouter's "Granite 4.0 Micro".
-        let by_id = |m: &&Model| m.offers.iter().any(|o| norm(&slug(&o.id)) == q);
+        // By key, or by a provider's id for it, bare or as `list --id` prints it:
+        // "granite-4.0-h-micro" or "openrouter/ibm-granite/granite-4.0-h-micro" is "Granite 4.0 Micro".
+        let by_id = |m: &&Model| {
+            m.offers.iter().any(|o| norm(&slug(&o.id)) == q || norm(&format!("{}/{}", o.provider, o.id)) == q)
+        };
         if let Some(m) = self.models.iter().find(|m| m.key == q).or_else(|| self.models.iter().find(by_id)) {
             return Ok(m);
         }
@@ -465,7 +491,7 @@ fn short_org(s: &str) -> String {
         "mistral" | "mistralai" | "mistral ai" => "Mistral".into(),
         "deepseek" => "DeepSeek".into(),
         "xai" | "x-ai" => "xAI".into(),
-        "z-ai" | "thudm" => "Z.ai".into(),
+        "z-ai" | "zhipuai" | "thudm" => "Z.ai".into(),
         "bytedance" | "bytedance-seed" => "ByteDance".into(),
         "ibm" | "ibm-granite" => "IBM".into(),
         "xiaomimimo" => "Xiaomi".into(),
@@ -875,10 +901,40 @@ mod tests {
     }
 
     #[test]
+    fn links_to_each_site_that_has_the_model() {
+        let offer = |p: &str, id: &str| Offer { provider: p.into(), id: id.into(), ..Default::default() };
+        let mut m = Model {
+            name: "Claude Opus 5.5".into(),
+            developer: "Anthropic".into(),
+            url: "https://openrouter.ai/anthropic/claude-opus-5.5".into(),
+            offers: vec![offer("openrouter", "anthropic/claude-opus-5.5"), offer("anthropic", "claude-opus-5-5")],
+            ..Default::default()
+        };
+        let sites = |m: &Model| m.links().into_iter().map(|(s, _)| s).collect::<Vec<_>>();
+        m.offers.push(offer("302ai", "claude-opus-5-5"));
+        assert_eq!(sites(&m), ["models.dev", "openrouter.ai"], "no Epoch page without its benchmarks");
+        m.eci = Some(160.0);
+        assert_eq!(
+            m.links(),
+            [
+                ("models.dev", "https://models.dev/models/anthropic/claude-opus-5-5/".into()),
+                ("epoch.ai", "https://epoch.ai/models/claude-opus-5-5".into()),
+                ("openrouter.ai", m.url.clone()),
+            ]
+        );
+        m.offers.remove(1);
+        assert_eq!(sites(&m), ["epoch.ai", "openrouter.ai"], "models.dev has pages only under the developer");
+    }
+
+    #[test]
     fn find_prefers_shortest() {
         let mk = |k: &str| Model { key: k.into(), ..Default::default() };
         let granite = Model {
-            offers: vec![Offer { id: "ibm-granite/granite-4.0-h-micro".into(), ..Default::default() }],
+            offers: vec![Offer {
+                provider: "openrouter".into(),
+                id: "ibm-granite/granite-4.0-h-micro".into(),
+                ..Default::default()
+            }],
             ..mk("granite40micro")
         };
         let d = Data {
@@ -889,6 +945,11 @@ mod tests {
         assert_eq!(d.find("opus-4.5").unwrap().key, "claudeopus45");
         assert_eq!(d.find("GPT 5.5").unwrap().key, "gpt55");
         assert_eq!(d.find("granite-4.0-h-micro").unwrap().key, "granite40micro", "by a provider's id");
+        assert_eq!(
+            d.find("openrouter/ibm-granite/granite-4.0-h-micro").unwrap().key,
+            "granite40micro",
+            "as list --id prints"
+        );
         assert!(d.find("nope").unwrap_err().is_empty());
         let mine = |k: &str| Model { available: true, ..mk(k) };
         let d = Data {

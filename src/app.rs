@@ -134,7 +134,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("e", "exclude the model: you have it but cannot use it; recommendations skip it"),
     ("typing", "← → ^a ^e move, alt-b alt-f ^← ^→ by word; ^w alt-d delete a word, ^u ^k to the start / end"),
     ("y Y", "copy the model id (provider/model) / the model name"),
-    ("o", "open the model on openrouter.ai"),
+    ("o", "open the model on models.dev, epoch.ai or openrouter.ai; asks which"),
     ("x", "open a harness on the model in a new terminal; asks which when Via lists several"),
     ("r", "refresh data now (auto every 24h)"),
     (
@@ -191,9 +191,11 @@ pub enum Input {
     },
     /// `q` asks before quitting.
     Quit,
-    /// `x` on a model several harnesses have: the command for each, `sel` under the bar.
-    Harness {
-        cmds: Vec<Vec<String>>,
+    /// A choice of what to do, `sel` under the bar: `x` on a model several harnesses have
+    /// launches one, `o` opens one of the model's pages. Each item is its label and effect.
+    Choose {
+        title: &'static str,
+        items: Vec<(String, Effect)>,
         sel: usize,
     },
 }
@@ -316,9 +318,9 @@ pub enum Mouse {
     Header(usize),
     /// Click on a header's ▾: open its dropdown.
     Menu(usize),
-    /// Click on entry `n` of the open dropdown or harness list.
+    /// Click on entry `n` of the open dropdown or choice list.
     Item(usize),
-    /// Click outside the open dropdown or harness list: close it.
+    /// Click outside the open dropdown or choice list: close it.
     Outside,
 }
 
@@ -657,12 +659,12 @@ impl App {
         task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key)), t)
     }
 
-    /// The cursor and length of the open dropdown or harness list, whose moves take the
+    /// The cursor and length of the open dropdown or choice list (`o`, `x`), whose moves take the
     /// table's vim motions.
     fn list(&mut self) -> Option<(&mut usize, usize)> {
         match &mut self.input {
             Input::Menu { items, query, sel, .. } => Some((sel, menu_rows(items, query).len())),
-            Input::Harness { cmds, sel } => Some((sel, cmds.len())),
+            Input::Choose { items, sel, .. } => Some((sel, items.len())),
             _ => None,
         }
     }
@@ -750,8 +752,8 @@ impl App {
         if ctrl && k.code == KeyCode::Char('c') {
             return Some(Effect::Quit);
         }
-        // A dropdown not being searched and the harness list take counts and motions too.
-        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Harness { .. });
+        // A dropdown not being searched and a choice list take counts and motions too.
+        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { .. });
         if self.input != Input::None && !list {
             return self.input_key(k.code, k.modifiers);
         }
@@ -800,9 +802,9 @@ impl App {
     /// selects a row, and again opens its details; a click on a header sorts by it, as `s`
     /// does, and on its ▾ opens the dropdown. Where several entries can be picked (Dev, Via)
     /// a click toggles one, as space does, and the dropdown stays open until a click outside;
-    /// elsewhere (Price, the harness list) a click picks the entry, as enter does.
+    /// elsewhere (Price, a choice list) a click picks the entry, as enter does.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
-        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Harness { .. });
+        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { .. });
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
                 self.move_by(n);
@@ -1005,14 +1007,22 @@ impl App {
                 let text = self.store.note(&m.key).unwrap_or("").to_string();
                 self.input = Input::Note { cur: text.len(), text };
             }
-            KeyCode::Char('o') if row => return Some(Effect::Open(self.current()?.url.clone())),
+            KeyCode::Char('o') if row => {
+                let mut items: Vec<_> =
+                    self.current()?.links().into_iter().map(|(site, url)| (site.into(), Effect::Open(url))).collect();
+                if items.len() == 1 {
+                    return items.pop().map(|(_, e)| e);
+                }
+                self.input = Input::Choose { title: "open on which site?", items, sel: 0 };
+            }
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
-                let mut cmds: Vec<_> = m.via.iter().filter_map(|h| launch_cmd(m, h)).collect();
-                match cmds.len() {
+                let mut items: Vec<_> =
+                    m.via.iter().filter_map(|h| launch_cmd(m, h)).map(|c| (c.join(" "), Effect::Launch(c))).collect();
+                match items.len() {
                     0 => self.status = format!("no harness has {}; Via shows where you have access", m.name),
-                    1 => return cmds.pop().map(Effect::Launch),
-                    _ => self.input = Input::Harness { cmds, sel: 0 },
+                    1 => return items.pop().map(|(_, e)| e),
+                    _ => self.input = Input::Choose { title: "open in which harness?", items, sel: 0 },
                 }
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
@@ -1194,11 +1204,11 @@ impl App {
                     _ => {}
                 }
             }
-            Input::Harness { cmds, sel } => match code {
+            Input::Choose { items, sel, .. } => match code {
                 KeyCode::Enter => {
-                    let cmd = cmds.swap_remove(*sel);
+                    let (_, effect) = items.swap_remove(*sel);
                     self.input = Input::None;
-                    return Some(Effect::Launch(cmd));
+                    return Some(effect);
                 }
                 KeyCode::Esc => self.input = Input::None,
                 _ => {}
@@ -1347,7 +1357,7 @@ mod tests {
         }
         let cmd = |h: &str, id: &str| Some(Effect::Launch(vec![h.into(), "--model".into(), id.into()]));
         assert_eq!(press(&mut a, "x"), None, "gpt55 has codex and opencode");
-        assert!(matches!(&a.input, Input::Harness { cmds, sel: 0 } if cmds.len() == 2));
+        assert!(matches!(&a.input, Input::Choose { items, sel: 0, .. } if items.len() == 2));
         assert_eq!(press(&mut a, "jj"), None, "j stops at the last");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.input, Input::None, "esc cancels");
@@ -1747,8 +1757,9 @@ mod tests {
         assert_eq!(a.current().unwrap().key, "gpt55", "the sideways wheel moves the model cursor as in compare");
         press(&mut a, "0$");
         assert_eq!(a.current().unwrap().key, "gpt55");
+        press(&mut a, "oG");
         assert_eq!(
-            press(&mut a, "o"),
+            code(&mut a, KeyCode::Enter),
             Some(Effect::Open(a.current().unwrap().url.clone())),
             "o opens the picked model"
         );
@@ -1795,7 +1806,11 @@ mod tests {
         assert_eq!(a.compare_sel, 0, "0 picks the first model");
         press(&mut a, "$");
         assert_eq!(a.compare_sel, 1, "$ picks the last model");
-        assert_eq!(press(&mut a, "o"), Some(Effect::Open("https://x/opus5".into())), "o opens the selected model");
+        assert_eq!(
+            press(&mut a, "o"),
+            Some(Effect::Open("https://x/opus5".into())),
+            "o opens the selected model, at once when only OpenRouter has it"
+        );
         press(&mut a, "/eci");
         assert_eq!((a.compare_query.as_str(), a.query.as_str()), ("eci", ""), "/ in compare filters its rows");
         code(&mut a, KeyCode::Enter);
@@ -1857,7 +1872,14 @@ mod tests {
         assert_eq!(press(&mut a, "nfast"), None);
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.note("gpt55"), Some("fast"));
-        assert_eq!(press(&mut a, "o"), Some(Effect::Open("https://x/gpt55".into())));
+        assert_eq!(press(&mut a, "o"), None, "o asks which site");
+        assert!(
+            matches!(&a.input, Input::Choose { items, .. } if items.len() == 2),
+            "epoch.ai, openrouter.ai: no models.dev page, as the developer does not offer it"
+        );
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));
+        press(&mut a, "oG");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://x/gpt55".into())), "openrouter.ai last");
         assert_eq!(press(&mut a, "y"), Some(Effect::Copy("p/gpt55".into())));
         a.data.models[0].name = "GPT 5.5".into();
         assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("GPT 5.5".into())));

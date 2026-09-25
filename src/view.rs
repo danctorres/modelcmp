@@ -222,7 +222,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
             yes(m.open_weights)
         ),
         format!("  released:   {}   knowledge: {}", or_dash(&m.release), or_dash(&m.knowledge)),
-        format!("  url:        {}", m.url),
+        format!("  pages:      {}", m.links().into_iter().map(|(_, u)| u).collect::<Vec<_>>().join("  ")),
         format!("  note:       {}", store.note(&m.key).unwrap_or("-")),
         String::new(),
         format!("  ECI {}", score(m.eci)),

@@ -153,8 +153,8 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             let rows = menu_rows(items, query);
             menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, *sel, rows.len()))
         }
-        Input::Harness { cmds, sel } => {
-            Some((overlay_rect(area, HARNESS_TITLE, &harness_lines(cmds, *sel)), *sel, cmds.len()))
+        Input::Choose { title, items, sel } => {
+            Some((overlay_rect(area, title, &choice_lines(items, *sel)), *sel, items.len()))
         }
         _ => None,
     };
@@ -433,8 +433,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
         overlay(buf, area, "quit?", lines, &mut 0);
     }
-    if let Input::Harness { cmds, sel } = &app.input {
-        overlay(buf, area, HARNESS_TITLE, harness_lines(cmds, *sel), &mut 0);
+    if let Input::Choose { title, items, sel } = &app.input {
+        overlay(buf, area, title, choice_lines(items, *sel), &mut 0);
     }
     if let Some(x) = cursor {
         f.set_cursor_position((x, bar.y));
@@ -715,7 +715,10 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
-        (Input::Harness { .. }, _) => ("LAUNCH", Color::Green),
+        (Input::Choose { items, .. }, _) if matches!(items.first(), Some((_, Effect::Launch(_)))) => {
+            ("LAUNCH", Color::Green)
+        }
+        (Input::Choose { .. }, _) => ("OPEN", Color::Green),
         (Input::None, View::Table) if app.selecting() => ("VISUAL", Color::Yellow),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
         (Input::None, View::Help) => ("HELP", Color::Cyan),
@@ -724,7 +727,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
     };
     let mut x = pill(buf, area.x, area.y, mode, color, area.width) + 1;
-    if matches!(app.input, Input::Quit | Input::Harness { .. }) {
+    if matches!(app.input, Input::Quit | Input::Choose { .. }) {
         // The question is in a box in the middle of the screen.
         return None;
     }
@@ -742,7 +745,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             (false, true) => (format!("{} ▾", col_name(*col)), query, *cur),
             _ => (format!("{} ▾ /", col_name(*col)), query, *cur),
         }),
-        Input::Quit | Input::Harness { .. } | Input::None => None,
+        Input::Quit | Input::Choose { .. } | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
         let text = format!("{label}{typed}");
@@ -831,16 +834,15 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     None
 }
 
-/// A centred rounded box showing `lines` from `scroll` on, which is clamped to the content.
-const HARNESS_TITLE: &str = "open in which harness?";
-
-fn harness_lines(cmds: &[Vec<String>], sel: usize) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = cmds
+/// The entries of a choice list, each coloured by its first word: the harness or the site.
+fn choice_lines(items: &[(String, Effect)], sel: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = items
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(dev_color(&c[0])) };
-            Line::from(format!(" {} ", c.join(" "))).style(style)
+        .map(|(i, (label, _))| {
+            let first = label.split(' ').next().unwrap_or_default();
+            let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(dev_color(first)) };
+            Line::from(format!(" {label} ")).style(style)
         })
         .collect();
     lines.push(Line::from(" j k move · enter opens").style(fg(MUTED)));
@@ -855,6 +857,7 @@ fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
 
+/// A centred rounded box showing `lines` from `scroll` on, which is clamped to the content.
 fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>, scroll: &mut u16) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;

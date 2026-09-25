@@ -77,6 +77,9 @@ struct ModelOut<'a> {
     release: &'a str,
     knowledge: &'a str,
     url: &'a str,
+    /// Site -> the model's page there: models.dev, epoch.ai, openrouter.ai
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pages: Option<BTreeMap<&'static str, String>>,
     /// Epoch Capabilities Index
     eci: Option<f64>,
     /// Task -> 0..100 percentile among Epoch-evaluated models
@@ -107,6 +110,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         release: &m.release,
         knowledge: &m.knowledge,
         url: &m.url,
+        pages: full.then(|| m.links().into_iter().collect()),
         eci: m.eci,
         tasks: TASKS.iter().filter_map(|t| Some((t.name, (fit::fit(m, t)? * 10.0).round() / 10.0))).collect(),
         benchmarks: full.then_some(&m.scores),
@@ -274,10 +278,15 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
     Ok(())
 }
 
-pub fn open(data: &Data, q: &str) -> Result {
+pub fn open(data: &Data, q: &str, on: &str) -> Result {
     let m = resolve(data, q)?;
-    open::that_detached(&m.url).map_err(|e| format!("could not open {}: {e}", m.url))?;
-    println!("{}", m.url);
+    let links = m.links();
+    let Some((_, url)) = links.iter().find(|(site, _)| site.starts_with(on)) else {
+        let sites: Vec<_> = links.iter().map(|(s, _)| *s).collect();
+        return Err(Exit { code: 1, msg: format!("{} has no page on {on}; it has {}", m.name, sites.join(", ")) });
+    };
+    open::that_detached(url).map_err(|e| format!("could not open {url}: {e}"))?;
+    println!("{url}");
     Ok(())
 }
 

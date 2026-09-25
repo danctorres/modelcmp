@@ -57,7 +57,7 @@ column.
 | `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but recommendations (`R` and `--task`) skip it |
 | typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` `^←` `^→` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
-| `o` | open the model on openrouter.ai |
+| `o` | open the model on models.dev, epoch.ai or openrouter.ai; asks which |
 | `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |
 | `r` | refresh data now |
 | `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
@@ -76,7 +76,7 @@ modelcmp list --min coding=70 --sort price     # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet                           # everything about one model
 modelcmp compare sonnet gpt-5 --json           # side by side, with a verdict
-modelcmp open sonnet                           # its web page
+modelcmp open sonnet --on epoch                # its web page: models.dev, epoch or openrouter (default)
 modelcmp fav sonnet                            # --rm to remove
 modelcmp note sonnet "fast enough for refactors"   # without text shows it, --rm deletes it
 modelcmp exclude llama                         # have it, can't use it; --rm to include again

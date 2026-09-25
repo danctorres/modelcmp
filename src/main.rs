@@ -86,8 +86,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Open the model's web page
-    Open { model: String },
+    /// Open the model's web page (`o` in the TUI)
+    Open {
+        model: String,
+        /// The site: models.dev, epoch.ai or openrouter.ai; a prefix will do
+        #[arg(long, default_value = "openrouter")]
+        on: String,
+    },
     /// Mark a model as a favorite (`f` in the TUI)
     Fav {
         model: String,
@@ -174,7 +179,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
-        Cmd::Open { model } => cli::open(&data, &model),
+        Cmd::Open { model, on } => cli::open(&data, &model, &on),
         Cmd::Fav { model, rm } => cli::fav(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
