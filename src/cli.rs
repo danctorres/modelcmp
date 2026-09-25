@@ -4,7 +4,7 @@ use crate::app::COLS;
 use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
-use crate::view::{compare_rows, detail_lines, priced, task_frontier, truncate, verdict, via, visible};
+use crate::view::{compare_rows, detail_lines, pick, priced, task_frontier, truncate, verdict, via, visible};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,7 +59,7 @@ struct ModelOut<'a> {
     available: bool,
     via: &'a [String],
     favorite: bool,
-    /// You have it but cannot use it; task rankings skip it
+    /// You have it but cannot use it; --task and tasks skip it
     excluded: bool,
     note: Option<&'a str>,
     price: Option<Price<'a>>,
@@ -76,7 +76,6 @@ struct ModelOut<'a> {
     eci: Option<f64>,
     /// Task -> 0..100 percentile among Epoch-evaluated models
     tasks: BTreeMap<&'static str, f64>,
-    best_for: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,7 +104,6 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         url: &m.url,
         eci: m.eci,
         tasks: TASKS.iter().filter_map(|t| Some((t.name, (fit::fit(m, t)? * 10.0).round() / 10.0))).collect(),
-        best_for: fit::best_for(m),
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
     }
@@ -116,7 +114,7 @@ fn print_json<T: Serialize>(v: &T) -> Result {
     Ok(())
 }
 
-/// The TUI's columns, so both show the same thing: Model, Dev, every numeric column, Via, Best for.
+/// The TUI's columns, so both show the same thing: Model, Dev, every numeric column, Via.
 fn table(models: &[&Model], store: &Store, show_avail: bool) {
     let cells: Vec<Vec<String>> =
         models.iter().map(|m| COLS.iter().map(|c| (c.get)(m).map_or("-".into(), c.show)).collect()).collect();
@@ -127,17 +125,11 @@ fn table(models: &[&Model], store: &Store, show_avail: bool) {
         models.iter().map(|m| f(m).chars().count()).chain([head.len()]).max().unwrap_or(0).min(max)
     };
     let (nw, dw) = (width(|m| m.name.clone(), "Model", 34), width(|m| m.developer.clone(), "Dev", 12));
-    let vw = width(|m| via(&m.via), "Via", 22);
-    let line = |mark: &str, name: &str, dev: &str, nums: &mut dyn Iterator<Item = &str>, via: &str, best: &str| {
+    let line = |mark: &str, name: &str, dev: &str, nums: &mut dyn Iterator<Item = &str>, via: &str| {
         let nums: String = nums.zip(&widths).map(|(v, &w)| format!(" {v:>w$}")).collect();
-        println!(
-            "{mark} {:<nw$} {:<dw$}{nums}  {:<vw$}  {best}",
-            truncate(name, nw),
-            truncate(dev, dw),
-            truncate(via, vw)
-        );
+        println!("{mark} {:<nw$} {:<dw$}{nums}  {via}", truncate(name, nw), truncate(dev, dw));
     };
-    line(" ", "Model", "Dev", &mut COLS.iter().map(|c| c.name), "Via", "Best for");
+    line(" ", "Model", "Dev", &mut COLS.iter().map(|c| c.name), "Via");
     for (m, row) in models.iter().zip(&cells) {
         let mark = match (store.is_fav(&m.key), show_avail && m.available) {
             _ if store.is_excluded(&m.key) => "✗",
@@ -145,8 +137,7 @@ fn table(models: &[&Model], store: &Store, show_avail: bool) {
             (_, true) => "●",
             _ => " ",
         };
-        let best = fit::best_for(m).join(", ");
-        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(&m.via), &best);
+        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(&m.via));
     }
 }
 
@@ -171,7 +162,8 @@ fn resolve<'a>(data: &'a Data, q: &str) -> Result<&'a Model> {
 
 pub struct ListOpts {
     pub task: Option<&'static Task>,
-    pub frontier: Option<&'static Task>,
+    /// `low`, `mid` or `high`: one model from the task's frontier.
+    pub tier: Option<String>,
     /// Index into `COLS`.
     pub sort: Option<usize>,
     /// (index into `COLS`, min, max)
@@ -188,24 +180,22 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     check("--dev", &o.dev, data.models.iter().map(|m| m.developer.as_str()))?;
     check("--via", &o.via, data.models.iter().flat_map(|m| &m.via).map(String::as_str))?;
     let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
-    // A task ranking or frontier is a recommendation, so models you cannot use stay out of it.
-    let ranking = o.task.is_some() || o.frontier.is_some();
+    // A task's frontier is a recommendation, so models you cannot use stay out of it.
     let mut models: Vec<&Model> = visible(data, store, o.all, o.favorites)
         .map(|(_, m)| m)
         .filter(|m| {
             (o.dev.is_empty() || has(&o.dev, &m.developer))
                 && (o.via.is_empty() || m.via.iter().any(|v| has(&o.via, v)))
                 && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
-                && !(ranking && store.is_excluded(&m.key))
+                && !(o.task.is_some() && store.is_excluded(&m.key))
         })
         .collect();
-    let mut scores = None;
-    if let Some(t) = o.frontier {
-        models = task_frontier(models.into_iter(), t).into_iter().map(|(m, _)| m).collect();
-    } else if let Some(t) = o.task {
-        let ranked = fit::rank(models.into_iter(), t);
-        models = ranked.iter().map(|(m, _)| *m).collect();
-        scores = Some(ranked.into_iter().map(|(_, s)| s).collect::<Vec<f64>>());
+    if let Some(t) = o.task {
+        let front = task_frontier(models.into_iter(), t);
+        models = match &o.tier {
+            Some(tier) => pick(&front, tier).map(|e| e.0).into_iter().collect(),
+            None => front.into_iter().map(|(m, _)| m).collect(),
+        };
     } else if let Some(c) = o.sort.map(|c| &COLS[c]) {
         // Best first, blanks last, names breaking ties.
         models.sort_by(|a, b| {
@@ -219,11 +209,6 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             order.then_with(|| a.name.cmp(&b.name))
         });
     }
-    // Over every ranked model, before the limit cuts the list.
-    let front: Vec<String> = match o.task {
-        Some(t) => task_frontier(models.iter().copied(), t).iter().map(|(m, s)| priced(m, *s)).collect(),
-        None => vec![],
-    };
     let total = models.len();
     if o.limit > 0 {
         models.truncate(o.limit);
@@ -238,11 +223,6 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     table(&models, store, o.all);
     if models.len() < total {
         println!("\n{} of {total} shown; -n 0 for all", models.len());
-    }
-    if let (Some(t), Some(s)) = (o.task, scores) {
-        let top: Vec<String> = models.iter().zip(s).take(3).map(|(m, s)| format!("{} ({s:.0})", m.name)).collect();
-        println!("\nbest for {}: {}", t.name, top.join(", "));
-        println!("best per price: {}", front.join(", "));
     }
     Ok(())
 }
@@ -321,17 +301,28 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
 }
 
 /// What each task measures, when to pick a model high on it, and its benchmarks.
-pub fn tasks(json: bool) -> Result {
+pub fn tasks(data: &Data, store: &Store, json: bool) -> Result {
+    // The frontier among the models you have and can use, as `list --task` gives it.
+    let front =
+        |t| task_frontier(visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)), t);
     if json {
         let v: Vec<_> = TASKS
             .iter()
-            .map(|t| serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches}))
+            .map(|t| {
+                let front: Vec<_> = front(t)
+                    .into_iter()
+                    .map(|(m, s)| serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0}))
+                    .collect();
+                serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "frontier": front})
+            })
             .collect();
         return print_json(&v);
     }
     for t in TASKS {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:     {}", t.when);
+        let front: Vec<String> = front(t).iter().map(|(m, s)| priced(m, *s)).collect();
+        println!("  best/price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
         if !t.benches.is_empty() {
             println!("  benchmarks:  {}", t.benches.join(", "));
         }

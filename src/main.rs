@@ -34,12 +34,12 @@ enum Cmd {
     /// List models you have access to (all with --all): rank, bound and sort them
     #[command(alias = "ls")]
     List {
-        /// Rank by task fit, best first; excluded models are left out
-        #[arg(short, long, value_parser = tasks(), conflicts_with_all = ["sort", "frontier"])]
+        /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`t` in the TUI)
+        #[arg(short, long, value_parser = tasks(), conflicts_with = "sort")]
         task: Option<String>,
-        /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`p` in the TUI)
-        #[arg(long, value_parser = tasks(), conflicts_with = "sort")]
-        frontier: Option<String>,
+        /// One model from the task's list: low = cheapest scoring 50+, mid = cheapest 75+, high = the best; the best when none reaches the floor
+        #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
+        tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
         #[arg(short, long, value_parser = PossibleValuesParser::new(app::COLS.map(|c| c.id)))]
         sort: Option<String>,
@@ -92,7 +92,7 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Exclude a model you have but cannot use: --task and --frontier leave it out (`e` in the TUI)
+    /// Exclude a model you have but cannot use: --task and tasks leave it out (`e` in the TUI)
     Exclude {
         model: String,
         /// Include it again
@@ -108,7 +108,7 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// What each task measures and when to pick a model high on it (`t` in the TUI)
+    /// What each task measures, when to pick a model high on it and the best model per price (`t` in the TUI)
     Tasks {
         /// Machine-readable output
         #[arg(long)]
@@ -148,9 +148,6 @@ fn main() {
 }
 
 fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
-    if let Cmd::Tasks { json } = cmd {
-        return cli::tasks(json);
-    }
     let (data, warn) = data::load(force)?;
     if let Some(w) = warn {
         eprintln!("warning: {w}");
@@ -162,25 +159,14 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // clap has already validated task names against fit::TASKS.
     let task = |t: Option<String>| t.and_then(|t| fit::task(&t));
     match cmd {
-        Cmd::List { task: t, frontier, sort, min, max, all, favorites, dev, via, limit, json } => {
+        Cmd::List { task: t, tier, sort, min, max, all, favorites, dev, via, limit, json } => {
             let bounds = min
                 .into_iter()
                 .map(|(c, v)| (c, v, f64::INFINITY))
                 .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
                 .collect();
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
-            let opts = cli::ListOpts {
-                task: task(t),
-                frontier: task(frontier),
-                sort,
-                bounds,
-                all,
-                favorites,
-                dev,
-                via,
-                limit,
-                json,
-            };
+            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, favorites, dev, via, limit, json };
             cli::list(&data, &store, &opts)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
@@ -189,6 +175,6 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Fav { model, rm } => cli::fav(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
-        Cmd::Tasks { .. } => unreachable!(),
+        Cmd::Tasks { json } => cli::tasks(&data, &store, json),
     }
 }

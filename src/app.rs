@@ -1,10 +1,10 @@
 //! TUI state and key handling. No I/O here: side effects come back to the shell as `Effect`s,
 //! so every key is unit-testable.
 
-use crate::data::{self, Data, Model};
+use crate::data::{Data, Model};
 use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
-use crate::view::{LEVELS, ctx, frontier, level_label, money, score, task_frontier, task_score, visible};
+use crate::view::{LEVELS, ctx, frontier, hits, level_label, money, score, task_frontier, task_score, visible};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::{Ordering, Reverse};
@@ -17,22 +17,13 @@ pub struct Col {
     pub id: &'static str,
     /// What the column means, for the top border and `?`.
     pub about: &'static str,
-    /// The task whose benchmarks feed the column.
-    pub task: Option<&'static str>,
     pub lower_better: bool,
     pub get: fn(&Model) -> Option<f64>,
     pub show: fn(f64) -> String,
 }
 
-impl Col {
-    /// A benchmark column, the only kind a price frontier makes sense for.
-    pub fn is_score(&self) -> bool {
-        self.name == "ECI" || self.task.is_some()
-    }
-}
-
 const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(&Model) -> Option<f64>) -> Col {
-    Col { name, id, about, task: None, lower_better: false, get, show: |v| score(Some(v)) }
+    Col { name, id, about, lower_better: false, get, show: |v| score(Some(v)) }
 }
 
 fn positive(x: f64) -> Option<f64> {
@@ -62,18 +53,9 @@ pub const COLS: [Col; 9] = [
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
     col("ECI", "eci", "Epoch Capabilities Index, overall capability", |m| m.eci),
-    Col {
-        task: Some("coding"),
-        ..col("Coding", "coding", "mean percentile (0-100) on coding benchmarks", |m| task_score(m, "coding"))
-    },
-    Col {
-        task: Some("agentic"),
-        ..col("Agentic", "agentic", "mean percentile (0-100) on agentic benchmarks", |m| task_score(m, "agentic"))
-    },
-    Col {
-        task: Some("reasoning"),
-        ..col("Reason", "reasoning", "mean percentile (0-100) on reasoning benchmarks", |m| task_score(m, "reasoning"))
-    },
+    col("Coding", "coding", "mean percentile (0-100) on coding benchmarks", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "mean percentile (0-100) on agentic benchmarks", |m| task_score(m, "agentic")),
+    col("Reason", "reasoning", "mean percentile (0-100) on reasoning benchmarks", |m| task_score(m, "reasoning")),
     col("Code/$", "value", "Coding divided by Price, as a percentile (0-100)", |m| m.fit.get("value").copied()),
 ];
 
@@ -82,13 +64,13 @@ const TEXT: usize = 2;
 /// Column index of the blended price, the default sort and the frontier's.
 pub const PRICE: usize = TEXT;
 /// Column index of ECI.
-#[cfg(test)]
 pub const ECI: usize = TEXT + 4;
+/// First column of each group: names, price and context, benchmarks, your own.
+const GROUPS: [usize; 4] = [0, PRICE, ECI, VIA];
 /// Column index of where you have access.
 pub const VIA: usize = TEXT + COLS.len();
-/// Column index of the tasks a model is best for, and of your note, the last one.
-pub const BEST: usize = VIA + 1;
-pub const NOTES: usize = VIA + 2;
+/// Column index of your note, the last one.
+pub const NOTES: usize = VIA + 1;
 pub const NCOLS: usize = NOTES + 1;
 
 /// The numeric column at cursor index `col`, if it is one.
@@ -102,7 +84,6 @@ pub fn col_name(col: usize) -> &'static str {
         0 => "Model",
         1 => "Dev",
         VIA => "Via",
-        BEST => "Best for",
         NOTES => "Notes",
         _ => numeric(col).map_or("", |c| c.name),
     }
@@ -116,18 +97,18 @@ pub fn has_menu(col: usize) -> bool {
 /// What the column at cursor index `col` means.
 pub fn col_about(col: usize) -> String {
     match col {
-        0 => "model name; dimmed if no available provider, struck through if excluded".into(),
+        0 => "model name; dimmed if no available provider".into(),
         1 => "company that trained the model".into(),
         VIA => "where you have access: the harnesses that list the model, env for a provider API key".into(),
-        BEST => "the one or two tasks it ranks highest on, at the 60th percentile or above".into(),
         NOTES => "your note, n to edit".into(),
         _ => numeric(col).map_or("", |c| c.about).into(),
     }
 }
 
 pub const HELP: &[(&str, &str)] = &[
-    ("j k ↓ ↑", "move; a count repeats, as in 3j"),
+    ("j k ↓ ↑", "move; a count repeats, as in 3j; past the last row back to the first"),
     ("h l ← →", "pick a column; the top border says what it means"),
+    ("0 $ w b", "first / last column; next / previous group: prices, benchmarks, Via"),
     ("s", "sort by the column; again reverses"),
     ("enter", "details: every benchmark, price per provider"),
     ("> <", "minimum / maximum for the column, e.g. > 70 enter on Coding"),
@@ -135,25 +116,33 @@ pub const HELP: &[(&str, &str)] = &[
     ("( ) ^d ^u", "half a page up / down"),
     ("gg G 3gg", "top / bottom / row 3"),
     ("m", "mark the model"),
+    ("V", "select a range of rows: move to extend it, then m e f or C act on all of it; esc cancels"),
+    ("e f with marks", "act on every marked model, not just the one under the cursor"),
     ("M", "show marked models only; with F, marked and favorites"),
     ("C", "compare marked models: cheapest, best coder, most coding per $"),
     (
-        "p",
-        "best model per price level on a benchmark column: cheapest first, each row down costs more and scores higher",
+        "/",
+        "filter by name, developer, Via or note, words in any order (anthropic opus), a typo forgiven when nothing matches (opsu); / again starts a new search, esc clears",
     ),
-    ("/", "filter by name; esc clears"),
-    ("c", "clear everything: filters, bounds, frontier, task ranking, marks"),
+    ("c", "clear everything: filters, bounds, task, marks"),
     ("a", "all models, including ones you have no access to; again: yours only"),
     ("f F", "favorite / show favorites only"),
     ("n", "note for the model"),
     ("e", "exclude the model: you have it but cannot use it; tasks skip it"),
-    ("typing", "← → ^a ^e move, alt-b alt-f by word; ^w alt-d delete a word, ^u ^k to the start / end"),
+    ("typing", "← → ^a ^e move, alt-b alt-f ^← ^→ by word; ^w alt-d delete a word, ^u ^k to the start / end"),
     ("y Y", "copy the model id (provider/model) / the model name"),
     ("o", "open the model on openrouter.ai"),
-    ("x", "launch a harness with the model: the Via filter's, else the first in Via; quit it to come back"),
+    ("x", "open a harness on the model in a new terminal; asks which when Via lists several"),
     ("r", "refresh data now (auto every 24h)"),
-    ("t", "tasks: what each one measures, when to use it, the best model per price; enter ranks the table by it"),
+    (
+        "t",
+        "tasks: what each one measures, when to use it, the best model per price; enter shows those models in the table: best first, each row down cheaper and scoring lower",
+    ),
     ("?", "this help"),
+    (
+        "mouse",
+        "click a row to select it, again for details; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column",
+    ),
     ("qq", "quit; the first q asks. esc closes an overlay or the filter"),
 ];
 
@@ -169,9 +158,11 @@ pub enum View {
 #[derive(PartialEq, Debug)]
 pub enum Input {
     None,
-    /// Typing `App::query`; `cur` is the cursor's byte offset in it.
+    /// Typing `App::query`; `cur` is the cursor's byte offset in it, `was` the query esc
+    /// goes back to.
     Search {
         cur: usize,
+        was: String,
     },
     Note {
         text: String,
@@ -197,6 +188,11 @@ pub enum Input {
     },
     /// `q` asks before quitting.
     Quit,
+    /// `x` on a model several harnesses have: the command for each, `sel` under the bar.
+    Harness {
+        cmds: Vec<Vec<String>>,
+        sel: usize,
+    },
 }
 
 /// Indices of the dropdown entries whose name contains `query`, any case; "any" always stays.
@@ -205,8 +201,20 @@ pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
     (0..items.len()).filter(|&i| i == 0 || items[i].0.to_lowercase().contains(&q)).collect()
 }
 
+/// Index `i` moved by `n` in a list of `len`: a move stops at an end, and one that starts
+/// there wraps around to the other end.
+fn step(i: usize, n: isize, len: usize) -> usize {
+    let last = len.saturating_sub(1);
+    match i.checked_add_signed(n) {
+        _ if n > 0 && i >= last => 0,
+        _ if n < 0 && i == 0 => last,
+        Some(j) => j.min(last),
+        None => 0,
+    }
+}
+
 /// Readline-style editing of a prompt with the cursor at byte `cur`: ← → ^b ^f move by a
-/// character, alt-b alt-f by a word, home end ^a ^e to the ends; backspace and delete drop a
+/// character, alt-b alt-f ^← ^→ by a word, home end ^a ^e to the ends; backspace and delete drop a
 /// character, ^w and alt-d a word, ^u and ^k the line before / after the cursor. `accept` says
 /// which characters are typed. True when the key was one of these.
 pub fn edit(
@@ -230,6 +238,8 @@ pub fn edit(
         *cur + start + rest[start..].find(char::is_whitespace).unwrap_or(rest.len() - start)
     };
     let to = match code {
+        KeyCode::Left if ctrl || alt => word_start,
+        KeyCode::Right if ctrl || alt => word_end,
         KeyCode::Left => prev,
         KeyCode::Right => next,
         KeyCode::Home => 0,
@@ -280,8 +290,25 @@ pub enum Effect {
     Open(String),
     Copy(String),
     Refresh,
-    /// Run this command in the terminal, then come back.
+    /// Run this command in a new terminal window.
     Launch(Vec<String>),
+}
+
+/// A mouse action, already mapped to the table by the shell.
+#[derive(PartialEq, Debug)]
+pub enum Mouse {
+    /// Wheel: rows to move, negative is up.
+    Scroll(isize),
+    /// Click on row `n` of the table (an index into `rows`).
+    Row(usize),
+    /// Horizontal wheel: columns to move the cursor, negative is left.
+    Cols(isize),
+    /// Click on a column header.
+    Header(usize),
+    /// Click on a header's ▾: open its dropdown.
+    Menu(usize),
+    /// Click on entry `n` of the open dropdown or harness list.
+    Item(usize),
 }
 
 /// `provider/model` of the offer you'd pay, as harnesses name it.
@@ -319,18 +346,20 @@ pub struct App {
     pub dev: Vec<String>,
     /// Harnesses (or "env") picked from the Via dropdown; empty is any.
     pub via: Vec<String>,
-    /// Column whose price frontier is shown, set with `p`.
-    pub frontier: Option<usize>,
-    /// Task the table is ranked for, picked in the tasks overlay; replaces the column sort.
+    /// Task whose price frontier the table shows, picked in the tasks overlay.
     pub task: Option<&'static Task>,
     /// Cursor in the tasks overlay.
     pub task_cur: usize,
     pub query: String,
+    /// The query matched nothing as typed, so it is matched allowing a typo per word.
+    pub typos: bool,
     /// Indices into `data.models`, in display order.
     pub rows: Vec<usize>,
     pub table: TableState,
     pub marked: Vec<String>,
     pub only_marked: bool,
+    /// Row where `V` started a visual range; the range runs to the cursor.
+    pub visual: Option<usize>,
     pub view: View,
     pub input: Input,
     /// Scroll offset of the detail, compare and help views. The renderer clamps it.
@@ -363,14 +392,15 @@ impl App {
             bounds: vec![],
             dev: vec![],
             via: vec![],
-            frontier: None,
             task: None,
             task_cur: 0,
             query: String::new(),
+            typos: false,
             rows: vec![],
             table: TableState::default().with_selected(0),
             marked: vec![],
             only_marked: false,
+            visual: None,
             view: View::Table,
             input: Input::None,
             scroll: 0,
@@ -412,6 +442,41 @@ impl App {
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
     }
 
+    /// Rows of the visual range, in order.
+    pub fn visual_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        let (a, b) = (self.visual?, self.selected());
+        Some(a.min(b)..=a.max(b))
+    }
+
+    /// Keys of the models a command acts on: in the table the visual range, else the marked
+    /// models, else the current one; elsewhere the current one.
+    fn targets(&self) -> Vec<String> {
+        match self.visual_range() {
+            _ if self.view != View::Table => {}
+            Some(r) => return self.rows[r].iter().map(|&i| self.data.models[i].key.clone()).collect(),
+            None if !self.marked.is_empty() => return self.marked.clone(),
+            None => {}
+        }
+        self.current().map(|m| vec![m.key.clone()]).unwrap_or_default()
+    }
+
+    /// Sets a flag on every target, or clears it when all of them have it. Ends a visual range
+    /// and says what happened when it was more than one model.
+    fn flag(&mut self, has: fn(&Store, &str) -> bool, toggle: fn(&mut Store, &str), verb: &str) -> Option<Effect> {
+        let keys = self.targets();
+        let on = !keys.iter().all(|k| has(&self.store, k));
+        for k in &keys {
+            if has(&self.store, k) != on {
+                toggle(&mut self.store, k);
+            }
+        }
+        if keys.len() > 1 {
+            self.status = format!("{}{verb} {} models", if on { "" } else { "un" }, keys.len());
+        }
+        self.rebuild();
+        (!keys.is_empty()).then_some(Effect::Save)
+    }
+
     pub fn marked_models(&self) -> Vec<&Model> {
         self.marked.iter().filter_map(|k| self.data.models.iter().find(|m| m.key == *k)).collect()
     }
@@ -419,11 +484,15 @@ impl App {
     /// Models passing every filter but the frontier, ignoring the ones on column `skip`, so a
     /// dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
-        let q = data::norm(&self.query);
         // Marked only and favorites only together show both sets: the models the user picked.
         let (favs, marked) = (self.favs && !self.only_marked, self.only_marked);
         visible(&self.data, &self.store, self.all, favs).filter(move |&(i, m)| {
-            (q.is_empty() || m.key.contains(&q) || data::norm(&m.developer).contains(&q))
+            hits(
+                &self.query,
+                [&m.name, &m.developer, &m.via.join(", "), self.store.note(&m.key).unwrap_or("")],
+                self.typos,
+            )
+            .is_some()
                 && (!marked || self.marked.contains(&m.key) || (self.favs && self.store.is_fav(&m.key)))
                 && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
                 && (skip == VIA || self.via.is_empty() || self.via.iter().any(|h| m.via.contains(h)))
@@ -437,20 +506,24 @@ impl App {
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
+        // The rows move, so a visual range would cover other models.
+        self.visual = None;
         let keep = self.current().map(|m| m.key.clone());
-        let mut rows: Vec<usize> = self.filtered(usize::MAX).map(|(i, _)| i).collect();
-        let ms = &self.data.models;
-        if let Some(c) = self.frontier.and_then(numeric) {
-            rows = frontier(&rows, |i| &ms[i], c.get);
+        let matching = |app: &Self| -> Vec<usize> { app.filtered(usize::MAX).map(|(i, _)| i).collect() };
+        self.typos = false;
+        let mut rows = matching(self);
+        // Typos only when nothing matches exactly, so "codex" does not also show Codestral.
+        if rows.is_empty() && !self.query.trim().is_empty() {
+            self.typos = true;
+            rows = matching(self);
         }
+        let ms = &self.data.models;
         if let Some(t) = self.task {
-            // Best fit first; excluded models and ones without data for the task drop out.
-            rows.retain(|&i| fit::fit(&ms[i], t).is_some() && !self.store.is_excluded(&ms[i].key));
-            rows.sort_by(|&a, &b| {
-                let (x, y) = (fit::fit(&ms[a], t).unwrap_or(0.0), fit::fit(&ms[b], t).unwrap_or(0.0));
-                y.total_cmp(&x).then_with(|| ms[a].name.cmp(&ms[b].name))
-            });
-        } else if numeric(self.sort_col).is_some() {
+            // Excluded models and ones without a price or data for the task drop out.
+            rows.retain(|&i| !self.store.is_excluded(&ms[i].key));
+            rows = frontier(&rows, |i| &ms[i], |m| fit::fit(m, t));
+        }
+        if numeric(self.sort_col).is_some() {
             let desc = self.descending;
             // Blanks last either way, names breaking ties.
             rows.sort_by(|&a, &b| {
@@ -468,7 +541,6 @@ impl App {
             let text = |m: &Model| match self.sort_col {
                 1 => m.developer.to_lowercase(),
                 VIA => m.via.join(","),
-                BEST => crate::fit::best_for(m).join(","),
                 NOTES => self.store.note(&m.key).unwrap_or("").to_lowercase(),
                 _ => String::new(),
             };
@@ -516,19 +588,32 @@ impl App {
         task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key)), t)
     }
 
+    /// The cursor and length of the open dropdown or harness list, whose moves take the
+    /// table's vim motions.
+    fn list(&mut self) -> Option<(&mut usize, usize)> {
+        match &mut self.input {
+            Input::Menu { items, query, sel, .. } => Some((sel, menu_rows(items, query).len())),
+            Input::Harness { cmds, sel } => Some((sel, cmds.len())),
+            _ => None,
+        }
+    }
+
     fn move_by(&mut self, n: isize) {
-        if self.view == View::Table {
-            let i = self.selected().saturating_add_signed(n);
-            self.select(i);
+        if let Some((sel, len)) = self.list() {
+            *sel = step(*sel, n, len);
+        } else if self.view == View::Table {
+            self.select(step(self.selected(), n, self.rows.len()));
         } else if self.view == View::Tasks {
-            self.task_cur = self.task_cur.saturating_add_signed(n).min(TASKS.len() - 1);
+            self.task_cur = step(self.task_cur, n, TASKS.len());
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
         }
     }
 
     fn go_to(&mut self, row: usize) {
-        if self.view == View::Table {
+        if let Some((sel, len)) = self.list() {
+            *sel = row.min(len - 1);
+        } else if self.view == View::Table {
             self.select(row);
         } else if self.view == View::Tasks {
             self.task_cur = row.min(TASKS.len() - 1);
@@ -599,7 +684,9 @@ impl App {
         if ctrl && k.code == KeyCode::Char('c') {
             return Some(Effect::Quit);
         }
-        if self.input != Input::None {
+        // A dropdown not being searched and the harness list take counts and motions too.
+        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Harness { .. });
+        if self.input != Input::None && !list {
             return self.input_key(k.code, k.modifiers);
         }
         self.status.clear();
@@ -625,9 +712,6 @@ impl App {
         }
         let n = count.max(1) as isize;
         let half = (self.page / 2).max(1) as isize;
-        let table = self.view == View::Table;
-        // Keys that act on the current model, which help and compare hide.
-        let row = table || self.view == View::Detail;
         match k.code {
             KeyCode::Down | KeyCode::Char('j') => self.move_by(n),
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-n),
@@ -640,8 +724,86 @@ impl App {
             KeyCode::Char('g') if count > 0 => self.go_to(count - 1),
             KeyCode::Home | KeyCode::Char('g') => self.go_to(0),
             KeyCode::End | KeyCode::Char('G') => self.go_to(usize::MAX),
+            _ if list => return self.input_key(k.code, k.modifiers),
+            _ => return self.table_key(k.code, n),
+        }
+        None
+    }
+
+    /// The wheel scrolls whatever `j k` move and sideways moves the column cursor; a click
+    /// selects a row, and again opens its details; a click on a header sorts by it, as `s`
+    /// does, and on its ▾ opens the dropdown. Where several entries can be picked (Dev, Via)
+    /// a click toggles one, as space does, and the dropdown stays open until a click outside;
+    /// elsewhere (Price, the harness list) a click picks the entry, as enter does.
+    pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
+        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Harness { .. });
+        if let Mouse::Scroll(n) = m {
+            if list || self.input == Input::None {
+                self.move_by(n);
+            }
+            return None;
+        }
+        if list {
+            return match m {
+                Mouse::Item(n) => {
+                    let several = matches!(self.input, Input::Menu { col, .. } if col == 1 || col == VIA);
+                    let (sel, len) = self.list()?;
+                    if n >= len {
+                        return None;
+                    }
+                    *sel = n;
+                    let key = if several { KeyCode::Char(' ') } else { KeyCode::Enter };
+                    self.input_key(key, KeyModifiers::NONE)
+                }
+                Mouse::Cols(_) => None,
+                _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
+            };
+        }
+        if self.view != View::Table || self.input != Input::None {
+            return None;
+        }
+        match m {
+            Mouse::Cols(n) => return self.table_key(KeyCode::Char(if n < 0 { 'h' } else { 'l' }), n.abs()),
+            Mouse::Row(n) if n < self.rows.len() => {
+                if n == self.selected() {
+                    return self.table_key(KeyCode::Enter, 1);
+                }
+                self.select(n);
+            }
+            Mouse::Header(c) if c < NCOLS => {
+                self.col = c;
+                return self.table_key(KeyCode::Char('s'), 1);
+            }
+            Mouse::Menu(c) if has_menu(c) => {
+                self.col = c;
+                return self.table_key(KeyCode::Char('d'), 1);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Keys other than motions when no prompt or list is open.
+    fn table_key(&mut self, code: KeyCode, n: isize) -> Option<Effect> {
+        let table = self.view == View::Table;
+        // Keys that act on the current model, which help and compare hide.
+        let row = table || self.view == View::Detail;
+        match code {
             KeyCode::Char('h') | KeyCode::Left if table => self.col = (self.col + NCOLS - n as usize % NCOLS) % NCOLS,
             KeyCode::Char('l') | KeyCode::Right if table => self.col = (self.col + n as usize) % NCOLS,
+            KeyCode::Char('0') if table => self.col = 0,
+            KeyCode::Char('$') if table => self.col = NCOLS - 1,
+            KeyCode::Char('w') if table => {
+                for _ in 0..n {
+                    let end = if self.col == NCOLS - 1 { 0 } else { NCOLS - 1 };
+                    self.col = GROUPS.into_iter().find(|&g| g > self.col).unwrap_or(end);
+                }
+            }
+            KeyCode::Char('b') if table => {
+                for _ in 0..n {
+                    self.col = GROUPS.into_iter().rev().find(|&g| g < self.col).unwrap_or(VIA);
+                }
+            }
             KeyCode::Char('s') if table => {
                 if self.sort_col == self.col {
                     self.descending = !self.descending;
@@ -657,18 +819,6 @@ impl App {
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
-            // The frontier reads cheapest first: each row down costs more and scores higher.
-            KeyCode::Char('p') if table && numeric(self.col).is_some_and(Col::is_score) => {
-                self.frontier = (self.frontier != Some(self.col)).then_some(self.col);
-                if self.frontier.is_some() {
-                    (self.sort_col, self.descending) = (PRICE, false);
-                }
-                self.rebuild();
-            }
-            KeyCode::Char('p') if table => {
-                let names: Vec<&str> = COLS.iter().filter(|c| c.is_score()).map(|c| c.name).collect();
-                self.status = format!("p needs a benchmark column: {}", names.join(", "));
-            }
             KeyCode::Char('M') if table => {
                 self.only_marked = !self.only_marked && !self.marked.is_empty();
                 self.rebuild();
@@ -678,8 +828,10 @@ impl App {
                 self.bounds.clear();
                 self.dev.clear();
                 self.via.clear();
-                self.frontier = None;
-                self.task = None;
+                // The task set the sort; back to the default, cheapest first.
+                if self.task.take().is_some() {
+                    (self.sort_col, self.descending) = (PRICE, false);
+                }
                 self.marked.clear();
                 self.only_marked = false;
                 self.favs = false;
@@ -689,6 +841,8 @@ impl App {
             KeyCode::Esc => {
                 if !table {
                     self.view = View::Table;
+                } else if self.visual.is_some() {
+                    self.visual = None;
                 } else if !self.query.is_empty() {
                     self.query.clear();
                     self.rebuild();
@@ -696,19 +850,10 @@ impl App {
             }
             KeyCode::Char('?') => self.view = if self.view == View::Help { View::Table } else { View::Help },
             KeyCode::Char('t') => self.view = if self.view == View::Tasks { View::Table } else { View::Tasks },
-            KeyCode::Char('f') if row => {
-                let key = self.current()?.key.clone();
-                self.store.toggle_fav(&key);
-                if self.favs {
-                    self.rebuild();
-                }
-                return Some(Effect::Save);
-            }
-            KeyCode::Char('e') if row => {
-                let key = self.current()?.key.clone();
-                self.store.toggle_excluded(&key);
-                self.rebuild();
-                return Some(Effect::Save);
+            KeyCode::Char('f') if row => return self.flag(Store::is_fav, Store::toggle_fav, "favorited"),
+            KeyCode::Char('e') if row => return self.flag(Store::is_excluded, Store::toggle_excluded, "excluded"),
+            KeyCode::Char('V') if table => {
+                self.visual = if self.visual.is_some() { None } else { Some(self.selected()) };
             }
             KeyCode::Char('n') if row => {
                 let m = self.current()?;
@@ -718,16 +863,35 @@ impl App {
             KeyCode::Char('o') if row => return Some(Effect::Open(self.current()?.url.clone())),
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
-                let picked = self.via.iter().chain(&m.via).find_map(|h| launch_cmd(m, h));
-                match picked {
-                    Some(cmd) => return Some(Effect::Launch(cmd)),
-                    None => self.status = format!("no harness has {}; Via shows where you have access", m.name),
+                let mut cmds: Vec<_> = m.via.iter().filter_map(|h| launch_cmd(m, h)).collect();
+                match cmds.len() {
+                    0 => self.status = format!("no harness has {}; Via shows where you have access", m.name),
+                    1 => return cmds.pop().map(Effect::Launch),
+                    _ => self.input = Input::Harness { cmds, sel: 0 },
                 }
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
             KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
+            KeyCode::Char('m') if table && self.visual.is_some() => {
+                let keys = self.targets();
+                if keys.iter().all(|k| self.marked.contains(k)) {
+                    self.marked.retain(|k| !keys.contains(k));
+                } else {
+                    for k in keys {
+                        if !self.marked.contains(&k) {
+                            self.marked.push(k);
+                        }
+                    }
+                }
+                self.rebuild();
+            }
             KeyCode::Char('m') if row => self.toggle_mark(),
             KeyCode::Char('C') => {
+                // A visual range is what gets compared.
+                if table && self.visual.is_some() {
+                    self.marked = self.targets();
+                    self.visual = None;
+                }
                 if self.marked.len() >= 2 {
                     self.view = View::Compare;
                     self.scroll = 0;
@@ -739,19 +903,28 @@ impl App {
             KeyCode::Enter if self.view == View::Tasks => {
                 let t = &TASKS[self.task_cur];
                 self.task = Some(t);
+                // On the frontier the priciest is the best: each row down is cheaper and scores lower.
+                (self.sort_col, self.descending) = (PRICE, true);
                 self.view = View::Table;
                 self.rebuild();
                 self.select(0);
-                self.status = match self.current() {
-                    Some(m) => format!("best for {}: {}; enter for details, c clears", t.name, m.name),
-                    None => format!("no model has data for {}", t.name),
+                self.status = match (self.rows.first(), self.rows.last()) {
+                    (Some(&a), Some(&b)) => {
+                        let ms = &self.data.models;
+                        format!("{} per price: {} best, {} cheapest; c clears", t.name, ms[a].name, ms[b].name)
+                    }
+                    _ => format!("no model has data for {}", t.name),
                 };
             }
             KeyCode::Enter if table && self.current().is_some() => {
                 self.view = View::Detail;
                 self.scroll = 0;
             }
-            KeyCode::Char('/') if table => self.input = Input::Search { cur: self.query.len() },
+            // A new search starts empty; esc brings the previous one back.
+            KeyCode::Char('/') if table => {
+                self.input = Input::Search { cur: 0, was: std::mem::take(&mut self.query) };
+                self.rebuild();
+            }
             KeyCode::Char('a') if table => {
                 self.all = !self.all;
                 self.rebuild();
@@ -768,11 +941,11 @@ impl App {
     /// Keys while typing a search, a note or a bound.
     fn input_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
         match &mut self.input {
-            Input::Search { cur } => {
+            Input::Search { cur, was } => {
                 match code {
                     KeyCode::Enter => self.input = Input::None,
                     KeyCode::Esc => {
-                        self.query.clear();
+                        self.query = std::mem::take(was);
                         self.input = Input::None;
                     }
                     KeyCode::Down | KeyCode::Up => {
@@ -857,12 +1030,19 @@ impl App {
                         *sel = menu_rows(items, query).len().min(2) - 1;
                     }
                     KeyCode::Char('/') => *typing = true,
-                    KeyCode::Char('j') => *sel = (*sel + 1).min(last),
-                    KeyCode::Char('k') => *sel = sel.saturating_sub(1),
                     KeyCode::Esc => self.input = Input::None,
                     _ => {}
                 }
             }
+            Input::Harness { cmds, sel } => match code {
+                KeyCode::Enter => {
+                    let cmd = cmds.swap_remove(*sel);
+                    self.input = Input::None;
+                    return Some(Effect::Launch(cmd));
+                }
+                KeyCode::Esc => self.input = Input::None,
+                _ => {}
+            },
             Input::Quit => {
                 if code == KeyCode::Char('q') {
                     return Some(Effect::Quit);
@@ -956,7 +1136,12 @@ mod tests {
         a.col = 0;
         press(&mut a, "ld");
         assert_eq!(menu(&a), [("any", 3), ("openai", 2), ("anthropic", 1)]);
-        press(&mut a, "j");
+        press(&mut a, "G");
+        assert!(matches!(a.input, Input::Menu { sel: 2, .. }), "G to the last entry");
+        press(&mut a, "gg");
+        assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "gg to the first");
+        press(&mut a, "2gg");
+        assert!(matches!(a.input, Input::Menu { sel: 1, .. }), "a count picks the entry");
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
@@ -992,21 +1177,24 @@ mod tests {
     }
 
     #[test]
-    fn x_launches_the_via_filter_harness_else_the_first() {
+    fn x_launches_the_only_harness_or_asks_which() {
         let mut a = app();
         for m in &mut a.data.models {
             let via = m.via.clone();
             m.offers[0].via = via;
         }
         let cmd = |h: &str, id: &str| Some(Effect::Launch(vec![h.into(), "--model".into(), id.into()]));
-        assert_eq!(press(&mut a, "x"), cmd("codex", "gpt55"), "first row, gpt55, first in Via");
-        a.via = vec!["opencode".into()];
-        assert_eq!(press(&mut a, "x"), cmd("opencode", "p/gpt55"), "opencode takes provider/model");
+        assert_eq!(press(&mut a, "x"), None, "gpt55 has codex and opencode");
+        assert!(matches!(&a.input, Input::Harness { cmds, sel: 0 } if cmds.len() == 2));
+        assert_eq!(press(&mut a, "jj"), None, "j stops at the last");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.input, Input::None, "esc cancels");
+        press(&mut a, "xj");
+        assert_eq!(code(&mut a, KeyCode::Enter), cmd("opencode", "p/gpt55"), "opencode takes provider/model");
+        assert_eq!(a.input, Input::None);
         press(&mut a, "j");
-        assert_eq!(press(&mut a, "x"), cmd("claude", "opus5"), "a filter the model lacks falls back");
+        assert_eq!(press(&mut a, "x"), cmd("claude", "opus5"), "one harness launches at once");
         press(&mut a, "a");
-        a.via.clear();
-        a.rebuild();
         let llama = a.rows.iter().position(|&r| a.data.models[r].key == "llama4").unwrap();
         a.select(llama);
         assert_eq!(press(&mut a, "x"), None);
@@ -1032,6 +1220,16 @@ mod tests {
         assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "no match leaves only any");
         code(&mut a, KeyCode::Enter);
         assert!(a.dev.is_empty());
+    }
+
+    #[test]
+    fn search_forgives_a_typo_only_when_nothing_matches() {
+        let mut a = app();
+        press(&mut a, "/opsu");
+        assert_eq!((keys(&a), a.typos), (vec!["opus5"], true));
+        ctrl(&mut a, 'u');
+        press(&mut a, "mini");
+        assert_eq!((keys(&a), a.typos), (vec!["mini"], false));
     }
 
     #[test]
@@ -1077,6 +1275,11 @@ mod tests {
         alt(&mut a, 'd');
         assert_eq!(note(&a), (String::new(), 0), "alt-d drops the word after");
         press(&mut a, "one two");
+        let ctrl_arrow = |a: &mut App, c| a.key(KeyEvent::new(c, KeyModifiers::CONTROL));
+        ctrl_arrow(&mut a, KeyCode::Left);
+        assert_eq!(note(&a), ("one two".into(), 4), "ctrl-left to the word start");
+        ctrl_arrow(&mut a, KeyCode::Right);
+        assert_eq!(note(&a), ("one two".into(), 7), "ctrl-right to the word end");
         ctrl(&mut a, 'b');
         ctrl(&mut a, 'b');
         ctrl(&mut a, 'u');
@@ -1192,11 +1395,43 @@ mod tests {
         press(&mut a, "3gg");
         assert_eq!(a.current().unwrap().key, "llama4");
         press(&mut a, "99j");
+        assert_eq!(a.current().unwrap().key, "mini", "a move stops at the end");
+        press(&mut a, "j");
+        assert_eq!(a.current().unwrap().key, "gpt55", "and wraps from there");
+        press(&mut a, "k");
         assert_eq!(a.current().unwrap().key, "mini");
         ctrl(&mut a, 'u');
         assert_eq!(a.current().unwrap().key, "gpt55");
         press(&mut a, &format!("{NCOLS}l"));
         assert_eq!(a.col, PRICE, "counted column moves wrap around");
+    }
+
+    #[test]
+    fn column_jumps() {
+        let mut a = app();
+        a.col = 0;
+        let mut cols = vec![];
+        for _ in 0..4 {
+            press(&mut a, "w");
+            cols.push(a.col);
+        }
+        press(&mut a, "w");
+        assert_eq!((cols, a.col), (vec![PRICE, ECI, VIA, NOTES], 0), "w wraps from the last column");
+        press(&mut a, "b");
+        assert_eq!(a.col, VIA, "b wraps from the first");
+        a.col = ECI + 1;
+        press(&mut a, "b");
+        assert_eq!(a.col, ECI, "b to the start of the group first");
+        press(&mut a, "b");
+        assert_eq!(a.col, PRICE);
+        press(&mut a, "0");
+        assert_eq!(a.col, 0);
+        press(&mut a, "2w");
+        assert_eq!(a.col, ECI);
+        press(&mut a, "$");
+        assert_eq!(a.col, NOTES);
+        press(&mut a, "a10j");
+        assert_eq!((a.col, a.current().unwrap().key.as_str()), (NOTES, "mini"), "0 inside a count");
     }
 
     #[test]
@@ -1219,18 +1454,6 @@ mod tests {
 
     #[test]
     fn frontier_keeps_cheapest_per_quality() {
-        let mut a = app();
-        a.col = ECI;
-        press(&mut a, "alp");
-        assert_eq!(a.frontier, Some(a.col));
-        assert_eq!((a.sort_col, a.descending), (PRICE, false), "cheapest first, each row down better");
-        // mini (60 @ 1) beats llama4 (40 @ 1); gpt55 (80 @ 10) is the best, so it stays.
-        assert_eq!(keys(&a), ["mini", "gpt55"]);
-        press(&mut a, "p");
-        assert_eq!(a.frontier, None);
-        press(&mut a, "hhhhp");
-        assert_eq!(a.frontier, None, "no frontier on a price column");
-        assert!(a.status.starts_with("p needs a benchmark column: ECI, Coding"), "{}", a.status);
         let models = [model("fable", true, Some(95.4), 20.0), model("opus", true, Some(95.2), 10.0)];
         let coding = |m: &Model| task_score(m, "coding");
         let front = |ms: &[Model]| frontier(&(0..ms.len()).collect::<Vec<_>>(), |i| &ms[i], coding);
@@ -1243,11 +1466,16 @@ mod tests {
     fn search_filters_and_esc_clears() {
         let mut a = app();
         press(&mut a, "/opus");
-        assert_eq!(a.input, Input::Search { cur: 4 });
+        assert_eq!(a.input, Input::Search { cur: 4, was: String::new() });
         assert_eq!(a.rows.len(), 1);
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.input, Input::None);
         assert_eq!(a.query, "opus");
+        press(&mut a, "/");
+        assert_eq!((a.query.as_str(), a.rows.len()), ("", 3), "/ again starts a new search");
+        press(&mut a, "gpt");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.query.as_str(), a.rows.len()), ("opus", 1), "esc drops the edit, not the filter");
         assert_eq!(code(&mut a, KeyCode::Esc), None, "esc clears the filter first");
         assert_eq!(a.rows.len(), 3);
         assert_eq!(code(&mut a, KeyCode::Esc), None, "only q quits");
@@ -1255,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn picking_a_task_ranks_the_table() {
+    fn picking_a_task_shows_its_frontier() {
         let mut a = app();
         press(&mut a, "tjj");
         assert_eq!(a.task_cur, 2);
@@ -1268,12 +1496,22 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.view, View::Table);
         assert_eq!(a.task.map(|t| t.name), Some("coding"));
-        assert_eq!(keys(&a), ["gpt55", "mini"], "best coder first, models without the score dropped");
+        assert_eq!(keys(&a), ["gpt55", "mini"], "best first, each row down cheaper");
+        assert_eq!((a.sort_col, a.descending), (PRICE, true));
         assert_eq!(a.selected(), 0);
-        assert!(a.status.starts_with("best for coding: gpt55"), "{}", a.status);
+        assert!(a.status.starts_with("coding per price: gpt55 best, mini cheapest"), "{}", a.status);
         press(&mut a, "c");
         assert!(a.task.is_none());
-        assert_eq!(a.rows.len(), 3, "c restores the column sort");
+        assert_eq!(a.rows.len(), 3);
+        assert_eq!((a.sort_col, a.descending), (PRICE, false), "c restores the default sort");
+    }
+
+    #[test]
+    fn a_task_keeps_the_best_of_each_price_level() {
+        let mut a = app();
+        a.data.models.push(model("flash", true, Some(70.0), 1.5));
+        let front: Vec<&str> = a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.as_str()).collect();
+        assert_eq!(front, ["flash", "gpt55"], "flash beats mini at about the same price");
     }
 
     #[test]
@@ -1286,7 +1524,7 @@ mod tests {
         assert_eq!(front(&a), ["mini"]);
         press(&mut a, "t");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(keys(&a), ["mini"], "nor does the task ranking");
+        assert_eq!(keys(&a), ["mini"], "nor does the table");
         press(&mut a, "c");
         a.store.toggle_excluded("gpt55");
         assert_eq!(front(&a), ["mini", "gpt55"], "e again brings it back");
@@ -1327,11 +1565,34 @@ mod tests {
         press(&mut a, "Mc");
         assert!(a.marked.is_empty() && !a.only_marked, "c clears the marks too");
         assert_eq!(a.rows.len(), 3);
-        press(&mut a, "ggmmGf");
+        press(&mut a, "Gfggmm");
         press(&mut a, "MF");
         assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "m and F together: marked or favorite");
         press(&mut a, "F");
         assert_eq!(keys(&a), ["gpt55", "opus5"], "F off again: marked only");
+    }
+
+    #[test]
+    fn visual_ranges_and_marks_act_on_groups() {
+        let mut a = app();
+        press(&mut a, "Vj");
+        assert_eq!(a.visual_range(), Some(0..=1));
+        assert_eq!(press(&mut a, "e"), Some(Effect::Save));
+        assert!(a.store.is_excluded("gpt55") && a.store.is_excluded("opus5") && !a.store.is_excluded("mini"));
+        assert_eq!((a.visual, a.status.as_str()), (None, "excluded 2 models"), "an action ends the range");
+        press(&mut a, "ggVje");
+        assert!(!a.store.is_excluded("gpt55") && !a.store.is_excluded("opus5"), "all had it: cleared");
+        press(&mut a, "GVk");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.visual, a.rows.len()), (None, 3), "esc cancels the range only");
+        press(&mut a, "ggVjm");
+        assert_eq!(a.marked, ["gpt55", "opus5"]);
+        press(&mut a, "Gf");
+        assert!(a.store.is_fav("gpt55") && a.store.is_fav("opus5") && !a.store.is_fav("mini"), "f on the marks");
+        press(&mut a, "ggVjm");
+        assert!(a.marked.is_empty(), "m on an all-marked range unmarks it");
+        press(&mut a, "ggVGC");
+        assert_eq!((a.view, a.marked.len()), (View::Compare, 3), "C compares the range");
     }
 
     #[test]
@@ -1361,6 +1622,60 @@ mod tests {
         a.refreshed(Err("offline".into()));
         assert_eq!(a.status, "refresh failed: offline");
         assert_eq!(press(&mut a, "r"), Some(Effect::Refresh));
+    }
+
+    #[test]
+    fn mouse_selects_sorts_and_scrolls() {
+        let mut a = app();
+        assert_eq!(a.mouse(Mouse::Row(2)), None);
+        assert_eq!(a.selected(), 2);
+        assert_eq!(a.mouse(Mouse::Row(2)), None);
+        assert_eq!(a.view, View::Detail);
+        assert_eq!(a.mouse(Mouse::Scroll(3)), None);
+        assert_eq!(a.scroll, 3);
+        assert_eq!(a.mouse(Mouse::Row(0)), None, "clicks do nothing behind an overlay");
+        assert_eq!(a.view, View::Detail);
+        code(&mut a, KeyCode::Esc);
+        a.mouse(Mouse::Scroll(-1));
+        assert_eq!(a.selected(), 1);
+        assert_eq!(a.mouse(Mouse::Row(9)), None, "past the end is ignored");
+        assert_eq!(a.selected(), 1);
+        a.mouse(Mouse::Header(1));
+        assert_eq!((a.col, a.sort_col, a.descending), (1, 1, false));
+        a.mouse(Mouse::Header(1));
+        assert!(a.descending);
+        let sel = a.selected();
+        press(&mut a, "/");
+        a.mouse(Mouse::Scroll(1));
+        assert_eq!(a.selected(), sel, "the wheel does nothing while typing");
+        code(&mut a, KeyCode::Esc);
+        a.mouse(Mouse::Cols(2));
+        assert_eq!(a.col, 3);
+        a.mouse(Mouse::Cols(-3));
+        assert_eq!(a.col, 0);
+        a.mouse(Mouse::Menu(0));
+        assert_eq!(a.input, Input::None, "Model has no dropdown");
+        a.mouse(Mouse::Menu(1));
+        assert!(matches!(a.input, Input::Menu { col: 1, .. }));
+        a.mouse(Mouse::Scroll(1));
+        a.mouse(Mouse::Header(0));
+        assert_eq!((a.input == Input::None, a.col), (true, 1), "a click outside closes the dropdown");
+        a.mouse(Mouse::Menu(1));
+        assert_eq!(a.mouse(Mouse::Item(9)), None);
+        assert!(matches!(a.input, Input::Menu { .. }), "past the end is ignored");
+        a.mouse(Mouse::Item(2));
+        assert!(matches!(a.input, Input::Menu { .. }), "a click keeps a multi-choice dropdown open");
+        assert_eq!(a.dev, ["anthropic"]);
+        a.mouse(Mouse::Item(1));
+        assert_eq!(a.dev, ["anthropic", "openai"]);
+        a.mouse(Mouse::Item(2));
+        assert_eq!(a.dev, ["openai"]);
+        a.mouse(Mouse::Row(0));
+        assert_eq!((a.input == Input::None, a.dev.as_slice()), (true, &["openai".to_string()][..]));
+        a.mouse(Mouse::Menu(PRICE));
+        a.mouse(Mouse::Item(2));
+        assert_eq!(a.input, Input::None, "Price is single-choice: a click picks and closes");
+        assert_eq!(a.bounds, [(PRICE, f64::NEG_INFINITY, LEVELS[1])]);
     }
 
     #[test]

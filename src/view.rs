@@ -1,8 +1,9 @@
 //! Text shared by the CLI and the TUI: number formatting, the detail page, the comparison grid.
 
-use crate::data::{Data, Model, Offer};
+use crate::data::{Data, Model, Offer, norm};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
+use std::ops::Range;
 
 pub fn money(x: f64) -> String {
     match x {
@@ -68,12 +69,29 @@ pub fn frontier<'m, T: Copy>(
 }
 
 /// A task's price frontier, cheapest first: each entry costs more and scores higher, the last
-/// being the best model for the task. Models without a price or a score are left out.
+/// being the best model for the task. Each price level keeps only its best entry, since models
+/// that close in price are not worth choosing between. Models without a price or a score are
+/// left out.
 pub fn task_frontier<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task) -> Vec<(&'a Model, f64)> {
     let ranked = fit::rank(models, t);
     let mut v = frontier(&ranked, |(m, _)| m, |m| fit::fit(m, t));
-    v.sort_by(|a, b| a.0.cost().partial_cmp(&b.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
+    // Dearest first so dedup keeps the best of each level, then back to cheapest first.
+    v.sort_by(|a, b| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
+    v.dedup_by_key(|(m, _)| level(m.cost().unwrap_or(0.0)));
+    v.reverse();
     v
+}
+
+/// `--tier` names and their score floors. A tier picks the cheapest frontier entry at or
+/// above its floor, scores compared as shown like the frontier does, or the best entry when
+/// none reaches it; `high` always picks the best.
+// ponytail: fixed floors on a percentile, tune them if the picks look off.
+pub const TIERS: [(&str, f64); 3] = [("low", 50.0), ("mid", 75.0), ("high", f64::INFINITY)];
+
+/// The entry of a cheapest-first frontier that `tier` picks; `None` for an empty frontier.
+pub fn pick<'a, T>(front: &'a [(T, f64)], tier: &str) -> Option<&'a (T, f64)> {
+    let floor = TIERS.iter().find(|t| t.0 == tier).map_or(f64::INFINITY, |t| t.1);
+    front.iter().find(|(_, s)| s.round() >= floor).or(front.last())
 }
 
 /// `$1.5`, or `free`.
@@ -97,6 +115,65 @@ pub fn via(v: &[String]) -> String {
 
 fn or_dash(s: &str) -> &str {
     if s.is_empty() { "-" } else { s }
+}
+
+/// Where every word of the search `q` starts a word of one of `fields`, any case, punctuation
+/// ignored: char ranges in each field, for highlighting. "opus 4.5", "anthropic opus" and
+/// "gpt5" match a name and developer; "mini" misses Gemini. None when a word misses them all.
+/// With `typos`, a word of 3+ letters that starts no word may be one slip off one ("opsu").
+pub fn hits<const N: usize>(q: &str, fields: [&str; N], typos: bool) -> Option<[Vec<Range<usize>>; N]> {
+    let mut out = [(); N].map(|_| vec![]);
+    for t in q.split_whitespace().map(norm).filter(|t| !t.is_empty()) {
+        let find = |typo| fields.iter().enumerate().find_map(|(i, s)| Some((i, word_hit(s, &t, typo)?)));
+        let fuzzy = typos && t.len() >= 3 && t.bytes().all(|b| b.is_ascii_alphabetic());
+        let (i, r) = find(false).or_else(|| fuzzy.then(|| find(true)).flatten())?;
+        out[i].push(r);
+    }
+    Some(out)
+}
+
+/// The chars of `s` that normalized `t` covers where it starts a word of `s`: at the beginning,
+/// after a space or punctuation, or where letters turn to digits or back ("Qwen3", "4o").
+/// With `typo`, what it covers is instead one slip away from `t`, see `one_typo`.
+fn word_hit(s: &str, t: &str, typo: bool) -> Option<Range<usize>> {
+    // `s` normalized, the char index in `s` of each of its bytes, and where its words start.
+    let (mut n, mut pos, mut starts, mut prev) = (String::new(), vec![], vec![], ' ');
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_alphanumeric() {
+            let c = c.to_ascii_lowercase();
+            if !prev.is_ascii_alphanumeric() || prev.is_ascii_digit() != c.is_ascii_digit() {
+                starts.push(n.len());
+            }
+            n.push(c);
+            pos.push(i);
+        }
+        prev = c;
+    }
+    let (at, len) = if typo {
+        let (n, t) = (n.as_bytes(), t.as_bytes());
+        starts.into_iter().find_map(|k| {
+            [t.len(), t.len() + 1, t.len() - 1]
+                .into_iter()
+                .find(|&l| k + l <= n.len() && one_typo(&n[k..k + l], t))
+                .map(|l| (k, l))
+        })?
+    } else {
+        (starts.into_iter().find(|&k| n[k..].starts_with(t))?, t.len())
+    };
+    Some(pos[at]..pos[at + len - 1] + 1)
+}
+
+/// `a` is `b` with one letter wrong, missing, extra, or swapped with the next.
+fn one_typo(a: &[u8], b: &[u8]) -> bool {
+    let p = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let (a, b) = (&a[p..], &b[p..]);
+    match (a.len(), b.len()) {
+        (0, 0) => false,
+        (x, y) if x == y => a[1..] == b[1..] || (x >= 2 && a[..2] == [b[1], b[0]] && a[2..] == b[2..]),
+        (x, y) if x == y + 1 => a[1..] == *b,
+        (x, y) if x + 1 == y => *a == b[1..],
+        _ => false,
+    }
 }
 
 /// Models the user should see: the ones they have access to, unless `all` or none is available.
@@ -137,7 +214,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         format!("  url:        {}", m.url),
         format!("  note:       {}", store.note(&m.key).unwrap_or("-")),
         String::new(),
-        format!("  ECI {}   best for: {}", score(m.eci), or_dash(&fit::best_for(m).join(", "))),
+        format!("  ECI {}", score(m.eci)),
         "  task fit (percentile vs all evaluated models):".into(),
     ];
     for t in TASKS {
@@ -256,6 +333,51 @@ fn best(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiers_pick_the_cheapest_good_enough() {
+        let front = [("free", 30.0), ("mini", 60.0), ("sonnet", 74.8), ("opus", 90.0)];
+        let key = |t| pick(&front, t).map(|e| e.0);
+        assert_eq!(key("low"), Some("mini"));
+        assert_eq!(key("mid"), Some("sonnet"), "74.8 shows as 75");
+        assert_eq!(key("high"), Some("opus"));
+        assert_eq!(pick(&front[..2], "mid").map(|e| e.0), Some("mini"), "none reaches it: the best");
+        assert_eq!(pick::<&str>(&[], "low"), None);
+    }
+
+    #[test]
+    fn search_words_start_words_of_the_name_or_developer() {
+        let matches = |q, f| hits(q, f, false).is_some();
+        let (opus, pro, mini, qwen) = (
+            ["Claude Opus 4.5", "anthropic"],
+            ["Gemini 3.1 Pro", "google"],
+            ["GPT-5 mini", "openai"],
+            ["Qwen3-235B-A22B", "alibaba"],
+        );
+        for q in ["opus", "anthropic opus", "opus claude", "OPUS 4.5", "claudeopus45", ""] {
+            assert!(matches(q, opus), "{q}");
+        }
+        assert!(matches("gemini pro", pro) && matches("gpt5", mini) && matches("qwen 3", qwen));
+        assert!(matches("235b", qwen) && matches("mini", mini));
+        assert!(!matches("mini", pro), "mini is not a word of Gemini");
+        assert!(!matches("laude", opus) && !matches("opus sonnet", opus));
+        assert_eq!(hits("4.5 anthropic", opus, false), Some([vec![12..15], vec![0..9]]), "the dot sits inside the hit");
+        assert_eq!(hits("a22b", qwen, false), Some([vec![11..15], vec![]]));
+    }
+
+    #[test]
+    fn typos_are_one_slip_in_a_word_of_letters() {
+        let (opus, son) = (["Claude Opus 4.5", "anthropic"], ["Claude Sonnet 4.5", "anthropic"]);
+        let typo = |q, f| hits(q, f, true);
+        for q in ["opsu", "anthorpic opus", "claud sonet", "sonnnet", "snonet", "sonbet", "sonen"] {
+            assert!(typo(q, son).is_some() || typo(q, opus).is_some(), "{q}");
+        }
+        assert_eq!(typo("sonet", son), Some([vec![7..13], vec![]]), "the whole word lights up");
+        assert_eq!(typo("opsu", opus), Some([vec![7..11], vec![]]));
+        assert!(hits("opsu", opus, false).is_none(), "only when asked");
+        assert!(typo("4.6", opus).is_none() && typo("op", son).is_none(), "digits and short words stay exact");
+        assert!(typo("sonnet", opus).is_none() && typo("osup", opus).is_none(), "one slip, not two");
+    }
 
     #[test]
     fn formats() {

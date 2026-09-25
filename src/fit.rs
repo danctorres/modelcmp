@@ -192,18 +192,6 @@ pub fn fit(m: &Model, t: &Task) -> Option<f64> {
     if ok { m.fit.get(t.name).copied() } else { None }
 }
 
-/// Top two benchmark-backed tasks the model is strong at (≥60th percentile).
-pub fn best_for(m: &Model) -> Vec<&'static str> {
-    let mut v: Vec<(&str, f64)> = TASKS
-        .iter()
-        .filter(|t| !t.benches.is_empty() || t.name == "value")
-        .filter_map(|t| Some((t.name, fit(m, t)?)))
-        .filter(|(_, s)| *s >= 60.0)
-        .collect();
-    v.sort_by(|a, b| b.1.total_cmp(&a.1));
-    v.into_iter().take(2).map(|(n, _)| n).collect()
-}
-
 /// Models ranked for a task, best first; models without data for the task are dropped.
 pub fn rank<'a>(models: impl Iterator<Item = &'a Model>, t: &Task) -> Vec<(&'a Model, f64)> {
     let mut v: Vec<_> = models.filter_map(|m| Some((m, fit(m, t)?))).collect();
@@ -242,7 +230,6 @@ mod tests {
         let models = [mk("a", &p["a"], true), mk("b", &p["b"], false)];
         let r = rank(models.iter(), task("coding").unwrap());
         assert_eq!(r[0].0.key, "b");
-        assert_eq!(best_for(&models[0]), vec!["agentic"]);
         // agentic needs tool calling; b lacks it
         assert!(fit(&models[1], task("agentic").unwrap()).is_none());
     }

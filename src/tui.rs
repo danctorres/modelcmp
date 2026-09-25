@@ -7,14 +7,17 @@
 //! terminal themes modelcmp too, and nothing paints a background over a transparent one.
 
 use crate::app::{
-    App, BEST, COLS, Effect, HELP, Input, NCOLS, NOTES, PRICE, VIA, View, col_about, col_name, has_menu, menu_rows,
+    App, COLS, Effect, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, col_about, col_name, has_menu, menu_rows,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
-use crate::view::{compare_rows, detail_lines, level, money, priced, truncate, verdict};
+use crate::view::{compare_rows, detail_lines, hits, level, money, priced, truncate, verdict};
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -41,7 +44,9 @@ pub fn run(force: bool) -> Result<(), String> {
         rx = Some(spawn_refresh());
     }
     let mut terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = event_loop(&mut app, &mut terminal, rx);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     res
 }
@@ -67,10 +72,16 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
         let mut wait = timeout;
         while event::poll(wait).map_err(|e| e.to_string())? {
             wait = Duration::ZERO;
-            if let Event::Key(k) = event::read().map_err(|e| e.to_string())?
-                && k.kind == KeyEventKind::Press
+            let effect = match event::read().map_err(|e| e.to_string())? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
+                Event::Mouse(m) => {
+                    let size = terminal.size().map_err(|e| e.to_string())?;
+                    hit(app, Rect::new(0, 0, size.width, size.height), m).and_then(|m| app.mouse(m))
+                }
+                _ => None,
+            };
             {
-                match app.key(k) {
+                match effect {
                     Some(Effect::Quit) => return Ok(()),
                     Some(Effect::Save) => {
                         if let Err(e) = app.store.save() {
@@ -89,16 +100,10 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                     }
                     Some(Effect::Refresh) => rx = Some(spawn_refresh()),
                     Some(Effect::Launch(cmd)) => {
-                        // The harness gets the whole terminal; input is only read on this thread, so nothing competes for it.
-                        ratatui::restore();
-                        let res = Command::new(&cmd[0]).args(&cmd[1..]).status();
-                        *terminal = ratatui::init();
-                        terminal.clear().map_err(|e| e.to_string())?;
                         let line = cmd.join(" ");
-                        app.status = match res {
-                            Ok(s) if s.success() => format!("back from {line}"),
-                            Ok(s) => format!("{line} exited with {s}"),
-                            Err(e) => format!("could not run {line}: {e}"),
+                        app.status = match new_terminal(&cmd) {
+                            Ok(()) => format!("opened {line} in a new terminal"),
+                            Err(e) => format!("could not open a terminal for {line}: {e}; set $TERMINAL"),
                         };
                     }
                     None => {}
@@ -117,6 +122,96 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
             dirty = true;
         }
     }
+}
+
+/// What a mouse event lands on, with the same geometry `draw` uses: the frame's inner area
+/// holds the header and then the rows from `app.table.offset()`.
+fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
+    match m.kind {
+        MouseEventKind::ScrollDown => return Some(Mouse::Scroll(3)),
+        MouseEventKind::ScrollUp => return Some(Mouse::Scroll(-3)),
+        MouseEventKind::ScrollRight => return Some(Mouse::Cols(1)),
+        MouseEventKind::ScrollLeft => return Some(Mouse::Cols(-1)),
+        MouseEventKind::Down(MouseButton::Left | MouseButton::Right) => {}
+        _ => return None,
+    }
+    if area.height < 4 || area.width < 4 {
+        return None;
+    }
+    let pos = ratatui::layout::Position::new(m.column, m.row);
+    let inner = Rect::new(1, 1, area.width - 2, area.height - 3);
+    let l = layout(inner.width, app);
+    // An open list first: a click on an entry acts on it, on its frame nothing, and any click
+    // outside closes it.
+    let list = match &app.input {
+        Input::Menu { col, items, sel, query, .. } => {
+            let rows = menu_rows(items, query);
+            menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, *sel, rows.len()))
+        }
+        Input::Harness { cmds, sel } => {
+            Some((overlay_rect(area, HARNESS_TITLE, &harness_lines(cmds, *sel)), *sel, cmds.len()))
+        }
+        _ => None,
+    };
+    if let Some((rect, sel, len)) = list {
+        if !rect.contains(pos) {
+            return Some(Mouse::Header(0));
+        }
+        let inner = rect.inner(ratatui::layout::Margin::new(1, 1));
+        if !inner.contains(pos) {
+            return None;
+        }
+        let top = sel.saturating_sub(inner.height as usize - 1);
+        let k = top + (m.row - inner.y) as usize;
+        return (k < len).then_some(Mouse::Item(k));
+    }
+    if !inner.contains(pos) {
+        return None;
+    }
+    if m.row > inner.y {
+        return Some(Mouse::Row(app.table.offset() + (m.row - inner.y - 1) as usize));
+    }
+    let x = m.column - inner.x;
+    let dev_x = l.name_x + l.name_w + GAP;
+    let (col, cx, w) = if x < dev_x {
+        (0, l.name_x, l.name_w)
+    } else if x < dev_x + l.dev_w {
+        (1, dev_x, l.dev_w)
+    } else if let Some(&(i, cx, w)) = l.cols.iter().find(|&&(_, cx, w)| (cx..cx + w).contains(&x)) {
+        (i + 2, cx, w)
+    } else if let Some((vx, w)) = l.via.filter(|&(vx, w)| (vx..vx + w).contains(&x)) {
+        (VIA, vx, w)
+    } else if let Some((nx, w)) = l.notes.filter(|&(nx, w)| (nx..nx + w).contains(&x)) {
+        (NOTES, nx, w)
+    } else {
+        return None;
+    };
+    // The ▾ ends a left-aligned text header ("Dev▼ ▾") and is the last cell of a numeric one.
+    let arrow = if col == 1 || col == VIA { cx + 4 + u16::from(app.sort_col == col) } else { cx + w - 1 };
+    Some(if has_menu(col) && x >= arrow { Mouse::Menu(col) } else { Mouse::Header(col) })
+}
+
+/// Start `cmd` in a new terminal window here, without waiting: Windows Terminal under WSL,
+/// else `$TERMINAL -e`, else x-terminal-emulator.
+fn new_terminal(cmd: &[String]) -> std::io::Result<()> {
+    let mut term = if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") {
+        // A new WSL session starts bare, so a login shell sets up PATH and keys as for a typed
+        // command. Model ids hold no `;`, which Windows Terminal would split the command on.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let line: Vec<String> = cmd.iter().map(|a| format!("'{}'", a.replace('\'', r"'\''"))).collect();
+        let mut c = Command::new("wt.exe");
+        c.args(["new-tab", "wsl.exe", "-d", &distro, "--cd"]).arg(std::env::current_dir()?);
+        c.args(["-e", &shell, "-lic", &format!("exec {}", line.join(" "))]);
+        c
+    } else {
+        let mut c = Command::new(std::env::var("TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".into()));
+        c.arg("-e").args(cmd);
+        c
+    };
+    let mut child = term.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    // Reap it whenever it exits.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// Pipe `text` into the first clipboard tool that runs.
@@ -145,8 +240,12 @@ const NAME_MIN: u16 = 16;
 /// column picked with `h l`; `u`, `C` and `c` show once they would do something.
 fn hints(app: &App) -> Vec<&'static str> {
     match app.view {
+        View::Table if app.visual.is_some() => {
+            vec!["j k G extend", "m mark", "e exclude", "f fav", "C compare", "esc cancel"]
+        }
         View::Table => {
             let mut v = vec![
+                "V select",
                 "m mark",
                 "f fav",
                 "e exclude",
@@ -173,7 +272,6 @@ fn hints(app: &App) -> Vec<&'static str> {
                 || !app.bounds.is_empty()
                 || !app.dev.is_empty()
                 || !app.via.is_empty()
-                || app.frontier.is_some()
                 || app.task.is_some()
                 || app.only_marked
                 || app.favs
@@ -199,6 +297,8 @@ const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
 const MARK: Color = Color::Magenta;
 const FAV: Color = Color::Yellow;
+/// What a search matched, as the filter in the status bar.
+const MATCH: Color = Color::Yellow;
 /// Each developer and harness gets a stable colour from these; the five harness names all differ.
 const DEVS: [Color; 5] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green];
 /// Price levels (`view::LEVELS`) from free to the most expensive.
@@ -267,6 +367,9 @@ fn draw(app: &mut App, f: &mut Frame) {
         let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
         overlay(buf, area, "quit?", lines, &mut 0);
     }
+    if let Input::Harness { cmds, sel } = &app.input {
+        overlay(buf, area, HARNESS_TITLE, harness_lines(cmds, *sel), &mut 0);
+    }
     if let Some(x) = cursor {
         f.set_cursor_position((x, bar.y));
     }
@@ -275,23 +378,17 @@ fn draw(app: &mut App, f: &mut Frame) {
 /// Column layout relative to the table's left edge. A numeric column is as wide as its header
 /// plus the sort arrow or its widest value, so neighbours always sit `GAP` apart whatever the filter.
 struct Layout {
+    /// Where Model starts: right of the row numbers and the ★● marks.
+    name_x: u16,
     name_w: u16,
     dev_w: u16,
     /// The numeric columns that fit: (index into `COLS`, x, width).
     cols: Vec<(usize, u16, u16)>,
-    /// Where the "Via", "Best for" and "Notes" columns start and their widths, if there is room.
+    /// Where the "Via" and "Notes" columns start and their widths, if there is room.
     via: Option<(u16, u16)>,
-    best: Option<(u16, u16)>,
     notes: Option<(u16, u16)>,
     /// The first column right of Dev shown (0 is Price, the last Notes), for `App::hscroll`.
     first: usize,
-}
-
-/// Width of the "Best for" column: room for the two longest task names `fit::best_for` can list.
-fn best_w() -> u16 {
-    let mut n: Vec<usize> = TASKS.iter().map(|t| t.name.len()).collect();
-    n.sort_unstable();
-    (n.iter().rev().take(2).sum::<usize>() + 2) as u16
 }
 
 fn layout(width: u16, app: &App) -> Layout {
@@ -307,12 +404,14 @@ fn layout(width: u16, app: &App) -> Layout {
         ms.iter().map(|m| m.via.iter().map(|v| v.len() + 1).sum::<usize>()).max().unwrap_or(0).clamp(6, 24) as u16;
     let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(str::len).max().unwrap_or(0).clamp(6, 40) as u16;
     let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
+    // Row numbers as wide as the last one, a space, then the ★● marks.
+    let name_x = app.rows.len().max(1).to_string().len() as u16 + 3;
     // The columns right of Dev scroll sideways: only as far as it takes to show the selected
     // one, keeping the last position otherwise. Model and Dev stay put.
-    let ws: Vec<u16> = widths.into_iter().chain([via_w, best_w(), notes_w]).collect();
+    let ws: Vec<u16> = widths.into_iter().chain([via_w, notes_w]).collect();
     let fixed: u16 = ws.iter().map(|w| w + GAP).sum::<u16>() + dev_w + GAP;
-    let name_w = width.saturating_sub(2 + fixed).clamp(NAME_MIN, longest.max(NAME_MIN));
-    let mut x = 2 + name_w + GAP + dev_w + GAP;
+    let name_w = width.saturating_sub(name_x + fixed).clamp(NAME_MIN, longest.max(NAME_MIN));
+    let mut x = name_x + name_w + GAP + dev_w + GAP;
     let room = width.saturating_sub(x) + GAP;
     let first = match app.col.checked_sub(2) {
         Some(s) => {
@@ -325,7 +424,7 @@ fn layout(width: u16, app: &App) -> Layout {
         }
         None => 0,
     };
-    let (mut cols, mut tail) = (Vec::with_capacity(COLS.len()), [None; 3]);
+    let (mut cols, mut tail) = (Vec::with_capacity(COLS.len()), [None; 2]);
     for (k, &w) in ws.iter().enumerate().skip(first) {
         if x + w > width {
             break;
@@ -336,7 +435,7 @@ fn layout(width: u16, app: &App) -> Layout {
         }
         x += w + GAP;
     }
-    Layout { name_w, dev_w, cols, via: tail[0], best: tail[1], notes: tail[2], first }
+    Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first }
 }
 
 /// Header plus as many rows as fit in `area`, scrolled so the selection stays in view.
@@ -344,7 +443,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
     if area.height == 0 {
         return;
     }
-    let Layout { name_w, dev_w, cols, via, best, notes, first } = layout(area.width, app);
+    let Layout { name_x, name_w, dev_w, cols, via, notes, first } = layout(area.width, app);
     app.hscroll = first;
     let arrow = |i: usize| match i == app.sort_col {
         true if app.descending => "▼",
@@ -355,8 +454,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
         true => fg(ACCENT).add_modifier(BOLD | Modifier::REVERSED),
         false => fg(ACCENT).add_modifier(BOLD),
     };
-    let (y, name_x, dev_x) = (area.y, area.x + 2, area.x + 2 + name_w + GAP);
+    let (num_w, marks_x) = (name_x as usize - 3, area.x + name_x - 2);
+    let (y, name_x, dev_x) = (area.y, area.x + name_x, area.x + name_x + name_w + GAP);
     let (nw, dw) = (name_w as usize, dev_w as usize);
+    buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
     buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
     buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
     if first > 0 {
@@ -370,10 +471,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
     if let Some((x, w)) = via {
         buf.set_stringn(area.x + x, y, format!("Via{} ▾", arrow(VIA)), w as usize, header(VIA));
     }
-    for (c, at) in [(BEST, best), (NOTES, notes)] {
-        if let Some((x, w)) = at {
-            buf.set_stringn(area.x + x, y, format!("{}{}", col_name(c), arrow(c)), w as usize, header(c));
-        }
+    if let Some((x, w)) = notes {
+        buf.set_stringn(area.x + x, y, format!("{}{}", col_name(NOTES), arrow(NOTES)), w as usize, header(NOTES));
     }
 
     let height = area.height as usize - 1;
@@ -382,21 +481,24 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
     *app.table.offset_mut() = top;
     let ext = app.ext;
     let any = app.data.models.iter().any(|m| m.available);
+    let range = app.visual_range().unwrap_or(sel..=sel);
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + 1 + (k - top) as u16;
         let m = &app.data.models[r];
-        // The selection is a reverse-video bar; colours stay off it so it reads as one.
-        let base = if k == sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
-        let tint = |c: Color| if k == sel { base } else { fg(c) };
+        // The selection, or the visual range, is a reverse-video bar; colours stay off it so it
+        // reads as one.
+        let on = range.contains(&k);
+        let base = if on { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+        let tint = |c: Color| if on { base } else { fg(c) };
         buf.set_style(Rect { y, height: 1, ..area }, base);
+        buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
         if app.store.is_fav(&m.key) {
-            buf.set_stringn(area.x, y, "★", 1, tint(FAV));
+            buf.set_stringn(marks_x, y, "★", 1, tint(FAV));
         }
         if app.marked.contains(&m.key) {
-            buf.set_stringn(area.x + 1, y, "●", 1, tint(MARK).add_modifier(BOLD));
+            buf.set_stringn(marks_x + 1, y, "●", 1, tint(MARK).add_modifier(BOLD));
         }
         let name = if m.available || !any { base } else { tint(MUTED) };
-        let name = if app.store.is_excluded(&m.key) { tint(MUTED).add_modifier(Modifier::CROSSED_OUT) } else { name };
         buf.set_stringn(name_x, y, &m.name, nw, name);
         buf.set_stringn(dev_x, y, &m.developer, dw, tint(dev_color(&m.developer)));
         for &(i, x, w) in &cols {
@@ -423,21 +525,53 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
                 x = buf.set_stringn(x, y, h, end.saturating_sub(x) as usize, tint(dev_color(h))).0;
             }
         }
-        if let Some((x, w)) = best {
-            buf.set_stringn(area.x + x, y, fit::best_for(m).join(", "), w as usize, tint(MUTED));
-        }
-        if let (Some((x, w)), Some(note)) = (notes, app.store.note(&m.key)) {
+        let note = app.store.note(&m.key).unwrap_or("");
+        if let Some((x, w)) = notes {
             buf.set_stringn(area.x + x, y, note, w as usize, base.add_modifier(Modifier::ITALIC));
+        }
+        if app.store.is_excluded(&m.key) {
+            // The whole row is struck out and muted; search hits still show on top.
+            buf.set_style(Rect { y, height: 1, ..area }, tint(MUTED).add_modifier(Modifier::CROSSED_OUT));
+        }
+        // What the search matched, underlined in bold; Notes may be scrolled off.
+        // ponytail: a char is taken as one cell; wide chars would shift the underline.
+        // Via is drawn as its harnesses joined by ", ", so the hits line up.
+        if let Some(hits) = hits(&app.query, [&m.name, &m.developer, &m.via.join(", "), note], app.typos) {
+            let style = tint(MATCH).add_modifier(BOLD | Modifier::UNDERLINED);
+            let [via, note] = [via, notes].map(|c| c.map(|(x, w)| (area.x + x, w as usize)));
+            for (field, ranges) in [Some((name_x, nw)), Some((dev_x, dw)), via, note].into_iter().zip(hits) {
+                let Some((x, w)) = field else { continue };
+                for r in ranges.into_iter().map(|r| r.start.min(w)..r.end.min(w)) {
+                    buf.set_style(Rect::new(x + r.start as u16, y, r.len() as u16, 1), style);
+                }
+            }
         }
     }
     if let Input::Menu { col, items, sel, query, .. } = &app.input {
-        let x = match (*col, via) {
-            (VIA, Some((x, _))) => area.x + x,
-            _ => cols.iter().find(|c| c.0 + 2 == *col).map_or(dev_x, |c| area.x + c.1),
-        };
+        let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first };
         let picked = if *col == 1 { &app.dev } else { &app.via };
-        dropdown(buf, area, x, *col, items, &menu_rows(items, query), *sel, picked);
+        dropdown(buf, area, menu_x(area, &l, *col), *col, items, &menu_rows(items, query), *sel, picked);
     }
+}
+
+/// Screen column where the dropdown of `col` opens: under its header, or Dev's when scrolled off.
+fn menu_x(area: Rect, l: &Layout, col: usize) -> u16 {
+    match (col, l.via) {
+        (VIA, Some((x, _))) => area.x + x,
+        _ => l.cols.iter().find(|c| c.0 + 2 == col).map_or(area.x + l.name_x + l.name_w + GAP, |c| area.x + c.1),
+    }
+}
+
+/// The dropdown's box and its entries' width, or none when fewer than one entry would fit.
+fn menu_box(area: Rect, x: u16, items: &[(String, usize)], rows: usize) -> Option<(Rect, (usize, usize))> {
+    let label_w = items.iter().map(|(s, _)| s.chars().count()).max().unwrap_or(0);
+    let n_w = items.iter().map(|(_, n)| n.to_string().len()).max().unwrap_or(0);
+    let w = ((label_w + n_w + 8) as u16).min(area.width);
+    let h = (rows as u16 + 2).min(area.height.saturating_sub(1));
+    if h < 3 {
+        return None;
+    }
+    Some((Rect::new(x.saturating_sub(2).min(area.right() - w).max(area.x), area.y + 1, w, h), (label_w, n_w)))
 }
 
 /// The list under a header opened with `d`, each entry with how many models it would show,
@@ -455,14 +589,7 @@ fn dropdown(
     sel: usize,
     picked: &[String],
 ) {
-    let label_w = items.iter().map(|(s, _)| s.chars().count()).max().unwrap_or(0);
-    let n_w = items.iter().map(|(_, n)| n.to_string().len()).max().unwrap_or(0);
-    let w = ((label_w + n_w + 8) as u16).min(area.width);
-    let h = (rows.len() as u16 + 2).min(area.height.saturating_sub(1));
-    if h < 3 {
-        return;
-    }
-    let rect = Rect::new(x.saturating_sub(2).min(area.right() - w).max(area.x), area.y + 1, w, h);
+    let Some((rect, (label_w, n_w))) = menu_box(area, x, items, rows.len()) else { return };
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(ACCENT));
     let inner = block.inner(rect);
     Clear.render(rect, buf);
@@ -502,6 +629,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
+        (Input::Harness { .. }, _) => ("LAUNCH", Color::Green),
+        (Input::None, View::Table) if app.visual.is_some() => ("VISUAL", Color::Yellow),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
         (Input::None, View::Help) => ("HELP", Color::Cyan),
         (Input::None, View::Tasks) => ("TASKS", Color::Cyan),
@@ -509,13 +638,13 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
     };
     let mut x = pill(buf, area.x, area.y, mode, color, area.width) + 1;
-    if app.input == Input::Quit {
+    if matches!(app.input, Input::Quit | Input::Harness { .. }) {
         // The question is in a box in the middle of the screen.
         return None;
     }
     // The prompt's label, the text being typed and the cursor's byte offset in it.
     let prompt = match &app.input {
-        Input::Search { cur } => Some(("/".to_string(), &app.query, *cur)),
+        Input::Search { cur, .. } => Some(("/".to_string(), &app.query, *cur)),
         Input::Note { text, cur } => Some(("note: ".to_string(), text, *cur)),
         Input::Bound { col, min, text, cur } => {
             Some((format!("{} {} ", col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
@@ -524,7 +653,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             (false, true) => (format!("{} ▾", col_name(*col)), query, *cur),
             _ => (format!("{} ▾ /", col_name(*col)), query, *cur),
         }),
-        Input::Quit | Input::None => None,
+        Input::Quit | Input::Harness { .. } | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
         let text = format!("{label}{typed}");
@@ -559,11 +688,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     if !app.query.is_empty() {
         parts.push((format!("/{}", app.query), Color::Yellow));
     }
-    if let Some(col) = app.frontier {
-        parts.push((format!("best {} per price", col_name(col)), Color::Yellow));
-    }
     if let Some(t) = app.task {
-        parts.push((format!("best for {}", t.name), Color::Yellow));
+        parts.push((format!("best {} per price", t.name), Color::Yellow));
     }
     if !app.dev.is_empty() {
         parts.push((format!("Dev={}", app.dev.join(",")), Color::Yellow));
@@ -617,11 +743,32 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
 }
 
 /// A centred rounded box showing `lines` from `scroll` on, which is clamped to the content.
-fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>, scroll: &mut u16) {
+const HARNESS_TITLE: &str = "open in which harness?";
+
+fn harness_lines(cmds: &[Vec<String>], sel: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = cmds
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(dev_color(&c[0])) };
+            Line::from(format!(" {} ", c.join(" "))).style(style)
+        })
+        .collect();
+    lines.push(Line::from(" j k move · enter opens").style(fg(MUTED)));
+    lines
+}
+
+/// Where an overlay with these lines sits: centred, as wide as its widest line or title.
+fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
     let w = (widest + 4).max(title.chars().count() as u16 + 6).min(area.width);
     let h = (lines.len() as u16 + 2).min(area.height);
-    let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+    Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
+}
+
+fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>, scroll: &mut u16) {
+    let rect = overlay_rect(area, title, &lines);
+    let h = rect.height;
     let shown = h.saturating_sub(2) as usize;
     *scroll = (*scroll).min(lines.len().saturating_sub(shown) as u16);
     let footer = if lines.len() > shown {
@@ -677,35 +824,43 @@ fn tasks(app: &App) -> Vec<Line<'static>> {
         };
         v.push(Line::from(vec![Span::styled(format!(" {} ", t.name), name), Span::raw(format!(" {}", t.about))]));
         v.push(Line::from(vec![Span::styled("  use for:     ", fg(MUTED)), Span::raw(t.when)]));
-        v.push(Line::from(vec![
-            Span::styled("  best/price:  ", fg(MUTED)),
-            Span::styled(frontier_line(app, t), fg(GOOD)),
-        ]));
+        let mut best = vec![Span::styled("  best/price:  ", fg(MUTED))];
+        best.extend(frontier_line(app, t));
+        v.push(Line::from(best));
         if !t.benches.is_empty() {
             v.push(Line::from(vec![Span::styled("  benchmarks:  ", fg(MUTED)), Span::raw(t.benches.join(", "))]));
         }
         v.push(Line::default());
     }
-    v.push(Line::from("CLI: modelcmp tasks · modelcmp list --task <task>").style(fg(MUTED)));
+    v.push(Line::from("CLI: modelcmp tasks · modelcmp list --task <task> [--tier low|mid|high]").style(fg(MUTED)));
     v
 }
 
-/// `name $price (score)` along the task's price frontier, cheapest first and the best last;
-/// a long frontier keeps its cheapest entries and the best.
-fn frontier_line(app: &App, t: &fit::Task) -> String {
+/// `name $price (score)` along the task's price frontier, cheapest first and the best last,
+/// each in its price level's colour as in the Price column; a long frontier keeps its
+/// cheapest entries and the best.
+fn frontier_line(app: &App, t: &fit::Task) -> Vec<Span<'static>> {
     let front = app.task_frontier(t);
     if front.is_empty() {
-        return "no data".into();
+        return vec![Span::styled("no data", fg(MUTED))];
     }
-    let entry = |(m, s): &(&Model, f64)| priced(m, *s);
-    let mut parts: Vec<String> = front.iter().take(4).map(entry).collect();
+    let entry = |(m, s): &(&Model, f64)| Span::styled(priced(m, *s), fg(LEVEL[level(m.cost().unwrap_or(0.0))]));
+    let mut parts: Vec<Span> = front.iter().take(4).map(entry).collect();
     if front.len() > 5 {
-        parts.push("…".into());
+        parts.push(Span::styled("…", fg(MUTED)));
     }
     if front.len() > 4 {
         parts.push(entry(&front[front.len() - 1]));
     }
-    parts.join(" · ")
+    let sep = Span::styled(" · ", fg(MUTED));
+    let mut out = Vec::new();
+    for (i, p) in parts.into_iter().enumerate() {
+        if i > 0 {
+            out.push(sep.clone());
+        }
+        out.push(p);
+    }
+    out
 }
 
 /// Every detail line, with `key:` labels and section headings coloured.
@@ -808,11 +963,38 @@ mod tests {
     }
 
     #[test]
+    fn search_hits_are_underlined() {
+        let mut a = app();
+        a.query = "goo fla".into();
+        a.rebuild();
+        let (buf, lines) = render(&mut a, 120, 4);
+        let row = &lines[1];
+        let (name, dev) = (row.find("flash").unwrap() as u16, row.find("google").unwrap() as u16);
+        let under = |x: u16| buf[(x, 1)].modifier.contains(Modifier::UNDERLINED);
+        assert!((name..name + 3).all(under) && !under(name + 3), "fla of flash");
+        assert!((dev..dev + 3).all(under) && !under(dev + 3), "goo of google");
+        a.store.set_note("opus", "good at refactors");
+        a.query = "refac".into();
+        a.rebuild();
+        let (buf, lines) = render(&mut a, 200, 4);
+        assert_eq!((a.rows.len(), words(&lines[1])[1]), (1, "opus"), "notes are searched");
+        let x = lines[1].find("refactors").unwrap() as u16;
+        let under = |x: u16| buf[(x, 1)].modifier.contains(Modifier::UNDERLINED);
+        assert!((x..x + 5).all(under) && !under(x + 5), "refac of the note");
+        a.query = "openc".into();
+        a.rebuild();
+        let (buf, lines) = render(&mut a, 200, 4);
+        assert_eq!(a.rows.len(), 2, "Via is searched");
+        let x = lines[1].find("opencode").unwrap() as u16;
+        assert!(buf[(x, 1)].modifier.contains(Modifier::UNDERLINED), "openc of the Via column");
+    }
+
+    #[test]
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 200, 5);
-        let header = "Model Dev ▾ ▼Price ▾ $in $out Ctx ECI Coding Agentic Reason \
-                      Code/$ Via ▾ Best for Notes";
+        let header = "# Model Dev ▾ ▼Price ▾ $in $out Ctx ECI Coding Agentic Reason \
+                      Code/$ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         let via = lines[2].find("opencode").expect(&lines[2]);
         assert_eq!(
@@ -820,13 +1002,14 @@ mod tests {
             dev_color("opencode"),
             "harnesses are coloured"
         );
-        assert_eq!(&words(&lines[1])[..7], ["opus", "anthropic", "5.0", "5.0", "5.0", "200k", "150"]);
-        assert_eq!(&words(&lines[2])[..7], ["flash", "google", "0.10", "0.10", "0.10", "200k", "120"]);
+        assert_eq!(&words(&lines[1])[..8], ["1", "opus", "anthropic", "5.0", "5.0", "5.0", "200k", "150"]);
+        assert_eq!(&words(&lines[2])[..8], ["2", "flash", "google", "0.10", "0.10", "0.10", "200k", "120"]);
         assert!(lines[4].starts_with(" NORMAL  2 available"), "{}", lines[4]);
         assert!(lines[4].ends_with("d dropdown  / filter  t tasks  ? help"), "{}", lines[4]);
         assert!(buf[(0, 1)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
-        assert_eq!(buf[(2, 2)].fg, Color::Reset, "names are plain text");
-        assert_eq!(buf[(20, 2)].fg, dev_color("google"));
+        assert_eq!(buf[(0, 2)].fg, MUTED, "row numbers are muted");
+        assert_eq!(buf[(4, 2)].fg, Color::Reset, "names are plain text");
+        assert_eq!(buf[(lines[2].find("google").unwrap() as u16, 2)].fg, dev_color("google"));
         // Screen column of a byte offset: `▾` takes several bytes.
         let x = |i: usize| lines[2][..i].chars().count() as u16;
         assert_eq!(buf[(x(lines[2].find("120").unwrap()), 2)].fg, BAD, "the lowest ECI shown is red");
@@ -848,7 +1031,7 @@ mod tests {
         let (buf, lines) = render(&mut a, 170, 8);
         let dev = lines[0].find("Dev").unwrap() - 2;
         assert!(lines[1][dev..].starts_with("╭────────────────╮"), "{}", lines[1]);
-        assert_eq!(&words(&lines[2])[1..4], ["│", "any", "2"]);
+        assert_eq!(&words(&lines[2])[2..5], ["│", "any", "2"]);
         assert_eq!(&words(&lines[3])[..3], ["│", "anthropic", "1"]);
         assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
@@ -862,30 +1045,70 @@ mod tests {
     }
 
     #[test]
+    fn clicks_land_on_rows_headers_and_dropdown_entries() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let mut a = app();
+        let (w, h) = (170, 10);
+        let area = Rect::new(0, 0, w, h);
+        // `draw` puts the header on row 1 and the first model on row 2, one cell in.
+        let (_, lines) = render(&mut a, w - 2, h - 3);
+        // Screen column of a header, one cell in: `▾` takes several bytes.
+        let col = |s: &str| lines[0][..lines[0].find(s).unwrap()].chars().count() as u16 + 1;
+        let click = |x, y| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(hit(&a, area, click(3, 3)), Some(Mouse::Row(1)));
+        assert_eq!(hit(&a, area, click(3, 1)), Some(Mouse::Header(0)));
+        assert_eq!(hit(&a, area, click(col("Dev"), 1)), Some(Mouse::Header(1)));
+        assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
+        assert_eq!(hit(&a, area, click(col("▼Price"), 1)), Some(Mouse::Header(2)));
+        assert_eq!(hit(&a, area, click(col("▼Price") + 7, 1)), Some(Mouse::Menu(2)), "the ▾ after Price");
+        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(7)));
+        assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
+        assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
+        let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
+        assert_eq!(hit(&a, area, wheel(MouseEventKind::ScrollLeft)), Some(Mouse::Cols(-1)));
+        a.mouse(Mouse::Menu(1));
+        let (_, lines) = render(&mut a, w - 2, h - 3);
+        let any = lines[2][..lines[2].find("any").unwrap()].chars().count() as u16 + 1;
+        assert_eq!(hit(&a, area, click(any, 3)), Some(Mouse::Item(0)));
+        assert_eq!(hit(&a, area, click(any, 4)), Some(Mouse::Item(1)));
+        assert_eq!(hit(&a, area, click(any, 5)), Some(Mouse::Item(2)));
+        assert_eq!(hit(&a, area, click(any, 6)), None, "the box's bottom border");
+        let right = |x, y| MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), ..click(x, y) };
+        assert_eq!(hit(&a, area, right(any, 4)), Some(Mouse::Item(1)), "either button");
+        assert_eq!(hit(&a, area, right(w - 2, 3)), Some(Mouse::Header(0)), "any click outside closes it");
+        assert_eq!(hit(&a, area, click(w - 2, 3)), Some(Mouse::Header(0)), "outside: closes it");
+    }
+
+    #[test]
     fn narrow_table_drops_columns_and_hints_without_panicking() {
         let mut a = app();
         let (_, lines) = render(&mut a, 44, 4);
-        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "▼Price", "▾"], "the cursor starts on Price");
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "▼Price", "▾"], "the cursor starts on Price");
         assert!(lines[3].ends_with("? help"), "{}", lines[3]);
         assert!(!lines[3].contains("m mark"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 44, 4);
-        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "‹", "Notes"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹", "Notes"]);
         a.col = VIA;
         let (_, lines) = render(&mut a, 44, 4);
-        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "‹", "Via", "▾"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹", "Via", "▾"]);
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
-        let (_, lines) = render(&mut a, 48, 4);
-        assert_eq!(words(&lines[0])[3..], ["‹", "Reason", "Code/$"], "scrolls back only as far as needed");
+        let (_, lines) = render(&mut a, 50, 4);
+        assert_eq!(words(&lines[0])[4..], ["‹", "Reason", "Code/$"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
-        let (_, lines) = render(&mut a, 48, 4);
-        assert_eq!(words(&lines[0])[3..], ["‹", "Reason", "Code/$"], "{}", lines[0]);
+        let (_, lines) = render(&mut a, 50, 4);
+        assert_eq!(words(&lines[0])[4..], ["‹", "Reason", "Code/$"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 44, 4);
-        assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "▼Price", "▾"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "▼Price", "▾"]);
         for (w, h) in [(1, 1), (3, 2), (0, 0), (30, 3), (12, 1)] {
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);
@@ -904,22 +1127,22 @@ mod tests {
         a.key(KeyCode::Char('s').into());
         a.table.select(Some(15));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[4])[0], "m6", "row 15 (m6) is the last of the 4 visible rows");
+        assert_eq!(words(&lines[4])[..2], ["16", "m6"], "row 15 (m6) is the last of the 4 visible rows");
         a.table.select(Some(0));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[1])[0], "opus", "scrolls back up");
+        assert_eq!(words(&lines[1])[..2], ["1", "opus"], "scrolls back up");
     }
 
     #[test]
     fn prompts_show_the_text_and_the_cursor() {
         let mut a = app();
-        a.input = Input::Search { cur: 3 };
+        a.input = Input::Search { cur: 3, was: String::new() };
         a.query = "gem".into();
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 4));
         let line: String = (0..14).map(|x| buf[(x, 0)].symbol()).collect();
         assert_eq!(line, " SEARCH  /gem ");
-        a.input = Input::Search { cur: 1 };
+        a.input = Input::Search { cur: 1, was: String::new() };
         assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 2), "the cursor sits inside the text");
         a.input = Input::Bound { col: 3, min: true, text: "4".into(), cur: 1 };
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));

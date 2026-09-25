@@ -28,15 +28,16 @@ modelcmp
 
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output),
 $in, $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
-Code/$, Via, Best for, Note. Task columns are mean percentiles (0-100) across the task's
+Code/$, Via, Note. Task columns are mean percentiles (0-100) across the task's
 benchmarks, ranked against every model Epoch has evaluated. Move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
 column.
 
 | Key | Action |
 |-----|--------|
-| `j` `k` | move; a count repeats, as in `3j` |
+| `j` `k` | move; a count repeats, as in `3j`; past the last row back to the first |
 | `h` `l` | pick a column |
+| `0` `$` `w` `b` | first / last column; next / previous group: prices, benchmarks, Via |
 | `s` | sort by the column; again reverses |
 | `enter` | details: every benchmark, price per provider |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
@@ -44,30 +45,32 @@ column.
 | `(` `)` `^d` `^u` | half a page up / down |
 | `gg` `G` `3gg` | top / bottom / row 3 |
 | `m` | mark the model |
+| `V` | select a range of rows: move to extend it, then `m` `e` `f` or `C` act on all of it; `esc` cancels |
+| `e` `f` with marks | act on every marked model, not just the one under the cursor |
 | `M` | marked models only; with `F`, marked and favorites |
 | `C` | compare marked models: cheapest, best coder, most coding per $ |
-| `p` | price frontier on a benchmark column: cheapest first, each row costs more and scores higher |
-| `/` | filter by name; `esc` clears |
-| `c` | clear filters, bounds, frontier, task ranking and marks |
+| `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears |
+| `c` | clear filters, bounds, task and marks |
 | `a` | all models, including ones you have no access to |
 | `f` `F` | favorite / favorites only |
 | `n` | note for the model |
-| `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but tasks (`t`, the ranking, best per price) skip it |
-| typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
+| `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but tasks (`t` and its best per price) skip it |
+| typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` `^←` `^→` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on openrouter.ai |
-| `x` | launch a harness with the model; quit it to come back |
+| `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |
 | `r` | refresh data now |
-| `t` | tasks: what each one measures, when to use it, the best model per price; `enter` ranks the table by it |
+| `t` | tasks: what each one measures, when to use it, the best model per price; `enter` shows those models in the table, best first, each row cheaper and scoring lower |
 | `?` | help |
+| mouse | click a row to select it, again for details; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column |
 | `qq` | quit; the first `q` asks. `esc` closes an overlay or the filter |
 
 ## CLI
 
 ```sh
 modelcmp list                                  # models you have access to
-modelcmp list --task coding -n 10              # ranked by task fit
-modelcmp list --frontier coding                # best model per price level, cheapest first
+modelcmp list --task coding                    # best model per price level, cheapest first
+modelcmp list --task coding --tier mid         # just one: the cheapest scoring 75+
 modelcmp list --min coding=70 --sort price     # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet                           # everything about one model
@@ -76,13 +79,16 @@ modelcmp open sonnet                           # its web page
 modelcmp fav sonnet                            # --rm to remove
 modelcmp note sonnet "fast enough for refactors"   # without text shows it, --rm deletes it
 modelcmp exclude llama                         # have it, can't use it; --rm to include again
-modelcmp tasks                                 # what each task measures, when to use it
+modelcmp tasks                                 # what each task measures, when to use it, best per price
 ```
 
 Tasks: `coding`, `agentic`, `reasoning`, `vision`, `long-context`, `value`, `overall`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
-`--frontier` leave excluded models out; plain `list` shows them marked `✗`. `--all`
+`tasks` leave excluded models out; plain `list` shows them marked `✗`. `--tier` picks one
+model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
+the best; the best when none reaches the floor. Scores are percentiles among the models
+Epoch benchmarked. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first.
 `list` prints every match unless `-n` limits it, and then says how many it left out.
 
@@ -93,12 +99,12 @@ than an empty list.
 For agents:
 
 ```sh
-modelcmp list --frontier coding --json | jq '.[0].key'
-modelcmp tasks --json
+modelcmp tasks --json                          # choose the task by its "when"; each has its frontier
+modelcmp list --task coding --tier mid --json  # the one model to use
 ```
 
 Each JSON model carries `key`, `excluded`, `price`, `context`, `eci`, per-task `tasks`
-percentiles and `best_for`. `show` and `compare` add every benchmark score and every
+percentiles. `show` and `compare` add every benchmark score and every
 provider's price.
 
 ## Data
