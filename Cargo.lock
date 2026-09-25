@@ -930,6 +930,7 @@ dependencies = [
  "clap",
  "csv",
  "dirs",
+ "libc",
  "open",
  "ratatui",
  "serde",

@@ -30,6 +30,8 @@ pub struct Task {
     pub need: Need,
 }
 
+/// A task is a capability software engineering needs, judged by `when`; its benchmarks need
+/// not be about code. Math and factual-recall benchmarks stay out.
 /// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
 pub const TASKS: &[Task] = &[
     Task {
@@ -80,27 +82,6 @@ pub const TASKS: &[Task] = &[
         ],
     },
     Task {
-        name: "math",
-        about: "competition and research math",
-        when: "numerical code, cryptography, statistics, proving an algorithm's complexity; rarely needed otherwise",
-        need: Need::None,
-        benches: &[
-            "FrontierMath-Tiers-1-3-v2-Private",
-            "FrontierMath-Tier-4-v2-Private",
-            "OTIS Mock AIME 2024-2025",
-            "ProofBench",
-            "FrontierMath-2025-02-28-Private",
-            "MATH level 5",
-        ],
-    },
-    Task {
-        name: "knowledge",
-        about: "factual recall, low hallucination",
-        when: "questions about an API, a library's flags or a protocol, where a low scorer invents details",
-        need: Need::None,
-        benches: &["SimpleQA Verified", "MMLU", "TriviaQA"],
-    },
-    Task {
         name: "vision",
         about: "image input (ranked by overall capability)",
         when: "screenshots, UI mockups, diagrams as input",
@@ -132,6 +113,14 @@ pub const TASKS: &[Task] = &[
 
 pub fn task(name: &str) -> Option<&'static Task> {
     TASKS.iter().find(|t| t.name == name)
+}
+
+/// Every benchmark a task uses, sorted; the others are not even parsed.
+pub fn task_benches() -> Vec<&'static str> {
+    let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.benches.iter().copied()).collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 pub fn task_names() -> impl Iterator<Item = &'static str> {
@@ -233,14 +222,14 @@ mod tests {
 
     #[test]
     fn ranks_by_task() {
-        let a = scores(&[("GPQA diamond", 0.9), ("DeepSWE", 0.2)]);
-        let b = scores(&[("GPQA diamond", 0.5), ("DeepSWE", 0.7)]);
+        let a = scores(&[("METR Time Horizons", 0.9), ("DeepSWE", 0.2)]);
+        let b = scores(&[("METR Time Horizons", 0.5), ("DeepSWE", 0.7)]);
         // Filler groups so both benchmarks reach MIN_POOL.
-        let filler = scores(&[("GPQA diamond", 0.0), ("DeepSWE", 1.0)]);
+        let filler = scores(&[("METR Time Horizons", 0.0), ("DeepSWE", 1.0)]);
         let mut groups = vec![("a", Some(150.0), &a), ("b", Some(140.0), &b)];
         groups.extend((0..MIN_POOL).map(|_| ("f", None, &filler)));
         let p = percentiles(groups.iter().copied());
-        assert!(p["a"]["reasoning"] > p["b"]["reasoning"]);
+        assert!(p["a"]["agentic"] > p["b"]["agentic"]);
         assert!(p["b"]["coding"] > p["a"]["coding"]);
         assert!(p["a"]["overall"] > p["b"]["overall"]);
 
@@ -253,17 +242,17 @@ mod tests {
         let models = [mk("a", &p["a"], true), mk("b", &p["b"], false)];
         let r = rank(models.iter(), task("coding").unwrap());
         assert_eq!(r[0].0.key, "b");
-        assert_eq!(best_for(&models[0]), vec!["reasoning"]);
+        assert_eq!(best_for(&models[0]), vec!["agentic"]);
         // agentic needs tool calling; b lacks it
         assert!(fit(&models[1], task("agentic").unwrap()).is_none());
     }
 
     #[test]
     fn small_pools_give_no_percentile() {
-        let s = scores(&[("TriviaQA", 0.9)]);
+        let s = scores(&[("DeepSWE", 0.9)]);
         let groups = [("a", None, &s), ("b", None, &s)];
         let p = percentiles(groups.iter().copied());
-        assert!(!p["a"].contains_key("knowledge"));
+        assert!(!p["a"].contains_key("coding"));
     }
 
     #[test]

@@ -109,6 +109,9 @@ pub struct Data {
     /// `provider/*` stands for all of a provider's models.
     #[serde(default)]
     pub harness: BTreeMap<String, Vec<String>>,
+    /// `fit::task_benches()` when fetched; a cache made with other benchmarks is stale.
+    #[serde(default)]
+    pub benches: Vec<String>,
     pub models: Vec<Model>,
 }
 
@@ -118,7 +121,7 @@ impl Data {
     }
 
     pub fn stale(&self) -> bool {
-        self.age() > MAX_AGE
+        self.age() > MAX_AGE || self.benches != crate::fit::task_benches()
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness, or the
@@ -154,7 +157,8 @@ impl Data {
         }
     }
 
-    /// Resolve a user-typed model name. Err = list of candidates (empty if none).
+    /// Resolve a user-typed model name. Err = list of candidates (empty if none). A partial
+    /// name matches the models you have first, and all of them only if none of yours match.
     pub fn find(&self, query: &str) -> Result<&Model, Vec<&Model>> {
         let q = norm(query);
         // By key, or by a provider's id for it: "granite-4.0-h-micro" is OpenRouter's "Granite 4.0 Micro".
@@ -162,7 +166,10 @@ impl Data {
         if let Some(m) = self.models.iter().find(|m| m.key == q).or_else(|| self.models.iter().find(by_id)) {
             return Ok(m);
         }
-        let mut hits: Vec<&Model> = self.models.iter().filter(|m| m.key.contains(&q)).collect();
+        let hits = |mine: bool| -> Vec<&Model> {
+            self.models.iter().filter(|m| (!mine || m.available) && m.key.contains(&q)).collect()
+        };
+        let mut hits = Some(hits(true)).filter(|h| !h.is_empty()).unwrap_or_else(|| hits(false));
         hits.sort_by_key(|m| m.key.len());
         match hits.as_slice() {
             [one] => Ok(one),
@@ -606,10 +613,11 @@ fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
         version_group.get(version).cloned().unwrap_or_else(|| version.split('_').next().unwrap_or(version).to_string())
     };
 
+    let task_benches = crate::fit::task_benches();
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
     for b in &benches {
         let (file, score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
-        if file.is_empty() || score_col.is_empty() {
+        if file.is_empty() || score_col.is_empty() || !task_benches.contains(&bench) {
             continue;
         }
         let scale: f64 = col(b, "scale")?.parse().unwrap_or(1.0);
@@ -777,7 +785,8 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
     unify_developers(&mut models);
     crate::fit::add_value(&mut models);
     models.sort_by(|a, b| b.eci.unwrap_or(0.0).total_cmp(&a.eci.unwrap_or(0.0)).then(b.release.cmp(&a.release)));
-    Ok(Data { fetched: now(), harness: BTreeMap::new(), models })
+    let benches = crate::fit::task_benches().into_iter().map(String::from).collect();
+    Ok(Data { fetched: now(), harness: BTreeMap::new(), benches, models })
 }
 
 #[cfg(test)]
@@ -848,6 +857,19 @@ mod tests {
         assert_eq!(d.find("GPT 5.5").unwrap().key, "gpt55");
         assert_eq!(d.find("granite-4.0-h-micro").unwrap().key, "granite40micro", "by a provider's id");
         assert!(d.find("nope").unwrap_err().is_empty());
+        let mine = |k: &str| Model { available: true, ..mk(k) };
+        let d = Data {
+            models: vec![
+                mk("claudesonnet4"),
+                mk("claudesonnet45"),
+                mine("claudesonnet5"),
+                mine("claudesonnet5thinking"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(d.find("sonnet").unwrap().key, "claudesonnet5", "yours first, then the shortest");
+        assert_eq!(d.find("sonnet4").unwrap().key, "claudesonnet4", "all models when none of yours match");
+        assert_eq!(d.find("claudesonnet45").unwrap().key, "claudesonnet45", "an exact key wins");
     }
 
     #[test]

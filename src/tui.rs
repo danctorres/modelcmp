@@ -149,6 +149,7 @@ fn hints(app: &App) -> Vec<&'static str> {
             let mut v = vec![
                 "m mark",
                 "f fav",
+                "e exclude",
                 "y copy id",
                 "enter details",
                 "x launch",
@@ -182,7 +183,9 @@ fn hints(app: &App) -> Vec<&'static str> {
             v.extend(["/ filter", "t tasks", "? help"]);
             v
         }
-        View::Detail => vec!["f fav", "n note", "y copy id", "o open", "x launch", "j k scroll", "esc back"],
+        View::Detail => {
+            vec!["f fav", "e exclude", "n note", "y copy id", "o open", "x launch", "j k scroll", "esc back"]
+        }
         View::Help | View::Compare => vec!["j k scroll", "esc back"],
         View::Tasks => vec!["j k move", "enter best models first", "esc back"],
     }
@@ -242,10 +245,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Table => None,
         View::Help => Some(("keys".to_string(), help())),
         View::Tasks => Some(("tasks".to_string(), tasks(app))),
-        View::Detail => app.current().map(|m| {
-            let star = if app.store.is_fav(&m.key) { "★ " } else { "" };
-            (format!("{star}{}", m.name), detail(m, &app.store))
-        }),
+        View::Detail => app.current().map(|m| (detail_lines(m, &app.store).swap_remove(0), detail(m, &app.store))),
         View::Compare => Some(("compare".into(), compare(&app.marked_models()))),
     };
     if let Some((title, lines)) = lines {
@@ -396,6 +396,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) {
             buf.set_stringn(area.x + 1, y, "●", 1, tint(MARK).add_modifier(BOLD));
         }
         let name = if m.available || !any { base } else { tint(MUTED) };
+        let name = if app.store.is_excluded(&m.key) { tint(MUTED).add_modifier(Modifier::CROSSED_OUT) } else { name };
         buf.set_stringn(name_x, y, &m.name, nw, name);
         buf.set_stringn(dev_x, y, &m.developer, dw, tint(dev_color(&m.developer)));
         for &(i, x, w) in &cols {
@@ -659,7 +660,7 @@ fn help() -> Vec<Line<'static>> {
         v.push(Line::from(vec![Span::styled(format!("{:<11}", col_name(c)), fg(KEY)), Span::raw(col_about(c))]));
     }
     v.push(Line::default());
-    v.push(Line::from(format!("Favorites and notes: {}", crate::store::path().display())).style(fg(MUTED)));
+    v.push(Line::from(format!("Favorites, exclusions and notes: {}", crate::store::path().display())).style(fg(MUTED)));
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
     v
 }
@@ -685,7 +686,7 @@ fn tasks(app: &App) -> Vec<Line<'static>> {
         }
         v.push(Line::default());
     }
-    v.push(Line::from("CLI: modelcmp tasks · modelcmp recommend <task>").style(fg(MUTED)));
+    v.push(Line::from("CLI: modelcmp tasks · modelcmp list --task <task>").style(fg(MUTED)));
     v
 }
 
@@ -810,7 +811,7 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 200, 5);
-        let header = "Model Dev ▾ ▼Price ▾ $in $out Ctx ECI Coding Agentic Reason Math \
+        let header = "Model Dev ▾ ▼Price ▾ $in $out Ctx ECI Coding Agentic Reason \
                       Code/$ Via ▾ Best for Notes";
         assert_eq!(words(&lines[0]), words(header));
         let via = lines[2].find("opencode").expect(&lines[2]);
@@ -877,11 +878,11 @@ mod tests {
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
-        let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Code/$"], "scrolls back only as far as needed");
+        let (_, lines) = render(&mut a, 48, 4);
+        assert_eq!(words(&lines[0])[3..], ["‹", "Reason", "Code/$"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
-        let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0])[3..], ["‹", "Math", "Code/$"], "{}", lines[0]);
+        let (_, lines) = render(&mut a, 48, 4);
+        assert_eq!(words(&lines[0])[3..], ["‹", "Reason", "Code/$"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 44, 4);
         assert_eq!(words(&lines[0]), ["Model", "Dev", "▾", "▼Price", "▾"]);

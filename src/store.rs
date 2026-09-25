@@ -1,4 +1,4 @@
-//! Favorites and notes, keyed by model key. ~/.config/modelcmp/user.json
+//! Favorites, exclusions and notes, keyed by model key. ~/.config/modelcmp/user.json
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,6 +10,8 @@ pub struct Store {
     #[serde(skip)]
     path: PathBuf,
     pub favorites: BTreeSet<String>,
+    /// Models you have but cannot use; tasks and recommendations skip them.
+    pub excluded: BTreeSet<String>,
     pub notes: BTreeMap<String, String>,
 }
 
@@ -61,6 +63,16 @@ impl Store {
         }
     }
 
+    pub fn is_excluded(&self, key: &str) -> bool {
+        self.excluded.contains(key)
+    }
+
+    pub fn toggle_excluded(&mut self, key: &str) {
+        if !self.excluded.remove(key) {
+            self.excluded.insert(key.to_string());
+        }
+    }
+
     pub fn note(&self, key: &str) -> Option<&str> {
         self.notes.get(key).map(String::as_str)
     }
@@ -89,12 +101,14 @@ mod tests {
         let p = tmp("rt");
         let mut s = Store::load_from(p.clone());
         s.toggle_fav("gpt55");
+        s.toggle_excluded("llama");
         s.set_note("gpt55", "  fast  ");
         s.set_note("x", "");
         s.save().unwrap();
         let back = Store::load_from(p.clone());
         assert_eq!(back, s);
         assert_eq!(back.note("gpt55"), Some("fast"));
+        assert!(back.is_excluded("llama"));
         assert!(back.note("x").is_none());
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }

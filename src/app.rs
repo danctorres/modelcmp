@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 /// A numeric column. The text columns (model name, developer) come first and are not listed here.
 pub struct Col {
     pub name: &'static str,
+    /// The column's name on the command line: `--sort`, `--min`, `--max`.
+    pub id: &'static str,
     /// What the column means, for the top border and `?`.
     pub about: &'static str,
     /// The task whose benchmarks feed the column.
@@ -29,8 +31,8 @@ impl Col {
     }
 }
 
-const fn col(name: &'static str, about: &'static str, get: fn(&Model) -> Option<f64>) -> Col {
-    Col { name, about, task: None, lower_better: false, get, show: |v| score(Some(v)) }
+const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(&Model) -> Option<f64>) -> Col {
+    Col { name, id, about, task: None, lower_better: false, get, show: |v| score(Some(v)) }
 }
 
 fn positive(x: f64) -> Option<f64> {
@@ -39,41 +41,40 @@ fn positive(x: f64) -> Option<f64> {
 
 /// Prices from the offer you'd pay, then the Epoch index, the task percentiles and the
 /// Artificial Analysis indices.
-pub const COLS: [Col; 10] = [
+pub const COLS: [Col; 9] = [
     Col {
         lower_better: true,
         show: money,
-        ..col("Price", "USD per 1M tokens, blended 3:1 input:output", |m| m.cost())
+        ..col("Price", "price", "USD per 1M tokens, blended 3:1 input:output", |m| m.cost())
     },
     Col {
         lower_better: true,
         show: money,
-        ..col("$in", "USD per 1M input tokens, cheapest available provider", |m| Some(m.price()?.input))
+        ..col("$in", "in", "USD per 1M input tokens, cheapest available provider", |m| Some(m.price()?.input))
     },
     Col {
         lower_better: true,
         show: money,
-        ..col("$out", "USD per 1M output tokens, cheapest available provider", |m| Some(m.price()?.output))
+        ..col("$out", "out", "USD per 1M output tokens, cheapest available provider", |m| Some(m.price()?.output))
     },
     Col {
         show: |v| ctx((v * 1000.0) as u64),
-        ..col("Ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
+        ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    col("ECI", "Epoch Capabilities Index, overall capability", |m| m.eci),
+    col("ECI", "eci", "Epoch Capabilities Index, overall capability", |m| m.eci),
     Col {
         task: Some("coding"),
-        ..col("Coding", "mean percentile (0-100) on coding benchmarks", |m| task_score(m, "coding"))
+        ..col("Coding", "coding", "mean percentile (0-100) on coding benchmarks", |m| task_score(m, "coding"))
     },
     Col {
         task: Some("agentic"),
-        ..col("Agentic", "mean percentile (0-100) on agentic benchmarks", |m| task_score(m, "agentic"))
+        ..col("Agentic", "agentic", "mean percentile (0-100) on agentic benchmarks", |m| task_score(m, "agentic"))
     },
     Col {
         task: Some("reasoning"),
-        ..col("Reason", "mean percentile (0-100) on reasoning benchmarks", |m| task_score(m, "reasoning"))
+        ..col("Reason", "reasoning", "mean percentile (0-100) on reasoning benchmarks", |m| task_score(m, "reasoning"))
     },
-    Col { task: Some("math"), ..col("Math", "mean percentile (0-100) on math benchmarks", |m| task_score(m, "math")) },
-    col("Code/$", "Coding divided by Price, as a percentile (0-100)", |m| m.fit.get("value").copied()),
+    col("Code/$", "value", "Coding divided by Price, as a percentile (0-100)", |m| m.fit.get("value").copied()),
 ];
 
 /// Text columns before the numbers: 0 is the model name, 1 its developer. `VIA` follows them.
@@ -115,7 +116,7 @@ pub fn has_menu(col: usize) -> bool {
 /// What the column at cursor index `col` means.
 pub fn col_about(col: usize) -> String {
     match col {
-        0 => "model name; dimmed if no available provider".into(),
+        0 => "model name; dimmed if no available provider, struck through if excluded".into(),
         1 => "company that trained the model".into(),
         VIA => "where you have access: the harnesses that list the model, env for a provider API key".into(),
         BEST => "the one or two tasks it ranks highest on, at the 60th percentile or above".into(),
@@ -145,6 +146,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("a", "all models, including ones you have no access to; again: yours only"),
     ("f F", "favorite / show favorites only"),
     ("n", "note for the model"),
+    ("e", "exclude the model: you have it but cannot use it; tasks skip it"),
     ("typing", "← → ^a ^e move, alt-b alt-f by word; ^w alt-d delete a word, ^u ^k to the start / end"),
     ("y Y", "copy the model id (provider/model) / the model name"),
     ("o", "open the model on openrouter.ai"),
@@ -442,8 +444,8 @@ impl App {
             rows = frontier(&rows, |i| &ms[i], c.get);
         }
         if let Some(t) = self.task {
-            // Best fit first; models without data for the task drop out.
-            rows.retain(|&i| fit::fit(&ms[i], t).is_some());
+            // Best fit first; excluded models and ones without data for the task drop out.
+            rows.retain(|&i| fit::fit(&ms[i], t).is_some() && !self.store.is_excluded(&ms[i].key));
             rows.sort_by(|&a, &b| {
                 let (x, y) = (fit::fit(&ms[a], t).unwrap_or(0.0), fit::fit(&ms[b], t).unwrap_or(0.0));
                 y.total_cmp(&x).then_with(|| ms[a].name.cmp(&ms[b].name))
@@ -508,10 +510,10 @@ impl App {
         Some(Effect::Refresh)
     }
 
-    /// The task's price frontier among the models the filters let through: cheapest first,
-    /// the best model last.
+    /// The task's price frontier among the models the filters let through, excluded ones
+    /// left out: cheapest first, the best model last.
     pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
-        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m), t)
+        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key)), t)
     }
 
     fn move_by(&mut self, n: isize) {
@@ -700,6 +702,12 @@ impl App {
                 if self.favs {
                     self.rebuild();
                 }
+                return Some(Effect::Save);
+            }
+            KeyCode::Char('e') if row => {
+                let key = self.current()?.key.clone();
+                self.store.toggle_excluded(&key);
+                self.rebuild();
                 return Some(Effect::Save);
             }
             KeyCode::Char('n') if row => {
@@ -1187,7 +1195,7 @@ mod tests {
         assert_eq!(a.current().unwrap().key, "mini");
         ctrl(&mut a, 'u');
         assert_eq!(a.current().unwrap().key, "gpt55");
-        press(&mut a, "15l");
+        press(&mut a, &format!("{NCOLS}l"));
         assert_eq!(a.col, PRICE, "counted column moves wrap around");
     }
 
@@ -1266,6 +1274,22 @@ mod tests {
         press(&mut a, "c");
         assert!(a.task.is_none());
         assert_eq!(a.rows.len(), 3, "c restores the column sort");
+    }
+
+    #[test]
+    fn excluded_models_leave_the_tasks() {
+        let mut a = app();
+        let front = |a: &App| a.task_frontier(&TASKS[0]).iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
+        assert_eq!(press(&mut a, "e"), Some(Effect::Save));
+        assert!(a.store.is_excluded("gpt55"));
+        assert_eq!(a.rows.len(), 3, "the table still shows it");
+        assert_eq!(front(&a), ["mini"]);
+        press(&mut a, "t");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(keys(&a), ["mini"], "nor does the task ranking");
+        press(&mut a, "c");
+        a.store.toggle_excluded("gpt55");
+        assert_eq!(front(&a), ["mini", "gpt55"], "e again brings it back");
     }
 
     #[test]

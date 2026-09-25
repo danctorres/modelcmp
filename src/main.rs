@@ -31,12 +31,24 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// List models (only ones you have access to, unless --all)
+    /// List models you have access to (all with --all): rank, bound and sort them
     #[command(alias = "ls")]
     List {
-        /// Rank by task fit
-        #[arg(short, long, value_parser = tasks())]
+        /// Rank by task fit, best first; excluded models are left out
+        #[arg(short, long, value_parser = tasks(), conflicts_with_all = ["sort", "frontier"])]
         task: Option<String>,
+        /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`p` in the TUI)
+        #[arg(long, value_parser = tasks(), conflicts_with = "sort")]
+        frontier: Option<String>,
+        /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
+        #[arg(short, long, value_parser = PossibleValuesParser::new(app::COLS.map(|c| c.id)))]
+        sort: Option<String>,
+        /// Keep models at or above a value, e.g. --min coding=70; columns as in --sort, ctx in thousands of tokens; repeatable (`>` in the TUI)
+        #[arg(long, value_parser = bound)]
+        min: Vec<(usize, f64)>,
+        /// Keep models at or below a value, e.g. --max price=2; repeatable (`<` in the TUI)
+        #[arg(long, value_parser = bound)]
+        max: Vec<(usize, f64)>,
         /// Include models you have no access to
         #[arg(short, long)]
         all: bool,
@@ -49,34 +61,8 @@ enum Cmd {
         /// Only models you have through these harnesses (opencode, claude, codex, gemini) or env; repeatable (the Via dropdown, `d`, in the TUI)
         #[arg(long)]
         via: Vec<String>,
-        /// Max blended price ($/1M tokens, 3:1 input:output)
-        #[arg(long)]
-        max_price: Option<f64>,
-        /// Best model per price level for --task: cheapest first, each row costing more and scoring higher (`p` in the TUI)
-        #[arg(long, requires = "task")]
-        frontier: bool,
         /// Max rows, 0 = no limit
-        #[arg(short = 'n', long, default_value_t = 30)]
-        limit: usize,
-        /// Machine-readable output
-        #[arg(long)]
-        json: bool,
-    },
-    /// Top models for a task
-    Recommend {
-        #[arg(value_parser = tasks())]
-        task: String,
-        /// Include models you have no access to
-        #[arg(short, long)]
-        all: bool,
-        /// Only models you have through these harnesses (opencode, claude, codex, gemini) or env; repeatable (the Via dropdown, `d`, in the TUI)
-        #[arg(long)]
-        via: Vec<String>,
-        /// Max blended price ($/1M tokens, 3:1 input:output)
-        #[arg(long)]
-        max_price: Option<f64>,
-        /// Max rows, 0 = no limit
-        #[arg(short = 'n', long, default_value_t = 5)]
+        #[arg(short = 'n', long, default_value_t = 0)]
         limit: usize,
         /// Machine-readable output
         #[arg(long)]
@@ -99,25 +85,61 @@ enum Cmd {
     },
     /// Open the model's web page
     Open { model: String },
-    /// Add or remove a favorite
+    /// Mark a model as a favorite (`f` in the TUI)
     Fav {
-        #[arg(value_parser = ["add", "rm"])]
-        action: String,
         model: String,
+        /// Remove it instead
+        #[arg(long)]
+        rm: bool,
     },
-    /// Show a model's note, or set it (empty text deletes)
-    Note { model: String, text: Option<String> },
+    /// Exclude a model you have but cannot use: --task and --frontier leave it out (`e` in the TUI)
+    Exclude {
+        model: String,
+        /// Include it again
+        #[arg(long)]
+        rm: bool,
+    },
+    /// Show a model's note, or set it (`n` in the TUI)
+    Note {
+        model: String,
+        #[arg(conflicts_with = "rm")]
+        text: Option<String>,
+        /// Delete the note
+        #[arg(long)]
+        rm: bool,
+    },
     /// What each task measures and when to pick a model high on it (`t` in the TUI)
-    Tasks,
-    /// Re-download data
-    Refresh,
+    Tasks {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `coding=70` for --min and --max: the column's index in `app::COLS` and the value.
+fn bound(s: &str) -> Result<(usize, f64), String> {
+    let ids = || app::COLS.map(|c| c.id).join(", ");
+    let (id, v) =
+        s.split_once('=').ok_or_else(|| format!("expected column=value, e.g. coding=70; columns: {}", ids()))?;
+    let col =
+        app::COLS.iter().position(|c| c.id == id).ok_or_else(|| format!("no column '{id}'; columns: {}", ids()))?;
+    Ok((col, v.parse().map_err(|_| format!("'{v}' is not a number"))?))
 }
 
 fn main() {
     let args = Args::parse();
     let result = match args.cmd {
         None => tui::run(args.refresh).map_err(Exit::from),
-        Some(cmd) => run(cmd, args.refresh),
+        Some(cmd) => {
+            // Die quietly when a pipe closes early, as in `modelcmp list | head`, instead of
+            // panicking in println. Not in the TUI: it writes to clipboard tools that may exit.
+            #[cfg(unix)]
+            // SAFETY: nothing else is running yet to observe the signal disposition change.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+            run(cmd, args.refresh)
+        }
     };
     if let Err(e) = result {
         eprintln!("modelcmp: {}", e.msg);
@@ -126,15 +148,8 @@ fn main() {
 }
 
 fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
-    if let Cmd::Tasks = cmd {
-        cli::tasks();
-        return Ok(());
-    }
-    if let Cmd::Refresh = cmd {
-        let data = data::refresh()?;
-        let with_bench = data.models.iter().filter(|m| m.eci.is_some()).count();
-        println!("{} models ({} with benchmarks)", data.models.len(), with_bench);
-        return Ok(());
+    if let Cmd::Tasks { json } = cmd {
+        return cli::tasks(json);
     }
     let (data, warn) = data::load(force)?;
     if let Some(w) = warn {
@@ -147,31 +162,33 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // clap has already validated task names against fit::TASKS.
     let task = |t: Option<String>| t.and_then(|t| fit::task(&t));
     match cmd {
-        Cmd::List { task: t, all, favorites, dev, via, max_price, frontier, limit, json } => cli::list(
-            &data,
-            &store,
-            &cli::ListOpts { task: task(t), all, favorites, dev, via, limit, max_price, frontier, json },
-        ),
-        Cmd::Recommend { task: t, all, via, max_price, limit, json } => cli::list(
-            &data,
-            &store,
-            &cli::ListOpts {
-                task: task(Some(t)),
+        Cmd::List { task: t, frontier, sort, min, max, all, favorites, dev, via, limit, json } => {
+            let bounds = min
+                .into_iter()
+                .map(|(c, v)| (c, v, f64::INFINITY))
+                .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
+                .collect();
+            let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
+            let opts = cli::ListOpts {
+                task: task(t),
+                frontier: task(frontier),
+                sort,
+                bounds,
                 all,
-                favorites: false,
-                dev: vec![],
+                favorites,
+                dev,
                 via,
                 limit,
-                max_price,
-                frontier: false,
                 json,
-            },
-        ),
+            };
+            cli::list(&data, &store, &opts)
+        }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
         Cmd::Open { model } => cli::open(&data, &model),
-        Cmd::Fav { action, model } => cli::fav(&data, &mut store, action == "add", &model),
-        Cmd::Note { model, text } => cli::note(&data, &mut store, &model, text.as_deref()),
-        Cmd::Tasks | Cmd::Refresh => unreachable!(),
+        Cmd::Fav { model, rm } => cli::fav(&data, &mut store, &model, rm),
+        Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
+        Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
+        Cmd::Tasks { .. } => unreachable!(),
     }
 }

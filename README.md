@@ -18,7 +18,7 @@ cargo install --path .
 ```
 
 Data is downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`.
-Favorites and notes live in `~/.config/modelcmp/user.json`.
+Favorites, exclusions and notes live in `~/.config/modelcmp/user.json`.
 
 ## TUI
 
@@ -27,7 +27,7 @@ modelcmp
 ```
 
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output),
-$in, $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason, Math,
+$in, $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Code/$, Via, Best for, Note. Task columns are mean percentiles (0-100) across the task's
 benchmarks, ranked against every model Epoch has evaluated. Move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
@@ -52,6 +52,7 @@ column.
 | `a` | all models, including ones you have no access to |
 | `f` `F` | favorite / favorites only |
 | `n` | note for the model |
+| `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but tasks (`t`, the ranking, best per price) skip it |
 | typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on openrouter.ai |
@@ -64,33 +65,41 @@ column.
 ## CLI
 
 ```sh
-modelcmp list                          # models you have access to
-modelcmp list --task coding -n 10      # ranked by task fit
-modelcmp list --task coding --frontier # best model per price level, cheapest first
-modelcmp list --max-price 2 --via opencode --dev anthropic --dev openai
-modelcmp recommend agentic             # top 5 for a task
-modelcmp show sonnet                   # everything about one model
-modelcmp compare sonnet gpt-5 --json   # side by side, with a verdict
-modelcmp open sonnet                   # its web page
-modelcmp fav add sonnet
-modelcmp note sonnet "fast enough for refactors"
-modelcmp tasks                         # what each task measures, when to use it
-modelcmp refresh                       # re-download data
+modelcmp list                                  # models you have access to
+modelcmp list --task coding -n 10              # ranked by task fit
+modelcmp list --frontier coding                # best model per price level, cheapest first
+modelcmp list --min coding=70 --sort price     # good enough, cheapest first
+modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
+modelcmp show sonnet                           # everything about one model
+modelcmp compare sonnet gpt-5 --json           # side by side, with a verdict
+modelcmp open sonnet                           # its web page
+modelcmp fav sonnet                            # --rm to remove
+modelcmp note sonnet "fast enough for refactors"   # without text shows it, --rm deletes it
+modelcmp exclude llama                         # have it, can't use it; --rm to include again
+modelcmp tasks                                 # what each task measures, when to use it
 ```
 
-Tasks: `coding`, `agentic`, `reasoning`, `math`, `knowledge`, `vision`, `long-context`,
-`value`, `overall`. `--all` includes models you have no access to. `--refresh` on any
-command re-downloads first. Model names match by substring; an ambiguous name exits with
-code 2 and lists the candidates.
+Tasks: `coding`, `agentic`, `reasoning`, `vision`, `long-context`, `value`, `overall`.
+Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
+tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
+`--frontier` leave excluded models out; plain `list` shows them marked `✗`. `--all`
+includes models you have no access to. `--refresh` on any command re-downloads first.
+`list` prints every match unless `-n` limits it, and then says how many it left out.
+
+Model names match by substring, among the models you have first; an ambiguous name exits
+with code 2 and lists the candidates. An unknown `--dev` or `--via` is an error rather
+than an empty list.
 
 For agents:
 
 ```sh
-modelcmp list --task coding --frontier --json | jq '.[0].key'
+modelcmp list --frontier coding --json | jq '.[0].key'
+modelcmp tasks --json
 ```
 
-Each JSON model carries `key`, `price`, `context`, `eci`, per-task `tasks` percentiles and
-`best_for`. `show` and `compare` add every benchmark score and every provider's price.
+Each JSON model carries `key`, `excluded`, `price`, `context`, `eci`, per-task `tasks`
+percentiles and `best_for`. `show` and `compare` add every benchmark score and every
+provider's price.
 
 ## Data
 

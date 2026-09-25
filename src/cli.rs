@@ -1,14 +1,13 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
+use crate::app::COLS;
 use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
-use crate::view::{
-    compare_rows, ctx, detail_lines, frontier, money, priced, score, task_frontier, task_score, truncate, verdict, via,
-    visible,
-};
+use crate::view::{compare_rows, detail_lines, priced, task_frontier, truncate, verdict, via, visible};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// An error with the process exit code it deserves: 2 for an ambiguous model name, 1 otherwise.
 pub struct Exit {
@@ -60,6 +59,8 @@ struct ModelOut<'a> {
     available: bool,
     via: &'a [String],
     favorite: bool,
+    /// You have it but cannot use it; task rankings skip it
+    excluded: bool,
     note: Option<&'a str>,
     price: Option<Price<'a>>,
     context: u64,
@@ -90,6 +91,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         available: m.available,
         via: &m.via,
         favorite: s.is_fav(&m.key),
+        excluded: s.is_excluded(&m.key),
         note: s.note(&m.key),
         price: m.price().map(Price::from),
         context: m.context,
@@ -114,34 +116,46 @@ fn print_json<T: Serialize>(v: &T) -> Result {
     Ok(())
 }
 
+/// The TUI's columns, so both show the same thing: Model, Dev, every numeric column, Via, Best for.
 fn table(models: &[&Model], store: &Store, show_avail: bool) {
-    println!(
-        "{:<2}{:<34} {:<9} {:>7} {:>7} {:>7} {:>6} {:>5} {:>6} {:>6} {:>6} {:>5}  {:<22} BEST FOR",
-        "", "MODEL", "DEV", "PRICE/M", "$IN/M", "$OUT/M", "CTX", "ECI", "CODE", "CODE/$", "REASON", "MATH", "VIA"
-    );
-    for m in models {
-        let price = |f: fn(&Offer) -> f64| m.price().map_or("-".into(), |p| money(f(p)));
+    let cells: Vec<Vec<String>> =
+        models.iter().map(|m| COLS.iter().map(|c| (c.get)(m).map_or("-".into(), c.show)).collect()).collect();
+    let widths: Vec<usize> = (0..COLS.len())
+        .map(|i| cells.iter().map(|r| r[i].chars().count()).chain([COLS[i].name.len()]).max().unwrap_or(0))
+        .collect();
+    let width = |f: fn(&Model) -> String, head: &str, max: usize| {
+        models.iter().map(|m| f(m).chars().count()).chain([head.len()]).max().unwrap_or(0).min(max)
+    };
+    let (nw, dw) = (width(|m| m.name.clone(), "Model", 34), width(|m| m.developer.clone(), "Dev", 12));
+    let vw = width(|m| via(&m.via), "Via", 22);
+    let line = |mark: &str, name: &str, dev: &str, nums: &mut dyn Iterator<Item = &str>, via: &str, best: &str| {
+        let nums: String = nums.zip(&widths).map(|(v, &w)| format!(" {v:>w$}")).collect();
+        println!(
+            "{mark} {:<nw$} {:<dw$}{nums}  {:<vw$}  {best}",
+            truncate(name, nw),
+            truncate(dev, dw),
+            truncate(via, vw)
+        );
+    };
+    line(" ", "Model", "Dev", &mut COLS.iter().map(|c| c.name), "Via", "Best for");
+    for (m, row) in models.iter().zip(&cells) {
         let mark = match (store.is_fav(&m.key), show_avail && m.available) {
+            _ if store.is_excluded(&m.key) => "✗",
             (true, _) => "★",
             (_, true) => "●",
             _ => " ",
         };
-        println!(
-            "{mark} {:<34} {:<9} {:>7} {:>7} {:>7} {:>6} {:>5} {:>6} {:>6} {:>6} {:>5}  {:<22} {}",
-            truncate(&m.name, 34),
-            truncate(&m.developer, 9),
-            m.cost().map_or("-".into(), money),
-            price(|p| p.input),
-            price(|p| p.output),
-            ctx(m.context),
-            score(m.eci),
-            score(task_score(m, "coding")),
-            score(m.fit.get("value").copied()),
-            score(task_score(m, "reasoning")),
-            score(task_score(m, "math")),
-            truncate(&via(&m.via), 22),
-            fit::best_for(m).join(", ")
-        );
+        let best = fit::best_for(m).join(", ");
+        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(&m.via), &best);
+    }
+}
+
+/// Every name in `asked` must be one of `known`, any case, or the filter would silently match nothing.
+fn check<'a>(flag: &str, asked: &[String], known: impl Iterator<Item = &'a str>) -> Result {
+    let known: BTreeSet<String> = known.filter(|k| !k.is_empty()).map(str::to_lowercase).collect();
+    match asked.iter().find(|a| !known.contains(&a.to_lowercase())) {
+        Some(bad) => Err(format!("no model has {flag} '{bad}'; known: {}", Vec::from_iter(known).join(", ")).into()),
+        None => Ok(()),
     }
 }
 
@@ -157,45 +171,60 @@ fn resolve<'a>(data: &'a Data, q: &str) -> Result<&'a Model> {
 
 pub struct ListOpts {
     pub task: Option<&'static Task>,
+    pub frontier: Option<&'static Task>,
+    /// Index into `COLS`.
+    pub sort: Option<usize>,
+    /// (index into `COLS`, min, max)
+    pub bounds: Vec<(usize, f64, f64)>,
     pub all: bool,
     pub favorites: bool,
     pub dev: Vec<String>,
     pub via: Vec<String>,
     pub limit: usize,
-    pub max_price: Option<f64>,
-    pub frontier: bool,
     pub json: bool,
 }
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
-    let mut models: Vec<&Model> = visible(data, store, o.all, o.favorites).map(|(_, m)| m).collect();
-    if !o.dev.is_empty() {
-        models.retain(|m| o.dev.iter().any(|d| m.developer.eq_ignore_ascii_case(d)));
-    }
-    if !o.via.is_empty() {
-        models.retain(|m| m.via.iter().any(|v| o.via.iter().any(|h| v.eq_ignore_ascii_case(h))));
-    }
-    if let Some(p) = o.max_price {
-        models.retain(|m| m.blended().is_some_and(|b| b <= p));
-    }
+    check("--dev", &o.dev, data.models.iter().map(|m| m.developer.as_str()))?;
+    check("--via", &o.via, data.models.iter().flat_map(|m| &m.via).map(String::as_str))?;
+    let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
+    // A task ranking or frontier is a recommendation, so models you cannot use stay out of it.
+    let ranking = o.task.is_some() || o.frontier.is_some();
+    let mut models: Vec<&Model> = visible(data, store, o.all, o.favorites)
+        .map(|(_, m)| m)
+        .filter(|m| {
+            (o.dev.is_empty() || has(&o.dev, &m.developer))
+                && (o.via.is_empty() || m.via.iter().any(|v| has(&o.via, v)))
+                && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
+                && !(ranking && store.is_excluded(&m.key))
+        })
+        .collect();
     let mut scores = None;
-    if let Some(t) = o.task {
+    if let Some(t) = o.frontier {
+        models = task_frontier(models.into_iter(), t).into_iter().map(|(m, _)| m).collect();
+    } else if let Some(t) = o.task {
         let ranked = fit::rank(models.into_iter(), t);
         models = ranked.iter().map(|(m, _)| *m).collect();
         scores = Some(ranked.into_iter().map(|(_, s)| s).collect::<Vec<f64>>());
-    }
-    // Cheapest first, like `p`: each row down costs more and scores higher. Price ties are
-    // score ties too on a frontier, and the stable sort keeps them in rank order.
-    if let (true, Some(t)) = (o.frontier, o.task) {
-        models = frontier(&models, |m| m, |m| fit::fit(m, t));
-        models.sort_by(|a, b| a.cost().partial_cmp(&b.cost()).unwrap_or(std::cmp::Ordering::Equal));
-        scores = None;
+    } else if let Some(c) = o.sort.map(|c| &COLS[c]) {
+        // Best first, blanks last, names breaking ties.
+        models.sort_by(|a, b| {
+            let order = match ((c.get)(a), (c.get)(b)) {
+                (Some(x), Some(y)) if c.lower_better => x.total_cmp(&y),
+                (Some(x), Some(y)) => y.total_cmp(&x),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            };
+            order.then_with(|| a.name.cmp(&b.name))
+        });
     }
     // Over every ranked model, before the limit cuts the list.
-    let front: Vec<String> = match (o.task, o.frontier) {
-        (Some(t), false) => task_frontier(models.iter().copied(), t).iter().map(|(m, s)| priced(m, *s)).collect(),
-        _ => vec![],
+    let front: Vec<String> = match o.task {
+        Some(t) => task_frontier(models.iter().copied(), t).iter().map(|(m, s)| priced(m, *s)).collect(),
+        None => vec![],
     };
+    let total = models.len();
     if o.limit > 0 {
         models.truncate(o.limit);
     }
@@ -207,6 +236,9 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         return Ok(());
     }
     table(&models, store, o.all);
+    if models.len() < total {
+        println!("\n{} of {total} shown; -n 0 for all", models.len());
+    }
     if let (Some(t), Some(s)) = (o.task, scores) {
         let top: Vec<String> = models.iter().zip(s).take(3).map(|(m, s)| format!("{} ({s:.0})", m.name)).collect();
         println!("\nbest for {}: {}", t.name, top.join(", "));
@@ -256,22 +288,32 @@ pub fn open(data: &Data, q: &str) -> Result {
     Ok(())
 }
 
-pub fn fav(data: &Data, store: &mut Store, add: bool, q: &str) -> Result {
+pub fn fav(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     let m = resolve(data, q)?;
-    if add != store.is_fav(&m.key) {
+    if rm == store.is_fav(&m.key) {
         store.toggle_fav(&m.key);
     }
     store.save()?;
-    println!("{} {}", if add { "★ added" } else { "removed" }, m.name);
+    println!("{} {}", if rm { "removed" } else { "★ added" }, m.name);
     Ok(())
 }
 
-pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>) -> Result {
+pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     let m = resolve(data, q)?;
-    match text {
-        None => println!("{}", store.note(&m.key).unwrap_or("")),
-        Some(t) => {
-            store.set_note(&m.key, t);
+    if rm == store.is_excluded(&m.key) {
+        store.toggle_excluded(&m.key);
+    }
+    store.save()?;
+    println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name);
+    Ok(())
+}
+
+pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: bool) -> Result {
+    let m = resolve(data, q)?;
+    match (text, rm) {
+        (None, false) => println!("{}", store.note(&m.key).unwrap_or("")),
+        (t, _) => {
+            store.set_note(&m.key, t.unwrap_or(""));
             store.save()?;
         }
     }
@@ -279,13 +321,21 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>) -> Resu
 }
 
 /// What each task measures, when to pick a model high on it, and its benchmarks.
-pub fn tasks() {
+pub fn tasks(json: bool) -> Result {
+    if json {
+        let v: Vec<_> = TASKS
+            .iter()
+            .map(|t| serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches}))
+            .collect();
+        return print_json(&v);
+    }
     for t in TASKS {
-        println!("{}  {}  (modelcmp recommend {})", t.name, t.about, t.name);
+        println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:     {}", t.when);
         if !t.benches.is_empty() {
             println!("  benchmarks:  {}", t.benches.join(", "));
         }
         println!();
     }
+    Ok(())
 }

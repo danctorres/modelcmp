@@ -117,7 +117,12 @@ pub fn visible<'a>(
 pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     let yes = |b: bool| if b { "yes" } else { "no" };
     let mut v = vec![
-        format!("{}{}", if store.is_fav(&m.key) { "★ " } else { "" }, m.name),
+        format!(
+            "{}{}{}",
+            if store.is_fav(&m.key) { "★ " } else { "" },
+            m.name,
+            if store.is_excluded(&m.key) { " (excluded)" } else { "" }
+        ),
         format!("  developer:  {}", or_dash(&m.developer)),
         format!("  via:        {}", via(&m.via)),
         format!("  context:    {} (max output {})", ctx(m.context), ctx(m.max_output)),
