@@ -384,35 +384,40 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
     Ok(())
 }
 
+/// The frontier among the models you have and can use, as `list --task` gives it.
+fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<(&'a Model, f64)> {
+    task_frontier(
+        visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)),
+        t,
+        store.favorite(t.name),
+    )
+}
+
+/// `recommend --json`: what agents read to choose a task and its model.
+fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
+    TASKS
+        .iter()
+        .map(|t| {
+            let front: Vec<_> = front(data, store, t)
+                .into_iter()
+                .map(|(m, s)| serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0}))
+                .collect();
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "frontier": front})
+        })
+        .collect()
+}
+
 /// The best model per price for each task, what it measures and when to use it.
 pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
-    // The frontier among the models you have and can use, as `list --task` gives it.
-    let front = |t: &Task| {
-        task_frontier(
-            visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)),
-            t,
-            store.favorite(t.name),
-        )
-    };
     if json {
-        let v: Vec<_> = TASKS
-            .iter()
-            .map(|t| {
-                let front: Vec<_> = front(t)
-                    .into_iter()
-                    .map(|(m, s)| serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0}))
-                    .collect();
-                serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "frontier": front})
-            })
-            .collect();
-        return print_json(&v);
+        return print_json(&recommend_json(data, store));
     }
     println!("{}\n", frontier_legend(true));
     for t in TASKS {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
         let yours = store.favorite(t.name);
-        let front: Vec<String> = front(t)
+        let front: Vec<String> = front(data, store, t)
             .iter()
             .map(|(m, s)| priced(m, fit::shown(m, t, *s), true, Some(m.key.as_str()) == yours))
             .collect();
@@ -420,4 +425,87 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn model(key: &str, coding: f64, price: f64) -> Model {
+        let mut m = Model {
+            key: key.into(),
+            name: key.into(),
+            offers: vec![Offer {
+                provider: "p".into(),
+                id: key.into(),
+                input: price,
+                output: price,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        m.fit.insert("coding".into(), coding);
+        m
+    }
+
+    fn keys(v: &Value) -> Vec<&str> {
+        v.as_object().unwrap().keys().map(String::as_str).collect()
+    }
+
+    /// The JSON is the agents' API: a renamed or dropped field breaks their scripts.
+    #[test]
+    fn model_json_keeps_its_fields() {
+        let store = Store::default();
+        let mut m = model("gpt55", 80.0, 2.0);
+        let short = serde_json::to_value(out(&m, &store, false)).unwrap();
+        let fields = [
+            "available",
+            "context",
+            "developer",
+            "eci",
+            "excluded",
+            "favorite_for",
+            "key",
+            "knowledge",
+            "marked",
+            "max_output",
+            "name",
+            "note",
+            "open_weights",
+            "price",
+            "reasoning",
+            "release",
+            "tasks",
+            "tool_call",
+            "url",
+            "via",
+            "vision",
+        ];
+        assert_eq!(keys(&short), fields);
+        assert_eq!(
+            keys(&short["price"]),
+            ["available", "cache_read_per_mtok", "id", "input_per_mtok", "output_per_mtok", "provider", "via"]
+        );
+        let full = serde_json::to_value(out(&m, &store, true)).unwrap();
+        let extra: Vec<_> = keys(&full).into_iter().filter(|k| !fields.contains(k)).collect();
+        assert_eq!(extra, ["benchmarks", "pages", "providers"], "only show and compare add these");
+        m.offers[0].unpriced = true;
+        let unpriced = serde_json::to_value(out(&m, &store, false)).unwrap();
+        assert_eq!(unpriced["price"]["input_per_mtok"], Value::Null, "an unknown price is not free");
+    }
+
+    #[test]
+    fn recommend_json_leaves_excluded_models_out() {
+        let data = Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
+        let mut store = Store::default();
+        let coding = |v: &[Value]| v.iter().find(|t| t["name"] == "coding").unwrap().clone();
+        let names = |t: &Value| t["frontier"].as_array().unwrap().iter().map(|e| e["key"].clone()).collect::<Vec<_>>();
+        let t = coding(&recommend_json(&data, &store));
+        assert_eq!(keys(&t), ["about", "benchmarks", "favorite", "frontier", "name", "when"]);
+        assert_eq!(keys(&t["frontier"][0]), ["key", "name", "price", "score"]);
+        assert_eq!(names(&t), ["mini", "gpt55"]);
+        store.toggle_excluded("mini");
+        assert_eq!(names(&coding(&recommend_json(&data, &store))), ["gpt55"]);
+    }
 }
