@@ -184,3 +184,7 @@ to a GitHub release.
 `app.rs` holds all state and key handling with no I/O, so every key is unit tested.
 `tui.rs` owns the terminal and the refresh thread, `cli.rs` the subcommands, `data.rs`
 the sources and cache, `fit.rs` the task scores.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
