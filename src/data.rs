@@ -294,12 +294,17 @@ fn harness_models() -> BTreeMap<String, Vec<String>> {
 }
 
 /// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit`.
-// ponytail: stdout is read after exit, so more than the pipe holds (64K) blocks the child until
-// the limit kills it; the harnesses print a few KB.
 fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
     use std::process::{Command, Stdio};
     let mut child =
         Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    // Read while it runs: output larger than the pipe holds would otherwise block it.
+    let mut out = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = tx.send(out.read_to_string(&mut text).map(|_| text));
+    });
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -313,9 +318,8 @@ fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
-    let mut text = String::new();
-    child.stdout.take()?.read_to_string(&mut text).ok()?;
-    Some(text)
+    // A process it left running may hold the pipe open: wait for the rest no longer than the limit.
+    rx.recv_timeout(limit.saturating_sub(start.elapsed())).ok()?.ok()
 }
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache.
@@ -902,6 +906,8 @@ mod tests {
     fn run_returns_output_and_gives_up_on_hangs() {
         assert_eq!(run("sh", &["-c", "echo a/b"], Duration::from_secs(5)).as_deref(), Some("a/b\n"));
         assert_eq!(run("sh", &["-c", "exit 1"], Duration::from_secs(5)), None, "a failure reports nothing");
+        let big = run("sh", &["-c", "head -c 200000 /dev/zero | tr '\\0' a"], Duration::from_secs(5));
+        assert_eq!(big.map(|s| s.len()), Some(200_000), "more than a pipe holds");
         assert_eq!(run("no-such-binary-xyz", &[], Duration::from_secs(5)), None, "so does a missing harness");
         let t = Instant::now();
         assert_eq!(run("sleep", &["10"], Duration::from_millis(200)), None, "a hang is killed");
