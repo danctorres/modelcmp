@@ -220,11 +220,12 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         });
     }
     let x = m.column - inner.x;
-    // The ✓ header shows marked models only, as `M` does, the ★ favorites only, as `F`, and
-    // the ✗ excluded only, as `E`.
+    // The # header goes to the first row, as `gg` does; the ✓ header shows marked models only,
+    // as `M` does, the ★ favorites only, as `F`, and the ✗ excluded only, as `E`.
     if x < l.name_x {
         let num_w = l.name_x - 7;
         return match x {
+            _ if x <= num_w => Some(Mouse::Top),
             _ if (num_w + 1..num_w + 3).contains(&x) => Some(Mouse::OnlyMarked),
             _ if (num_w + 3..num_w + 5).contains(&x) => Some(Mouse::OnlyFav),
             _ if (num_w + 5..num_w + 7).contains(&x) => Some(Mouse::OnlyExcluded),
@@ -351,6 +352,9 @@ fn hints(app: &App) -> Vec<&'static str> {
             {
                 v.push("c clear");
             }
+            if stale(app) {
+                v.push("r refresh");
+            }
             v.extend(["/ filter", "R recommend", "? help"]);
             // Where esc goes back from, as in the overlays.
             if !app.query.is_empty() || app.only_marked || app.only_fav || app.only_excluded || app.task.is_some() {
@@ -390,6 +394,12 @@ fn hints(app: &App) -> Vec<&'static str> {
             "esc back",
         ],
     }
+}
+
+/// Data past the cache's 24h with no refresh under way: the status bar says how old, and
+/// hints `r`. Only the age counts: a stale format or benchmark list refreshes at start.
+fn stale(app: &App) -> bool {
+    !app.refreshing && app.data.age() > data::MAX_AGE
 }
 
 // The terminal's own palette, so the colours are whatever the rice set. Text stays the default foreground.
@@ -555,7 +565,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Table => None,
         View::Help => Some(("keys".to_string(), help(&app.overlay_query))),
         View::Recommend => {
-            Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(100))))
+            Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(130))))
         }
         View::Detail => app.current().map(|m| (detail_lines(m, &app.store).swap_remove(0), detail(m, &app.store))),
         View::Compare if app.marked_models().len() < 2 => {
@@ -1023,6 +1033,9 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     };
     let part = |s: String, c: Color| Line::styled(s, fg(c));
     let mut parts = vec![part(format!("{} {scope}", app.rows.len()), Color::Reset)];
+    if stale(app) {
+        parts.push(part(format!("data {} old", age(app.data.age())), BAD));
+    }
     if app.any_marked() {
         let n = app.store.marked.len();
         parts.push(part(format!("{n} marked{}", if app.only_marked { " only" } else { "" }), MARK));
@@ -1084,7 +1097,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             x = buf.set_stringn(x, area.y, " · ", limit.saturating_sub(x) as usize, fg(MUTED)).0;
         }
         for span in &line.spans {
-            x = buf.set_stringn(x, area.y, &span.content, limit.saturating_sub(x) as usize, span.style).0;
+            let style = line.style.patch(span.style);
+            x = buf.set_stringn(x, area.y, &span.content, limit.saturating_sub(x) as usize, style).0;
         }
     }
     // Hints: the key in colour, what it does in plain text.
@@ -1243,8 +1257,8 @@ fn help(query: &str) -> Vec<Line<'static>> {
     v
 }
 
-/// One block per task: what it is, when to pick a model high on it, its best models per
-/// price and its benchmarks, wrapped to `width`. The cursor's block is highlighted; enter
+/// One block per task: what it is, when to pick a model high on it and its best models per
+/// price, wrapped to `width`. The cursor's block is highlighted; enter
 /// ranks the table by it.
 fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
     let cur = app.current().map(|m| m.key.clone());
@@ -1270,14 +1284,6 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
             Span::styled(" · ", fg(MUTED)),
             width,
         ));
-        if !t.benches.is_empty() {
-            let benches = t.benches.iter().map(|b| Line::from(*b)).collect();
-            v.extend(
-                wrapped(label("  benchmarks:      "), benches, Span::raw(", "), width)
-                    .into_iter()
-                    .map(|l| l.style(fg(MUTED))),
-            );
-        }
     }
     v.push(Line::default());
     let cli = words(
@@ -1336,7 +1342,10 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
             if app.store.favorite(t.name) == Some(m.key.as_str()) {
                 spans.push(Span::styled("★ ", tint(task_color(t.name)).add_modifier(BOLD)));
             }
-            spans.push(Span::styled(priced(m, *s, false, false), tint(LEVEL[level(m.cost().unwrap_or(0.0))])));
+            spans.push(Span::styled(
+                priced(m, fit::shown(m, t, *s), false, false),
+                tint(LEVEL[level(m.cost().unwrap_or(0.0))]),
+            ));
             Line::from(spans)
         })
         .collect()
@@ -1487,7 +1496,23 @@ mod tests {
 
     fn app() -> App {
         let models = vec![model("opus", "anthropic", Some(150.0), 5.0), model("flash", "google", Some(120.0), 0.1)];
-        App::new(Data { models, ..Default::default() }, Store::default())
+        let fetched = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        App::new(Data { models, fetched, ..Default::default() }, Store::default())
+    }
+
+    #[test]
+    fn old_data_says_so_in_the_status_bar() {
+        let mut a = app();
+        let (_, lines) = render(&mut a, 200, 4);
+        assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "fresh: {}", lines[3]);
+        a.data.fetched -= data::MAX_AGE.as_secs() + 3600;
+        let (buf, lines) = render(&mut a, 200, 4);
+        assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
+        assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
+        assert!(lines[3].ends_with("r refresh  / filter  R recommend  ? help"), "{}", lines[3]);
+        a.refreshing = true;
+        let (_, lines) = render(&mut a, 200, 4);
+        assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "refreshing: {}", lines[3]);
     }
 
     fn render(app: &mut App, width: u16, height: u16) -> (Buffer, Vec<String>) {
@@ -1749,6 +1774,7 @@ mod tests {
         assert_eq!(hit(&a, area, drag(3, 0)), Some(Mouse::Extend(0)), "a drag above the table: the first row");
         assert_eq!(hit(&a, area, drag(3, h)), Some(Mouse::Extend(h as usize - 6)), "below: the last row");
         assert_eq!(hit(&a, Rect::new(0, 0, w, 5), drag(3, 2)), None, "no rows to extend over");
+        assert_eq!(hit(&a, area, click(1, 1)), Some(Mouse::Top), "the # header: the first row");
         assert_eq!(hit(&a, area, click(3, 1)), Some(Mouse::OnlyMarked), "the ✓ header: marked only");
         assert_eq!(hit(&a, area, click(5, 1)), Some(Mouse::OnlyFav), "the ★ header: favorites only");
         assert_eq!(hit(&a, area, click(7, 1)), Some(Mouse::OnlyExcluded), "the ✗ header: excluded only");
@@ -2101,7 +2127,7 @@ mod tests {
         a.task_cur = TASKS.iter().position(|t| t.name == "vision").unwrap();
         let lines = recommend(&a, 60);
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert!(text[0].starts_with("best per price: name, $ per 1M tokens"), "{}", text[0]);
+        assert!(text[0].starts_with("best per price: the top model"), "{}", text[0]);
         let gap = text.iter().position(String::is_empty).unwrap();
         assert!(gap > 1 && text[..gap].join(" ") == frontier_legend(false), "the legend wraps: {:?}", &text[..gap]);
         assert_eq!(

@@ -142,9 +142,9 @@ pub const HELP: &[(&str, &str)] = &[
     ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
     ("mouse", "click selects, again details; ctrl / shift click, drag; right click marks"),
     ("", "click ☐ ☆ · to mark, favorite, exclude; a header sorts, its ▾ opens"),
-    ("", "click the ✓ ★ ✗ header: marked, favorites or excluded only"),
+    ("", "click #: first row; the ✓ ★ ✗ header: marked, favorites, excluded only"),
     ("?", "this help"),
-    ("esc", "back: overlay, selection, filter, M, F, task"),
+    ("esc", "back: overlay, selection, filter, M, F, E, task"),
     ("q", "quit; asks first"),
 ];
 
@@ -341,6 +341,8 @@ pub enum Mouse {
     Extend(usize),
     /// Horizontal wheel: columns to move the cursor, negative is left.
     Cols(isize),
+    /// Click on the # header: the first row, as `gg` goes.
+    Top,
     /// Click on the ✓ header: show marked models only, as `M` does.
     OnlyMarked,
     /// Click on the ★ header: show favorites only, as `F` does.
@@ -881,6 +883,24 @@ impl App {
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Option<Effect> {
+        let effect = self.on_key(k);
+        self.follow();
+        effect
+    }
+
+    /// The table's bar follows the model picked in compare and recommend, so after esc you are
+    /// on it. A selection in progress keeps the bar, which is its end.
+    fn follow(&mut self) {
+        if !matches!(self.view, View::Compare | View::Recommend) || self.selecting() {
+            return;
+        }
+        let Some(key) = self.current().map(|m| m.key.clone()) else { return };
+        if let Some(n) = self.rows.iter().position(|&i| self.data.models[i].key == key) {
+            self.select(n);
+        }
+    }
+
+    fn on_key(&mut self, k: KeyEvent) -> Option<Effect> {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && k.code == KeyCode::Char('c') {
             return Some(Effect::Quit);
@@ -938,6 +958,12 @@ impl App {
     /// a click toggles one, as m does, and the dropdown stays open until a click outside;
     /// elsewhere (Price, a choice list) a click picks the entry, as enter does.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
+        let effect = self.on_mouse(m);
+        self.follow();
+        effect
+    }
+
+    fn on_mouse(&mut self, m: Mouse) -> Option<Effect> {
         let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { typing: false, .. });
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
@@ -1042,6 +1068,7 @@ impl App {
                 }
                 self.select(n);
             }
+            Mouse::Top => self.go_to(0),
             Mouse::OnlyMarked => return self.table_key(KeyCode::Char('M'), 1),
             Mouse::OnlyFav => return self.table_key(KeyCode::Char('F'), 1),
             Mouse::OnlyExcluded => return self.table_key(KeyCode::Char('E'), 1),
@@ -2091,6 +2118,23 @@ mod tests {
     }
 
     #[test]
+    fn the_table_bar_follows_the_model_picked_in_an_overlay() {
+        let mut a = app();
+        let row = |a: &App, key: &str| a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
+        press(&mut a, "Rjl");
+        assert_eq!(a.selected(), row(&a, "gpt55"), "recommend's pick");
+        a.mouse(Mouse::Cols(1));
+        assert_eq!(a.selected(), row(&a, "mini"), "the wheel too");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, "mini"), "esc lands on it");
+        a.store.marked = vec!["gpt55".into(), "mini".into()];
+        press(&mut a, "Cl");
+        assert_eq!(a.selected(), row(&a, "mini"), "compare's too");
+        press(&mut a, "h");
+        assert_eq!(a.selected(), row(&a, "gpt55"));
+    }
+
+    #[test]
     fn a_refresh_keeps_the_selection() {
         let mut a = app();
         press(&mut a, "Vj");
@@ -2190,6 +2234,9 @@ mod tests {
         press(&mut a, "MF");
         a.mouse(Mouse::OnlyMarked);
         a.mouse(Mouse::OnlyFav);
+        press(&mut a, "G");
+        a.mouse(Mouse::Top);
+        assert_eq!(a.selected(), 0, "the # header goes to the first row");
         assert!((a.only_marked, a.only_fav) == (true, true), "the ✓ and ★ headers do what M and F do");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only_marked, a.only_fav), (false, true), "esc leaves M first");
@@ -2366,7 +2413,9 @@ mod tests {
         assert_eq!(press(&mut a, "C"), Some(Effect::Save));
         assert_eq!((&a.view, a.store.marked.len(), a.selecting()), (&View::Compare, 3, false), "C compares the picks");
         code(&mut a, KeyCode::Esc);
+        assert_eq!(a.selected(), 0, "the bar stays on the model compare had picked");
         a.store.marked.clear();
+        press(&mut a, "j");
         a.mouse(Mouse::Row(0));
         a.mouse(Mouse::Extend(1));
         a.mouse(Mouse::Mark(2));

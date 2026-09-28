@@ -439,8 +439,8 @@ pub fn usd(x: f64) -> String {
 /// What a frontier line shows, for the recommend panel and `modelcmp recommend`, which adds the key.
 pub fn frontier_legend(keyed: bool) -> String {
     format!(
-        "best per price: name{}, $ per 1M tokens (3:1 in:out, 90% of in cached), (task percentile: rank among Epoch's models, \
-         not a quality gap), cheapest first and the best last; only models in the top half, plus ★ your favorite",
+        "best per price: the top model at each price level, cheapest first, as name{} $/1M tokens (the task's column), \
+         plus ★ your favorite",
         if keyed { " [key]" } else { "" }
     )
 }

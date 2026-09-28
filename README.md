@@ -29,7 +29,13 @@ modelcmp
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session; providers without a cache price pay full input),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Code/$, Via, Note. Task columns are mean percentiles (0-100) across the task's
-benchmarks, ranked against every model Epoch has evaluated. Move the column cursor and the
+benchmarks, ranked against every model Epoch has evaluated:
+
+- Coding: DeepSWE, FrontierCode, SWE-Bench verified, Terminal Bench, WeirdML, MirrorCode, GSO-Bench, Aider polyglot
+- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, OSWorld, METR Time Horizons, The Agent Company, DeepResearch Bench, Terminal Bench
+- Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles
+
+`modelcmp recommend` prints the same lists. Move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
 column.
 
@@ -51,7 +57,7 @@ column.
 | `M` | marked models only; `M` again or `esc`: every model |
 | `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked); `F` again or `esc`: every model |
 | `E` | excluded models only, the rows with a red `✗`; `E` again or `esc`: every model |
-| `C` | compare 2+ marked models: cheapest, best coder, most coding per $; `C` again or `esc` closes it |
+| `C` | compare 2+ marked models: cheapest, best coder, most coding per $; `h` `l` pick a model, and the table's bar follows it; `C` again or `esc` closes it |
 | `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare it filters the rows, in the help its lines, and in a list like the theme panel its entries; what matched is underlined in yellow everywhere |
 | `c` | clear filters, bounds, task, `M`, `F` and `E`; marks stay |
 | `a` | all models, including ones you have no access to |
@@ -63,10 +69,10 @@ column.
 | `o` | open the model on models.dev, epoch.ai or openrouter.ai; asks which |
 | `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |
 | `r` | refresh data now |
-| `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
+| `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`, and the table's bar follows it, so `esc` lands on it; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
 | `T` | theme panel: `j` `k` preview, `/` searches, `enter` saves, `esc` or `T` closes. `terminal` (its own colours, the default), then the dark `gruvbox`, `nord`, `catppuccin`, `dracula`, `tokyonight`, `kanagawa`, `monokai`, `rose-pine`, `github`, `solarized`, `synthwave` and `cyberpunk`, the light `github-light`, `gruvbox-light`, `paper` and `sepia`, and the retro `amber`, `phosphor`, `c64` and `gameboy`; saved with your marks. A theme sets the 16 terminal colours, the text colour and 5 to 14 colours for developers, each of which has to read on that theme's background and stay apart from the others. Every theme paints its own background, so a dark one stays dark on a light terminal; only `terminal` keeps a transparent background |
 | `?` | help; `/` keeps the lines that match |
-| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its `☐` toggles the mark, on its `☆` picks its tasks, on its `✗` box excludes it; a click on the `✓` header shows marked models only, on the `★` header favorites only, on the `✗` header excluded only; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
+| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its `☐` toggles the mark, on its `☆` picks its tasks, on its `✗` box excludes it; a click on the `#` header goes to the first row, on the `✓` header shows marked models only, on the `★` header favorites only, on the `✗` header excluded only; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
 | `qq` | quit; the first `q` asks. `esc` goes back: closes an overlay, drops the selection, clears the `/` filter, leaves `M`, then `F`, then `E`, then a task picked in recommend back to recommend |
 
 ## CLI
@@ -98,7 +104,8 @@ tier's pick and sits on the task's list marked `★` whether or not it is on the
 Epoch benchmarked. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first. The
 TUI's bottom border always shows the refresh state: `⟳ refreshing`, `refresh failed` in red
-with the age of the data still shown, or the data age alone, red once it is past 24h.
+with the age of the data still shown, or the data age alone, red once it is past 24h; then
+the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 `list` prints every match unless `-n` limits it, and then says how many it left out.
 
 Model names match by substring, among the models you have first; an ambiguous name exits
@@ -117,7 +124,8 @@ Each JSON model carries `key`, `excluded`, `favorite_for` (the tasks it is the u
 for), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted), `context`,
 `eci`, per-task `tasks` percentiles. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
-frontier entry as `name [key] $price (percentile)`.
+frontier entry as `name [key] $price (value)`, the value being the task's table column: the
+ECI for overall, vision and long-context, the percentile for the others.
 
 ## Data
 

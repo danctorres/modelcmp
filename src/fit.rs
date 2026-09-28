@@ -128,6 +128,14 @@ pub fn task_names() -> impl Iterator<Item = &'static str> {
     TASKS.iter().map(|t| t.name)
 }
 
+/// Tasks ranked by the ECI percentile; they show the raw ECI, as the table's ECI column does.
+const ECI_TASKS: [&str; 3] = ["overall", "vision", "long-context"];
+
+/// The value a task's frontier shows for a model ranked `s`: its value in the task's table column.
+pub fn shown(m: &Model, t: &Task, s: f64) -> f64 {
+    if ECI_TASKS.contains(&t.name) { m.eci.unwrap_or(s) } else { s }
+}
+
 /// Fraction of `all` below x (ties count half), as 0..100.
 fn pct_rank(x: f64, all: &[f64]) -> f64 {
     let below = all.iter().filter(|v| **v < x).count() as f64;
@@ -153,7 +161,7 @@ pub fn percentiles<'a>(
         let mut fit = BTreeMap::new();
         if let Some(e) = eci {
             let p = pct_rank(e, &ecis);
-            for t in ["overall", "vision", "long-context"] {
+            for t in ECI_TASKS {
                 fit.insert(t.to_string(), p);
             }
         }
