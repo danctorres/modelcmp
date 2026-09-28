@@ -49,13 +49,14 @@ column.
 | `V` | select a range of rows: move to extend it, then `m` `e` or `C` act on all of it; `esc` cancels |
 | `e` on a mark | act on every marked model, not just the one under the cursor |
 | `M` | marked models only; `M` again or `esc`: every model |
+| `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked); `F` again or `esc`: every model |
 | `C` | compare 2+ marked models: cheapest, best coder, most coding per $; `C` again or `esc` closes it |
 | `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare, filters the rows |
-| `c` | clear filters, bounds, task and `M`; marks stay |
+| `c` | clear filters, bounds, task, `M` and `F`; marks stay |
 | `a` | all models, including ones you have no access to |
 | `n` | note for the model |
 | `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but recommendations (`R` and `--task`) skip it |
-| `f` | favorite the model for tasks. Every row has a `☆`, filled `★` for a favorite: with a task picked, that task's favorite in the task's colour, the colour of its column header and of its name in recommend; with none, a plain `★` for the favorite of any task. `f` or a click on the `☆` lists the tasks with `☐`/`☑`: `m` or a click ticks one, `enter` ticks the one under the bar and closes; the list starts on the picked task, or the task under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. The model joins the task's line even off the price frontier, and `--tier` picks it |
+| `f` | favorite the model for tasks. Every row has a `☆`, filled bold `★` for a favorite: with a task picked, that task's favorite in the task's colour, the colour of its column header and of its name in recommend; with none, a gold `★` for the favorite of any task. `f` or a click on the `☆` lists the tasks with `☐`/`☑`: `m` or a click ticks one, `enter` ticks the one under the bar and closes; the list starts on the picked task, or the task under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. The model joins the task's line even off the price frontier, and `--tier` picks it |
 | typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` `^←` `^→` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on models.dev, epoch.ai or openrouter.ai; asks which |
@@ -64,7 +65,7 @@ column.
 | `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
 | `?` | help |
 | mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its `☐` toggles the mark, on its `☆` picks its tasks; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
-| `qq` | quit; the first `q` asks. `esc` goes back: closes an overlay, drops the selection, clears the `/` filter, leaves `M`, then a task picked in recommend back to recommend |
+| `qq` | quit; the first `q` asks. `esc` goes back: closes an overlay, drops the selection, clears the `/` filter, leaves `M`, then `F`, then a task picked in recommend back to recommend |
 
 ## CLI
 

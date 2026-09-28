@@ -296,6 +296,11 @@ fn hints(app: &App) -> Vec<&'static str> {
             } else if app.any_marked() {
                 v.push("M marked only");
             }
+            if app.only_fav {
+                v.push("F every model");
+            } else if app.any_fav() {
+                v.push("F favorites only");
+            }
             if !app.store.marked.is_empty() {
                 v.push("U unmark all");
             }
@@ -308,12 +313,13 @@ fn hints(app: &App) -> Vec<&'static str> {
                 || !app.via.is_empty()
                 || app.task.is_some()
                 || app.only_marked
+                || app.only_fav
             {
                 v.push("c clear");
             }
             v.extend(["/ filter", "R recommend", "? help"]);
             // Where esc goes back from, as in the overlays.
-            if app.only_marked || app.task.is_some() {
+            if app.only_marked || app.only_fav || app.task.is_some() {
                 v.push("esc back");
             }
             v
@@ -359,6 +365,8 @@ const MUTED: Color = Color::DarkGray;
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
 const MARK: Color = Color::LightBlue;
+/// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
+const STAR: Color = Color::Yellow;
 /// One colour per task in `TASKS` order: the ★ of its favorite, its column header and its
 /// name in recommend. Off the mark colour (☑ light blue), the key hints' cyan,
 /// red for the worst value and yellow for a match.
@@ -632,10 +640,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
         };
         if app.starred(&m.key) {
-            // In the colour of the task at hand, as its header; plain with no task, as the ★
-            // then stands for any of them.
-            let star = app.task_at_hand().map_or(base, |t| tint(task_color(t.name)));
-            buf.set_stringn(star_x, y, "★", 1, star);
+            // In the colour of the task at hand, as its header; gold with no task, as the ★
+            // then stands for any of them. Bold so it stands out as much as the ☑.
+            let star = tint(app.task_at_hand().map_or(STAR, |t| task_color(t.name)));
+            buf.set_stringn(star_x, y, "★", 1, star.add_modifier(BOLD));
         } else {
             buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
@@ -851,15 +859,17 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         let n = app.store.marked.len();
         parts.push(part(format!("{n} marked{}", if app.only_marked { " only" } else { "" }), MARK));
     }
+    if app.only_fav {
+        parts.push(part("★ favorites only".into(), STAR));
+    }
     // The tasks the model under the cursor is the favorite for, each ★ in its task's colour as
     // on its header: the row's single ★ does not say which.
     if let Some(m) = app.current() {
         let tasks = app.store.favorite_for(&m.key);
         if !tasks.is_empty() {
-            let spans = tasks
-                .iter()
-                .enumerate()
-                .map(|(i, t)| Span::styled(format!("{}★ {t}", if i > 0 { " " } else { "" }), fg(task_color(t))));
+            let spans = tasks.iter().enumerate().map(|(i, t)| {
+                Span::styled(format!("{}★ {t}", if i > 0 { " " } else { "" }), fg(task_color(t)).add_modifier(BOLD))
+            });
             parts.push(Line::from(spans.collect::<Vec<_>>()));
         }
     }
@@ -1093,7 +1103,7 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
             let tint = |c: Color| if on { Style::new().add_modifier(Modifier::REVERSED) } else { fg(c) };
             let mut spans = Vec::with_capacity(2);
             if app.store.favorite(t.name) == Some(m.key.as_str()) {
-                spans.push(Span::styled("★ ", tint(task_color(t.name))));
+                spans.push(Span::styled("★ ", tint(task_color(t.name)).add_modifier(BOLD)));
             }
             spans.push(Span::styled(priced(m, *s, false, false), tint(LEVEL[level(m.cost().unwrap_or(0.0))])));
             Line::from(spans)
@@ -1444,7 +1454,7 @@ mod tests {
         // The cell where `pat` starts on line `y`; the lines hold wide glyphs before it.
         let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
         let star = |m: &str| buf[at(lines.iter().position(|l| l.contains(m)).unwrap(), "★")].fg;
-        assert_eq!(star("opus"), Color::Reset, "no task picked: a plain ★ that says favorite for some task");
+        assert_eq!(star("opus"), STAR, "no task picked: a gold ★ that says favorite for some task");
         assert_eq!(buf[at(0, "Coding")].fg, task_color("coding"), "the task's colour on the header");
         assert_eq!(buf[at(0, "Price")].fg, ACCENT, "columns of no task stay plain");
         assert_eq!(buf[at(4, "★")].fg, task_color("agentic"), "and in the status bar");

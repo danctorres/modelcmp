@@ -126,12 +126,13 @@ pub const HELP: &[(&str, &str)] = &[
     ("V", "select a range of rows: move to extend it, then m e or C act on all of it; esc cancels"),
     ("e on a mark", "act on every marked model, not just the one under the cursor"),
     ("M", "show marked models only; M again or esc: every model"),
+    ("F", "show favorite models only, the rows with a ★; F again or esc: every model"),
     ("C", "compare 2+ marked models: cheapest, best coder, most coding per $; C again or esc closes it"),
     (
         "/",
         "filter by name, developer, Via or note, words in any order (anthropic opus), a typo forgiven when nothing matches (opsu); / again starts a new search, esc clears; in compare, filters the rows",
     ),
-    ("c", "clear filters, bounds, task and M; marks stay"),
+    ("c", "clear filters, bounds, task, M and F; marks stay"),
     ("a", "all models, including ones you have no access to; again: yours only"),
     ("n", "note for the model"),
     ("e", "exclude the model: you have it but cannot use it; recommendations skip it"),
@@ -155,7 +156,7 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "qq",
-        "quit; the first q asks. esc goes back: closes an overlay, drops the selection, clears the / filter, leaves M, then a task picked in recommend back to recommend",
+        "quit; the first q asks. esc goes back: closes an overlay, drops the selection, clears the / filter, leaves M, then F, then a task picked in recommend back to recommend",
     ),
 ];
 
@@ -386,6 +387,7 @@ pub struct App {
     pub rows: Vec<usize>,
     pub table: TableState,
     pub only_marked: bool,
+    pub only_fav: bool,
     /// Row where `V` started a visual range; the range runs to the cursor.
     pub visual: Option<usize>,
     /// Rows picked one by one with ctrl click; selected along with the visual range.
@@ -439,6 +441,7 @@ impl App {
             rows: vec![],
             table: TableState::default().with_selected(0),
             only_marked: false,
+            only_fav: false,
             visual: None,
             picked: vec![],
             view: View::Table,
@@ -572,6 +575,20 @@ impl App {
         !self.store.marked.is_empty()
     }
 
+    /// Whether the table row shows a ★, so `F` keeps it: the picked task's favorite, or with no
+    /// task a favorite for any. `starred` without recommend's cursor, which the table ignores.
+    fn is_fav(&self, key: &str) -> bool {
+        match self.task {
+            Some(t) => self.store.favorite(t.name) == Some(key),
+            None => !self.store.favorite_for(key).is_empty(),
+        }
+    }
+
+    /// Whether any model shows a ★ in the table, so `F` has something to show.
+    pub fn any_fav(&self) -> bool {
+        self.data.models.iter().any(|m| self.is_fav(&m.key))
+    }
+
     /// Whether the open choice list is `f`'s tasks, where m ticks one and the list stays open.
     pub fn choosing_favs(&self) -> bool {
         matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(_)))))
@@ -600,6 +617,7 @@ impl App {
             )
             .is_some()
                 && (!self.only_marked || self.store.is_marked(&m.key))
+                && (!self.only_fav || self.is_fav(&m.key))
                 && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
                 && (skip == VIA || self.via.is_empty() || self.via.iter().any(|h| m.via.contains(h)))
                 && self
@@ -612,8 +630,9 @@ impl App {
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
-        // Unmarking the last marked model leaves M for every model rather than an empty table.
+        // Unmarking the last marked model leaves M (and unfavoriting the last, F) for every model rather than an empty table.
         self.only_marked &= self.any_marked();
+        self.only_fav &= self.any_fav();
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
         let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
         let anchor = self.visual.and_then(key_of);
@@ -1059,6 +1078,13 @@ impl App {
                 self.only_marked = !self.only_marked;
                 self.rebuild();
             }
+            KeyCode::Char('F') if table && !self.only_fav && !self.any_fav() => {
+                self.status = "no favorites: f favorites the one under the bar".into();
+            }
+            KeyCode::Char('F') if table => {
+                self.only_fav = !self.only_fav;
+                self.rebuild();
+            }
             KeyCode::Char('U') if table && self.store.marked.is_empty() => {
                 self.status = "no marked models: m marks the one under the bar".into();
             }
@@ -1079,6 +1105,7 @@ impl App {
                     (self.sort_col, self.descending) = (PRICE, false);
                 }
                 self.only_marked = false;
+                self.only_fav = false;
                 self.rebuild();
             }
             KeyCode::Char('q') => self.input = Input::Quit,
@@ -1095,6 +1122,9 @@ impl App {
                 } else if self.only_marked {
                     // Back out of M to every model.
                     self.only_marked = false;
+                    self.rebuild();
+                } else if self.only_fav {
+                    self.only_fav = false;
                     self.rebuild();
                 } else if self.task.take().is_some() {
                     // Back to recommend, where enter picked the task.
@@ -2025,6 +2055,20 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only_marked, a.rows.len()), (false, 3), "then leaves M");
         assert_eq!(a.store.marked, ["gpt55"], "without touching the marks");
+        press(&mut a, "F");
+        assert_eq!((a.only_fav, a.status.as_str()), (false, "no favorites: f favorites the one under the bar"));
+        a.store.toggle_favorite("coding", "opus5");
+        press(&mut a, "F");
+        assert_eq!(keys(&a), ["opus5"], "F shows the favorites only");
+        press(&mut a, "Mc");
+        assert_eq!((a.only_marked, a.only_fav, a.rows.len()), (false, false, 3), "c leaves M and F");
+        press(&mut a, "MF");
+        assert!(a.rows.is_empty(), "M and F together: marked favorites");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.only_marked, a.only_fav), (false, true), "esc leaves M first");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.only_fav, a.rows.len()), (false, 3), "then F");
+        a.store.toggle_favorite("coding", "opus5");
         press(&mut a, "Rj");
         code(&mut a, KeyCode::Enter);
         assert!(a.task.is_some());
