@@ -1,4 +1,4 @@
-# modelcmp
+<h1 align="center"><img src="https://github.com/user-attachments/assets/175d7284-8b17-4ce4-bfd9-36790017ccca" alt="modelcmp" width="480"></h1>
 
 Pick the cheapest LLM that is good enough for the job.
 
