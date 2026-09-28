@@ -156,6 +156,7 @@ fn main() {
             // Die quietly when a pipe closes early, as in `modelcmp list | head`, instead of
             // panicking in println. Not in the TUI: it writes to clipboard tools that may exit.
             #[cfg(unix)]
+            #[allow(unsafe_code)]
             // SAFETY: nothing else is running yet to observe the signal disposition change.
             unsafe {
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);

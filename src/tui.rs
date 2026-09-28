@@ -1338,19 +1338,19 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
     let label = |s: &'static str| vec![Span::styled(s, fg(MUTED))];
     let words = |s: &str| s.split(' ').map(|w| Line::from(w.to_string())).collect();
     let space = Span::raw(" ");
-    let mut v: Vec<Line> = wrapped(vec![], words(&frontier_legend(false)), space.clone(), width)
+    let mut v: Vec<Line> = wrapped(vec![], words(&frontier_legend(false)), &space, width)
         .into_iter()
         .map(|l| l.style(fg(MUTED)))
         .collect();
     for (i, t) in TASKS.iter().enumerate() {
         v.push(Line::default());
-        v.extend(wrapped(vec![name(i, format!(" {} ", t.name)), space.clone()], words(t.about), space.clone(), width));
-        v.extend(wrapped(label("  use for:         "), words(t.when), space.clone(), width));
+        v.extend(wrapped(vec![name(i, format!(" {} ", t.name)), space.clone()], words(t.about), &space, width));
+        v.extend(wrapped(label("  use for:         "), words(t.when), &space, width));
         let picked = (i == app.task_cur).then_some(cur.as_deref()).flatten();
         v.extend(wrapped(
             label("  best per price:  "),
             frontier_spans(app, t, picked),
-            Span::styled(" · ", fg(MUTED)),
+            &Span::styled(" · ", fg(MUTED)),
             width,
         ));
     }
@@ -1358,7 +1358,7 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
     let cli = words(
         "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model>",
     );
-    v.extend(wrapped(vec![], cli, space, width).into_iter().map(|l| l.style(fg(MUTED))));
+    v.extend(wrapped(vec![], cli, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
     v
 }
 
@@ -1367,7 +1367,7 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
 fn wrapped(
     label: Vec<Span<'static>>,
     items: Vec<Line<'static>>,
-    glue: Span<'static>,
+    glue: &Span<'static>,
     width: usize,
 ) -> Vec<Line<'static>> {
     let indent: usize = label.iter().map(Span::width).sum();
@@ -2203,9 +2203,9 @@ mod tests {
     fn wrapped_breaks_between_items_and_keeps_punctuation() {
         let label = vec![Span::raw("  b: ")];
         let items = ["aa", "bb", "cc", "dd"].map(Line::from).to_vec();
-        let text: Vec<String> = wrapped(label, items, Span::raw(", "), 13).iter().map(ToString::to_string).collect();
+        let text: Vec<String> = wrapped(label, items, &Span::raw(", "), 13).iter().map(ToString::to_string).collect();
         assert_eq!(text, ["  b: aa, bb,", "     cc, dd"], "the kept comma stays inside the width");
-        let text: Vec<String> = wrapped(vec![], vec![Line::from("a"), Line::from("b")], Span::raw(" "), 2)
+        let text: Vec<String> = wrapped(vec![], vec![Line::from("a"), Line::from("b")], &Span::raw(" "), 2)
             .iter()
             .map(ToString::to_string)
             .collect();

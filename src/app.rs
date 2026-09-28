@@ -351,7 +351,7 @@ pub enum Effect {
 }
 
 /// A mouse action, already mapped to the table by the shell.
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum Mouse {
     /// Wheel: rows to move, negative is up.
     Scroll(isize),
