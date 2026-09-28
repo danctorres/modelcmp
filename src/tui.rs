@@ -707,6 +707,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         true => "▲",
         false => "",
     };
+    // The column under the cursor: its header reversed, its cells bold and a thick rule under it,
+    // as VisiData shows its current column; the values keep their colours.
     let header = |i: usize| match i == app.col {
         true => fg(ACCENT).add_modifier(BOLD | Modifier::REVERSED),
         false => fg(ACCENT).add_modifier(BOLD),
@@ -742,11 +744,21 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     for &x in &seps {
         buf.set_stringn(area.x + x, y, "│", 1, fg(MUTED));
     }
+    let cur = match app.col {
+        0 => Some((name_x, name_w)),
+        1 => Some((dev_x, dev_w)),
+        VIA => via.map(|(x, w)| (area.x + x, w)),
+        NOTES => notes.map(|(x, w)| (area.x + x, w)),
+        c => cols.iter().find(|&&(i, ..)| i + 2 == c).map(|&(_, x, w)| (area.x + x, w)),
+    };
     // A rule parts the header from the rows, crossing the group lines.
     if area.height > 1 {
         buf.set_stringn(area.x, y + 1, "─".repeat(area.width as usize), area.width as usize, fg(MUTED));
         for &x in &seps {
             buf.set_stringn(area.x + x, y + 1, "┼", 1, fg(MUTED));
+        }
+        if let Some((x, w)) = cur {
+            buf.set_stringn(x, y + 1, "━".repeat(w as usize), w as usize, fg(ACCENT));
         }
     }
 
@@ -837,6 +849,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 }
             }
         }
+    }
+    if let Some((x, w)) = cur {
+        let drawn = app.rows.len().saturating_sub(top).min(height) as u16;
+        buf.set_style(Rect::new(x, area.y + 2, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
     }
     if let Input::Menu { col, items, sel, query, .. } = &app.input {
         let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
@@ -1880,6 +1896,23 @@ mod tests {
             table(&mut buf, area, &mut a);
             status(&mut buf, area, &a);
         }
+    }
+
+    #[test]
+    fn selected_column_is_bold_with_a_thick_rule() {
+        let mut a = app();
+        a.col = ECI;
+        let area = Rect::new(0, 0, 200, 4);
+        let mut buf = Buffer::empty(area);
+        table(&mut buf, area, &mut a);
+        let l = layout(200, &a);
+        let &(_, x, w) = l.cols.iter().find(|&&(i, ..)| i + 2 == ECI).unwrap();
+        let &(_, px, _) = l.cols.iter().find(|&&(i, ..)| i + 2 == PRICE).unwrap();
+        assert_eq!(buf[(x, 1)].symbol(), "━", "a thick rule under the cursor's column");
+        assert_eq!(buf[(x + w - 1, 1)].symbol(), "━");
+        assert_eq!(buf[(px, 1)].symbol(), "─", "a thin one elsewhere");
+        assert!(buf[(x + w - 1, 3)].modifier.contains(BOLD), "its cells are bold");
+        assert!(!buf[(px + 1, 3)].modifier.contains(BOLD), "other columns are not");
     }
 
     #[test]
