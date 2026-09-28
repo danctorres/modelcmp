@@ -14,6 +14,319 @@ pub fn money(x: f64) -> String {
     }
 }
 
+/// A theme's colours: the terminal's 16 in ANSI order (black, red, green, yellow, blue,
+/// magenta, cyan, white, then the bright ones), default text, the background, and the accents
+/// developers and harnesses take theirs from. Their count has to divide the 210 of `dev_color`
+/// to keep the five harness names apart (5, 10 and 14 do; 6 and 7 collide), and they have to stand
+/// far enough apart to tell two developers by colour (`accents_are_told_apart`). Nord's own
+/// palette is four blues, so its last two are tints of it rather than a fifth near-blue.
+/// Every colour here is drawn as text on the background, so each has to read on it
+/// (`every_theme_reads_on_its_own_background`); a status pill takes its text from `bg`
+/// and its fill from the half of a colour furthest from it, so `ansi[0]` need not stand out.
+pub struct Palette {
+    pub ansi: [u32; 16],
+    pub text: u32,
+    /// Painted under everything, so a dark theme stays dark on a light terminal and the other way round.
+    pub bg: u32,
+    pub accents: &'static [u32],
+}
+
+/// `T` in the TUI: the terminal's own colours, or one of these palettes in their place, in
+/// tuiman's order: the dark ones, then the light ones, then the retro machines. Everforest is
+/// left out as nord's twin on the same slate. A theme's own palette is only the starting point:
+/// what a colour is here has to read on the background and stay apart from its neighbours, so a
+/// light theme keeps the darker half of a pair and a monochrome one drifts in hue as it ramps.
+pub const THEMES: [(&str, Option<Palette>); 21] = [
+    ("terminal", None),
+    (
+        "gruvbox",
+        Some(Palette {
+            ansi: [
+                0x282828, 0xea6962, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984, 0x928374, 0xfb4934,
+                0xb8bb26, 0xfabd2f, 0x9ecfe0, 0xd3869b, 0x8ec07c, 0xebdbb2,
+            ],
+            text: 0xebdbb2,
+            bg: 0x282828,
+            accents: &[
+                0xfb4934, 0xb8bb26, 0xfabd2f, 0xd3869b, 0xfe8019, 0xea6962, 0x98971a, 0xd79921, 0x458588, 0xb16286,
+                0x689d6a, 0xd65d0e, 0xa89984, 0x7daea3,
+            ],
+        }),
+    ),
+    (
+        "nord",
+        Some(Palette {
+            ansi: [
+                0x3b4252, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x5e81ac, 0xb48ead, 0x88c0d0, 0xe5e9f0, 0x7b88a1, 0xd08770,
+                0xb5d19c, 0xf0d399, 0xa3d0e8, 0xc895bf, 0x8fbcbb, 0xeceff4,
+            ],
+            text: 0xd8dee9,
+            bg: 0x2e3440,
+            accents: &[
+                0xbf616a, 0xd08770, 0xebcb8b, 0xa3be8c, 0xb48ead, 0x88c0d0, 0x81a1c1, 0xe5e9f0, 0xd6c1d2, 0x6c86a1,
+            ],
+        }),
+    ),
+    (
+        "catppuccin",
+        Some(Palette {
+            ansi: [
+                0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x7f849c, 0xeba0ac,
+                0xb9e8b4, 0xfae3c0, 0xa6c8ff, 0xf7d0ee, 0xa8e8dd, 0xa6adc8,
+            ],
+            text: 0xcdd6f4,
+            bg: 0x1e1e2e,
+            accents: &[
+                0xf5e0dc, 0xf5c2e7, 0xcba6f7, 0xf38ba8, 0xfab387, 0xf9e2af, 0xa6e3a1, 0x94e2d5, 0x89b4fa, 0xbac2de,
+            ],
+        }),
+    ),
+    (
+        "dracula",
+        Some(Palette {
+            ansi: [
+                0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2, 0x7f8bb8, 0xff6e6e,
+                0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
+            ],
+            text: 0xf8f8f2,
+            bg: 0x282a36,
+            accents: &[
+                0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xffb86c, 0xf8f8f2, 0x7f8bb8, 0xd6acff,
+            ],
+        }),
+    ),
+    (
+        "tokyonight",
+        Some(Palette {
+            ansi: [
+                0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x565f89, 0xff7a93,
+                0xb9f27c, 0xff9e64, 0x7da6ff, 0xc7a9ff, 0x8ddfff, 0xc0caf5,
+            ],
+            text: 0xc0caf5,
+            bg: 0x1a1b26,
+            accents: &[
+                0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0x2ac3de, 0x73daca, 0xc0caf5, 0xff007c,
+            ],
+        }),
+    ),
+    (
+        "kanagawa",
+        Some(Palette {
+            ansi: [
+                0x16161d, 0xc34043, 0x76946a, 0xc0a36e, 0x7e9cd8, 0x957fb8, 0x6a9589, 0xc8c093, 0x727169, 0xe82424,
+                0x98bb6c, 0xe6c384, 0x7fb4ca, 0x938aa9, 0x7aa89f, 0xdcd7ba,
+            ],
+            text: 0xdcd7ba,
+            bg: 0x1f1f28,
+            accents: &[
+                0xe46876, 0x98bb6c, 0xe6c384, 0x957fb8, 0xffa066, 0xdcd7ba, 0x7fb4ca, 0xc0a36e, 0x727169, 0x6a9589,
+            ],
+        }),
+    ),
+    (
+        "monokai",
+        Some(Palette {
+            ansi: [
+                0x272822, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf8f8f2, 0x75715e, 0xff5c9b,
+                0xc3ee5e, 0xfd971f, 0x8ee7fa, 0xc9a6ff, 0xc4f7f0, 0xf9f8f5,
+            ],
+            text: 0xf8f8f2,
+            bg: 0x272822,
+            accents: &[
+                0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xfd971f, 0xf8f8f2, 0x75715e, 0xff5c9b,
+            ],
+        }),
+    ),
+    (
+        "rose-pine",
+        Some(Palette {
+            ansi: [
+                0x26233a, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4, 0x6e6a86, 0xf2809f,
+                0x4fa3c0, 0xffd39a, 0xb5e2e8, 0xd6c0f0, 0xf3d0ce, 0xffffff,
+            ],
+            text: 0xe0def4,
+            bg: 0x191724,
+            accents: &[
+                0xf6c177, 0xebbcba, 0xc4a7e7, 0x6e6a86, 0xf2809f, 0xb5e2e8, 0x3e8fb0, 0x908caa, 0xf2e9e1, 0x9bc98c,
+            ],
+        }),
+    ),
+    (
+        "github",
+        Some(Palette {
+            ansi: [
+                0x484f58, 0xff7b72, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xb1bac4, 0x6e7681, 0xffa198,
+                0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xf0f6fc,
+            ],
+            text: 0xe6edf3,
+            bg: 0x0d1117,
+            accents: &[
+                0xff7b72, 0x3fb950, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xf0883e, 0xdb61a2, 0xb1bac4, 0x6e7681, 0xe3b341,
+            ],
+        }),
+    ),
+    (
+        "solarized",
+        Some(Palette {
+            ansi: [
+                0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x657b83, 0xcb4b16,
+                0xa4b81c, 0xd4a520, 0x6c9fd8, 0x6c71c4, 0x48c4b8, 0xfdf6e3,
+            ],
+            text: 0x93a1a1,
+            bg: 0x002b36,
+            accents: &[
+                0xdc322f, 0xd33682, 0x6c71c4, 0x268bd2, 0x2aa198, 0x859900, 0xd4a520, 0x48c4b8, 0x93a1a1, 0x6c9fd8,
+            ],
+        }),
+    ),
+    (
+        "synthwave",
+        Some(Palette {
+            ansi: [
+                0x262335, 0xfe4450, 0x72f1b8, 0xfede5d, 0x2de2e6, 0xff7edb, 0x36f9f6, 0xffffff, 0x848bbd, 0xf97e72,
+                0x9cf7cf, 0xfff08a, 0x6be8ff, 0xffa3e8, 0x8ffcfa, 0xffffff,
+            ],
+            text: 0xf0eff1,
+            bg: 0x241b2f,
+            accents: &[
+                0xff7edb, 0xfede5d, 0xf97e72, 0x72f1b8, 0xfe4450, 0xb893ce, 0x2de2e6, 0x6be8ff, 0x9cf7cf, 0xff8b39,
+            ],
+        }),
+    ),
+    (
+        "cyberpunk",
+        Some(Palette {
+            ansi: [
+                0x000b1e, 0xff0055, 0x00ff9c, 0xfcee0c, 0x0abdc6, 0xea00d9, 0x00e8ff, 0xd7d7d5, 0x5a6a8a, 0xff3377,
+                0x5fffb8, 0xfff35c, 0x3dd8ff, 0xff5cf0, 0x7cf3ff, 0xffffff,
+            ],
+            text: 0x0abdc6,
+            bg: 0x000b1e,
+            accents: &[
+                0xfcee0c, 0xff0055, 0x00ff9c, 0xea00d9, 0xff8a00, 0xb14aeb, 0x3dd8ff, 0xff5cf0, 0x5fffb8, 0xd7d7d5,
+            ],
+        }),
+    ),
+    (
+        "github-light",
+        Some(Palette {
+            ansi: [
+                0xffffff, 0xcf222e, 0x116329, 0x4d2d00, 0x0969da, 0x8250df, 0x1b7c83, 0x6e7781, 0x57606a, 0xa40e26,
+                0x1a7f37, 0x633c01, 0x218bff, 0xa475f9, 0x3192aa, 0x1f2328,
+            ],
+            text: 0x1f2328,
+            bg: 0xffffff,
+            accents: &[
+                0xcf222e, 0x9a6700, 0x1a7f37, 0x0969da, 0x8250df, 0xbf3989, 0x1b7c83, 0x953800, 0x57606a, 0x4d2d00,
+            ],
+        }),
+    ),
+    (
+        "gruvbox-light",
+        Some(Palette {
+            ansi: [
+                0xfbf1c7, 0x9d0006, 0x79740e, 0xa86800, 0x076678, 0x8f3f71, 0x427b58, 0x3c3836, 0x7c6f64, 0xcc241d,
+                0x5f7a1e, 0xb57614, 0x076678, 0xb16286, 0x3d7a4f, 0x282828,
+            ],
+            text: 0x3c3836,
+            bg: 0xfbf1c7,
+            accents: &[
+                0x9d0006, 0x79740e, 0xb57614, 0x076678, 0x8f3f71, 0xaf3a03, 0x7c6f64, 0x3c3836, 0x458588, 0xb16286,
+            ],
+        }),
+    ),
+    (
+        "paper",
+        Some(Palette {
+            ansi: [
+                0xffffff, 0xc62828, 0x2e7d32, 0xb8860b, 0x1565c0, 0x6a1b9a, 0x00695c, 0x1a1a1a, 0x8a8a8a, 0x8e0000,
+                0x1b5e20, 0x8f6b00, 0x0d47a1, 0x4a148c, 0x004d40, 0x000000,
+            ],
+            text: 0x1a1a1a,
+            bg: 0xffffff,
+            accents: &[
+                0xc62828, 0x2e7d32, 0xb8860b, 0x1565c0, 0x6a1b9a, 0x00695c, 0xd84315, 0xad1457, 0x424242, 0x8e0000,
+            ],
+        }),
+    ),
+    (
+        "sepia",
+        Some(Palette {
+            ansi: [
+                0xf4ecd8, 0xa33a2a, 0x5f7a2e, 0x9a6a00, 0x2f5f8a, 0x7b4a7a, 0x3f7570, 0x5b4636, 0xa08c74, 0x8b2f22,
+                0x4c631f, 0x8b4513, 0x24506f, 0x663c66, 0x33605c, 0x3b2d22,
+            ],
+            text: 0x5b4636,
+            bg: 0xf4ecd8,
+            accents: &[
+                0xa33a2a, 0x9a6a00, 0x7b4a7a, 0x3f7570, 0x5b4636, 0x24506f, 0x4c631f, 0x2f6b4f, 0x6b4f9e, 0x3b2d22,
+            ],
+        }),
+    ),
+    (
+        "amber",
+        Some(Palette {
+            ansi: [
+                0x1a1000, 0xcc5500, 0xffd966, 0xffcc00, 0xe07b00, 0xff9900, 0xffe8a3, 0xffb000, 0x8f6200, 0xff7700,
+                0xfff3d0, 0xffe066, 0xffe8a3, 0xffb84d, 0xfff8e7, 0xfffbf0,
+            ],
+            text: 0xffb000,
+            bg: 0x1a1000,
+            accents: &[
+                0xffcc00, 0xffe8a3, 0xff9900, 0xcc5500, 0xfff3d0, 0xb87333, 0xff7700, 0x8f6200, 0xffe066, 0xffffff,
+            ],
+        }),
+    ),
+    (
+        "phosphor",
+        Some(Palette {
+            ansi: [
+                0x0a0f0a, 0x0f9f3f, 0x33ff66, 0x99ffaa, 0x1a7f33, 0x66ff99, 0xccffcc, 0x33ff66, 0x1a7f33, 0x2fbf55,
+                0x66ff99, 0xccffcc, 0x2ecc71, 0x99ffaa, 0xe6ffe6, 0xffffff,
+            ],
+            text: 0x33ff66,
+            bg: 0x0a0f0a,
+            accents: &[
+                0x33ff66, 0x99ffaa, 0xccffcc, 0x1a7f33, 0x66ff99, 0x2ecc71, 0x00cc44, 0xa0d8a0, 0xffffff, 0x7fbf8f,
+            ],
+        }),
+    ),
+    (
+        "c64",
+        Some(Palette {
+            ansi: [
+                0x40318d, 0xe8958c, 0xa9ff9f, 0xedf171, 0x9a97ff, 0xd08ad3, 0x75cec8, 0xb8b0ff, 0x9a8fd8, 0xffb3ab,
+                0xcfffc9, 0xf8fbb0, 0xffffff, 0xe4b3e6, 0xa8e6e2, 0xffffff,
+            ],
+            text: 0xb8b0ff,
+            bg: 0x40318d,
+            accents: &[
+                0xedf171, 0xa9ff9f, 0x75cec8, 0xb2b2b2, 0xffffff, 0xd08ad3, 0xe8958c, 0xb8b0ff, 0xcfffc9, 0xf8fbb0,
+            ],
+        }),
+    ),
+    (
+        "gameboy",
+        Some(Palette {
+            ansi: [
+                0x9bbc0f, 0x553311, 0x145214, 0x6b4a00, 0x0d4f3c, 0x3b2d0c, 0x073b26, 0x0f380f, 0x306230, 0x5c3a10,
+                0x1f5c2a, 0x4a5a10, 0x0b2b0b, 0x46360a, 0x2f5d3a, 0x0b2b0b,
+            ],
+            text: 0x0f380f,
+            bg: 0x9bbc0f,
+            // Five, not ten: the DMG screen is four shades of green, and ten colours that far
+            // apart would have to leave it for navy and purple. Five still divide the 210 and
+            // keep the harnesses apart, as the terminal's own five do.
+            accents: &[0x0f380f, 0x306230, 0x3b2d0c, 0x13463a, 0x704214],
+        }),
+    ),
+];
+
+/// Index into `THEMES` of a saved name; an unknown or empty one is the terminal's.
+pub fn theme(name: &str) -> usize {
+    THEMES.iter().position(|t| t.0 == name).unwrap_or(0)
+}
+
 /// Upper edges of the price levels in blended $/1M: free, then up to 0.5, 2, 5 and 15, then above.
 /// They fall between model families: Flash-Lite, Flash and Haiku, Sonnet and Pro, Opus, Fable.
 pub const LEVELS: [f64; 5] = [0.0, 0.5, 2.0, 5.0, 15.0];

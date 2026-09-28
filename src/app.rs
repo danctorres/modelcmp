@@ -4,7 +4,7 @@
 use crate::data::{Data, Model};
 use crate::fit::{TASKS, Task};
 use crate::store::Store;
-use crate::view::{LEVELS, ctx, hits, level_label, money, score, task_frontier, task_score, visible};
+use crate::view::{LEVELS, THEMES, ctx, hits, level_label, money, score, task_frontier, task_score, visible};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::{Ordering, Reverse};
@@ -156,6 +156,7 @@ pub const HELP: &[(&str, &str)] = &[
         "R",
         "recommend: the best model per price for each task, what the task measures and when to use it; h l pick a model for o x y f e n; enter shows the task's models in the table: best first, each row down cheaper and scoring lower",
     ),
+    ("T", "theme: the terminal's own colours, or 20 dark, light and retro palettes; j k preview, enter saves"),
     ("?", "this help"),
     (
         "mouse",
@@ -317,6 +318,8 @@ pub enum Effect {
     Launch(Vec<String>),
     /// Favorite the current model for the task; the `f` chooser's items, applied by `App` itself.
     Fav(&'static str),
+    /// A `view::THEMES` name; the `T` chooser's items, applied by `App` itself.
+    Theme(&'static str),
 }
 
 /// A mouse action, already mapped to the table by the shell.
@@ -596,6 +599,17 @@ impl App {
     /// Whether the open choice list is `f`'s tasks, where m ticks one and the list stays open.
     pub fn choosing_favs(&self) -> bool {
         matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(_)))))
+    }
+
+    /// The theme under the cursor of the open `T` list, which the screen previews.
+    pub fn theme_preview(&self) -> Option<&'static str> {
+        match &self.input {
+            Input::Choose { items, sel, .. } => match items.get(*sel) {
+                Some((_, Effect::Theme(name))) => Some(name),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// `f`'s list: every task, ticked where the current model is its favorite.
@@ -1200,6 +1214,10 @@ impl App {
                 return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
+            KeyCode::Char('T') => {
+                let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
+                self.input = Input::Choose { title: "theme?", items, sel: crate::view::theme(&self.store.theme) };
+            }
             KeyCode::Enter if self.view == View::Recommend => {
                 let t = &TASKS[self.task_cur];
                 self.task = Some(t);
@@ -1348,11 +1366,18 @@ impl App {
                 KeyCode::Enter => {
                     let (_, effect) = items.swap_remove(*sel);
                     self.input = Input::None;
-                    if let Effect::Fav(task) = effect {
-                        return self.fav(task);
+                    match effect {
+                        Effect::Fav(task) => return self.fav(task),
+                        Effect::Theme(name) => {
+                            self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
+                            self.status = format!("theme {name}");
+                            return Some(Effect::Save);
+                        }
+                        effect => return Some(effect),
                     }
-                    return Some(effect);
                 }
+                // The key that opens the theme list also closes it.
+                KeyCode::Char('T') if self.theme_preview().is_some() => self.input = Input::None,
                 KeyCode::Esc => self.input = Input::None,
                 _ => {}
             },
@@ -1414,6 +1439,23 @@ mod tests {
             };
         }
         App::new(Data { fetched: 0, models, ..Default::default() }, Store::default())
+    }
+
+    #[test]
+    fn t_picks_a_theme_from_a_panel() {
+        let mut a = app();
+        assert_eq!(press(&mut a, "Tj"), None);
+        assert_eq!((a.theme_preview(), a.store.theme.as_str()), (Some("gruvbox"), ""), "previewed, not saved");
+        press(&mut a, "T");
+        assert_eq!((a.theme_preview(), &a.input), (None, &Input::None), "T closes it unchanged");
+        press(&mut a, "Tjj");
+        assert_eq!(a.key(KeyEvent::from(KeyCode::Enter)), Some(Effect::Save));
+        assert_eq!((a.store.theme.as_str(), a.status.as_str()), ("nord", "theme nord"));
+        press(&mut a, "T");
+        assert_eq!(a.theme_preview(), Some("nord"), "opens on the saved theme");
+        press(&mut a, "gg");
+        a.key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(a.store.theme, "", "the terminal's colours are saved as nothing");
     }
 
     fn press(app: &mut App, keys: &str) -> Option<Effect> {

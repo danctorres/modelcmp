@@ -1,4 +1,4 @@
-//! Marks, exclusions, notes and per-task favorites, keyed by model key. ~/.config/modelcmp/user.json
+//! Marks, exclusions, notes, per-task favorites and the theme, keyed by model key. ~/.config/modelcmp/user.json
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +20,9 @@ pub struct Store {
     /// Task name -> your favorite model for it: `--tier` picks it over the computed one.
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
+    /// A `view::THEMES` name, picked with `T`; empty is the terminal's colours.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub theme: String,
 }
 
 pub fn path() -> PathBuf {

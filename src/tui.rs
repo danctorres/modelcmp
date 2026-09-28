@@ -13,7 +13,9 @@ use crate::app::{
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
-use crate::view::{age, compare_rows, detail_lines, frontier_legend, hits, level, money, priced, truncate, verdict};
+use crate::view::{
+    Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level, money, priced, truncate, verdict,
+};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -65,7 +67,13 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
     let mut dirty = true;
     loop {
         if dirty {
-            terminal.draw(|f| draw(app, f)).map_err(|e| e.to_string())?;
+            terminal
+                .draw(|f| {
+                    draw(app, f);
+                    let name = app.theme_preview().unwrap_or(&app.store.theme);
+                    recolor(f.buffer_mut(), THEMES[crate::view::theme(name)].1.as_ref());
+                })
+                .map_err(|e| e.to_string())?;
         }
         // Block on input; wake every 200ms while a refresh is in flight, else once a minute to
         // repaint the data age in the frame.
@@ -109,7 +117,7 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                         });
                     }
                     // The app applies its own chooser items before they get here.
-                    Some(Effect::Fav(_)) | None => {}
+                    Some(Effect::Fav(_) | Effect::Theme(_)) | None => {}
                 }
             }
             dirty = true;
@@ -364,6 +372,8 @@ const KEY: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
+/// A marked row's ☑. Light blue, and the only thing drawn in it, so a palette's slot 12 is
+/// free to be whatever parts from the muted ☐ (`the_mark_parts_from_an_empty_box`).
 const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
 const STAR: Color = Color::Yellow;
@@ -381,18 +391,88 @@ const TASK: [Color; 7] = [
 ];
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
-/// Each developer and harness gets a stable colour from these; the five harness names all differ.
+/// Developers' and harnesses' colours in the terminal's own theme; the five harness names all differ.
 const DEVS: [Color; 5] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green];
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
 
+/// Swap the terminal colours for the theme's after drawing, so the drawing code keeps naming
+/// terminal colours: the 16, default text, and a developer's placeholder (see `dev_color`).
+/// Backgrounds with no colour get the theme's; with the terminal's own colours they stay transparent.
+fn recolor(buf: &mut Buffer, palette: Option<&Palette>) {
+    let bg = palette.map(|p| Color::from_u32(p.bg));
+    for cell in &mut buf.content {
+        // A pill is the only black text (see `pill`), and the dim half of a palette is too close
+        // to its own background to read on: give it the theme's background as its text and the
+        // half of its fill colour that stands furthest from it, which is dark in a light theme.
+        if let (Color::Black, Some(p)) = (cell.fg, palette) {
+            cell.fg = Color::from_u32(p.bg);
+            cell.bg = contrasting(cell.bg, p);
+            continue;
+        }
+        cell.fg = match (cell.fg, palette) {
+            (Color::Reset, Some(p)) => Color::from_u32(p.text),
+            (c, p) => resolve(c, p),
+        };
+        cell.bg = match (cell.bg, bg) {
+            (Color::Reset, Some(b)) => b,
+            (c, _) => resolve(c, palette),
+        };
+    }
+}
+
+/// The brighter or the dimmer half of a drawn colour, whichever is furthest from the theme's
+/// background in perceived brightness, so a solid fill reads in a dark and a light theme alike.
+fn contrasting(c: Color, p: &Palette) -> Color {
+    let lum =
+        |c: u32| 0.2126 * f64::from((c >> 16) & 255) + 0.7152 * f64::from((c >> 8) & 255) + 0.0722 * f64::from(c & 255);
+    let Some(i) = ansi(c) else { return resolve(c, Some(p)) };
+    let (dim, bright) = (p.ansi[i % 8], p.ansi[i % 8 + 8]);
+    Color::from_u32(if (lum(dim) - lum(p.bg)).abs() > (lum(bright) - lum(p.bg)).abs() { dim } else { bright })
+}
+
+/// A drawn colour in the theme's palette, or the terminal's own.
+fn resolve(c: Color, palette: Option<&Palette>) -> Color {
+    match (c, palette) {
+        (Color::Indexed(k), Some(p)) => Color::from_u32(p.accents[k as usize % p.accents.len()]),
+        (Color::Indexed(k), None) => DEVS[k as usize % DEVS.len()],
+        (c, Some(p)) => ansi(c).map_or(c, |i| Color::from_u32(p.ansi[i])),
+        (c, None) => c,
+    }
+}
+
+/// The ANSI slot a named terminal colour sits in, for a palette lookup.
+fn ansi(c: Color) -> Option<usize> {
+    Some(match c {
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        _ => return None,
+    })
+}
+
 const fn fg(c: Color) -> Style {
     Style::new().fg(c)
 }
 
+/// A developer's or harness's colour, as a placeholder `recolor` resolves to one of the theme's
+/// accents: the name's byte sum mod 210, which keeps it mod 5, 10 and 14 (`DEVS`, `Palette::accents`).
 fn dev_color(dev: &str) -> Color {
-    DEVS[dev.bytes().map(usize::from).sum::<usize>() % DEVS.len()]
+    Color::Indexed((dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)
 }
 
 fn task_color(task: &str) -> Color {
@@ -499,7 +579,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         overlay(buf, area, "quit?", lines, &mut 0);
     }
     if let Input::Choose { title, items, sel } = &app.input {
-        overlay(buf, area, title, choice_lines(items, *sel), &mut 0);
+        // Scrolled as the mouse maps it, so the bar stays in view when the list is taller than the screen.
+        let lines = choice_lines(items, *sel);
+        let shown = overlay_rect(area, title, &lines).height.saturating_sub(2).max(1);
+        overlay(buf, area, title, lines, &mut (*sel as u16).saturating_sub(shown - 1));
     }
     if let Some(x) = cursor {
         f.set_cursor_position((x, bar.y));
@@ -636,7 +719,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         buf.set_style(Rect { y, height: 1, ..area }, base);
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
         match app.store.is_marked(&m.key) {
-            true => buf.set_stringn(box_x, y, "☑", 1, tint(MARK)),
+            // Bold as well as blue: on the selection bar, which keeps colours off, that is
+            // all the mark has left to show itself with.
+            true => buf.set_stringn(box_x, y, "☑", 1, tint(MARK).add_modifier(BOLD)),
             false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
         };
         if app.starred(&m.key) {
@@ -758,13 +843,15 @@ fn dropdown(
         };
         let tint = |c: Color| if k == sel { base } else { fg(c) };
         buf.set_style(Rect { y, height: 1, ..inner }, base);
-        // Checkboxes as on the table's marks; "any" clears the picks, so it has none.
-        let mark = match i {
-            0 => "  ",
-            _ if picked.contains(label) => "☑ ",
-            _ => "☐ ",
+        // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
+        // entry does not read as an empty box in the entry's colour; "any" clears the picks,
+        // so it has none.
+        let (mark, style) = match i {
+            0 => ("  ", tint(color)),
+            _ if picked.contains(label) => ("☑ ", tint(MARK).add_modifier(BOLD)),
+            _ => ("☐ ", tint(color)),
         };
-        let x = buf.set_stringn(inner.x + 1, y, mark, 2, tint(color)).0;
+        let x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
         let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, tint(color)).0;
         buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, tint(MUTED));
     }
@@ -801,6 +888,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             ("LAUNCH", Color::Green)
         }
         (Input::Choose { .. }, _) if app.choosing_favs() => ("FAV", Color::Green),
+        (Input::Choose { .. }, _) if app.theme_preview().is_some() => ("THEME", Color::Green),
         (Input::Choose { .. }, _) => ("OPEN", Color::Green),
         (Input::None, View::Table) if app.selecting() => ("VISUAL", Color::Yellow),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
@@ -941,11 +1029,20 @@ fn choice_lines(items: &[(String, Effect)], sel: usize) -> Vec<Line<'static>> {
                 _ => dev_color(label.split(' ').next().unwrap_or_default()),
             };
             let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(color) };
-            Line::from(format!(" {label} ")).style(style)
+            // A ticked box in the mark's colour, as in the table and the dropdowns; the rest of
+            // the label keeps the task's or the harness's own.
+            match label.strip_prefix('☑') {
+                Some(rest) if i != sel => Line::from(vec![
+                    Span::styled(" ☑", fg(MARK).add_modifier(BOLD)),
+                    Span::styled(format!("{rest} "), style),
+                ]),
+                _ => Line::from(format!(" {label} ")).style(style),
+            }
         })
         .collect();
     let hint = match items.first() {
         Some((_, Effect::Fav(_))) => " j k move · m toggle · enter toggle and close · esc close",
+        Some((_, Effect::Theme(_))) => " j k preview · enter saves · esc T close",
         _ => " j k move · enter opens",
     };
     lines.push(Line::from(hint).style(fg(MUTED)));
@@ -1005,7 +1102,7 @@ fn help() -> Vec<Line<'static>> {
     }
     v.push(Line::default());
     v.push(
-        Line::from(format!("Marks, exclusions, notes and favorites: {}", crate::store::path().display()))
+        Line::from(format!("Marks, exclusions, notes, favorites and theme: {}", crate::store::path().display()))
             .style(fg(MUTED)),
     );
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
@@ -1262,6 +1359,108 @@ mod tests {
             .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_owned())
             .collect();
         (buf, lines)
+    }
+
+    #[test]
+    fn theme_swaps_colours_and_paints_its_background() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_fg(Color::Black).set_bg(Color::LightBlue);
+        buf[(1, 0)].set_fg(Color::Reset);
+        recolor(&mut buf, THEMES[crate::view::theme("nord")].1.as_ref());
+        // A pill: nord's background as the text, and the light blue kept, being the half of blue
+        // that stands furthest from it.
+        assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (Color::from_u32(0x2e3440), Color::from_u32(0xa3d0e8)));
+        assert_eq!((buf[(1, 0)].fg, buf[(1, 0)].bg), (Color::from_u32(0xd8dee9), Color::from_u32(0x2e3440)));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        recolor(&mut buf, None);
+        assert_eq!(buf[(0, 0)].bg, Color::Reset, "the terminal's own colours keep its background");
+    }
+
+    /// Text a theme paints must be legible on what is behind it: the WCAG ratio for bold text,
+    /// 3:1, for every colour a row or a pill can take.
+    #[test]
+    fn every_theme_reads_on_its_own_background() {
+        let lum = |c: u32| {
+            let f = |s: u32| {
+                let v = f64::from((c >> s) & 255) / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * f(16) + 0.7152 * f(8) + 0.0722 * f(0)
+        };
+        let ratio = |a: u32, b: u32| (lum(a).max(lum(b)) + 0.05) / (lum(a).min(lum(b)) + 0.05);
+        let hex = |c: Color| match c {
+            Color::Rgb(r, g, b) => u32::from_be_bytes([0, r, g, b]),
+            c => panic!("not a theme colour: {c:?}"),
+        };
+        for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
+            for c in p.accents.iter().chain([&p.text]) {
+                assert!(ratio(*c, p.bg) >= 3.0, "{name}: {c:06x} on the background, {:.1}:1", ratio(*c, p.bg));
+            }
+            // Every colour the drawing code names, as text on the background and as a pill's fill.
+            for c in [
+                Color::Red,
+                Color::Green,
+                Color::Yellow,
+                Color::Blue,
+                Color::Magenta,
+                Color::Cyan,
+                Color::LightRed,
+                Color::LightGreen,
+                Color::LightYellow,
+                Color::LightBlue,
+                Color::LightMagenta,
+                Color::LightCyan,
+            ] {
+                let (text, fill) = (hex(resolve(c, Some(p))), hex(contrasting(c, p)));
+                assert!(ratio(text, p.bg) >= 3.0, "{name}: {c:?} as text, {:.1}:1", ratio(text, p.bg));
+                assert!(ratio(fill, p.bg) >= 3.0, "{name}: {c:?} as a pill, {:.1}:1", ratio(fill, p.bg));
+            }
+            assert!(ratio(p.ansi[8], p.bg) >= 2.5, "{name}: muted text, {:.1}:1", ratio(p.ansi[8], p.bg));
+        }
+    }
+
+    /// Two developers must not get colours that look the same: the accents stay apart by the
+    /// weighted RGB distance (a redmean approximation), and their count divides `dev_color`'s 210
+    /// so the five harness names never collide.
+    #[test]
+    fn accents_are_told_apart() {
+        for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
+            assert_eq!(210 % p.accents.len(), 0, "{name}: {} accents do not divide 210", p.accents.len());
+            for (i, &x) in p.accents.iter().enumerate() {
+                for &y in &p.accents[i + 1..] {
+                    assert!(apart(x, y) >= 60.0, "{name}: {x:06x} and {y:06x} look alike, {:.0}", apart(x, y));
+                }
+            }
+        }
+    }
+
+    fn chan(c: u32, shift: u32) -> f64 {
+        f64::from((c >> shift) & 255)
+    }
+
+    fn apart(x: u32, y: u32) -> f64 {
+        let (dr, dg, db) = (chan(x, 16) - chan(y, 16), chan(x, 8) - chan(y, 8), chan(x, 0) - chan(y, 0));
+        let rm = (chan(x, 16) + chan(y, 16)) / 2.0;
+        ((2.0 + rm / 256.0) * dr * dr + 4.0 * dg * dg + (3.0 - rm / 256.0) * db * db).sqrt()
+    }
+
+    /// A marked row shows it by the colour of its ☑, so that colour cannot look like the muted
+    /// ☐ beside it. Slot 12 is the mark's and slot 8 the muted one's.
+    #[test]
+    fn the_mark_parts_from_an_empty_box() {
+        for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
+            let d = apart(p.ansi[12], p.ansi[8]);
+            assert!(d >= 130.0, "{name}: ☑ {:06x} and ☐ {:06x} look alike, {d:.0}", p.ansi[12], p.ansi[8]);
+        }
+    }
+
+    #[test]
+    fn every_theme_keeps_the_harnesses_apart() {
+        for (name, p) in &THEMES {
+            let colors: Vec<_> =
+                ["opencode", "claude", "codex", "gemini", "env"].map(|h| resolve(dev_color(h), p.as_ref())).into();
+            assert!((1..5).all(|i| !colors[..i].contains(&colors[i])), "{name}: {colors:?}");
+        }
     }
 
     #[test]
@@ -1610,6 +1809,20 @@ mod tests {
         );
         let (typo, _) = compare(&ms, 0, 0, 200, "contxt");
         assert!(labels(&typo).contains(&"context".to_string()), "a typo is forgiven when nothing matches");
+    }
+
+    #[test]
+    fn theme_list_scrolls_to_the_bar() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
+        let mut a = app();
+        a.key(KeyCode::Char('T').into());
+        for _ in 1..THEMES.len() {
+            a.key(KeyCode::Char('j').into());
+        }
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = (0..8).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
+        assert!(text.contains(THEMES[THEMES.len() - 1].0) && text.contains('▲'), "{text}");
     }
 
     #[test]
