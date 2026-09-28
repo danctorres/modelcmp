@@ -7,7 +7,7 @@
 //! terminal themes modelcmp too, and nothing paints a background over a transparent one.
 
 use crate::app::{
-    App, COLS, ECI, Effect, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about, col_name,
+    App, COLS, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about, col_name,
     has_menu, menu_rows,
 };
 use crate::data::{self, Data, Model};
@@ -27,6 +27,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::{DefaultTerminal, Frame};
+use std::ops::Range;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
@@ -186,17 +187,21 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     // A drag past the table's edges still extends the range to its nearest row.
     if extend {
-        if inner.height < 2 {
+        if inner.height < 3 {
             return None;
         }
-        let y = m.row.clamp(inner.y + 1, inner.bottom() - 1);
-        return Some(Mouse::Extend(app.table.offset() + (y - inner.y - 1) as usize));
+        let y = m.row.clamp(inner.y + 2, inner.bottom() - 1);
+        return Some(Mouse::Extend(app.table.offset() + (y - inner.y - 2) as usize));
     }
     if !inner.contains(pos) {
         return None;
     }
+    // The rule under the header.
+    if m.row == inner.y + 1 {
+        return None;
+    }
     if m.row > inner.y {
-        let n = app.table.offset() + (m.row - inner.y - 1) as usize;
+        let n = app.table.offset() + (m.row - inner.y - 2) as usize;
         // The checkbox right of the row number toggles the mark, the ☆ after it picks the
         // tasks, and the ✗ box after that excludes the model.
         let (num_w, x) = (l.name_x - 7, m.column - inner.x);
@@ -215,6 +220,17 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         });
     }
     let x = m.column - inner.x;
+    // The ✓ header shows marked models only, as `M` does, the ★ favorites only, as `F`, and
+    // the ✗ excluded only, as `E`.
+    if x < l.name_x {
+        let num_w = l.name_x - 7;
+        return match x {
+            _ if (num_w + 1..num_w + 3).contains(&x) => Some(Mouse::OnlyMarked),
+            _ if (num_w + 3..num_w + 5).contains(&x) => Some(Mouse::OnlyFav),
+            _ if (num_w + 5..num_w + 7).contains(&x) => Some(Mouse::OnlyExcluded),
+            _ => None,
+        };
+    }
     let dev_x = l.name_x + l.name_w + GAP;
     let (col, cx, w) = if x < dev_x {
         (0, l.name_x, l.name_w)
@@ -313,6 +329,11 @@ fn hints(app: &App) -> Vec<&'static str> {
             } else if app.any_fav() {
                 v.push("F favorites only");
             }
+            if app.only_excluded {
+                v.push("E every model");
+            } else if !app.store.excluded.is_empty() {
+                v.push("E excluded only");
+            }
             if !app.store.marked.is_empty() {
                 v.push("U unmark all");
             }
@@ -326,12 +347,13 @@ fn hints(app: &App) -> Vec<&'static str> {
                 || app.task.is_some()
                 || app.only_marked
                 || app.only_fav
+                || app.only_excluded
             {
                 v.push("c clear");
             }
             v.extend(["/ filter", "R recommend", "? help"]);
             // Where esc goes back from, as in the overlays.
-            if !app.query.is_empty() || app.only_marked || app.only_fav || app.task.is_some() {
+            if !app.query.is_empty() || app.only_marked || app.only_fav || app.only_excluded || app.task.is_some() {
                 v.push("esc back");
             }
             v
@@ -381,8 +403,7 @@ const BAD: Color = Color::Red;
 const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
 const STAR: Color = Color::Yellow;
-/// One colour per task in `TASKS` order: the ★ of its favorite, its column header and its
-/// name in recommend. Off the mark colour (✓ light blue), the key hints' cyan, the worst
+/// One colour per task in `TASKS` order: the ★ of its favorite and its name in recommend. Off the mark colour (✓ light blue), the key hints' cyan, the worst
 /// value's red and yellow for a match; 16 colours leave no room to also skip the best's green.
 const TASK: [Color; 7] = [
     Color::LightCyan,
@@ -483,12 +504,6 @@ fn task_color(task: &str) -> Color {
     TASK[TASKS.iter().position(|t| t.name == task).unwrap_or(0)]
 }
 
-/// The task a numeric column scores, for its colour: ECI is the overall task.
-fn col_task(i: usize) -> Option<&'static str> {
-    let id = if i + 2 == ECI { "overall" } else { COLS.get(i)?.id };
-    fit::task(id).map(|t| t.name)
-}
-
 fn draw(app: &mut App, f: &mut Frame) {
     let area = f.area();
     if area.height < 4 || area.width < 4 {
@@ -519,7 +534,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 .right_aligned(),
         );
     let inner = frame.inner(body);
-    app.page = inner.height.saturating_sub(1);
+    app.page = inner.height.saturating_sub(2);
     let buf = f.buffer_mut();
     frame.render(body, buf);
     let (right, above, below) = table(buf, inner, app);
@@ -528,7 +543,12 @@ fn draw(app: &mut App, f: &mut Frame) {
         buf.set_stringn(body.right() - 1, inner.y, "›", 1, fg(ACCENT).add_modifier(BOLD));
     }
     if inner.height > 1 {
-        vmarks(buf, body.x, inner.y + 1, inner.bottom() - 1, above, below);
+        // The rule under the header runs into the frame.
+        buf.set_stringn(body.x, inner.y + 1, "├", 1, fg(MUTED));
+        buf.set_stringn(body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
+    }
+    if inner.height > 2 {
+        vmarks(buf, body.x, inner.y + 2, inner.bottom() - 1, above, below);
     }
     let cursor = status(buf, bar, app);
     let lines = match app.view {
@@ -609,6 +629,9 @@ struct Layout {
     first: usize,
     /// Columns cut off on the right; `‹` after Dev and `›` on the frame say where to scroll.
     more: bool,
+    /// Where a `│` parts two groups of columns (`GROUPS`): after Dev, and before each group
+    /// that starts right of it.
+    seps: Vec<u16>,
 }
 
 fn layout(width: u16, app: &App) -> Layout {
@@ -631,26 +654,36 @@ fn layout(width: u16, app: &App) -> Layout {
     // The columns right of Dev scroll sideways: only as far as it takes to show the selected
     // one, keeping the last position otherwise. Model and Dev stay put.
     let ws: Vec<u16> = widths.into_iter().chain([via_w, notes_w]).collect();
-    let fixed: u16 = ws.iter().map(|w| w + GAP).sum::<u16>() + dev_w + GAP;
+    // A column starting a group has a `│` in its gap, one cell wider; the first shown always
+    // has one, parting it from Dev.
+    let sep = |k: usize| u16::from(GROUPS.contains(&(k + 2)));
+    let fixed: u16 = ws.iter().enumerate().map(|(k, w)| w + GAP + sep(k)).sum::<u16>() + dev_w + GAP;
     let name_w = width.saturating_sub(name_x + fixed).clamp(NAME_MIN, longest.max(NAME_MIN));
-    let mut x = name_x + name_w + GAP + dev_w + GAP;
+    let mut x = name_x + name_w + GAP + dev_w + GAP + 1;
     let room = width.saturating_sub(x) + GAP;
     let first = match app.col.checked_sub(2) {
         Some(s) => {
             let (mut lo, mut used) = (s, ws[s] + GAP);
-            while lo > 0 && used + ws[lo - 1] + GAP <= room {
+            while lo > 0 && used + ws[lo - 1] + GAP + sep(lo) <= room {
                 lo -= 1;
-                used += ws[lo] + GAP;
+                used += ws[lo] + GAP + sep(lo + 1);
             }
             app.hscroll.clamp(lo, s)
         }
         None => 0,
     };
-    let (mut cols, mut tail, mut more) = (Vec::with_capacity(COLS.len()), [None; 2], false);
+    let (mut cols, mut tail, mut more, mut seps) = (Vec::with_capacity(COLS.len()), [None; 2], false, vec![]);
     for (k, &w) in ws.iter().enumerate().skip(first) {
+        let part = k == first || sep(k) == 1;
+        if k > first {
+            x += sep(k);
+        }
         if x + w > width {
             more = true;
             break;
+        }
+        if part {
+            seps.push(x - 2);
         }
         match k.checked_sub(COLS.len()) {
             Some(t) => tail[t] = Some((x, w)),
@@ -658,7 +691,7 @@ fn layout(width: u16, app: &App) -> Layout {
         }
         x += w + GAP;
     }
-    Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more }
+    Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, seps }
 }
 
 /// Header plus as many rows as fit in `area`, scrolled so the selection stays in view. Says
@@ -667,19 +700,16 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     if area.height == 0 {
         return (false, false, false);
     }
-    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more } = layout(area.width, app);
+    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, seps } = layout(area.width, app);
     app.hscroll = first;
     let arrow = |i: usize| match i == app.sort_col {
         true if app.descending => "▼",
         true => "▲",
         false => "",
     };
-    let header = |i: usize| {
-        let color = i.checked_sub(2).and_then(col_task).map_or(ACCENT, task_color);
-        match i == app.col {
-            true => fg(color).add_modifier(BOLD | Modifier::REVERSED),
-            false => fg(color).add_modifier(BOLD),
-        }
+    let header = |i: usize| match i == app.col {
+        true => fg(ACCENT).add_modifier(BOLD | Modifier::REVERSED),
+        false => fg(ACCENT).add_modifier(BOLD),
     };
     // The marks: the checkbox, then the ☆, then the ✗ box.
     let num_w = (name_x - 7) as usize;
@@ -688,6 +718,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let (y, name_x, dev_x) = (area.y, area.x + name_x, area.x + name_x + name_w + GAP);
     let (nw, dw) = (name_w as usize, dev_w as usize);
     buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
+    // Each mark column labelled with its own glyph, as mail clients head a star column with a star.
+    for (x, g) in [(box_x, "✓"), (star_x, "★"), (ex_x, "✗")] {
+        buf.set_stringn(x, y, g, 1, fg(MUTED));
+    }
     buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
     buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
     if first > 0 {
@@ -705,7 +739,18 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         buf.set_stringn(area.x + x, y, format!("{}{}", col_name(NOTES), arrow(NOTES)), w as usize, header(NOTES));
     }
 
-    let height = area.height as usize - 1;
+    for &x in &seps {
+        buf.set_stringn(area.x + x, y, "│", 1, fg(MUTED));
+    }
+    // A rule parts the header from the rows, crossing the group lines.
+    if area.height > 1 {
+        buf.set_stringn(area.x, y + 1, "─".repeat(area.width as usize), area.width as usize, fg(MUTED));
+        for &x in &seps {
+            buf.set_stringn(area.x + x, y + 1, "┼", 1, fg(MUTED));
+        }
+    }
+
+    let height = (area.height as usize).saturating_sub(2);
     let sel = app.table.selected().unwrap_or(0).min(app.rows.len().saturating_sub(1));
     // Keep the selection in view, and never leave rows blank below while some are hidden above.
     let top = app.table.offset().clamp(sel.saturating_sub(height.saturating_sub(1)), sel);
@@ -714,7 +759,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let ext = app.ext;
     let any = app.data.models.iter().any(|m| m.available);
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
-        let y = area.y + 1 + (k - top) as u16;
+        let y = area.y + 2 + (k - top) as u16;
         let m = &app.data.models[r];
         // The selection, or the visual range, is a reverse-video bar; colours stay off it so it
         // reads as one.
@@ -730,7 +775,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
         };
         if app.starred(&m.key) {
-            // In the colour of the task at hand, as its header; gold with no task, as the ★
+            // In the colour of the task at hand, as its name in recommend; gold with no task, as the ★
             // then stands for any of them. Bold so it stands out as much as the ✓.
             let star = tint(app.task_at_hand().map_or(STAR, |t| task_color(t.name)));
             buf.set_stringn(star_x, y, "★", 1, star.add_modifier(BOLD));
@@ -769,12 +814,15 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             buf.set_stringn(area.x + x, y, note, w as usize, base.add_modifier(Modifier::ITALIC));
         }
         if app.store.is_excluded(&m.key) {
-            // The whole row is struck out and muted; search hits still show on top. The ✗ is
-            // drawn after it, so the row's own strike does not swallow its colour.
-            buf.set_style(Rect { y, height: 1, ..area }, tint(MUTED).add_modifier(Modifier::CROSSED_OUT));
+            // The whole row is muted; search hits still show on top. The ✗ is drawn after it,
+            // so it keeps its red.
+            buf.set_style(Rect { y, height: 1, ..area }, tint(MUTED));
             buf.set_stringn(ex_x, y, "✗", 1, tint(BAD).add_modifier(BOLD));
         } else {
             buf.set_stringn(ex_x, y, "·", 1, tint(MUTED));
+        }
+        for &x in &seps {
+            buf.set_stringn(area.x + x, y, "│", 1, tint(MUTED));
         }
         // What the search matched, underlined in bold; Notes may be scrolled off.
         // ponytail: a char is taken as one cell; wide chars would shift the underline.
@@ -791,9 +839,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         }
     }
     if let Input::Menu { col, items, sel, query, .. } = &app.input {
-        let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more };
+        let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
         let picked = if *col == 1 { &app.dev } else { &app.via };
-        dropdown(buf, area, menu_x(area, &l, *col), *col, items, &menu_rows(items, query), *sel, picked);
+        dropdown(buf, area, menu_x(area, &l, *col), *col, items, query, *sel, picked);
     }
     (more, top > 0, top + height < app.rows.len())
 }
@@ -829,10 +877,11 @@ fn dropdown(
     x: u16,
     col: usize,
     items: &[(String, usize)],
-    rows: &[usize],
+    query: &str,
     sel: usize,
     picked: &[String],
 ) {
+    let rows = &menu_rows(items, query);
     let Some((rect, (label_w, n_w))) = menu_box(area, x, items, rows.len()) else { return };
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(ACCENT));
     let inner = block.inner(rect);
@@ -861,7 +910,11 @@ fn dropdown(
             _ => ("☐ ", tint(color)),
         };
         let x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
+        let at = x;
         let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, tint(color)).0;
+        for r in found(label, query).into_iter().map(|r| r.start.min(label_w)..r.end.min(label_w)) {
+            buf.set_style(Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(tint(color)));
+        }
         buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, tint(MUTED));
     }
     vmarks(buf, rect.x, inner.y, inner.bottom() - 1, top > 0, top + shown < rows.len());
@@ -961,8 +1014,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     if app.only_fav {
         parts.push(part("★ favorites only".into(), STAR));
     }
-    // The tasks the model under the cursor is the favorite for, each ★ in its task's colour as
-    // on its header: the row's single ★ does not say which.
+    if app.only_excluded {
+        parts.push(part("✗ excluded only".into(), BAD));
+    }
+    // The tasks the model under the cursor is the favorite for, each ★ in its task's colour:
+    // the row's single ★ does not say which.
     if let Some(m) = app.current() {
         let tasks = app.store.favorite_for(&m.key);
         if !tasks.is_empty() {
@@ -1028,6 +1084,45 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     None
 }
 
+/// The char ranges where `q` occurs in `s`, any case: what a substring search matched.
+fn found(s: &str, q: &str) -> Vec<Range<usize>> {
+    let low = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let (s, q): (Vec<char>, Vec<char>) = (s.chars().map(low).collect(), q.chars().map(low).collect());
+    if q.is_empty() {
+        return vec![];
+    }
+    (0..(s.len() + 1).saturating_sub(q.len())).filter(|&i| s[i..i + q.len()] == q[..]).map(|i| i..i + q.len()).collect()
+}
+
+/// How a search hit is drawn, as in the table: yellow, bold and underlined, but off the
+/// reverse-video selection bar only bold and underlined, so the bar keeps no colour.
+fn hit_style(style: Style) -> Style {
+    let hit = style.add_modifier(BOLD | Modifier::UNDERLINED);
+    if style.add_modifier.contains(Modifier::REVERSED) { hit } else { hit.fg(MATCH) }
+}
+
+/// `line` with the chars each span's `ranges` cover drawn as search hits.
+fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> Line<'static> {
+    let outer = line.style;
+    line.spans = std::mem::take(&mut line.spans)
+        .into_iter()
+        .flat_map(|span| {
+            let r = ranges(&span.content);
+            let hit = hit_style(outer.patch(span.style));
+            let mut out: Vec<Span<'static>> = vec![];
+            for (i, c) in span.content.chars().enumerate() {
+                let style = if r.iter().any(|r| r.contains(&i)) { hit } else { span.style };
+                match out.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push(c),
+                    _ => out.push(Span::styled(c.to_string(), style)),
+                }
+            }
+            out
+        })
+        .collect();
+    line
+}
+
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line<'static>> {
     let rows = choice_rows(items, query);
@@ -1052,6 +1147,7 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
                 _ => Line::from(format!(" {label} ")).style(style),
             }
         })
+        .map(|l| lit(l, |s| found(s, query)))
         .collect();
     // What `/` left, said as the dropdowns say it.
     if rows.is_empty() {
@@ -1123,6 +1219,7 @@ fn help(query: &str) -> Vec<Line<'static>> {
     if !query.is_empty() {
         let q = query.to_lowercase();
         v.retain(|l| l.spans.iter().any(|s| s.content.to_lowercase().contains(&q)));
+        v = v.into_iter().map(|l| lit(l, |s| found(s, query))).collect();
         if v.is_empty() {
             v.push(Line::from(format!("no help line matches {query}")).style(fg(MUTED)));
         }
@@ -1252,11 +1349,12 @@ fn detail(m: &Model, store: &Store) -> Vec<Line<'static>> {
 fn compare(models: &[&Model], sel: usize, first: usize, avail: usize, query: &str) -> (Vec<Line<'static>>, usize) {
     let mut rows = compare_rows(models);
     // The model row is the header; `query` filters the rest, forgiving a typo when nothing matches.
+    let mut typos = false;
     if !query.trim().is_empty() {
         let keep = |typos: bool| {
             rows.iter().enumerate().filter(|(i, r)| *i == 0 || hits(query, [&r.label], typos).is_some()).count()
         };
-        let typos = keep(false) < 2;
+        typos = keep(false) < 2;
         rows = rows
             .into_iter()
             .enumerate()
@@ -1298,8 +1396,10 @@ fn compare(models: &[&Model], sel: usize, first: usize, avail: usize, query: &st
     }
     // The model row carries `‹` and `›` for models scrolled off, as the table's header does.
     let edge = fg(ACCENT).add_modifier(BOLD);
-    out.extend(rows.into_iter().enumerate().map(|(k, r)| {
-        let mut spans = vec![Span::styled(format!("{:<label_w$}", r.label), fg(KEY))];
+    out.extend(rows.into_iter().enumerate().flat_map(|(k, r)| {
+        let label = Line::from(Span::styled(format!("{:<label_w$}", r.label), fg(KEY)));
+        let hit = hits(query, [&r.label], typos).map_or(vec![], |[r]| r);
+        let mut spans = lit(label, |_| hit.clone()).spans;
         for (i, c) in r.cells.into_iter().enumerate().skip(first).take(shown) {
             let style = if i == sel {
                 Style::new().add_modifier(Modifier::REVERSED)
@@ -1318,7 +1418,10 @@ fn compare(models: &[&Model], sel: usize, first: usize, avail: usize, query: &st
         if k == 0 && first + shown < n {
             spans.push(Span::styled(" ›", edge));
         }
-        Line::from(spans)
+        let line = Line::from(spans);
+        // A rule under the model row, as under the table's header.
+        let rule = (k == 0).then(|| Line::styled("─".repeat(line.width()), fg(MUTED)));
+        std::iter::once(line).chain(rule)
     }));
     (out, first)
 }
@@ -1488,7 +1591,7 @@ mod tests {
     fn marked_row_is_checked_and_coloured() {
         let mut a = app();
         a.store.marked = vec!["flash".into()];
-        let (buf, lines) = render(&mut a, 120, 4);
+        let (buf, lines) = render(&mut a, 120, 5);
         let row = |m: &str| lines.iter().position(|l| l.contains(m)).unwrap() as u16;
         let (opus, flash) = (row("opus"), row("flash"));
         assert!(lines[flash as usize].contains('✓') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
@@ -1512,56 +1615,64 @@ mod tests {
         a.query = "goo fla".into();
         a.rebuild();
         let (buf, lines) = render(&mut a, 120, 4);
-        let row = &lines[1];
+        let row = &lines[2];
         let (name, dev) = (cell(row, "flash"), cell(row, "google"));
-        let under = |x: u16| buf[(x, 1)].modifier.contains(Modifier::UNDERLINED);
+        let under = |x: u16| buf[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         assert!((name..name + 3).all(under) && !under(name + 3), "fla of flash");
         assert!((dev..dev + 3).all(under) && !under(dev + 3), "goo of google");
         a.store.set_note("opus", "good at refactors");
         a.query = "refac".into();
         a.rebuild();
         let (buf, lines) = render(&mut a, 200, 4);
-        assert_eq!((a.rows.len(), words(&lines[1])[4]), (1, "opus"), "notes are searched");
-        let x = cell(&lines[1], "refactors");
-        let under = |x: u16| buf[(x, 1)].modifier.contains(Modifier::UNDERLINED);
+        assert_eq!((a.rows.len(), words(&lines[2])[4]), (1, "opus"), "notes are searched");
+        let x = cell(&lines[2], "refactors");
+        let under = |x: u16| buf[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         assert!((x..x + 5).all(under) && !under(x + 5), "refac of the note");
         a.query = "openc".into();
         a.rebuild();
         let (buf, lines) = render(&mut a, 200, 4);
         assert_eq!(a.rows.len(), 2, "Via is searched");
-        let x = cell(&lines[1], "opencode");
-        assert!(buf[(x, 1)].modifier.contains(Modifier::UNDERLINED), "openc of the Via column");
+        let x = cell(&lines[2], "opencode");
+        assert!(buf[(x, 2)].modifier.contains(Modifier::UNDERLINED), "openc of the Via column");
     }
 
     #[test]
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
-        let (buf, lines) = render(&mut a, 200, 5);
-        let header = "# Model Dev ▾ ▼Price ▾ $in $cache $out Ctx ECI Coding Agentic Reason \
-                      Code/$ Via ▾ Notes";
+        let (buf, lines) = render(&mut a, 200, 6);
+        let header = "# ✓ ★ ✗ Model Dev ▾ │ ▼Price ▾ $in $cache $out Ctx │ ECI Coding Agentic Reason \
+                      Code/$ │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
-        let via = lines[2].find("opencode").expect(&lines[2]);
+        // A rule under the header, crossing the lines between the groups of columns.
+        assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 3, "{}", lines[1]);
+        let sep = cell(&lines[0], "│");
+        assert_eq!((cell(&lines[1], "┼"), cell(&lines[3], "│")), (sep, sep), "the group lines run straight down");
+        assert_eq!(buf[(sep, 3)].fg, MUTED, "and are muted");
+        let via = lines[3].find("opencode").expect(&lines[3]);
         assert_eq!(
-            buf[(lines[2][..via].chars().count() as u16, 2)].fg,
+            buf[(lines[3][..via].chars().count() as u16, 3)].fg,
             dev_color("opencode"),
             "harnesses are coloured"
         );
-        assert_eq!(&words(&lines[1])[..10], ["1", "☐", "☆", "·", "opus", "anthropic", "5.0", "5.0", "5.0", "5.0"]);
-        assert_eq!(&words(&lines[2])[..10], ["2", "☐", "☆", "·", "flash", "google", "0.10", "0.10", "0.10", "0.10"]);
-        assert!(lines[4].starts_with(" NORMAL  2 available"), "{}", lines[4]);
-        assert!(lines[4].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[4]);
-        assert!(buf[(0, 1)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
-        assert!((0..200).all(|x| buf[(x, 1)].fg == Color::Reset), "no colour breaks the selection bar");
-        assert_eq!(buf[(0, 2)].fg, MUTED, "row numbers are muted");
-        assert_eq!(buf[(cell(&lines[2], "flash"), 2)].fg, Color::Reset, "names are plain text");
-        assert_eq!(buf[(cell(&lines[2], "☆"), 2)].fg, MUTED, "the empty ☆ is muted");
-        assert_eq!(buf[(lines[2].find("google").unwrap() as u16, 2)].fg, dev_color("google"));
-        // Screen column of a byte offset: `▾` takes several bytes.
-        let x = |i: usize| lines[2][..i].chars().count() as u16;
-        assert_eq!(buf[(x(lines[2].find("120").unwrap()), 2)].fg, BAD, "the lowest ECI shown is red");
-        assert_eq!(buf[(x(lines[2].rfind("0.10").unwrap()), 2)].fg, GOOD, "the cheapest $out is green");
+        assert_eq!(&words(&lines[2])[..11], ["1", "☐", "☆", "·", "opus", "anthropic", "│", "5.0", "5.0", "5.0", "5.0"]);
         assert_eq!(
-            buf[(x(lines[2].find("0.10").unwrap()), 2)].fg,
+            &words(&lines[3])[..11],
+            ["2", "☐", "☆", "·", "flash", "google", "│", "0.10", "0.10", "0.10", "0.10"]
+        );
+        assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
+        assert!(lines[5].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[5]);
+        assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
+        assert!((0..200).all(|x| buf[(x, 2)].fg == Color::Reset), "no colour breaks the selection bar");
+        assert_eq!(buf[(0, 3)].fg, MUTED, "row numbers are muted");
+        assert_eq!(buf[(cell(&lines[3], "flash"), 3)].fg, Color::Reset, "names are plain text");
+        assert_eq!(buf[(cell(&lines[3], "☆"), 3)].fg, MUTED, "the empty ☆ is muted");
+        assert_eq!(buf[(lines[3].find("google").unwrap() as u16, 3)].fg, dev_color("google"));
+        // Screen column of a byte offset: `▾` takes several bytes.
+        let x = |i: usize| lines[3][..i].chars().count() as u16;
+        assert_eq!(buf[(x(lines[3].find("120").unwrap()), 3)].fg, BAD, "the lowest ECI shown is red");
+        assert_eq!(buf[(x(lines[3].rfind("0.10").unwrap()), 3)].fg, GOOD, "the cheapest $out is green");
+        assert_eq!(
+            buf[(x(lines[3].find("0.10").unwrap()), 3)].fg,
             LEVEL[1],
             "the blended price takes its level's colour"
         );
@@ -1579,14 +1690,14 @@ mod tests {
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭────────────────╮"), "{}", lines[1]);
         assert_eq!(&words(&lines[2])[5..8], ["│", "any", "2"]);
-        assert_eq!(&words(&lines[3])[..4], ["│", "☐", "anthropic", "1"]);
+        assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"]);
         assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
         for c in "/anth".chars() {
             a.key(KeyCode::Char(c).into());
         }
         let (_, lines) = render(&mut a, 170, 8);
-        assert_eq!(&words(&lines[3])[..4], ["│", "☐", "anthropic", "1"], "only matches are listed");
+        assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"], "only matches are listed");
         assert!(from(&lines[4]).starts_with("╰"), "{}", lines[4]);
         assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
     }
@@ -1597,7 +1708,7 @@ mod tests {
         let mut a = app();
         let (w, h) = (170, 10);
         let area = Rect::new(0, 0, w, h);
-        // `draw` puts the header on row 1 and the first model on row 2, one cell in.
+        // `draw` puts the header on row 1, its rule on row 2 and the first model on row 3, one cell in.
         let (_, lines) = render(&mut a, w - 2, h - 3);
         // Screen column of a header, one cell in: `▾` takes several bytes.
         let col = |s: &str| lines[0][..lines[0].find(s).unwrap()].chars().count() as u16 + 1;
@@ -1607,22 +1718,26 @@ mod tests {
             row: y,
             modifiers: KeyModifiers::NONE,
         };
-        assert_eq!(hit(&a, area, click(12, 3)), Some(Mouse::Row(1)));
-        assert_eq!(hit(&a, area, click(3, 3)), Some(Mouse::Box(1)), "a click on the checkbox cycles it");
-        assert_eq!(hit(&a, area, click(5, 3)), Some(Mouse::Star(1)), "and on the ☆ picks tasks");
-        assert_eq!(hit(&a, area, click(7, 3)), Some(Mouse::Exclude(1)), "and on the ✗ box excludes the model");
+        assert_eq!(hit(&a, area, click(12, 4)), Some(Mouse::Row(1)));
+        assert_eq!(hit(&a, area, click(3, 4)), Some(Mouse::Box(1)), "a click on the checkbox cycles it");
+        assert_eq!(hit(&a, area, click(5, 4)), Some(Mouse::Star(1)), "and on the ☆ picks tasks");
+        assert_eq!(hit(&a, area, click(7, 4)), Some(Mouse::Exclude(1)), "and on the ✗ box excludes the model");
         let right = |x, y| MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), ..click(x, y) };
-        assert_eq!(hit(&a, area, right(12, 3)), Some(Mouse::Mark(1)), "right click marks");
+        assert_eq!(hit(&a, area, right(12, 4)), Some(Mouse::Mark(1)), "right click marks");
         let ctrl = |x, y| MouseEvent { modifiers: KeyModifiers::CONTROL, ..click(x, y) };
-        assert_eq!(hit(&a, area, ctrl(12, 3)), Some(Mouse::Pick(1)), "ctrl click picks");
+        assert_eq!(hit(&a, area, ctrl(12, 4)), Some(Mouse::Pick(1)), "ctrl click picks");
         let drag = |x, y| MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), ..click(x, y) };
-        assert_eq!(hit(&a, area, drag(3, 4)), Some(Mouse::Extend(2)));
+        assert_eq!(hit(&a, area, drag(3, 5)), Some(Mouse::Extend(2)));
         let shift = |x, y| MouseEvent { modifiers: KeyModifiers::SHIFT, ..click(x, y) };
-        assert_eq!(hit(&a, area, shift(3, 4)), Some(Mouse::Extend(2)), "shift click extends like a drag");
+        assert_eq!(hit(&a, area, shift(3, 5)), Some(Mouse::Extend(2)), "shift click extends like a drag");
         assert_eq!(hit(&a, area, drag(3, 0)), Some(Mouse::Extend(0)), "a drag above the table: the first row");
-        assert_eq!(hit(&a, area, drag(3, h)), Some(Mouse::Extend(h as usize - 5)), "below: the last row");
-        assert_eq!(hit(&a, Rect::new(0, 0, w, 4), drag(3, 2)), None, "no rows to extend over");
-        assert_eq!(hit(&a, area, click(3, 1)), Some(Mouse::Header(0)));
+        assert_eq!(hit(&a, area, drag(3, h)), Some(Mouse::Extend(h as usize - 6)), "below: the last row");
+        assert_eq!(hit(&a, Rect::new(0, 0, w, 5), drag(3, 2)), None, "no rows to extend over");
+        assert_eq!(hit(&a, area, click(3, 1)), Some(Mouse::OnlyMarked), "the ✓ header: marked only");
+        assert_eq!(hit(&a, area, click(5, 1)), Some(Mouse::OnlyFav), "the ★ header: favorites only");
+        assert_eq!(hit(&a, area, click(7, 1)), Some(Mouse::OnlyExcluded), "the ✗ header: excluded only");
+        assert_eq!(hit(&a, area, click(9, 1)), Some(Mouse::Header(0)));
+        assert_eq!(hit(&a, area, click(3, 2)), None, "the rule under the header");
         assert_eq!(hit(&a, area, click(col("Dev"), 1)), Some(Mouse::Header(1)));
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
         assert_eq!(hit(&a, area, click(col("▼Price"), 1)), Some(Mouse::Header(2)));
@@ -1676,14 +1791,14 @@ mod tests {
         let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
         let star = |m: &str| buf[at(lines.iter().position(|l| l.contains(m)).unwrap(), "★")].fg;
         assert_eq!(star("opus"), STAR, "no task picked: a gold ★ that says favorite for some task");
-        assert_eq!(buf[at(0, "Coding")].fg, task_color("coding"), "the task's colour on the header");
-        assert_eq!(buf[at(0, "Price")].fg, ACCENT, "columns of no task stay plain");
+        assert_eq!(buf[at(0, "Coding")].fg, ACCENT, "headers are one colour, a task's column too");
         assert_eq!(buf[at(4, "★")].fg, task_color("agentic"), "and in the status bar");
-        let name_x = at(1, "opus").0;
+        let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
+        let name_x = at(opus, "opus").0;
         a.store.toggle_favorite("reasoning", "opus");
         let (_, lines) = render(&mut a, 120, 5);
-        assert_eq!(lines[1].matches('★').count(), 1, "one ★ however many tasks: {}", lines[1]);
-        assert_eq!(at(1, "opus").0, name_x, "so the names never shift");
+        assert_eq!(lines[opus].matches('★').count(), 1, "one ★ however many tasks: {}", lines[opus]);
+        assert_eq!(at(opus, "opus").0, name_x, "so the names never shift");
         a.key(KeyCode::Char('k').into()); // the bar on opus: the status bar names its tasks
         let (buf, lines) = render(&mut a, 120, 5);
         assert!(lines[4].contains("★ coding ★ reasoning"), "each in the status bar too: {}", lines[4]);
@@ -1699,9 +1814,10 @@ mod tests {
         }
         let (buf, lines) = render(&mut a, 120, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
-        assert!(!lines[opus].contains('★') && lines[3 - opus].contains('★'), "only agentic's favorite: {lines:?}");
-        let x = lines[3 - opus][..lines[3 - opus].find('★').unwrap()].chars().count() as u16;
-        assert_eq!(buf[(x, (3 - opus) as u16)].fg, task_color("agentic"));
+        let flash = 5 - opus;
+        assert!(!lines[opus].contains('★') && lines[flash].contains('★'), "only agentic's favorite: {lines:?}");
+        let x = lines[flash][..lines[flash].find('★').unwrap()].chars().count() as u16;
+        assert_eq!(buf[(x, flash as u16)].fg, task_color("agentic"));
         // The recommend panel: the task name and the favorite's ★ in the task's colour, the model in its price level's.
         let mut data = std::mem::take(&mut a.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
@@ -1721,7 +1837,11 @@ mod tests {
     fn narrow_table_drops_columns_and_hints_without_panicking() {
         let mut a = app();
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "▼Price", "▾"], "the cursor starts on Price");
+        assert_eq!(
+            words(&lines[0]),
+            ["#", "✓", "★", "✗", "Model", "Dev", "▾", "│", "▼Price", "▾"],
+            "the cursor starts on Price"
+        );
         assert!(layout(46, &a).more, "columns cut off on the right");
         assert!(!layout(400, &a).more, "all columns fit");
         // Rows above or below the window are reported for the frame's ▲ ▼.
@@ -1739,21 +1859,21 @@ mod tests {
         // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹", "Notes"]);
+        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "‹│", "Notes"]);
         a.col = VIA;
-        let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹", "Via", "▾"]);
+        let (_, lines) = render(&mut a, 47, 4);
+        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "‹│", "Via", "▾"]);
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
         let (_, lines) = render(&mut a, 54, 4);
-        assert_eq!(words(&lines[0])[4..], ["‹", "Reason", "Code/$"], "scrolls back only as far as needed");
+        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Code/$"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 54, 4);
-        assert_eq!(words(&lines[0])[4..], ["‹", "Reason", "Code/$"], "{}", lines[0]);
+        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Code/$"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "▼Price", "▾"]);
+        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "│", "▼Price", "▾"]);
         for (w, h) in [(1, 1), (3, 2), (0, 0), (30, 3), (12, 1)] {
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);
@@ -1772,10 +1892,10 @@ mod tests {
         a.key(KeyCode::Char('s').into());
         a.table.select(Some(15));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[4])[..5], ["16", "☐", "☆", "·", "m6"], "row 15 (m6) is the last of the 4 visible rows");
+        assert_eq!(words(&lines[4])[..5], ["16", "☐", "☆", "·", "m6"], "row 15 (m6) is the last of the 3 visible rows");
         a.table.select(Some(0));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[1])[..5], ["1", "☐", "☆", "·", "opus"], "scrolls back up");
+        assert_eq!(words(&lines[2])[..5], ["1", "☐", "☆", "·", "opus"], "scrolls back up");
     }
 
     #[test]
@@ -1823,6 +1943,8 @@ mod tests {
                 .map(|l| l.split("  ").next().unwrap().trim().to_string())
                 .collect::<Vec<_>>()
         };
+        let rule = full.iter().position(|l| l.to_string().starts_with("model ")).unwrap() + 1;
+        assert!(full[rule].to_string().chars().all(|c| c == '─'), "a rule under the model row, as in the table");
         let (some, _) = compare(&ms, 0, 0, 200, "eci");
         assert_eq!(
             labels(&some).iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
@@ -1866,11 +1988,11 @@ mod tests {
         let top: String = (0..100).map(|x| term.backend().buffer()[(x, 0)].symbol()).collect();
         assert!(top.starts_with("╭──"), "{top}");
         assert!(top.ends_with("─ ▼ by Price ╮"), "{top}");
-        let (l, r) = top.split_once(" ECI: Epoch Capabilities Index, overall capability ").unwrap();
+        let (l, r) = top.split_once(" ECI: Epoch AI's overall capability index ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         let bottom: String = (0..100).map(|x| term.backend().buffer()[(x, 6)].symbol()).collect();
         assert!(bottom.contains("models.dev + Epoch AI"), "{bottom}");
-        assert_eq!(a.page, 4, "8 lines minus status bar, two borders and the header");
+        assert_eq!(a.page, 3, "8 lines minus status bar, two borders, the header and its rule");
         // The right border marks columns off to the right, the left one rows below, then above.
         let mut data = std::mem::take(&mut a.data);
         for i in 0..6 {
@@ -1881,10 +2003,11 @@ mod tests {
         let edge = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
             term.backend().buffer()[(x, y)].symbol().to_string()
         };
-        assert_eq!([edge(&term, 99, 1), edge(&term, 0, 2), edge(&term, 0, 5)], ["›", "│", "▼"]);
+        let marks = [edge(&term, 99, 1), edge(&term, 0, 2), edge(&term, 99, 2), edge(&term, 0, 3), edge(&term, 0, 5)];
+        assert_eq!(marks, ["›", "├", "┤", "│", "▼"], "the rule joins the frame");
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([edge(&term, 0, 2), edge(&term, 0, 5)], ["▲", "│"]);
+        assert_eq!([edge(&term, 0, 3), edge(&term, 0, 5)], ["▲", "│"]);
     }
 
     #[test]
@@ -1919,6 +2042,24 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert_eq!(text, ["a", "b"], "a space at a break is dropped");
+    }
+
+    #[test]
+    fn searches_show_what_matched() {
+        let lit_text = |lines: &[Line]| -> Vec<String> {
+            let hit = |s: &&Span| s.style.add_modifier.contains(Modifier::UNDERLINED);
+            lines.iter().flat_map(|l| l.spans.iter().filter(hit).map(|s| s.content.to_string())).collect()
+        };
+        assert_eq!(found("Gruvbox gRUV", "ruv"), [1..4, 9..12]);
+        let hits = lit_text(&help("THEME"));
+        assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
+        let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
+        let lines = choice_lines(&items, 0, "uv");
+        assert_eq!(lit_text(&lines), ["uv"]);
+        // On the selection bar a hit is bold and underlined but gets no colour.
+        let lines = choice_lines(&items, 0, "gr");
+        let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
+        assert_eq!(hit.style.fg, None);
     }
 
     #[test]

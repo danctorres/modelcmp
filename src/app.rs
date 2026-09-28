@@ -46,7 +46,7 @@ pub const COLS: [Col; 10] = [
     Col {
         lower_better: true,
         show: money,
-        ..col("$cache", "cache", "USD per 1M cached input tokens; $in when the provider has no discount", |m| {
+        ..col("$cache", "cache", "USD per 1M cached input tokens ($in when the provider has no discount)", |m| {
             m.price().map(|o| o.cache_read.unwrap_or(o.input))
         })
     },
@@ -59,11 +59,11 @@ pub const COLS: [Col; 10] = [
         show: |v| ctx((v * 1000.0) as u64),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    col("ECI", "eci", "Epoch Capabilities Index, overall capability", |m| m.eci),
-    col("Coding", "coding", "mean percentile (0-100) on coding benchmarks", |m| task_score(m, "coding")),
-    col("Agentic", "agentic", "mean percentile (0-100) on agentic benchmarks", |m| task_score(m, "agentic")),
-    col("Reason", "reasoning", "mean percentile (0-100) on reasoning benchmarks", |m| task_score(m, "reasoning")),
-    col("Code/$", "value", "Coding divided by Price, as a percentile (0-100)", |m| m.fit.get("value").copied()),
+    col("ECI", "eci", "Epoch AI's overall capability index", |m| m.eci),
+    col("Coding", "coding", "mean percentile, coding benchmarks", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "mean percentile, agentic benchmarks", |m| task_score(m, "agentic")),
+    col("Reason", "reasoning", "mean percentile, reasoning benchmarks", |m| task_score(m, "reasoning")),
+    col("Code/$", "value", "Coding ÷ Price, as a percentile", |m| m.fit.get("value").copied()),
 ];
 
 /// Text columns before the numbers: 0 is the model name, 1 its developer. `VIA` follows them.
@@ -73,7 +73,7 @@ pub const PRICE: usize = TEXT;
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 5;
 /// First column of each group: names, price and context, benchmarks, your own.
-const GROUPS: [usize; 4] = [0, PRICE, ECI, VIA];
+pub const GROUPS: [usize; 4] = [0, PRICE, ECI, VIA];
 /// Column index of where you have access.
 pub const VIA: usize = TEXT + COLS.len();
 /// Column index of your note, the last one.
@@ -104,10 +104,10 @@ pub fn has_menu(col: usize) -> bool {
 /// What the column at cursor index `col` means.
 pub fn col_about(col: usize) -> String {
     match col {
-        0 => "model name; dimmed if no available provider".into(),
+        0 => "model name (dimmed if Via is empty)".into(),
         1 => "company that trained the model".into(),
-        VIA => "where you have access: the harnesses that list the model, env for a provider API key".into(),
-        NOTES => "your note, n to edit".into(),
+        VIA => "harnesses listing it, env if API key set".into(),
+        NOTES => "your own note on the model".into(),
         _ => numeric(col).map_or("", |c| c.about).into(),
     }
 }
@@ -115,7 +115,7 @@ pub fn col_about(col: usize) -> String {
 pub const HELP: &[(&str, &str)] = &[
     ("j k ↓ ↑", "move; a count repeats, as in 3j"),
     ("h l ← →", "pick a column; in compare and recommend, a model"),
-    ("0 $ w b", "first / last column; next / previous group"),
+    ("0 _ $ w b", "first / last column; next / previous group"),
     ("gg G 3gg", "top / bottom / row 3"),
     ("( ) ^d ^u", "half a page up / down"),
     ("s", "sort by the column; again reverses"),
@@ -123,12 +123,12 @@ pub const HELP: &[(&str, &str)] = &[
     ("> <", "minimum / maximum for the column, e.g. > 70 enter"),
     ("d", "dropdown on Dev, Price and Via (▾); m toggles several"),
     ("/", "filter models, compare rows, this help or a list"),
-    ("c", "clear filters, bounds, task, M and F; marks stay"),
+    ("c", "clear filters, bounds, task, M, F and E; marks stay"),
     ("a", "all models, including ones you have no access to"),
     ("m", "mark the model (✓): the shortlist for C"),
     ("U", "unmark every model"),
     ("V", "select a range; m e C act on all of it"),
-    ("M F", "marked / favorite models only; again: every model"),
+    ("M F E", "marked / favorite / excluded models only; again: every model"),
     ("C", "compare the marked models"),
     ("f", "favorite the model for tasks (★)"),
     ("e", "exclude the model (✗): recommendations skip it; on a mark, all marks"),
@@ -142,6 +142,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
     ("mouse", "click selects, again details; ctrl / shift click, drag; right click marks"),
     ("", "click ☐ ☆ · to mark, favorite, exclude; a header sorts, its ▾ opens"),
+    ("", "click the ✓ ★ ✗ header: marked, favorites or excluded only"),
     ("?", "this help"),
     ("esc", "back: overlay, selection, filter, M, F, task"),
     ("q", "quit; asks first"),
@@ -340,6 +341,12 @@ pub enum Mouse {
     Extend(usize),
     /// Horizontal wheel: columns to move the cursor, negative is left.
     Cols(isize),
+    /// Click on the ✓ header: show marked models only, as `M` does.
+    OnlyMarked,
+    /// Click on the ★ header: show favorites only, as `F` does.
+    OnlyFav,
+    /// Click on the ✗ header: show excluded models only, as `E` does.
+    OnlyExcluded,
     /// Click on a column header.
     Header(usize),
     /// Click on a header's ▾: open its dropdown.
@@ -397,6 +404,8 @@ pub struct App {
     pub table: TableState,
     pub only_marked: bool,
     pub only_fav: bool,
+    /// `E`: show excluded models only.
+    pub only_excluded: bool,
     /// Row where `V` started a visual range; the range runs to the cursor.
     pub visual: Option<usize>,
     /// Rows picked one by one with ctrl click; selected along with the visual range.
@@ -451,6 +460,7 @@ impl App {
             table: TableState::default().with_selected(0),
             only_marked: false,
             only_fav: false,
+            only_excluded: false,
             visual: None,
             picked: vec![],
             view: View::Table,
@@ -640,6 +650,7 @@ impl App {
             .is_some()
                 && (!self.only_marked || self.store.is_marked(&m.key))
                 && (!self.only_fav || self.is_fav(&m.key))
+                && (!self.only_excluded || self.store.is_excluded(&m.key))
                 && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
                 && (skip == VIA || self.via.is_empty() || self.via.iter().any(|h| m.via.contains(h)))
                 && self
@@ -655,6 +666,7 @@ impl App {
         // Unmarking the last marked model leaves M (and unfavoriting the last, F) for every model rather than an empty table.
         self.only_marked &= self.any_marked();
         self.only_fav &= self.any_fav();
+        self.only_excluded &= !self.store.excluded.is_empty();
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
         let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
         let anchor = self.visual.and_then(key_of);
@@ -1030,6 +1042,9 @@ impl App {
                 }
                 self.select(n);
             }
+            Mouse::OnlyMarked => return self.table_key(KeyCode::Char('M'), 1),
+            Mouse::OnlyFav => return self.table_key(KeyCode::Char('F'), 1),
+            Mouse::OnlyExcluded => return self.table_key(KeyCode::Char('E'), 1),
             Mouse::Header(c) if c < NCOLS => {
                 self.col = c;
                 return self.table_key(KeyCode::Char('s'), 1);
@@ -1065,9 +1080,9 @@ impl App {
                 let (len, sel) = (across?, self.across_sel());
                 *sel = step((*sel).min(len.saturating_sub(1)), n, len);
             }
-            KeyCode::Char('0') if table => self.col = 0,
+            KeyCode::Char('0' | '_') if table => self.col = 0,
             KeyCode::Char('$') if table => self.col = NCOLS - 1,
-            KeyCode::Char('0') if across.is_some() => *self.across_sel() = 0,
+            KeyCode::Char('0' | '_') if across.is_some() => *self.across_sel() = 0,
             KeyCode::Char('$') if across.is_some() => *self.across_sel() = across?.saturating_sub(1),
             KeyCode::Char('w') if table => {
                 for _ in 0..n {
@@ -1109,6 +1124,13 @@ impl App {
                 self.only_fav = !self.only_fav;
                 self.rebuild();
             }
+            KeyCode::Char('E') if table && !self.only_excluded && self.store.excluded.is_empty() => {
+                self.status = "no excluded models: e excludes the one under the bar".into();
+            }
+            KeyCode::Char('E') if table => {
+                self.only_excluded = !self.only_excluded;
+                self.rebuild();
+            }
             KeyCode::Char('U') if table && self.store.marked.is_empty() => {
                 self.status = "no marked models: m marks the one under the bar".into();
             }
@@ -1129,6 +1151,7 @@ impl App {
                 }
                 self.only_marked = false;
                 self.only_fav = false;
+                self.only_excluded = false;
                 self.rebuild();
             }
             KeyCode::Char('q') => self.input = Input::Quit,
@@ -1148,6 +1171,9 @@ impl App {
                     self.rebuild();
                 } else if self.only_fav {
                     self.only_fav = false;
+                    self.rebuild();
+                } else if self.only_excluded {
+                    self.only_excluded = false;
                     self.rebuild();
                 } else if self.task.take().is_some() {
                     // Back to recommend, where enter picked the task.
@@ -1789,7 +1815,7 @@ mod tests {
 
     #[test]
     fn every_column_says_what_it_means() {
-        assert!(col_about(0).contains("no available provider"));
+        assert!(col_about(0).contains("Via"));
         assert!(col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about.is_empty()));
     }
@@ -1840,6 +1866,10 @@ mod tests {
         assert_eq!(a.col, 0);
         press(&mut a, "2w");
         assert_eq!(a.col, ECI);
+        press(&mut a, "$");
+        assert_eq!(a.col, NOTES);
+        press(&mut a, "_");
+        assert_eq!(a.col, 0);
         press(&mut a, "$");
         assert_eq!(a.col, NOTES);
         press(&mut a, "a10j");
@@ -2157,6 +2187,10 @@ mod tests {
         assert_eq!((a.only_marked, a.only_fav, a.rows.len()), (false, false, 3), "c leaves M and F");
         press(&mut a, "MF");
         assert!(a.rows.is_empty(), "M and F together: marked favorites");
+        press(&mut a, "MF");
+        a.mouse(Mouse::OnlyMarked);
+        a.mouse(Mouse::OnlyFav);
+        assert!((a.only_marked, a.only_fav) == (true, true), "the ✓ and ★ headers do what M and F do");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only_marked, a.only_fav), (false, true), "esc leaves M first");
         code(&mut a, KeyCode::Esc);
@@ -2172,6 +2206,17 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "CC");
         assert_eq!(a.view, View::Table, "C closes compare, as ? and R close theirs");
+        press(&mut a, "c");
+        a.mouse(Mouse::OnlyExcluded);
+        assert_eq!(
+            (a.only_excluded, a.status.as_str()),
+            (false, "no excluded models: e excludes the one under the bar")
+        );
+        a.store.toggle_excluded("mini");
+        a.mouse(Mouse::OnlyExcluded);
+        assert_eq!(keys(&a), ["mini"], "the ✗ header, as E, shows the excluded only");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.only_excluded, a.rows.len()), (false, 3), "esc leaves E");
     }
 
     #[test]
