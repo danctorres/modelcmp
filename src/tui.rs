@@ -7,8 +7,8 @@
 //! terminal themes modelcmp too, and nothing paints a background over a transparent one.
 
 use crate::app::{
-    App, COLS, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about, col_name,
-    has_menu, menu_rows,
+    App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about,
+    col_name, has_menu, menu_rows,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -353,6 +353,11 @@ fn hints(app: &App) -> Vec<&'static str> {
                 view.push("E excluded only");
             }
             view.push(if app.all { "a yours only" } else { "a all" });
+            // On the price columns, or anywhere while it is off the default.
+            let cached = data::cached() > 0.0;
+            if (PRICE..ECI).contains(&app.col) || !cached {
+                view.push(if cached { "% no cache" } else { "% 90% cached" });
+            }
             if !app.query.is_empty()
                 || !app.bounds.is_empty()
                 || !app.dev.is_empty()
@@ -1573,9 +1578,11 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 4);
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
-        assert!(lines[3].contains("a all  r refresh  │  enter details"), "{}", lines[3]);
+        assert!(lines[3].contains("a all  % no cache  r refresh  │  enter details"), "{}", lines[3]);
         a.refreshing = true;
+        data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
+        assert!(lines[3].contains("a all  % 90% cached  │"), "off the default, the way back: {}", lines[3]);
         assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "refreshing: {}", lines[3]);
     }
 
@@ -1767,7 +1774,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  │  enter details  x launch  o open  y copy id  m mark  f fav  e exclude  n note  │  q quit  ? help"
+                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  % no cache  │  enter details  x launch  o open  y copy id  m mark  f fav  e exclude  n note  │  q quit  ? help"
             ),
             "{}",
             lines[5]

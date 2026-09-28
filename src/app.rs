@@ -35,7 +35,7 @@ pub const COLS: [Col; 10] = [
     Col {
         lower_better: true,
         show: money,
-        ..col("Price", "price", "USD per 1M tokens, 3:1 input:output, 90% of the input cached", |m| m.cost())
+        ..col("Price", "price", "USD per 1M tokens, 3:1 input:output", |m| m.cost())
     },
     Col {
         lower_better: true,
@@ -107,6 +107,7 @@ pub fn col_about(col: usize) -> String {
         1 => "company that trained the model".into(),
         VIA => "harnesses listing it, env if API key set".into(),
         NOTES => "your own note on the model".into(),
+        PRICE => format!("{}, {:.0}% of the input cached", COLS[PRICE - TEXT].about, crate::data::cached() * 100.0),
         _ => numeric(col).map_or("", |c| c.about).into(),
     }
 }
@@ -130,6 +131,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("> <", "minimum / maximum for the column, e.g. > 70 enter"),
             ("d", "dropdown on Dev, Price and Via (▾); m toggles several"),
             ("a", "all models, including ones you have no access to"),
+            ("%", "Price with 90% of the input cached, as in an agent session, or none"),
             ("M F E", "marked / favorite / excluded models only; again: every model"),
             ("c", "clear filters, bounds, task, M, F and E; marks stay"),
         ],
@@ -523,6 +525,13 @@ impl App {
         self.data = data;
         self.compare_sel = self.compare_sel.min(self.marked_models().len().saturating_sub(1));
         self.rebuild();
+    }
+
+    /// Recompute everything that depends on `data::cached()`: Code/$ and the column values.
+    pub fn reprice(&mut self) {
+        let mut data = std::mem::take(&mut self.data);
+        crate::fit::add_value(&mut data.models);
+        self.set_data(data);
     }
 
     /// Value of the column at cursor index `col` for `data.models[i]`.
@@ -1353,6 +1362,14 @@ impl App {
                 self.all = !self.all;
                 self.rebuild();
             }
+            KeyCode::Char('%') if table => {
+                let off = crate::data::cached() > 0.0;
+                crate::data::set_cached(if off { 0.0 } else { crate::data::AGENT_CACHED });
+                self.reprice();
+                self.status =
+                    if off { "no input cached, as a one-off prompt" } else { "90% of the input cached, as an agent" }
+                        .into();
+            }
             _ => {}
         }
         None
@@ -1557,6 +1574,24 @@ mod tests {
             };
         }
         App::new(Data { fetched: 0, models, ..Default::default() }, Store::default())
+    }
+
+    #[test]
+    fn percent_toggles_the_cached_input_in_price() {
+        let mut a = app();
+        let gpt = a.data.models.iter().position(|m| m.key == "gpt55").unwrap();
+        a.data.models[gpt].offers[0].cache_read = Some(0.5);
+        a.reprice();
+        let sel = |a: &App| a.current().unwrap().key.clone();
+        press(&mut a, "gg");
+        let was = sel(&a);
+        // 3 × (0.9 × 0.5 + 0.1 × 10) + 10, over 4.
+        assert_eq!(a.val(gpt, PRICE), Some(3.5875));
+        press(&mut a, "%");
+        assert_eq!((a.val(gpt, PRICE), sel(&a)), (Some(10.0), was), "full input price, the bar stays");
+        assert!(col_about(PRICE).contains(" 0% of the input cached") && a.status.contains("one-off"));
+        press(&mut a, "%");
+        assert_eq!(a.val(gpt, PRICE), Some(3.5875), "again: back to an agent's 90%");
     }
 
     #[test]

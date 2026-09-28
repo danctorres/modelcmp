@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
@@ -11,10 +12,34 @@ const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 const FORMAT: u32 = 1;
-/// Share of input tokens read from the prompt cache: an agent resends the whole conversation
-/// every turn, so most of what it sends was sent before.
-// ponytail: one share for every model and session; agents often cache 90%+, a one-off prompt 0%.
-pub const CACHED: f64 = 0.9;
+/// Share of input tokens read from the prompt cache by default: an agent resends the whole
+/// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
+/// nothing: `--cache 0`, or `%` in the TUI.
+pub const AGENT_CACHED: f64 = 0.9;
+/// The share in use, as f64 bits: one process-wide setting that every price reads.
+#[cfg(not(test))]
+static CACHED: AtomicU64 = AtomicU64::new(AGENT_CACHED.to_bits());
+// Tests run in parallel threads: each gets its own share, so one that sets it cannot race the rest.
+#[cfg(test)]
+thread_local!(static CACHED: AtomicU64 = const { AtomicU64::new(AGENT_CACHED.to_bits()) });
+
+/// Share of input tokens read from the prompt cache, 0..1.
+pub fn cached() -> f64 {
+    #[cfg(test)]
+    return CACHED.with(|c| f64::from_bits(c.load(Relaxed)));
+    #[cfg(not(test))]
+    f64::from_bits(CACHED.load(Relaxed))
+}
+
+/// Set the cache share, clamped to 0..1. Prices derived from it (`fit::add_value`,
+/// `App::vals`) must be recomputed by the caller.
+pub fn set_cached(share: f64) {
+    let bits = share.clamp(0.0, 1.0).to_bits();
+    #[cfg(test)]
+    CACHED.with(|c| c.store(bits, Relaxed));
+    #[cfg(not(test))]
+    CACHED.store(bits, Relaxed);
+}
 /// How a harness tells which models it can use.
 enum Probe {
     /// A command that prints the `provider/model` ids it has access to, one per line.
@@ -49,12 +74,13 @@ pub struct Offer {
 }
 
 impl Offer {
-    /// $ per 1M input tokens with `CACHED` of them read from the cache.
+    /// $ per 1M input tokens with `cached()` of them read from the cache.
     pub fn input_cached(&self) -> f64 {
-        CACHED * self.cache_read.unwrap_or(self.input) + (1.0 - CACHED) * self.input
+        let share = cached();
+        share * self.cache_read.unwrap_or(self.input) + (1.0 - share) * self.input
     }
 
-    /// $ per 1M tokens, 3:1 input:output with `CACHED` of the input cached.
+    /// $ per 1M tokens, 3:1 input:output with `cached()` of the input cached.
     pub fn blended(&self) -> f64 {
         (3.0 * self.input_cached() + self.output) / 4.0
     }
@@ -1079,8 +1105,15 @@ mod tests {
         let m = Model { offers: vec![plain, cached], ..Default::default() };
         assert_eq!(m.price().unwrap().provider, "c", "the dearer list price is cheaper once cached");
         assert!(
-            crate::app::col_about(crate::app::PRICE).contains(&format!("{:.0}% of the input cached", CACHED * 100.0))
+            crate::app::col_about(crate::app::PRICE)
+                .contains(&format!("{:.0}% of the input cached", crate::data::cached() * 100.0))
         );
+        // A one-off prompt caches nothing: the cheaper list price wins again.
+        set_cached(0.0);
+        assert_eq!(m.price().unwrap().provider, "p");
+        assert!(crate::app::col_about(crate::app::PRICE).contains(" 0% of the input cached"));
+        set_cached(2.0);
+        assert_eq!(crate::data::cached(), 1.0, "clamped");
     }
 
     #[test]

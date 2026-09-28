@@ -25,6 +25,9 @@ struct Args {
     /// Re-download data now instead of using the cache
     #[arg(long, global = true)]
     refresh: bool,
+    /// Percent of input tokens read from the prompt cache in Price: 90 fits an agent session, 0 a one-off prompt (`%` in the TUI)
+    #[arg(long, global = true, value_name = "PERCENT", default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
+    cache: u8,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -146,6 +149,7 @@ fn bound(s: &str) -> Result<(usize, f64), String> {
 
 fn main() {
     let args = Args::parse();
+    data::set_cached(f64::from(args.cache) / 100.0);
     let result = match args.cmd {
         None => tui::run(args.refresh).map_err(Exit::from),
         Some(cmd) => {

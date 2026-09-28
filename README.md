@@ -26,7 +26,7 @@ Marks, exclusions, notes and per-task favorites live in `~/.config/modelcmp/user
 modelcmp
 ```
 
-One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session; providers without a cache price pay full input),
+One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Code/$, Via, Note. Task columns are mean percentiles (0-100) across the task's
 benchmarks, ranked against every model Epoch has evaluated:
@@ -58,6 +58,7 @@ column.
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
 | `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `m` toggles several, as it marks models |
 | `a` | all models, including ones you have no access to |
+| `%` | Price with no input cached, as a one-off prompt, instead of an agent's 90%; again: back to 90%. The top border on Price says which, and the hint shows on the price columns, or anywhere while it is off 90%. Code/$, the cheapest provider and recommend follow it. `modelcmp --cache 50` starts the TUI with any other share |
 | `M` | marked models only; `M` again or `esc`: every model |
 | `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked); `F` again or `esc`: every model |
 | `E` | excluded models only, the rows with a red `✗`; `E` again or `esc`: every model |
@@ -124,6 +125,7 @@ modelcmp note sonnet "fast enough for refactors"   # without text shows it, --rm
 modelcmp exclude llama                         # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet                     # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
+modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
 ```
 
 Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`, `long-context`.
@@ -134,7 +136,7 @@ model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 7
 the best; the best when none reaches the floor. A model you `fav` for the task beats the
 tier's pick and sits on the task's list marked `★` whether or not it is on the frontier. Scores are percentiles among the models
 Epoch benchmarked. `--all`
-includes models you have no access to. `--refresh` on any command re-downloads first. The
+includes models you have no access to. `--refresh` on any command re-downloads first, and `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache. The
 TUI's bottom border always shows the refresh state: `⟳ refreshing`, `refresh failed` in red
 with the age of the data still shown, or the data age alone, red once it is past 24h; then
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
