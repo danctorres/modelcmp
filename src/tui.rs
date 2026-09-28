@@ -304,42 +304,55 @@ fn copy(text: &str) -> bool {
 /// Blank columns between two table columns.
 const GAP: u16 = 2;
 const NAME_MIN: u16 = 16;
-/// Key reminders in the status bar, most dispensable first: narrow terminals drop them
-/// from the front. Ways back (`esc`, a toggle that is on) and `? help` go last; toggles
-/// that are off, first. `s` and `> <` act on the column picked with `h l`.
+/// Between two groups of hints in the status bar, drawn muted.
+const SEP: &str = "│";
+/// The actions on one model, in the one order every view shows them in.
+const ACTIONS: [&str; 8] =
+    ["enter details", "x launch", "o open", "y copy id", "m mark", "f fav", "e exclude", "n note"];
+
+/// The last group of every overlay: `? help` is the last hint a narrow terminal drops.
+const BACK: [&str; 3] = ["esc back", "q quit", "? help"];
+
+/// The model actions a view offers, in `ACTIONS` order whatever order they are asked in.
+fn actions(keys: &str) -> Vec<&'static str> {
+    ACTIONS.into_iter().filter(|a| keys.split(' ').any(|k| a.split(' ').next() == Some(k))).collect()
+}
+
+/// Key reminders in the status bar, in groups every view keeps in the same order: moving,
+/// the view's own keys, the model's actions, then the way back and help. Narrow terminals
+/// drop them from the front, so the actions outlast the view's keys and `? help` goes last.
+/// A toggle names what pressing it does; `M F E` show only once they would change
+/// something, the rest of the keys are in `?`. `s` acts on the column picked with `h l`.
 fn hints(app: &App) -> Vec<&'static str> {
-    match app.view {
+    let groups: Vec<Vec<&'static str>> = match app.view {
         View::Table if app.selecting() => {
-            vec!["j k G extend", "e exclude", "m mark", "C compare", "esc cancel"]
+            vec![vec!["j k G extend"], vec!["C compare"], actions("m f e"), vec!["esc cancel", "q quit", "? help"]]
         }
         View::Table => {
-            let mut v = vec![];
-            if !app.only_excluded && !app.store.excluded.is_empty() {
-                v.push("E excluded only");
-            }
-            if !app.only_fav && app.any_fav() {
-                v.push("F favorites only");
-            }
-            if !app.only_marked && app.any_marked() {
-                v.push("M marked only");
-            }
-            v.extend(["h l column", "s sort", "> < bound"]);
+            let mut view = vec!["/ filter", "s sort"];
             if has_menu(app.col) {
-                v.push("d dropdown");
+                view.push("d dropdown");
             }
-            v.extend([if app.all { "a yours only" } else { "a all" }, "x launch", "y copy id", "e exclude", "f fav"]);
-            v.push("V select");
-            if !app.store.marked.is_empty() {
-                v.push("U unmark all");
-            }
-            v.push("R recommend");
+            view.push("R recommend");
             if app.marked_models().len() >= 2 {
-                v.push("C compare");
+                view.push("C compare");
             }
-            v.extend(["enter details", "m mark", "/ filter"]);
-            if stale(app) {
-                v.push("r refresh");
+            if app.only_marked {
+                view.push("M every model");
+            } else if app.any_marked() {
+                view.push("M marked only");
             }
+            if app.only_fav {
+                view.push("F every model");
+            } else if app.any_fav() {
+                view.push("F favorites only");
+            }
+            if app.only_excluded {
+                view.push("E every model");
+            } else if !app.store.excluded.is_empty() {
+                view.push("E excluded only");
+            }
+            view.push(if app.all { "a yours only" } else { "a all" });
             if !app.query.is_empty()
                 || !app.bounds.is_empty()
                 || !app.dev.is_empty()
@@ -349,55 +362,35 @@ fn hints(app: &App) -> Vec<&'static str> {
                 || app.only_fav
                 || app.only_excluded
             {
-                v.push("c clear");
+                view.push("c clear");
             }
-            if app.only_marked {
-                v.push("M every model");
+            if stale(app) {
+                view.push("r refresh");
             }
-            if app.only_fav {
-                v.push("F every model");
-            }
-            if app.only_excluded {
-                v.push("E every model");
-            }
+            let mut back = vec![];
             // Where esc goes back from, as in the overlays.
             if !app.query.is_empty() || app.only_marked || app.only_fav || app.only_excluded || app.task.is_some() {
-                v.push("esc back");
+                back.push("esc back");
             }
-            v.push("? help");
-            v
+            back.extend(["q quit", "? help"]);
+            vec![vec!["h l column"], view, actions("enter x o y m f e n"), back]
         }
-        View::Detail => {
-            vec!["j k scroll", "x launch", "o open", "y copy id", "n note", "e exclude", "f fav", "m mark", "esc back"]
+        View::Detail => vec![vec!["j k scroll"], actions("x o y m f e n"), BACK.to_vec()],
+        // `?` here closes help, which `esc back` already says.
+        View::Help => vec![vec!["j k scroll"], vec!["/ search"], vec!["esc back", "q quit"]],
+        View::Compare if app.marked_models().len() < 2 => vec![BACK.to_vec()],
+        View::Compare => {
+            vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("x o y f e n"), BACK.to_vec()]
         }
-        View::Help => vec!["j k scroll", "/ search", "esc back"],
-        View::Compare if app.marked_models().len() < 2 => vec!["esc back"],
-        View::Compare => vec![
-            "j k scroll",
-            "n note",
-            "e exclude",
-            "f fav",
-            "y copy id",
-            "x launch",
-            "o open",
-            "/ rows",
-            "h l 0 $ model",
-            "esc back",
-        ],
         View::Recommend => vec![
-            "n note",
-            "e exclude",
-            "f fav",
-            "m mark",
-            "y copy id",
-            "x launch",
-            "o open",
-            "h l 0 $ model",
-            "j k task",
-            "enter best models first",
-            "esc back",
+            vec!["j k task", "h l 0 $ model"],
+            vec!["enter best models first"],
+            actions("x o y m f e n"),
+            BACK.to_vec(),
         ],
-    }
+    };
+    let groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
+    groups.join(&SEP)
 }
 
 /// A hint's keys and what they do, which keeps its leading space: the keys are the leading
@@ -434,7 +427,7 @@ fn hint_layout(app: &App, width: u16) -> (Vec<&'static str>, u16) {
     let left = mode(app).0.chars().count() + 3 + parts(app).iter().map(|p| p.width() + 3).sum::<usize>();
     let all = hints(app);
     let mut hints = &all[..];
-    while hints.len() > 1 && left + hints.join("  ").chars().count() + 1 > width as usize {
+    while hints.len() > 1 && (hints[0] == SEP || left + hints.join("  ").chars().count() + 1 > width as usize) {
         hints = &hints[1..];
     }
     (hints.to_vec(), width.saturating_sub(hints.join("  ").chars().count() as u16))
@@ -449,7 +442,7 @@ fn hint_at(app: &App, width: u16, x: u16) -> Option<KeyCode> {
     for hint in hints {
         let w = hint.chars().count() as u16;
         if (start..start + w).contains(&x) {
-            return hint_key(hint);
+            return (hint != SEP).then(|| hint_key(hint)).flatten();
         }
         start += w + 2;
     }
@@ -1169,9 +1162,13 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     // Hints: the key in colour, what it does in plain text.
     let mut x = area.x + start;
     for (i, hint) in hints.iter().enumerate() {
-        let (key, what) = split_hint(hint);
-        x = buf.set_stringn(x, area.y, key, width, fg(KEY).add_modifier(BOLD)).0;
-        x = buf.set_stringn(x, area.y, what, width, Style::new()).0;
+        if *hint == SEP {
+            x = buf.set_stringn(x, area.y, SEP, width, fg(MUTED)).0;
+        } else {
+            let (key, what) = split_hint(hint);
+            x = buf.set_stringn(x, area.y, key, width, fg(KEY).add_modifier(BOLD)).0;
+            x = buf.set_stringn(x, area.y, what, width, Style::new()).0;
+        }
         if i + 1 < hints.len() {
             x = buf.set_stringn(x, area.y, "  ", width, Style::new()).0;
         }
@@ -1250,7 +1247,7 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
     }
     let hint = match items.first() {
         Some((_, Effect::Fav(_))) => " j k move · / search · m toggle · enter toggle and close · esc close",
-        Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc T close",
+        Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc t close",
         _ => " j k move · / search · enter opens",
     };
     lines.push(Line::from(hint).style(fg(MUTED)));
@@ -1296,14 +1293,15 @@ fn heading(text: &str) -> Line<'static> {
 }
 
 fn help(query: &str) -> Vec<Line<'static>> {
-    let key_w = HELP.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
-    let mut v: Vec<Line> = HELP
-        .iter()
-        .map(|(k, what)| {
+    let key_w = HELP.iter().flat_map(|(_, keys)| keys.iter()).map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let mut v: Vec<Line> = Vec::new();
+    for (name, keys) in HELP {
+        v.push(heading(name));
+        v.extend(keys.iter().map(|(k, what)| {
             Line::from(vec![Span::styled(format!("{k:<key_w$}  "), fg(KEY).add_modifier(BOLD)), Span::raw(*what)])
-        })
-        .collect();
-    v.push(Line::default());
+        }));
+        v.push(Line::default());
+    }
     v.push(heading("Columns: green the best shown, red the worst"));
     for c in 0..NCOLS {
         v.push(Line::from(vec![Span::styled(format!("{:<11}", col_name(c)), fg(KEY)), Span::raw(col_about(c))]));
@@ -1575,7 +1573,7 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 4);
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
-        assert!(lines[3].ends_with("m mark  / filter  r refresh  ? help"), "{}", lines[3]);
+        assert!(lines[3].contains("a all  r refresh  │  enter details"), "{}", lines[3]);
         a.refreshing = true;
         let (_, lines) = render(&mut a, 200, 4);
         assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "refreshing: {}", lines[3]);
@@ -1767,7 +1765,14 @@ mod tests {
             ["2", "☐", "☆", "·", "flash", "google", "│", "0.10", "0.10", "0.10", "0.10"]
         );
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
-        assert!(lines[5].ends_with("d dropdown  a all  x launch  y copy id  e exclude  f fav  V select  R recommend  enter details  m mark  / filter  ? help"), "{}", lines[5]);
+        assert!(
+            lines[5].ends_with(
+                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  │  enter details  x launch  o open  y copy id  m mark  f fav  e exclude  n note  │  q quit  ? help"
+            ),
+            "{}",
+            lines[5]
+        );
+        assert_eq!(buf[(cell(&lines[5], "│"), 5)].fg, MUTED, "groups are split by a muted rule");
         assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
         assert!((0..200).all(|x| buf[(x, 2)].fg == Color::Reset), "no colour breaks the selection bar");
         assert_eq!(buf[(0, 3)].fg, MUTED, "row numbers are muted");

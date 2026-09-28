@@ -112,41 +112,69 @@ pub fn col_about(col: usize) -> String {
     }
 }
 
-pub const HELP: &[(&str, &str)] = &[
-    ("j k ↓ ↑", "move; a count repeats, as in 3j"),
-    ("h l ← →", "pick a column; in compare and recommend, a model"),
-    ("0 _ $ w b", "first / last column; next / previous group"),
-    ("gg G 3gg", "top / bottom / row 3"),
-    ("( ) ^d ^u", "half a page up / down"),
-    ("s", "sort by the column; again reverses"),
-    ("enter", "details: every benchmark, price per provider"),
-    ("> <", "minimum / maximum for the column, e.g. > 70 enter"),
-    ("d", "dropdown on Dev, Price and Via (▾); m toggles several"),
-    ("/", "filter models, compare rows, this help or a list"),
-    ("c", "clear filters, bounds, task, M, F and E; marks stay"),
-    ("a", "all models, including ones you have no access to"),
-    ("m", "mark the model (✓): the shortlist for C"),
-    ("U", "unmark every model"),
-    ("V", "select a range; m e C act on all of it"),
-    ("M F E", "marked / favorite / excluded models only; again: every model"),
-    ("C", "compare the marked models"),
-    ("f", "favorite the model for tasks (★)"),
-    ("e", "exclude the model (✗): recommendations skip it; on a mark, all marks"),
-    ("n", "note for the model"),
-    ("y Y", "copy the model id / name"),
-    ("o", "open the model on models.dev, epoch.ai or openrouter.ai"),
-    ("x", "open a harness on the model in a new terminal"),
-    ("R", "recommend: the best model per price for each task"),
-    ("t", "theme"),
-    ("r", "refresh data now (auto every 24h)"),
-    ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
-    ("mouse", "click selects, again details; ctrl / shift click, drag; right click marks"),
-    ("", "click ☐ ☆ · to mark, favorite, exclude; a header sorts, its ▾ opens"),
-    ("", "click #: first row; the ✓ ★ ✗ header: marked, favorites, excluded only"),
-    ("", "click a key hint in the status bar to press it"),
-    ("?", "this help"),
-    ("esc", "back: overlay, selection, filter, M, F, E, task"),
-    ("q", "quit; asks first"),
+pub const HELP: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Move",
+        &[
+            ("j k ↓ ↑", "move; a count repeats, as in 3j"),
+            ("h l ← →", "pick a column; in compare and recommend, a model"),
+            ("0 _ $ w b", "first / last column; next / previous group"),
+            ("gg G 3gg", "top / bottom / row 3"),
+            ("( ) ^d ^u", "half a page up / down"),
+        ],
+    ),
+    (
+        "Filter and sort",
+        &[
+            ("s", "sort by the column; again reverses"),
+            ("/", "filter models, compare rows, this help or a list"),
+            ("> <", "minimum / maximum for the column, e.g. > 70 enter"),
+            ("d", "dropdown on Dev, Price and Via (▾); m toggles several"),
+            ("a", "all models, including ones you have no access to"),
+            ("M F E", "marked / favorite / excluded models only; again: every model"),
+            ("c", "clear filters, bounds, task, M, F and E; marks stay"),
+        ],
+    ),
+    (
+        "Mark and compare",
+        &[
+            ("m", "mark the model (✓): the shortlist for C"),
+            ("U", "unmark every model"),
+            ("V", "select a range; m e C act on all of it"),
+            ("C", "compare the marked models"),
+        ],
+    ),
+    (
+        "Model under the cursor",
+        &[
+            ("enter", "details: every benchmark, price per provider"),
+            ("f", "favorite the model for tasks (★)"),
+            ("e", "exclude the model (✗): recommendations skip it; on a mark, all marks"),
+            ("n", "note for the model"),
+            ("y Y", "copy the model id / name"),
+            ("o", "open the model on models.dev, epoch.ai or openrouter.ai"),
+            ("x", "open a harness on the model in a new terminal"),
+        ],
+    ),
+    ("Panels", &[("R", "recommend: the best model per price for each task"), ("t", "theme"), ("?", "this help")]),
+    (
+        "Input and mouse",
+        &[
+            ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
+            ("mouse", "click selects, again details; ctrl / shift click, drag; right click marks"),
+            ("", "click ☐ ☆ · to mark, favorite, exclude; a header sorts, its ▾ opens"),
+            ("", "click #: first row; the ✓ ★ ✗ header: marked, favorites, excluded only"),
+            ("", "click a key hint in the status bar to press it"),
+        ],
+    ),
+    (
+        "General",
+        &[
+            ("r", "refresh data now (auto every 24h)"),
+            ("esc", "back: overlay, selection, filter, M, F, E, task"),
+            ("q", "quit; asks first"),
+        ],
+    ),
 ];
 
 #[derive(PartialEq, Debug)]
