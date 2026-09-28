@@ -35,17 +35,19 @@ use std::time::Duration;
 type Refresh = Receiver<Result<Data, String>>;
 
 pub fn run(force: bool) -> Result<(), String> {
-    let cached = if force { None } else { data::load_cache() };
-    let data = match cached {
-        Some(d) => d,
+    // Start from the cache however old, and refresh behind the table (`--refresh` too, so a
+    // failure shows in the frame); only a first run, with no cache, waits for the download.
+    let (data, fresh) = match data::load_cache() {
+        Some(d) => (d, false),
+        // No cache, so no stale copy to fall back on and no warning to lose.
         None => {
             eprintln!("downloading model data (models.dev + Epoch AI)…");
-            data::load(true)?.0
+            (data::load(true)?.0, true)
         }
     };
     let mut app = App::new(data, Store::load());
     let mut rx = None;
-    if app.data.stale() && app.refresh().is_some() {
+    if !fresh && (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
     let mut terminal = ratatui::init();
