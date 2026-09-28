@@ -1333,7 +1333,8 @@ fn help(query: &str) -> Vec<Line<'static>> {
     }
     v.push(Line::default());
     v.push(Line::from(format!("Saved in {}", crate::store::path().display())).style(fg(MUTED)));
-    v.push(Line::from("More in the README · CLI: modelcmp --help").style(fg(MUTED)));
+    v.push(Line::from("Every key: github.com/danctorres/modelcmp/blob/main/KEYS.md").style(fg(MUTED)));
+    v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
     // `/` keeps the lines that match, so a key or a column can be looked up in a long list.
     if !query.is_empty() {
         let q = query.to_lowercase();
