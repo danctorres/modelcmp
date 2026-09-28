@@ -4,8 +4,12 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 jobs:
   check:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,6 +17,20 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+  # Daily: fails when an upstream (models.dev, Epoch AI) changes format and the data thins
+  # out, before a user sees it. Floors sit well under today's 1418 models, 159 with ECI,
+  # 143 with a coding score and 1330 priced.
+  data:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo run --quiet -- list --all --json --refresh > models.json
+      - run: |
+          jq '{models: length, eci: map(select(.eci)) | length, coding: map(select(.tasks.coding)) | length,
+               priced: map(select(.price.input_per_mtok)) | length}' models.json | tee counts.json
+          jq -e '.models >= 500 and .eci >= 50 and .coding >= 50 and .priced >= 300' counts.json
   build:
     needs: check
     if: startsWith(github.ref, 'refs/tags/v')
@@ -36,7 +54,7 @@ jobs:
       - run: |
           name="modelcmp-${{ matrix.target }}-$GITHUB_REF_NAME"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/modelcmp" README.md LICENSE "$name/"
+          cp "target/${{ matrix.target }}/release/modelcmp" README.md KEYS.md REFERENCE.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v4
         with:
