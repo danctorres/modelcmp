@@ -60,7 +60,7 @@ column.
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
 | `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `m` toggles several, as it marks models |
 | `a` | all models, including ones you have no access to |
-| `%` | Price with no input cached, as a one-off prompt, instead of an agent's 90%; again: back to 90%. The top border on Price says which, and the hint shows on the price columns, or anywhere while it is off 90%. Code/$, the cheapest provider and recommend follow it. `modelcmp --cache 50` starts the TUI with any other share |
+| `%` | Price with no input cached, as a one-off prompt, instead of the share it started with (an agent's 90%, or `--cache`); again: back to that share. The top border on Price says which, and the hint shows on the price columns, or anywhere while no input is cached. Code/$, the cheapest provider and recommend follow it. `modelcmp --cache 50` starts the TUI with any other share |
 | `M` | marked models only; `M` again or `esc`: every model |
 | `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked); `F` again or `esc`: every model |
 | `E` | excluded models only, the rows with a red `✗`; `E` again or `esc`: every model |

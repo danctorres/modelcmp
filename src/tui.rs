@@ -360,7 +360,7 @@ fn hints(app: &App) -> Vec<&'static str> {
             // On the price columns, or anywhere while it is off the default.
             let cached = data::cached() > 0.0;
             if (PRICE..ECI).contains(&app.col) || !cached {
-                view.push(if cached { "% no cache" } else { "% 90% cached" });
+                view.push(if cached { "% no cache" } else { app.cache_hint });
             }
             if !app.query.is_empty()
                 || !app.bounds.is_empty()

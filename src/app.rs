@@ -133,7 +133,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("> <", "minimum / maximum for the column, e.g. > 70 enter"),
             ("d", "dropdown on Dev, Price and Via (▾); m toggles several"),
             ("a", "all models, including ones you have no access to"),
-            ("%", "Price with 90% of the input cached, as in an agent session, or none"),
+            ("%", "Price with none of the input cached, or back to --cache (90%)"),
             ("M F E", "marked / favorite / excluded models only; again: every model"),
             ("c", "clear filters, bounds, task, M, F and E; marks stay"),
         ],
@@ -470,6 +470,10 @@ pub struct App {
     pub refreshing: bool,
     /// The last refresh failed; stays in the frame until one succeeds.
     pub refresh_failed: bool,
+    /// The share `%` turns back on: `--cache`, or an agent's when that was 0.
+    pub cache_on: f64,
+    /// The `%` hint while no input is cached, naming `cache_on`.
+    pub cache_hint: &'static str,
 }
 
 impl App {
@@ -513,7 +517,13 @@ impl App {
             failed: false,
             refreshing: false,
             refresh_failed: false,
+            cache_on: 0.0,
+            cache_hint: "",
         };
+        let start = crate::data::cached();
+        app.cache_on = if start > 0.0 { start } else { crate::data::AGENT_CACHED };
+        // ponytail: leaked once per App, which the TUI makes once; hints are &'static str.
+        app.cache_hint = Box::leak(format!("% {:.0}% cached", app.cache_on * 100.0).into_boxed_str());
         app.set_data(data);
         app
     }
@@ -1366,11 +1376,13 @@ impl App {
             }
             KeyCode::Char('%') if table => {
                 let off = crate::data::cached() > 0.0;
-                crate::data::set_cached(if off { 0.0 } else { crate::data::AGENT_CACHED });
+                crate::data::set_cached(if off { 0.0 } else { self.cache_on });
                 self.reprice();
-                self.status =
-                    if off { "no input cached, as a one-off prompt" } else { "90% of the input cached, as an agent" }
-                        .into();
+                self.status = if off {
+                    "no input cached, as a one-off prompt".into()
+                } else {
+                    format!("{:.0}% of the input cached", self.cache_on * 100.0)
+                };
             }
             _ => {}
         }
@@ -1594,6 +1606,13 @@ mod tests {
         assert!(col_about(PRICE).contains(" 0% of the input cached") && a.status.contains("one-off"));
         press(&mut a, "%");
         assert_eq!(a.val(gpt, PRICE), Some(3.5875), "again: back to an agent's 90%");
+        // Started with --cache 50, % goes back to 50, not 90.
+        crate::data::set_cached(0.5);
+        let mut a = app();
+        press(&mut a, "%%");
+        assert_eq!((crate::data::cached(), a.status.as_str()), (0.5, "50% of the input cached"));
+        press(&mut a, "%");
+        assert_eq!(a.cache_hint, "% 50% cached", "the hint names it");
     }
 
     #[test]
