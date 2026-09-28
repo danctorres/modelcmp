@@ -3,21 +3,16 @@
 Pick the cheapest LLM that is good enough for the job.
 
 Frontier models cost ten times or more what smaller ones do, and many software tasks do not
-need them. modelcmp puts prices and software-engineering benchmarks side by side for the
-models you already have, and for any other model when you want to see what you are missing.
-For each kind of task (coding, agentic runs, reasoning, ...) it recommends the best model at
-each price, and you can set the model you want used for a task. An agent gets that answer
-from one command, `modelcmp recommend --json`, instead of fetching prices and benchmarks and
-comparing models in its own context, and can then hand a subtask to a cheaper model instead
-of spending the strongest one's tokens on it.
+need them. modelcmp puts prices and software-engineering benchmarks side by side and, for each
+kind of task (coding, agentic runs, reasoning, ...), names the best model at each price.
+
+- **You** get a TUI to compare models, mark a shortlist and set the model you want for a task.
+- **Your agent** gets the same answer from `modelcmp recommend --json` in one call, instead of
+  comparing models in its own context, and can hand a subtask to a cheaper model.
 
 ![modelcmp TUI](https://github.com/user-attachments/assets/0b84321d-ac18-4267-8490-702b87efd0a9)
 
-modelcmp joins prices from [models.dev](https://models.dev) with benchmarks from
-[Epoch AI](https://epoch.ai/benchmarks) and by default shows only the models you can
-already use: the ones your harnesses list (`opencode models`; `claude`, `codex` and
-`gemini` count as their own provider) plus providers whose API key is set in the
-environment. The VIA column says which; `a` in the TUI or `--all` adds every other model.
+By default it shows only the models you can already use; `a` in the TUI or `--all` adds the rest.
 
 ## Install
 
@@ -26,6 +21,9 @@ brew install danctorres/tap/modelcmp
 # or
 cargo install --git https://github.com/danctorres/modelcmp
 ```
+
+Linux and macOS; binaries are on the [releases](https://github.com/danctorres/modelcmp/releases)
+page. `cargo install` needs Rust 1.85 or later.
 
 ## Use
 
@@ -38,6 +36,19 @@ modelcmp compare sonnet-5 gpt-5             # side by side, with a verdict
 modelcmp show sonnet-5                      # everything about one model
 modelcmp fav coding sonnet-5                # your model for coding: recommend and agents use it
 ```
+
+```
+$ modelcmp recommend
+coding  writing and fixing code  (modelcmp list --task coding)
+  best per price:  Gemini 3.7 Flash [gemini37flash] $1.0 (65) · Claude Sonnet 5 [claudesonnet5] $2.8 (68) · Claude Opus 5 [claudeopus5] $7.0 (95)
+
+agentic  multi-step tool use, long autonomous tasks  (modelcmp list --task agentic)
+  best per price:  Gemini 3.7 Flash [gemini37flash] $1.0 (77) · Claude Fable 5.1 [claudefable51] $13 (93)
+...
+```
+
+Each pick is name, [key], $ per 1M tokens and, in brackets, its score on the task (a
+0-100 percentile), cheapest first.
 
 In the TUI, `R` recommends, `f` sets a model as your pick for tasks, `m` marks models and
 `C` compares them, `/` filters and `?` lists every key. Only `q` quits, and it asks first;
@@ -65,7 +76,12 @@ without skills can take its body in `AGENTS.md`.
 - [models.dev](https://models.dev): prices, context windows, capabilities.
 - [Epoch AI Benchmarking Hub](https://epoch.ai/benchmarks) (CC-BY): ECI and
   per-benchmark scores.
-- `opencode models` and the `claude`, `codex`, `gemini` binaries on `PATH`: what you have.
+- What you have: the models `opencode models` lists, the `claude`, `codex` and `gemini`
+  binaries on `PATH` (each counts as its own provider), and providers whose API key is set
+  in the environment. The Via column says which.
 
 Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`. Marks,
 exclusions, notes and per-task favorites live in `~/.config/modelcmp/user.json`.
+
+Benchmarks are proxies: a score says how a model did on that test, not how it will do in
+your harness.
