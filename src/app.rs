@@ -69,6 +69,8 @@ pub const COLS: [Col; 10] = [
 const TEXT: usize = 2;
 /// Column index of the blended price, the default sort and the frontier's.
 pub const PRICE: usize = TEXT;
+/// The sort the table starts with, and that `c` and leaving a task go back to: priciest first.
+const DEFAULT_SORT: (usize, bool) = (PRICE, true);
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 5;
 /// First column of each group: names, price and context, benchmarks, your own.
@@ -480,8 +482,8 @@ impl App {
             store,
             all: false,
             col: PRICE,
-            sort_col: PRICE,
-            descending: true,
+            sort_col: DEFAULT_SORT.0,
+            descending: DEFAULT_SORT.1,
             bounds: vec![],
             dev: vec![],
             via: vec![],
@@ -1218,9 +1220,9 @@ impl App {
                 self.bounds.clear();
                 self.dev.clear();
                 self.via.clear();
-                // The task set the sort; back to the default, cheapest first.
+                // The task set the sort; back to the default.
                 if self.task.take().is_some() {
-                    (self.sort_col, self.descending) = (PRICE, false);
+                    (self.sort_col, self.descending) = DEFAULT_SORT;
                 }
                 self.only_marked = false;
                 self.only_fav = false;
@@ -1250,7 +1252,7 @@ impl App {
                     self.rebuild();
                 } else if self.task.take().is_some() {
                     // Back to recommend, where enter picked the task.
-                    (self.sort_col, self.descending) = (PRICE, false);
+                    (self.sort_col, self.descending) = DEFAULT_SORT;
                     self.rebuild();
                     self.view = View::Recommend;
                 }
@@ -2047,7 +2049,7 @@ mod tests {
         press(&mut a, "c");
         assert!(a.task.is_none());
         assert_eq!(a.rows.len(), 3);
-        assert_eq!((a.sort_col, a.descending), (PRICE, false), "c restores the default sort");
+        assert_eq!((a.sort_col, a.descending), DEFAULT_SORT, "c restores the default sort");
     }
 
     #[test]
@@ -2321,7 +2323,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert!(a.task.is_none(), "esc drops the task");
         assert_eq!((&a.view, a.task_cur), (&View::Recommend, 1), "and goes back to recommend");
-        assert_eq!((a.sort_col, a.descending), (PRICE, false));
+        assert_eq!((a.sort_col, a.descending), DEFAULT_SORT, "and the sort it started with");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "CC");
         assert_eq!(a.view, View::Table, "C closes compare, as ? and R close theirs");
