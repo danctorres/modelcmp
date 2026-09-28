@@ -3,12 +3,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
 #[serde(default)]
 pub struct Store {
     #[serde(skip)]
     path: PathBuf,
+    /// The file's mtime when this process last read or wrote it, to spot another writer.
+    #[serde(skip)]
+    mtime: Option<SystemTime>,
     /// Pins from older files, read once and loaded as marks.
     #[serde(alias = "favorites", skip_serializing)]
     pinned: BTreeSet<String>,
@@ -23,6 +27,10 @@ pub struct Store {
     /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub theme: String,
+}
+
+fn mtime(p: &Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
 pub fn path() -> PathBuf {
@@ -60,12 +68,32 @@ impl Store {
                 s.marked.push(k);
             }
         }
+        s.mtime = mtime(&path);
         s.path = path;
         s
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
-        write_atomic(&self.path, serde_json::to_string_pretty(self)?.as_bytes())
+    pub fn save(&mut self) -> std::io::Result<()> {
+        write_atomic(&self.path, serde_json::to_string_pretty(self)?.as_bytes())?;
+        self.mtime = mtime(&self.path);
+        Ok(())
+    }
+
+    /// Read the file again if another process wrote it since this one last did (an agent's
+    /// `modelcmp mark` while the TUI is open), so the TUI's next save does not undo that.
+    /// A file that does not parse is left alone until the next start. True when reloaded.
+    pub fn reload_if_changed(&mut self) -> bool {
+        let now = mtime(&self.path);
+        if now == self.mtime {
+            return false;
+        }
+        let parses = std::fs::read(&self.path).map_or(true, |b| serde_json::from_slice::<Store>(&b).is_ok());
+        if parses {
+            *self = Store::load_from(std::mem::take(&mut self.path));
+        } else {
+            self.mtime = now;
+        }
+        parses
     }
 
     /// What `M` shows and `C` compares.
@@ -166,10 +194,27 @@ mod tests {
         assert!(old.favorite("coding") == Some("old") && old.is_marked("old"));
         // Pins were dropped: they load as marks, once each, and are not written back.
         std::fs::write(&p, br#"{"pinned":["a","c"],"marked":["a","b"]}"#).unwrap();
-        let both = Store::load_from(p.clone());
+        let mut both = Store::load_from(p.clone());
         assert_eq!(both.marked, ["a", "b", "c"]);
         both.save().unwrap();
         assert!(!std::fs::read_to_string(&p).unwrap().contains("pinned"));
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn another_writer_is_picked_up() {
+        let p = tmp("reload");
+        let mut tui = Store::load_from(p.clone());
+        tui.toggle_marked("a");
+        tui.save().unwrap();
+        assert!(!tui.reload_if_changed(), "its own save is not a change");
+        // An agent marks another model; the file's mtime moves on.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut agent = Store::load_from(p.clone());
+        agent.toggle_marked("b");
+        agent.save().unwrap();
+        assert!(tui.reload_if_changed());
+        assert_eq!(tui.marked, ["a", "b"]);
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 

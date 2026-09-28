@@ -84,6 +84,10 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
         let mut wait = timeout;
         while event::poll(wait).map_err(|e| e.to_string())? {
             wait = Duration::ZERO;
+            // An agent may have marked or noted a model meanwhile: act on its file, not a stale copy.
+            if app.store.reload_if_changed() {
+                app.rebuild();
+            }
             let effect = match event::read().map_err(|e| e.to_string())? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
                 Event::Mouse(m) => {
