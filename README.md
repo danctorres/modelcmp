@@ -118,7 +118,7 @@ column.
 modelcmp list                                  # models you have access to
 modelcmp list --task coding                    # best model per price level scoring 50+, cheapest first
 modelcmp list --task coding --tier mid         # just one: the cheapest scoring 75+
-modelcmp list --task coding --tier mid --id    # only its provider/model, for codex -m $(...)
+modelcmp list --task coding --tier mid --id    # only its provider/model, for opencode -m $(...)
 modelcmp list --min coding=70 --sort price     # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet-5                         # everything about one model

@@ -70,7 +70,7 @@ enum Cmd {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
-        /// Only the model ids a harness takes (provider/model), one per line: `codex -m $(modelcmp list --task coding --tier mid --id)`
+        /// Only the provider/model ids opencode takes, one per line: `opencode -m $(modelcmp list --task coding --tier mid --id)`
         #[arg(long, conflicts_with = "json")]
         id: bool,
     },
