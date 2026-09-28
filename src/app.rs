@@ -30,8 +30,7 @@ fn positive(x: f64) -> Option<f64> {
     (x > 0.0).then_some(x)
 }
 
-/// Prices from the offer you'd pay, then the Epoch index, the task percentiles and the
-/// Artificial Analysis indices.
+/// Prices from the offer you'd pay, then the Epoch index, the task percentiles and Code/$.
 pub const COLS: [Col; 10] = [
     Col {
         lower_better: true,

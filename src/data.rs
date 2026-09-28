@@ -1,5 +1,4 @@
-//! Fetching, caching and merging models.dev (prices) with Epoch AI (benchmarks) and the
-//! Artificial Analysis indices OpenRouter lists.
+//! Fetching, caching and merging models.dev (prices) with Epoch AI (benchmarks).
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
