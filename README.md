@@ -1,6 +1,21 @@
 <h1 align="center"><img src="https://github.com/user-attachments/assets/175d7284-8b17-4ce4-bfd9-36790017ccca" alt="modelcmp" width="480"></h1>
 
-Pick the cheapest LLM that is good enough for the job.
+<p align="center"><b>Pick the cheapest LLM that is good enough for the job.</b></p>
+
+<p align="center">
+  <a href="https://github.com/danctorres/modelcmp/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danctorres/modelcmp/ci.yml?branch=main&label=ci" alt="CI"></a>
+  <a href="https://github.com/danctorres/modelcmp/releases"><img src="https://img.shields.io/github/v/release/danctorres/modelcmp" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/danctorres/modelcmp" alt="License"></a>
+  <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#for-agents">For agents</a> ·
+  <a href="KEYS.md">Keys</a> ·
+  <a href="REFERENCE.md">Reference</a>
+</p>
 
 Frontier models cost ten times or more what smaller ones do, and many software tasks do not
 need them. modelcmp puts prices and software-engineering benchmarks side by side and, for each
@@ -25,7 +40,7 @@ cargo install --git https://github.com/danctorres/modelcmp
 Linux and macOS; binaries are on the [releases](https://github.com/danctorres/modelcmp/releases)
 page. `cargo install` needs Rust 1.88 or later.
 
-## Use
+## Usage
 
 ```sh
 modelcmp                                    # the TUI
@@ -85,3 +100,17 @@ exclusions, notes and per-task favorites live in `~/.config/modelcmp/user.json`.
 
 Benchmarks are proxies: a score says how a model did on that test, not how it will do in
 your harness.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a PR, run what CI runs:
+
+```sh
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org).
+
+## License
+
+[MIT](LICENSE). Benchmark data from Epoch AI is licensed CC-BY.
