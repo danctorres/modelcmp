@@ -401,9 +401,6 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
             .map(|(m, s)| priced(m, fit::shown(m, t, *s), true, Some(m.key.as_str()) == yours))
             .collect();
         println!("  best per price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
-        if !t.benches.is_empty() {
-            println!("  benchmarks:      {}", t.benches.join(", "));
-        }
         println!();
     }
     Ok(())
