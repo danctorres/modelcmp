@@ -18,7 +18,7 @@ use crate::view::{
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
 use ratatui::crossterm::execute;
@@ -166,7 +166,11 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         }
         Input::Choose { title, items, sel, query, .. } => {
             let rows = choice_rows(items, query).len();
-            Some((overlay_rect(area, title, &choice_lines(items, *sel, query)), *sel, rows))
+            Some((
+                overlay_rect(Rect { height: area.height - 1, ..area }, title, &choice_lines(items, *sel, query)),
+                *sel,
+                rows,
+            ))
         }
         _ => None,
     };
@@ -184,6 +188,10 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         let top = sel.saturating_sub(inner.height as usize - 1);
         let k = top + (m.row - inner.y) as usize;
         return (k < len).then_some(Mouse::Item(k));
+    }
+    // A hint in the status bar presses its key.
+    if m.row == area.bottom() - 1 {
+        return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten();
     }
     // A drag past the table's edges still extends the range to its nearest row.
     if extend {
@@ -296,50 +304,41 @@ fn copy(text: &str) -> bool {
 /// Blank columns between two table columns.
 const GAP: u16 = 2;
 const NAME_MIN: u16 = 16;
-/// Key reminders in the status bar, most dispensable first. `s` and `> <` act on the
-/// column picked with `h l`; `u`, `C` and `c` show once they would do something.
+/// Key reminders in the status bar, most dispensable first: narrow terminals drop them
+/// from the front. Ways back (`esc`, a toggle that is on) and `? help` go last; toggles
+/// that are off, first. `s` and `> <` act on the column picked with `h l`.
 fn hints(app: &App) -> Vec<&'static str> {
     match app.view {
         View::Table if app.selecting() => {
-            vec!["j k G extend", "m mark", "e exclude", "C compare", "esc cancel"]
+            vec!["j k G extend", "e exclude", "m mark", "C compare", "esc cancel"]
         }
         View::Table => {
-            let mut v = vec![
-                "V select",
-                "m mark",
-                "f fav",
-                "e exclude",
-                "y copy id",
-                "enter details",
-                "x launch",
-                "> < bound",
-                if app.all { "a yours only" } else { "a all" },
-                "s sort",
-                "h l column",
-            ];
+            let mut v = vec![];
+            if !app.only_excluded && !app.store.excluded.is_empty() {
+                v.push("E excluded only");
+            }
+            if !app.only_fav && app.any_fav() {
+                v.push("F favorites only");
+            }
+            if !app.only_marked && app.any_marked() {
+                v.push("M marked only");
+            }
+            v.extend(["h l column", "s sort", "> < bound"]);
             if has_menu(app.col) {
                 v.push("d dropdown");
             }
-            if app.only_marked {
-                v.push("M every model");
-            } else if app.any_marked() {
-                v.push("M marked only");
-            }
-            if app.only_fav {
-                v.push("F every model");
-            } else if app.any_fav() {
-                v.push("F favorites only");
-            }
-            if app.only_excluded {
-                v.push("E every model");
-            } else if !app.store.excluded.is_empty() {
-                v.push("E excluded only");
-            }
+            v.extend([if app.all { "a yours only" } else { "a all" }, "x launch", "y copy id", "e exclude", "f fav"]);
+            v.push("V select");
             if !app.store.marked.is_empty() {
                 v.push("U unmark all");
             }
+            v.push("R recommend");
             if app.marked_models().len() >= 2 {
                 v.push("C compare");
+            }
+            v.extend(["enter details", "m mark", "/ filter"]);
+            if stale(app) {
+                v.push("r refresh");
             }
             if !app.query.is_empty()
                 || !app.bounds.is_empty()
@@ -352,48 +351,109 @@ fn hints(app: &App) -> Vec<&'static str> {
             {
                 v.push("c clear");
             }
-            if stale(app) {
-                v.push("r refresh");
+            if app.only_marked {
+                v.push("M every model");
             }
-            v.extend(["/ filter", "R recommend", "? help"]);
+            if app.only_fav {
+                v.push("F every model");
+            }
+            if app.only_excluded {
+                v.push("E every model");
+            }
             // Where esc goes back from, as in the overlays.
             if !app.query.is_empty() || app.only_marked || app.only_fav || app.only_excluded || app.task.is_some() {
                 v.push("esc back");
             }
+            v.push("? help");
             v
         }
         View::Detail => {
-            vec!["f fav", "e exclude", "n note", "y copy id", "o open", "x launch", "j k scroll", "esc back"]
+            vec!["j k scroll", "x launch", "o open", "y copy id", "n note", "e exclude", "f fav", "m mark", "esc back"]
         }
         View::Help => vec!["j k scroll", "/ search", "esc back"],
         View::Compare if app.marked_models().len() < 2 => vec!["esc back"],
-        View::Compare => {
-            vec![
-                "h l 0 $ model",
-                "/ rows",
-                "o open",
-                "x launch",
-                "y copy id",
-                "f fav",
-                "e exclude",
-                "n note",
-                "j k scroll",
-                "esc back",
-            ]
-        }
-        View::Recommend => vec![
-            "j k task",
-            "h l 0 $ model",
-            "enter best models first",
-            "o open",
-            "x launch",
-            "y copy id",
-            "f fav",
-            "e exclude",
+        View::Compare => vec![
+            "j k scroll",
             "n note",
+            "e exclude",
+            "f fav",
+            "y copy id",
+            "x launch",
+            "o open",
+            "/ rows",
+            "h l 0 $ model",
+            "esc back",
+        ],
+        View::Recommend => vec![
+            "n note",
+            "e exclude",
+            "f fav",
+            "m mark",
+            "y copy id",
+            "x launch",
+            "o open",
+            "h l 0 $ model",
+            "j k task",
+            "enter best models first",
             "esc back",
         ],
     }
+}
+
+/// A hint's keys and what they do, which keeps its leading space: the keys are the leading
+/// words of one character, or `enter` or `esc`.
+fn split_hint(hint: &str) -> (&str, &str) {
+    let mut end = 0;
+    for word in hint.split(' ') {
+        if word.chars().count() != 1 && word != "enter" && word != "esc" {
+            break;
+        }
+        end += word.len() + 1;
+    }
+    hint.split_at(end.saturating_sub(1).min(hint.len()))
+}
+
+/// The key a click on a hint presses: only a hint with a single key has one.
+fn hint_key(hint: &str) -> Option<KeyCode> {
+    match split_hint(hint).0 {
+        "enter" => Some(KeyCode::Enter),
+        "esc" => Some(KeyCode::Esc),
+        k => {
+            let mut chars = k.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(KeyCode::Char(c)),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// The hints that fit a status bar `width` wide and the column the first starts at.
+fn hint_layout(app: &App, width: u16) -> (Vec<&'static str>, u16) {
+    // The pill, a space, then each part and its " · ".
+    let left = mode(app).0.chars().count() + 3 + parts(app).iter().map(|p| p.width() + 3).sum::<usize>();
+    let all = hints(app);
+    let mut hints = &all[..];
+    while hints.len() > 1 && left + hints.join("  ").chars().count() + 1 > width as usize {
+        hints = &hints[1..];
+    }
+    (hints.to_vec(), width.saturating_sub(hints.join("  ").chars().count() as u16))
+}
+
+/// A click on the status bar at column `x` presses the key of the hint under it, as in tuiman.
+fn hint_at(app: &App, width: u16, x: u16) -> Option<KeyCode> {
+    if app.input != Input::None {
+        return None;
+    }
+    let (hints, mut start) = hint_layout(app, width);
+    for hint in hints {
+        let w = hint.chars().count() as u16;
+        if (start..start + w).contains(&x) {
+            return hint_key(hint);
+        }
+        start += w + 2;
+    }
+    None
 }
 
 /// Data past the cache's 24h with no refresh under way: the status bar says how old, and
@@ -600,23 +660,23 @@ fn draw(app: &mut App, f: &mut Frame) {
                 lines.iter().position(|l| l.spans.iter().any(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
             if let Some(start) = start {
                 let end = lines[start..].iter().position(|l| l.width() == 0).map_or(lines.len(), |n| start + n);
-                let shown = area.height.saturating_sub(2) as usize;
+                let shown = body.height.saturating_sub(2) as usize;
                 let lo = end.saturating_sub(shown).min(start);
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        overlay(buf, area, &title, lines, &mut app.scroll);
+        overlay(buf, body, &title, lines, &mut app.scroll);
     }
     if app.input == Input::Quit {
         let keys = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, area, "quit?", lines, &mut 0);
+        overlay(buf, body, "quit?", lines, &mut 0);
     }
     if let Input::Choose { title, items, sel, query, .. } = &app.input {
         // Scrolled as the mouse maps it, so the bar stays in view when the list is taller than the screen.
         let lines = choice_lines(items, *sel, query);
-        let shown = overlay_rect(area, title, &lines).height.saturating_sub(2).max(1);
-        overlay(buf, area, title, lines, &mut (*sel as u16).saturating_sub(shown - 1));
+        let shown = overlay_rect(body, title, &lines).height.saturating_sub(2).max(1);
+        overlay(buf, body, title, lines, &mut (*sel as u16).saturating_sub(shown - 1));
     }
     if let Some(x) = cursor {
         f.set_cursor_position((x, bar.y));
@@ -963,68 +1023,8 @@ fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) ->
     buf.set_stringn(x, y, format!(" {text} "), max as usize, fg(Color::Black).bg(color).add_modifier(BOLD)).0
 }
 
-/// Returns the cursor column while a search, note or bound is being typed.
-fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
-    let width = area.width as usize;
-    let (mode, color) = match (&app.input, &app.view) {
-        (Input::Search { .. }, _) => ("SEARCH", Color::Blue),
-        (Input::Note { .. }, _) => ("NOTE", Color::Blue),
-        (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
-        (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
-        (Input::Quit, _) => ("QUIT", Color::Red),
-        (Input::Choose { items, .. }, _) if matches!(items.first(), Some((_, Effect::Launch(_)))) => {
-            ("LAUNCH", Color::Green)
-        }
-        (Input::Choose { .. }, _) if app.choosing_favs() => ("FAV", Color::Green),
-        (Input::Choose { .. }, _) if app.theme_preview().is_some() => ("THEME", Color::Green),
-        (Input::Choose { .. }, _) => ("OPEN", Color::Green),
-        (Input::None, View::Table) if app.selecting() => ("VISUAL", Color::Yellow),
-        (Input::None, View::Table) => ("NORMAL", Color::Magenta),
-        (Input::None, View::Help) => ("HELP", Color::Cyan),
-        (Input::None, View::Recommend) => ("RECOMMEND", Color::Cyan),
-        (Input::None, View::Detail) => ("DETAIL", Color::Cyan),
-        (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
-    };
-    let mut x = pill(buf, area.x, area.y, mode, color, area.width) + 1;
-    if matches!(app.input, Input::Quit | Input::Choose { typing: false, .. }) {
-        // The question is in a box in the middle of the screen.
-        return None;
-    }
-    // The prompt's label, the text being typed and the cursor's byte offset in it.
-    let prompt = match &app.input {
-        Input::Search { cur, .. } => {
-            let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
-            Some(("/".to_string(), q, *cur))
-        }
-        Input::Note { text, cur } => Some(("note: ".to_string(), text, *cur)),
-        Input::Bound { col, min, text, cur } => {
-            Some((format!("{} {} ", col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
-        }
-        Input::Menu { col, query, cur, typing, .. } => Some(match (*typing, query.is_empty()) {
-            (false, true) => (format!("{} ▾", col_name(*col)), query, *cur),
-            _ => (format!("{} ▾ /", col_name(*col)), query, *cur),
-        }),
-        Input::Choose { title, query, cur, .. } => Some((format!("{title} /"), query, *cur)),
-        Input::Quit | Input::None => None,
-    };
-    if let Some((label, typed, cur)) = prompt {
-        let text = format!("{label}{typed}");
-        let (menu, typing) = match app.input {
-            Input::Menu { typing, .. } => (true, typing),
-            Input::Choose { .. } => (true, true),
-            _ => (false, true),
-        };
-        let hint = match (menu, typing) {
-            (true, false) => "j k move  / search  enter pick  m toggle  esc close",
-            (true, true) => "↓ ↑ move  enter pick  esc clear",
-            _ => "enter apply  esc cancel",
-        };
-        let hx = area.right().saturating_sub(hint.len() as u16 + 1);
-        buf.set_stringn(x, area.y, &text, hx.saturating_sub(x) as usize, Style::new());
-        buf.set_stringn(hx, area.y, hint, hint.len(), fg(MUTED));
-        let cx = x + (label.chars().count() + typed[..cur].chars().count()) as u16;
-        return typing.then_some(cx.min(area.right().saturating_sub(1)));
-    }
+/// The status bar's left side, joined with " · ": the model count, then what filters it.
+fn parts(app: &App) -> Vec<Line<'static>> {
     let any = app.data.models.iter().any(|m| m.available);
     let scope = match (app.all, any) {
         (false, true) => "available",
@@ -1082,16 +1082,81 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     if !app.status.is_empty() {
         parts.push(part(app.status.clone(), if app.failed { BAD } else { GOOD }));
     }
+    parts
+}
+
+/// The mode pill's label and colour.
+fn mode(app: &App) -> (&'static str, Color) {
+    match (&app.input, &app.view) {
+        (Input::Search { .. }, _) => ("SEARCH", Color::Blue),
+        (Input::Note { .. }, _) => ("NOTE", Color::Blue),
+        (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
+        (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
+        (Input::Quit, _) => ("QUIT", Color::Red),
+        (Input::Choose { items, .. }, _) if matches!(items.first(), Some((_, Effect::Launch(_)))) => {
+            ("LAUNCH", Color::Green)
+        }
+        (Input::Choose { .. }, _) if app.choosing_favs() => ("FAV", Color::Green),
+        (Input::Choose { .. }, _) if app.theme_preview().is_some() => ("THEME", Color::Green),
+        (Input::Choose { .. }, _) => ("OPEN", Color::Green),
+        (Input::None, View::Table) if app.selecting() => ("VISUAL", Color::Yellow),
+        (Input::None, View::Table) => ("NORMAL", Color::Magenta),
+        (Input::None, View::Help) => ("HELP", Color::Cyan),
+        (Input::None, View::Recommend) => ("RECOMMEND", Color::Cyan),
+        (Input::None, View::Detail) => ("DETAIL", Color::Cyan),
+        (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
+    }
+}
+
+/// Returns the cursor column while a search, note or bound is being typed.
+fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
+    let width = area.width as usize;
+    let (mode, color) = mode(app);
+    let mut x = pill(buf, area.x, area.y, mode, color, area.width) + 1;
+    if matches!(app.input, Input::Quit | Input::Choose { typing: false, .. }) {
+        // The question is in a box in the middle of the screen.
+        return None;
+    }
+    // The prompt's label, the text being typed and the cursor's byte offset in it.
+    let prompt = match &app.input {
+        Input::Search { cur, .. } => {
+            let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
+            Some(("/".to_string(), q, *cur))
+        }
+        Input::Note { text, cur } => Some(("note: ".to_string(), text, *cur)),
+        Input::Bound { col, min, text, cur } => {
+            Some((format!("{} {} ", col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
+        }
+        Input::Menu { col, query, cur, typing, .. } => Some(match (*typing, query.is_empty()) {
+            (false, true) => (format!("{} ▾", col_name(*col)), query, *cur),
+            _ => (format!("{} ▾ /", col_name(*col)), query, *cur),
+        }),
+        Input::Choose { title, query, cur, .. } => Some((format!("{title} /"), query, *cur)),
+        Input::Quit | Input::None => None,
+    };
+    if let Some((label, typed, cur)) = prompt {
+        let text = format!("{label}{typed}");
+        let (menu, typing) = match app.input {
+            Input::Menu { typing, .. } => (true, typing),
+            Input::Choose { .. } => (true, true),
+            _ => (false, true),
+        };
+        let hint = match (menu, typing) {
+            (true, false) => "j k move  / search  enter pick  m toggle  esc close",
+            (true, true) => "↓ ↑ move  enter pick  esc clear",
+            _ => "enter apply  esc cancel",
+        };
+        let hx = area.right().saturating_sub(hint.len() as u16 + 1);
+        buf.set_stringn(x, area.y, &text, hx.saturating_sub(x) as usize, Style::new());
+        buf.set_stringn(hx, area.y, hint, hint.len(), fg(MUTED));
+        let cx = x + (label.chars().count() + typed[..cur].chars().count()) as u16;
+        return typing.then_some(cx.min(area.right().saturating_sub(1)));
+    }
+    let parts = parts(app);
     // Key hints fill what the left side leaves free; whole hints drop from the front on
     // narrow terminals, and `? help` is the last to go.
-    let left = x as usize + parts.iter().map(|p| p.width() + 3).sum::<usize>();
-    let all = hints(app);
-    let mut hints = &all[..];
-    while hints.len() > 1 && left + hints.join("  ").chars().count() + 1 > width {
-        hints = &hints[1..];
-    }
-    let right = hints.join("  ").chars().count() as u16;
-    let limit = area.right().saturating_sub(right + 1);
+    let (hints, start) = hint_layout(app, area.width);
+    let limit = (area.x + start).saturating_sub(1);
     for (i, line) in parts.iter().enumerate() {
         if i > 0 {
             x = buf.set_stringn(x, area.y, " · ", limit.saturating_sub(x) as usize, fg(MUTED)).0;
@@ -1102,11 +1167,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         }
     }
     // Hints: the key in colour, what it does in plain text.
-    let mut x = area.right().saturating_sub(right);
+    let mut x = area.x + start;
     for (i, hint) in hints.iter().enumerate() {
-        let (key, what) = hint.split_once(' ').unwrap_or((hint, ""));
+        let (key, what) = split_hint(hint);
         x = buf.set_stringn(x, area.y, key, width, fg(KEY).add_modifier(BOLD)).0;
-        x = buf.set_stringn(x, area.y, format!(" {what}"), width, Style::new()).0;
+        x = buf.set_stringn(x, area.y, what, width, Style::new()).0;
         if i + 1 < hints.len() {
             x = buf.set_stringn(x, area.y, "  ", width, Style::new()).0;
         }
@@ -1205,10 +1270,11 @@ fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>,
     let h = rect.height;
     let shown = h.saturating_sub(2) as usize;
     *scroll = (*scroll).min(lines.len().saturating_sub(shown) as u16);
+    // Where you are; the keys are in the status bar.
     let footer = if lines.len() > shown {
-        format!(" {}-{} of {} · j k scroll · esc closes ", *scroll + 1, *scroll as usize + shown, lines.len())
+        format!(" {}-{} of {} ", *scroll + 1, *scroll as usize + shown, lines.len())
     } else {
-        " esc closes ".into()
+        String::new()
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -1509,7 +1575,7 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 4);
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
-        assert!(lines[3].ends_with("r refresh  / filter  R recommend  ? help"), "{}", lines[3]);
+        assert!(lines[3].ends_with("m mark  / filter  r refresh  ? help"), "{}", lines[3]);
         a.refreshing = true;
         let (_, lines) = render(&mut a, 200, 4);
         assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "refreshing: {}", lines[3]);
@@ -1701,7 +1767,7 @@ mod tests {
             ["2", "☐", "☆", "·", "flash", "google", "│", "0.10", "0.10", "0.10", "0.10"]
         );
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
-        assert!(lines[5].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[5]);
+        assert!(lines[5].ends_with("d dropdown  a all  x launch  y copy id  e exclude  f fav  V select  R recommend  enter details  m mark  / filter  ? help"), "{}", lines[5]);
         assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
         assert!((0..200).all(|x| buf[(x, 2)].fg == Color::Reset), "no colour breaks the selection bar");
         assert_eq!(buf[(0, 3)].fg, MUTED, "row numbers are muted");
@@ -1724,7 +1790,7 @@ mod tests {
         let mut a = app();
         a.col = 1;
         let (_, lines) = render(&mut a, 170, 8);
-        assert!(lines[7].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[7]);
+        assert!(lines[7].contains("  d dropdown  "), "{}", lines[7]);
         a.key(KeyCode::Char('d').into());
         let (buf, lines) = render(&mut a, 170, 8);
         let dev = cell(&lines[0], "Dev") as usize - 2;
@@ -1741,6 +1807,32 @@ mod tests {
         assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"], "only matches are listed");
         assert!(from(&lines[4]).starts_with("╰"), "{}", lines[4]);
         assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
+    }
+
+    #[test]
+    fn a_click_on_a_hint_presses_its_key() {
+        use ratatui::crossterm::event::KeyModifiers;
+        assert_eq!(split_hint("h l 0 $ model"), ("h l 0 $", " model"));
+        assert_eq!(split_hint("enter best models first"), ("enter", " best models first"));
+        assert_eq!(
+            (hint_key("a all"), hint_key("esc back"), hint_key("j k scroll")),
+            (Some(KeyCode::Char('a')), Some(KeyCode::Esc), None)
+        );
+        let mut a = app();
+        let (w, h) = (200, 6);
+        let (_, lines) = render(&mut a, w, h);
+        let bar = &lines[h as usize - 1];
+        let x = bar[..bar.find("? help").unwrap()].chars().count() as u16;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: h - 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let hit = hit(&a, Rect::new(0, 0, w, h), click);
+        assert_eq!(hit, Some(Mouse::Key(KeyCode::Char('?'))));
+        a.mouse(hit.unwrap());
+        assert_eq!(a.view, View::Help);
     }
 
     #[test]
@@ -2018,7 +2110,7 @@ mod tests {
     fn theme_list_scrolls_to_the_bar() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
         let mut a = app();
-        a.key(KeyCode::Char('T').into());
+        a.key(KeyCode::Char('t').into());
         for _ in 1..THEMES.len() {
             a.key(KeyCode::Char('j').into());
         }
@@ -2067,6 +2159,11 @@ mod tests {
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         assert_eq!([edge(&term, 0, 3), edge(&term, 0, 5)], ["▲", "│"]);
+        // A tall overlay stops above the status bar, which shows its keys.
+        a.key(KeyCode::Char('?').into());
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let bar: String = (0..100).map(|x| edge(&term, x, 7)).collect();
+        assert!(bar.starts_with(" HELP "), "{bar}");
     }
 
     #[test]

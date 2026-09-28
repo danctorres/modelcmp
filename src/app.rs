@@ -137,12 +137,13 @@ pub const HELP: &[(&str, &str)] = &[
     ("o", "open the model on models.dev, epoch.ai or openrouter.ai"),
     ("x", "open a harness on the model in a new terminal"),
     ("R", "recommend: the best model per price for each task"),
-    ("T", "theme"),
+    ("t", "theme"),
     ("r", "refresh data now (auto every 24h)"),
     ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
     ("mouse", "click selects, again details; ctrl / shift click, drag; right click marks"),
     ("", "click ☐ ☆ · to mark, favorite, exclude; a header sorts, its ▾ opens"),
     ("", "click #: first row; the ✓ ★ ✗ header: marked, favorites, excluded only"),
+    ("", "click a key hint in the status bar to press it"),
     ("?", "this help"),
     ("esc", "back: overlay, selection, filter, M, F, E, task"),
     ("q", "quit; asks first"),
@@ -204,7 +205,7 @@ pub enum Input {
 }
 
 impl Input {
-    /// A choice list (`f`, `o`, `x`, `T`) with the bar on `sel` and nothing searched yet.
+    /// A choice list (`f`, `o`, `x`, `t`) with the bar on `sel` and nothing searched yet.
     fn choose(title: &'static str, items: Vec<(String, Effect)>, sel: usize) -> Self {
         Self::Choose { title, items, sel, query: String::new(), cur: 0, typing: false }
     }
@@ -316,7 +317,7 @@ pub enum Effect {
     Launch(Vec<String>),
     /// Favorite the current model for the task; the `f` chooser's items, applied by `App` itself.
     Fav(&'static str),
-    /// A `view::THEMES` name; the `T` chooser's items, applied by `App` itself.
+    /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
 }
 
@@ -333,7 +334,7 @@ pub enum Mouse {
     Box(usize),
     /// A click on row `n`'s ☆: pick the tasks it is the favorite for, as `f` does.
     Star(usize),
-    /// A click on row `n`'s ✗ box: exclude it or take the exclusion off, as `e` does.
+    /// A click on row `n`'s ✗ box: exclude it or take the exclusion off, that row alone.
     Exclude(usize),
     /// Ctrl click on row `n`: toggle it in the selection on its own, keeping the rest.
     Pick(usize),
@@ -357,6 +358,8 @@ pub enum Mouse {
     Item(usize),
     /// Click outside the open dropdown or choice list: close it.
     Outside,
+    /// Click on a status bar hint: press its key.
+    Key(KeyCode),
 }
 
 /// `provider/model` of the offer you'd pay, as harnesses name it.
@@ -617,7 +620,7 @@ impl App {
         matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(_)))))
     }
 
-    /// The theme under the cursor of the open `T` list, which the screen previews.
+    /// The theme under the cursor of the open `t` list, which the screen previews.
     pub fn theme_preview(&self) -> Option<&'static str> {
         match &self.input {
             Input::Choose { items, sel, query, .. } => match choice_rows(items, query).get(*sel).map(|&i| &items[i]) {
@@ -964,6 +967,9 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: Mouse) -> Option<Effect> {
+        if let Mouse::Key(code) = m {
+            return self.on_key(code.into());
+        }
         let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { typing: false, .. });
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
@@ -1040,10 +1046,14 @@ impl App {
                 self.select(n);
                 return self.table_key(KeyCode::Char('f'), 1);
             }
+            // Only the clicked row, even on a mark, where `e` takes every mark.
             Mouse::Exclude(n) if n < self.rows.len() => {
                 self.deselect();
                 self.select(n);
-                return self.table_key(KeyCode::Char('e'), 1);
+                let key = self.current()?.key.clone();
+                self.store.toggle_excluded(&key);
+                self.rebuild();
+                return Some(Effect::Save);
             }
             Mouse::Pick(n) if n < self.rows.len() => {
                 // The range, if any, becomes picked rows, then the clicked row toggles.
@@ -1281,7 +1291,7 @@ impl App {
                 return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
-            KeyCode::Char('T') => {
+            KeyCode::Char('t') => {
                 let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
                 self.input = Input::choose("theme?", items, crate::view::theme(&self.store.theme));
             }
@@ -1296,7 +1306,7 @@ impl App {
                 self.status = match (self.rows.first(), self.rows.last()) {
                     (Some(&a), Some(&b)) => {
                         let ms = &self.data.models;
-                        format!("{} per price: {} best, {} cheapest; esc back", t.name, ms[a].name, ms[b].name)
+                        format!("{} best, {} cheapest", ms[a].name, ms[b].name)
                     }
                     _ => format!("no model has data for {}", t.name),
                 };
@@ -1458,7 +1468,7 @@ impl App {
                 _ if *typing && edit(query, cur, code, mods, |_| true) => *sel = 0,
                 KeyCode::Char('/') => *typing = true,
                 // The key that opens the theme list also closes it.
-                KeyCode::Char('T') if self.theme_preview().is_some() => self.input = Input::None,
+                KeyCode::Char('t') if self.theme_preview().is_some() => self.input = Input::None,
                 KeyCode::Esc => self.input = Input::None,
                 _ => {}
             },
@@ -1525,14 +1535,14 @@ mod tests {
     #[test]
     fn t_picks_a_theme_from_a_panel() {
         let mut a = app();
-        assert_eq!(press(&mut a, "Tj"), None);
+        assert_eq!(press(&mut a, "tj"), None);
         assert_eq!((a.theme_preview(), a.store.theme.as_str()), (Some("gruvbox"), ""), "previewed, not saved");
-        press(&mut a, "T");
-        assert_eq!((a.theme_preview(), &a.input), (None, &Input::None), "T closes it unchanged");
-        press(&mut a, "Tjj");
+        press(&mut a, "t");
+        assert_eq!((a.theme_preview(), &a.input), (None, &Input::None), "t closes it unchanged");
+        press(&mut a, "tjj");
         assert_eq!(a.key(KeyEvent::from(KeyCode::Enter)), Some(Effect::Save));
         assert_eq!((a.store.theme.as_str(), a.status.as_str()), ("nord", "theme nord"));
-        press(&mut a, "T");
+        press(&mut a, "t");
         assert_eq!(a.theme_preview(), Some("nord"), "opens on the saved theme");
         press(&mut a, "gg");
         a.key(KeyEvent::from(KeyCode::Enter));
@@ -1542,13 +1552,13 @@ mod tests {
     #[test]
     fn slash_searches_a_choice_list_and_the_help() {
         let mut a = app();
-        press(&mut a, "T/nor");
+        press(&mut a, "t/nor");
         assert_eq!(a.theme_preview(), Some("nord"), "/ keeps the matching themes, the bar on the first");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.theme_preview(), Some("nord"), "esc drops the search, keeping the theme under the bar");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.theme, "nord");
-        press(&mut a, "T/zzz");
+        press(&mut a, "t/zzz");
         assert_eq!(a.theme_preview(), None, "nothing matches, so enter picks nothing");
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         code(&mut a, KeyCode::Esc);
@@ -1971,7 +1981,7 @@ mod tests {
         assert_eq!(keys(&a), ["gpt55", "mini"], "best first, each row down cheaper");
         assert_eq!((a.sort_col, a.descending), (PRICE, true));
         assert_eq!(a.selected(), 0);
-        assert!(a.status.starts_with("coding per price: gpt55 best, mini cheapest"), "{}", a.status);
+        assert!(a.status.starts_with("gpt55 best, mini cheapest"), "{}", a.status);
         press(&mut a, "c");
         assert!(a.task.is_none());
         assert_eq!(a.rows.len(), 3);
@@ -2326,6 +2336,10 @@ mod tests {
         assert_eq!((a.selected(), a.selecting()), (1, false));
         assert_eq!(a.mouse(Mouse::Exclude(1)), Some(Effect::Save));
         assert!(!a.store.is_excluded(&k), "a second click takes the exclusion off");
+        press(&mut a, "ggm");
+        a.mouse(Mouse::Box(1));
+        a.mouse(Mouse::Exclude(1));
+        assert!(a.store.is_excluded(&k) && !a.store.is_excluded(&key(&a, 0)), "on a mark, not every mark as e does");
     }
 
     #[test]

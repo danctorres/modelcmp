@@ -31,7 +31,7 @@ pub struct Palette {
     pub accents: &'static [u32],
 }
 
-/// `T` in the TUI: the terminal's own colours, or one of these palettes in their place, in
+/// `t` in the TUI: the terminal's own colours, or one of these palettes in their place, in
 /// tuiman's order: the dark ones, then the light ones, then the retro machines. Everforest is
 /// left out as nord's twin on the same slate. A theme's own palette is only the starting point:
 /// what a colour is here has to read on the background and stay apart from its neighbours, so a

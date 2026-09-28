@@ -20,7 +20,7 @@ pub struct Store {
     /// Task name -> your favorite model for it: `--tier` picks it over the computed one.
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
-    /// A `view::THEMES` name, picked with `T`; empty is the terminal's colours.
+    /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub theme: String,
 }
