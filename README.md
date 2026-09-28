@@ -16,7 +16,9 @@ Run it without arguments for the interactive TUI. Subcommands print text, or JSO
 ## Install
 
 ```sh
-cargo install --path .
+brew install danctorres/tap/modelcmp
+# or
+cargo install --git https://github.com/danctorres/modelcmp
 ```
 
 Data is downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`.
@@ -178,8 +180,9 @@ ECI for overall, vision and long-context, the percentile for the others.
 cargo fmt && cargo clippy -- -D warnings && cargo test
 ```
 
-CI runs the same on every push. Pushing a `v*` tag builds a release binary and attaches it
-to a GitHub release.
+CI runs the same on every push. Pushing a `v*` tag builds static binaries for Linux
+(x86_64, aarch64, musl) and macOS (x86_64, aarch64) and attaches them, with a
+`SHA256SUMS` file, to a GitHub release.
 
 `app.rs` holds all state and key handling with no I/O, so every key is unit tested.
 `tui.rs` owns the terminal and the refresh thread, `cli.rs` the subcommands, `data.rs`
