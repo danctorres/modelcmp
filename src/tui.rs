@@ -1148,7 +1148,12 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         Input::Quit | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
-        let text = format!("{label}{typed}");
+        // Ctx is bounded in thousands of tokens, as its cells read: `Ctx ≥ 200k`.
+        let unit = match app.input {
+            Input::Bound { col, .. } if crate::app::numeric(col).is_some_and(|c| c.id == "ctx") => "k",
+            _ => "",
+        };
+        let text = format!("{label}{typed}{unit}");
         let (menu, typing) = match app.input {
             Input::Menu { typing, .. } => (true, typing),
             Input::Choose { .. } => (true, true),
@@ -2091,6 +2096,10 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         status(&mut buf, Rect::new(0, 0, 40, 1), &a);
         assert_eq!((0..15).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  $in ≥ 4");
+        a.input = Input::Bound { col: ECI - 1, min: true, text: "200".into(), cur: 3 };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
+        assert_eq!(status(&mut buf, Rect::new(0, 0, 60, 1), &a), Some(8 + 6 + 3), "the k is after the cursor");
+        assert_eq!((0..18).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  Ctx ≥ 200k", "in thousands");
     }
 
     #[test]
