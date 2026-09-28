@@ -10,7 +10,7 @@ kind of task (coding, agentic runs, reasoning, ...), names the best model at eac
 - **Your agent** gets the same answer from `modelcmp recommend --json` in one call, instead of
   comparing models in its own context, and can hand a subtask to a cheaper model.
 
-![modelcmp TUI](https://github.com/user-attachments/assets/0b84321d-ac18-4267-8490-702b87efd0a9)
+![modelcmp TUI](https://github.com/user-attachments/assets/6ffde581-f8f1-4b06-b35d-a79c3ecb6277)
 
 By default it shows only the models you can already use; `a` in the TUI or `--all` adds the rest.
 
