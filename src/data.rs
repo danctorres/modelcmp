@@ -11,7 +11,8 @@ const MODELS_URL: &str = "https://models.dev/api.json";
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
-const FORMAT: u32 = 1;
+/// 2: `Offer::unpriced`, where a missing price used to read as free.
+const FORMAT: u32 = 2;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -66,6 +67,9 @@ pub struct Offer {
     /// $ per 1M cached input tokens, when the provider lists a discount.
     #[serde(default)]
     pub cache_read: Option<f64>,
+    /// models.dev lists no price for it: `input` and `output` are 0 but mean unknown, not free.
+    #[serde(default)]
+    pub unpriced: bool,
     #[serde(skip)]
     pub available: bool,
     /// Where you have access: the harnesses listing it, then "env" if the provider's API key is set.
@@ -117,14 +121,16 @@ pub struct Model {
 }
 
 impl Model {
-    /// The offer you'd actually pay: cheapest available one, else the most common list price.
+    /// The offer you'd actually use: cheapest available paid one, else a free one of yours,
+    /// else one of yours with no listed price, else the most common list price. It may be
+    /// `unpriced`, still naming the id to use; `priced_offer` is the one with prices to show.
     pub fn price(&self) -> Option<&Offer> {
-        let paid = |o: &&Offer| o.input + o.output > 0.0;
+        let paid = |o: &&Offer| !o.unpriced && o.input + o.output > 0.0;
         let avail: Vec<&Offer> = self.offers.iter().filter(|o| o.available).collect();
         if let Some(o) = avail.iter().copied().filter(paid).min_by(|a, b| a.blended().total_cmp(&b.blended())) {
             return Some(o);
         }
-        if let Some(o) = avail.first() {
+        if let Some(o) = avail.iter().find(|o| !o.unpriced).or(avail.first()) {
             return Some(o);
         }
         // ponytail: mode of prices ≈ list price; resellers with odd pricing are outvoted.
@@ -134,12 +140,23 @@ impl Model {
             let cache = o.input_cached().to_bits();
             counts.entry((o.input.to_bits(), o.output.to_bits(), cache)).or_insert((0, o)).0 += 1;
         }
-        counts.into_values().rev().max_by_key(|(n, _)| *n).map(|(_, o)| o).or(self.offers.first())
+        counts
+            .into_values()
+            .rev()
+            .max_by_key(|(n, _)| *n)
+            .map(|(_, o)| o)
+            .or_else(|| self.offers.iter().find(|o| !o.unpriced))
+            .or(self.offers.first())
     }
 
-    /// `Offer::blended` of the offer you'd pay; 0 when your only offer is free.
+    /// `price`, when its prices are known.
+    pub fn priced_offer(&self) -> Option<&Offer> {
+        self.price().filter(|o| !o.unpriced)
+    }
+
+    /// `Offer::blended` of the offer you'd pay; 0 when it is free, none when its price is unknown.
     pub fn cost(&self) -> Option<f64> {
-        self.price().map(Offer::blended)
+        self.priced_offer().map(Offer::blended)
     }
 
     /// The model's pages, (site, url): models.dev when its developer offers it, as models.dev
@@ -833,6 +850,7 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
             output: cost.map_or(0.0, |c| c.output),
             // A few list a paid model's cache as 0, a placeholder; a cache never costs more than input.
             cache_read: cost.and_then(|c| c.cache_read.filter(|&r| r > 0.0).map(|r| r.min(c.input))),
+            unpriced: cost.is_none(),
             ..Default::default()
         });
     }
@@ -1123,6 +1141,13 @@ mod tests {
         assert!(crate::app::col_about(crate::app::PRICE).contains(" 0% of the input cached"));
         set_cached(2.0);
         assert_eq!(crate::data::cached(), 1.0, "clamped");
+        // A price nobody lists is unknown, not free: yours still names the id, but costs nothing known.
+        let unknown = Offer { provider: "u".into(), unpriced: true, available: true, ..Default::default() };
+        let free = Offer { provider: "f".into(), available: true, ..Default::default() };
+        let m = Model { offers: vec![unknown.clone()], ..Default::default() };
+        assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("u", None));
+        let m = Model { offers: vec![unknown, free], ..Default::default() };
+        assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("f", Some(0.0)), "a free offer is priced");
     }
 
     #[test]

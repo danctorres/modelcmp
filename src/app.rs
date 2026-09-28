@@ -40,19 +40,21 @@ pub const COLS: [Col; 10] = [
     Col {
         lower_better: true,
         show: money,
-        ..col("$in", "in", "USD per 1M input tokens, cheapest available provider", |m| Some(m.price()?.input))
+        ..col("$in", "in", "USD per 1M input tokens, cheapest available provider", |m| Some(m.priced_offer()?.input))
     },
     Col {
         lower_better: true,
         show: money,
         ..col("$cache", "cache", "USD per 1M cached input tokens ($in when the provider has no discount)", |m| {
-            m.price().map(|o| o.cache_read.unwrap_or(o.input))
+            m.priced_offer().map(|o| o.cache_read.unwrap_or(o.input))
         })
     },
     Col {
         lower_better: true,
         show: money,
-        ..col("$out", "out", "USD per 1M output tokens, cheapest available provider", |m| Some(m.price()?.output))
+        ..col("$out", "out", "USD per 1M output tokens, cheapest available provider", |m| {
+            Some(m.priced_offer()?.output)
+        })
     },
     Col {
         show: |v| ctx((v * 1000.0) as u64),

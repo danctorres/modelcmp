@@ -39,10 +39,11 @@ struct Price<'a> {
     available: bool,
     /// Where you have access: harnesses (opencode, claude, ...) and "env" for an API key
     via: &'a [String],
-    input_per_mtok: f64,
+    /// Null when the provider lists no price
+    input_per_mtok: Option<f64>,
     /// Cached input; absent when the provider lists no discount, so input costs full price
     cache_read_per_mtok: Option<f64>,
-    output_per_mtok: f64,
+    output_per_mtok: Option<f64>,
 }
 
 impl<'a> From<&'a Offer> for Price<'a> {
@@ -52,9 +53,9 @@ impl<'a> From<&'a Offer> for Price<'a> {
             id: &o.id,
             available: o.available,
             via: &o.via,
-            input_per_mtok: o.input,
+            input_per_mtok: (!o.unpriced).then_some(o.input),
             cache_read_per_mtok: o.cache_read,
-            output_per_mtok: o.output,
+            output_per_mtok: (!o.unpriced).then_some(o.output),
         }
     }
 }

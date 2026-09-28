@@ -450,7 +450,7 @@ pub fn frontier_legend(keyed: bool) -> String {
 pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
     let flag = if favorite { "★ " } else { "" };
-    format!("{flag}{}{key} {} ({s:.0})", m.name, usd(m.cost().unwrap_or(0.0)))
+    format!("{flag}{}{key} {} ({s:.0})", m.name, m.cost().map_or("-".into(), usd))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
@@ -581,7 +581,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     v.push("  providers (model id, $ per 1M tokens in / cached in / out):".into());
     let mut offers: Vec<&Offer> = m.offers.iter().collect();
     // Available first, then cheapest; unknown price ("-") last.
-    let cost = |o: &Offer| Some(o.blended()).filter(|c| *c > 0.0).unwrap_or(f64::MAX);
+    let cost = |o: &Offer| if o.unpriced { f64::MAX } else { o.blended() };
     offers.sort_by(|a, b| b.available.cmp(&a.available).then(cost(a).total_cmp(&cost(b))));
     for o in offers {
         v.push(format!(
@@ -589,9 +589,9 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
             if o.available { "●" } else { " " },
             truncate(&o.provider_name, 19),
             truncate(&o.id, 33),
-            money(o.input),
+            if o.unpriced { "-".into() } else { money(o.input) },
             o.cache_read.map_or("-".into(), money),
-            money(o.output),
+            if o.unpriced { "-".into() } else { money(o.output) },
             o.via.join(", ")
         ));
     }
@@ -617,9 +617,7 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
             .filter(|_| vals.iter().flatten().count() > 1);
         Row { label: label.into(), cells: vals.into_iter().map(|v| v.map_or("-".into(), &fmt)).collect(), best }
     }
-    let price = |f: fn(&Offer) -> f64| -> Vec<Option<f64>> {
-        models.iter().map(|m| m.price().map(f).filter(|p| *p > 0.0)).collect()
-    };
+    let price = |f: fn(&Offer) -> f64| -> Vec<Option<f64>> { models.iter().map(|m| m.priced_offer().map(f)).collect() };
     let mut rows = vec![
         Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), best: None },
         Row { label: "via".into(), cells: models.iter().map(|m| via(&m.via)).collect(), best: None },

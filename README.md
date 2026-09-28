@@ -159,7 +159,7 @@ opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just 
 ```
 
 Each JSON model carries `key`, `excluded`, `favorite_for` (the tasks it is the user's favorite
-for), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted), `context`,
+for), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
 `eci`, per-task `tasks` percentiles. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the

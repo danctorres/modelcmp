@@ -1417,7 +1417,7 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
             }
             spans.push(Span::styled(
                 priced(m, fit::shown(m, t, *s), false, false),
-                tint(LEVEL[level(m.cost().unwrap_or(0.0))]),
+                tint(m.cost().map_or(MUTED, |c| LEVEL[level(c)])),
             ));
             Line::from(spans)
         })
