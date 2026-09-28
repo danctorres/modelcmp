@@ -120,7 +120,11 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                         let line = cmd.join(" ");
                         app.report(match new_terminal(&cmd) {
                             Ok(()) => Ok(format!("opened {line} in a new terminal")),
-                            Err(e) => Err(format!("could not open a terminal for {line}: {e}; set $TERMINAL")),
+                            Err(e) => {
+                                let hint =
+                                    if e.kind() == std::io::ErrorKind::NotFound { "; set $TERMINAL" } else { "" };
+                                Err(format!("could not open a terminal for {line}: {e}{hint}"))
+                            }
                         });
                     }
                     // The app applies its own chooser items before they get here.
@@ -268,9 +272,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
 /// Start `cmd` in a new terminal window here, without waiting: Windows Terminal under WSL,
 /// else `$TERMINAL -e`, else x-terminal-emulator.
 fn new_terminal(cmd: &[String]) -> std::io::Result<()> {
+    // Windows Terminal splits its command line on `;` wherever it stands, and the ids come from
+    // downloaded data: one holding a `;` would start a second command there. No real id has one.
+    if cmd.iter().any(|a| a.contains(';')) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "a model id holding ';' is refused"));
+    }
     let mut term = if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") {
         // A new WSL session starts bare, so a login shell sets up PATH and keys as for a typed
-        // command. Model ids hold no `;`, which Windows Terminal would split the command on.
+        // command.
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         let line: Vec<String> = cmd.iter().map(|a| format!("'{}'", a.replace('\'', r"'\''"))).collect();
         let mut c = Command::new("wt.exe");
@@ -2082,6 +2091,13 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         status(&mut buf, Rect::new(0, 0, 40, 1), &a);
         assert_eq!((0..15).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  $in ≥ 4");
+    }
+
+    #[test]
+    fn a_launch_refuses_an_id_windows_terminal_would_split() {
+        let cmd = ["opencode", "--model", "p/x;new-tab"].map(String::from);
+        let e = new_terminal(&cmd).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "refused before anything is spawned: {e}");
     }
 
     #[test]
