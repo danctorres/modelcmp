@@ -63,10 +63,12 @@ struct ModelOut<'a> {
     developer: &'a str,
     available: bool,
     via: &'a [String],
-    favorite: bool,
+    marked: bool,
     /// You have it but cannot use it; --task and recommend skip it
     excluded: bool,
     note: Option<&'a str>,
+    /// Tasks this model is your favorite for (`modelcmp fav`); `--tier` picks it for them
+    favorite_for: Vec<&'a str>,
     price: Option<Price<'a>>,
     context: u64,
     max_output: u64,
@@ -97,9 +99,10 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         developer: &m.developer,
         available: m.available,
         via: &m.via,
-        favorite: s.is_fav(&m.key),
+        marked: s.is_marked(&m.key),
         excluded: s.is_excluded(&m.key),
         note: s.note(&m.key),
+        favorite_for: s.favorite_for(&m.key),
         price: m.price().map(Price::from),
         context: m.context,
         max_output: m.max_output,
@@ -138,13 +141,16 @@ fn table(models: &[&Model], store: &Store, show_avail: bool) {
         let nums: String = nums.zip(&widths).map(|(v, &w)| format!(" {v:>w$}")).collect();
         println!("{mark} {:<nw$} {:<dw$}{nums}  {via}", truncate(name, nw), truncate(dev, dw));
     };
-    line(" ", "Model", "Dev", &mut COLS.iter().map(|c| c.name), "Via");
+    line("  ", "Model", "Dev", &mut COLS.iter().map(|c| c.name), "Via");
     for (m, row) in models.iter().zip(&cells) {
-        let mark = match (store.is_fav(&m.key), show_avail && m.available) {
-            _ if store.is_excluded(&m.key) => "✗",
-            (true, _) => "★",
-            (_, true) => "●",
-            _ => " ",
+        let mark = if store.is_excluded(&m.key) {
+            "✗ "
+        } else if store.is_marked(&m.key) {
+            "☑ "
+        } else if show_avail && m.available {
+            "● "
+        } else {
+            "  "
         };
         line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(&m.via));
     }
@@ -178,7 +184,7 @@ pub struct ListOpts {
     /// (index into `COLS`, min, max)
     pub bounds: Vec<(usize, f64, f64)>,
     pub all: bool,
-    pub favorites: bool,
+    pub marked: bool,
     pub dev: Vec<String>,
     pub via: Vec<String>,
     pub limit: usize,
@@ -192,7 +198,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     check("--via", &o.via, data.models.iter().flat_map(|m| &m.via).map(String::as_str))?;
     let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
     // A task's frontier is a recommendation, so models you cannot use stay out of it.
-    let mut models: Vec<&Model> = visible(data, store, o.all, o.favorites)
+    let mut models: Vec<&Model> = visible(data, store, o.all, o.marked)
         .map(|(_, m)| m)
         .filter(|m| {
             (o.dev.is_empty() || has(&o.dev, &m.developer))
@@ -202,9 +208,17 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         })
         .collect();
     if let Some(t) = o.task {
-        let front = task_frontier(models.into_iter(), t);
+        let yours = store.favorite(t.name);
+        let front = task_frontier(models.into_iter(), t, yours);
         models = match &o.tier {
-            Some(tier) => pick(&front, tier).map(|e| e.0).into_iter().collect(),
+            // Your favorite beats the tier's pick.
+            Some(tier) => front
+                .iter()
+                .find(|(m, _)| Some(m.key.as_str()) == yours)
+                .or_else(|| pick(&front, tier))
+                .map(|e| e.0)
+                .into_iter()
+                .collect(),
             None => front.into_iter().map(|(m, _)| m).collect(),
         };
     } else if let Some(c) = o.sort.map(|c| &COLS[c]) {
@@ -290,13 +304,13 @@ pub fn open(data: &Data, q: &str, on: &str) -> Result {
     Ok(())
 }
 
-pub fn fav(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
+pub fn mark(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     let m = resolve(data, q)?;
-    if rm == store.is_fav(&m.key) {
-        store.toggle_fav(&m.key);
+    if rm == store.is_marked(&m.key) {
+        store.toggle_marked(&m.key);
     }
     store.save()?;
-    println!("{} {}", if rm { "removed" } else { "★ added" }, m.name);
+    println!("{} {}", if rm { "unmarked" } else { "☑ marked" }, m.name);
     Ok(())
 }
 
@@ -307,6 +321,35 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     }
     store.save()?;
     println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name);
+    Ok(())
+}
+
+/// Show the favorite model of every task, of one, or set or clear one.
+pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, rm: bool) -> Result {
+    let name = |key: &str| data.models.iter().find(|m| m.key == key).map_or(key.to_string(), |m| m.name.clone());
+    match (task, q, rm) {
+        (None, ..) => {
+            for (t, k) in &store.favorite {
+                println!("{t:<13}★ {} [{k}]", name(k));
+            }
+        }
+        (Some(t), None, false) => {
+            if let Some(k) = store.favorite(t) {
+                println!("★ {} [{k}]", name(k));
+            }
+        }
+        (Some(t), None, true) => {
+            store.favorite.remove(t);
+            store.save()?;
+            println!("cleared {t}");
+        }
+        (Some(t), Some(q), _) => {
+            let m = resolve(data, q)?;
+            store.favorite.insert(t.to_string(), m.key.clone());
+            store.save()?;
+            println!("★ {t}: {}", m.name);
+        }
+    }
     Ok(())
 }
 
@@ -325,8 +368,13 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
 /// The best model per price for each task, what it measures and when to use it.
 pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     // The frontier among the models you have and can use, as `list --task` gives it.
-    let front =
-        |t| task_frontier(visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)), t);
+    let front = |t: &Task| {
+        task_frontier(
+            visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)),
+            t,
+            store.favorite(t.name),
+        )
+    };
     if json {
         let v: Vec<_> = TASKS
             .iter()
@@ -335,7 +383,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
                     .into_iter()
                     .map(|(m, s)| serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0}))
                     .collect();
-                serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "frontier": front})
+                serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "frontier": front})
             })
             .collect();
         return print_json(&v);
@@ -344,7 +392,9 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     for t in TASKS {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
-        let front: Vec<String> = front(t).iter().map(|(m, s)| priced(m, *s, true)).collect();
+        let yours = store.favorite(t.name);
+        let front: Vec<String> =
+            front(t).iter().map(|(m, s)| priced(m, *s, true, Some(m.key.as_str()) == yours)).collect();
         println!("  best per price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
         if !t.benches.is_empty() {
             println!("  benchmarks:      {}", t.benches.join(", "));

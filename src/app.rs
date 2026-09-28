@@ -115,23 +115,30 @@ pub const HELP: &[(&str, &str)] = &[
     ("s", "sort by the column; again reverses"),
     ("enter", "details: every benchmark, price per provider"),
     ("> <", "minimum / maximum for the column, e.g. > 70 enter on Coding"),
-    ("d", "dropdown on the Dev, Price and Via headers (▾); / searches it, space toggles several"),
+    ("d", "dropdown on the Dev, Price and Via headers (▾); / searches it, m toggles several, as it marks models"),
     ("( ) ^d ^u", "half a page up / down"),
     ("gg G 3gg", "top / bottom / row 3"),
-    ("m", "mark the model"),
-    ("V", "select a range of rows: move to extend it, then m e f or C act on all of it; esc cancels"),
-    ("e f on a mark", "act on every marked model, not just the one under the cursor"),
-    ("M", "show marked models only; with F, marked and favorites"),
-    ("C", "compare marked models: cheapest, best coder, most coding per $"),
+    (
+        "m",
+        "mark the model: its box ☐ becomes ☑ and the row turns light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it",
+    ),
+    ("U", "unmark every model"),
+    ("V", "select a range of rows: move to extend it, then m e or C act on all of it; esc cancels"),
+    ("e on a mark", "act on every marked model, not just the one under the cursor"),
+    ("M", "show marked models only; M again or esc: every model"),
+    ("C", "compare 2+ marked models: cheapest, best coder, most coding per $; C again or esc closes it"),
     (
         "/",
         "filter by name, developer, Via or note, words in any order (anthropic opus), a typo forgiven when nothing matches (opsu); / again starts a new search, esc clears; in compare, filters the rows",
     ),
-    ("c", "clear everything: filters, bounds, task, marks"),
+    ("c", "clear filters, bounds, task and M; marks stay"),
     ("a", "all models, including ones you have no access to; again: yours only"),
-    ("f F", "favorite / show favorites only"),
     ("n", "note for the model"),
     ("e", "exclude the model: you have it but cannot use it; recommendations skip it"),
+    (
+        "f",
+        "favorite the model for tasks: every row has a ☆, filled ★ for a favorite (in the task's colour when that task is picked); f or a click on the ☆ lists the tasks, m ticks one, enter ticks the one under the bar and closes, starting on the picked task or the one under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. --tier picks it, agents see it",
+    ),
     ("typing", "← → ^a ^e move, alt-b alt-f ^← ^→ by word; ^w alt-d delete a word, ^u ^k to the start / end"),
     ("y Y", "copy the model id (provider/model) / the model name"),
     ("o", "open the model on models.dev, epoch.ai or openrouter.ai; asks which"),
@@ -144,9 +151,12 @@ pub const HELP: &[(&str, &str)] = &[
     ("?", "this help"),
     (
         "mouse",
-        "click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column",
+        "click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its ☐ toggles the mark, on its ☆ picks its tasks; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column",
     ),
-    ("qq", "quit; the first q asks. esc closes an overlay or the filter"),
+    (
+        "qq",
+        "quit; the first q asks. esc goes back: closes an overlay, drops the selection, clears the / filter, leaves M, then a task picked in recommend back to recommend",
+    ),
 ];
 
 #[derive(PartialEq, Debug)]
@@ -297,6 +307,8 @@ pub enum Effect {
     Refresh,
     /// Run this command in a new terminal window.
     Launch(Vec<String>),
+    /// Favorite the current model for the task; the `f` chooser's items, applied by `App` itself.
+    Fav(&'static str),
 }
 
 /// A mouse action, already mapped to the table by the shell.
@@ -308,6 +320,10 @@ pub enum Mouse {
     Row(usize),
     /// Right click on row `n`: mark it, as `m` does, without moving; a selection becomes marks.
     Mark(usize),
+    /// A click on row `n`'s checkbox: toggle its mark, as `m` does.
+    Box(usize),
+    /// A click on row `n`'s ☆: pick the tasks it is the favorite for, as `f` does.
+    Star(usize),
     /// Ctrl click on row `n`: toggle it in the selection on its own, keeping the rest.
     Pick(usize),
     /// Shift click or left drag to row `n`: extend the selection to it as a visual range.
@@ -348,7 +364,6 @@ pub struct App {
     pub ext: [Option<(f64, f64)>; COLS.len()],
     pub store: Store,
     pub all: bool,
-    pub favs: bool,
     /// Column under the cursor: 0 is the name, 1 the developer, then `COLS`.
     pub col: usize,
     pub sort_col: usize,
@@ -394,7 +409,11 @@ pub struct App {
     /// The count before a first `g`, waiting for the second one of `gg`.
     g_pending: Option<usize>,
     pub status: String,
+    /// The status is an error, shown in red.
+    pub failed: bool,
     pub refreshing: bool,
+    /// The last refresh failed; stays in the frame until one succeeds.
+    pub refresh_failed: bool,
 }
 
 impl App {
@@ -406,7 +425,6 @@ impl App {
             ext: [None; COLS.len()],
             store,
             all: false,
-            favs: false,
             col: PRICE,
             sort_col: PRICE,
             descending: true,
@@ -434,7 +452,9 @@ impl App {
             count: 0,
             g_pending: None,
             status: String::new(),
+            failed: false,
             refreshing: false,
+            refresh_failed: false,
         };
         app.set_data(data);
         app
@@ -547,19 +567,39 @@ impl App {
         self.store.marked.iter().filter_map(|k| self.data.models.iter().find(|m| m.key == *k)).collect()
     }
 
+    /// Whether any model is marked, so `M` has something to show.
+    pub fn any_marked(&self) -> bool {
+        !self.store.marked.is_empty()
+    }
+
+    /// Whether the open choice list is `f`'s tasks, where m ticks one and the list stays open.
+    pub fn choosing_favs(&self) -> bool {
+        matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(_)))))
+    }
+
+    /// `f`'s list: every task, ticked where the current model is its favorite.
+    fn fav_items(&self) -> Option<Vec<(String, Effect)>> {
+        let m = self.current()?;
+        let name = |k: &str| self.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
+        let item = |t: &Task| match self.store.favorite(t.name) {
+            Some(k) if k == m.key => format!("☑ {}", t.name),
+            Some(k) => format!("☐ {}  (now {})", t.name, name(k)),
+            None => format!("☐ {}", t.name),
+        };
+        Some(TASKS.iter().map(|t| (item(t), Effect::Fav(t.name))).collect())
+    }
+
     /// Models passing every filter but the frontier, ignoring the ones on column `skip`, so a
     /// dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
-        // Marked only and favorites only together show both sets: the models the user picked.
-        let (favs, marked) = (self.favs && !self.only_marked, self.only_marked);
-        visible(&self.data, &self.store, self.all, favs).filter(move |&(i, m)| {
+        visible(&self.data, &self.store, self.all, false).filter(move |&(i, m)| {
             hits(
                 &self.query,
                 [&m.name, &m.developer, &m.via.join(", "), self.store.note(&m.key).unwrap_or("")],
                 self.typos,
             )
             .is_some()
-                && (!marked || self.store.marked.contains(&m.key) || (self.favs && self.store.is_fav(&m.key)))
+                && (!self.only_marked || self.store.is_marked(&m.key))
                 && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
                 && (skip == VIA || self.via.is_empty() || self.via.iter().any(|h| m.via.contains(h)))
                 && self
@@ -572,6 +612,8 @@ impl App {
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
+        // Unmarking the last marked model leaves M for every model rather than an empty table.
+        self.only_marked &= self.any_marked();
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
         let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
         let anchor = self.visual.and_then(key_of);
@@ -634,18 +676,26 @@ impl App {
     /// A background refresh finished.
     pub fn refreshed(&mut self, res: Result<Data, String>) {
         self.refreshing = false;
+        self.refresh_failed = res.is_err();
         match res {
             Ok(d) => {
                 self.status = "data refreshed".into();
                 self.set_data(d);
             }
-            Err(e) => self.status = format!("refresh failed: {e}"),
+            Err(e) => self.report(Err(format!("refresh failed: {e}"))),
         }
     }
 
-    /// The status bar's `⟳ refreshing` says it is under way, so the message is cleared.
+    /// The outcome of an action in the status bar, an error in red.
+    pub fn report(&mut self, res: Result<String, String>) {
+        self.failed = res.is_err();
+        self.status = res.unwrap_or_else(|e| e);
+    }
+
+    /// The frame's `⟳ refreshing` says it is under way, so the message is cleared.
     pub fn refresh(&mut self) -> Option<Effect> {
         self.status.clear();
+        self.failed = false;
         if self.refreshing {
             return None;
         }
@@ -656,7 +706,45 @@ impl App {
     /// The task's price frontier among the models the filters let through, excluded ones
     /// left out: cheapest first, the best model last.
     pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
-        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key)), t)
+        task_frontier(
+            self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key)),
+            t,
+            self.store.favorite(t.name),
+        )
+    }
+
+    /// The task `f` and the ★ mark refer to: the one under the cursor in recommend, else the
+    /// picked one.
+    pub fn task_at_hand(&self) -> Option<&'static Task> {
+        if self.view == View::Recommend { Some(&TASKS[self.task_cur]) } else { self.task }
+    }
+
+    /// Whether the model's row shows a ★: it is the favorite for the task at hand, or with no
+    /// task for any. One ★ either way; the status bar and the detail name the tasks.
+    pub fn starred(&self, key: &str) -> bool {
+        match self.task_at_hand() {
+            Some(t) => self.store.favorite(t.name) == Some(key),
+            None => !self.store.favorite_for(key).is_empty(),
+        }
+    }
+
+    /// `f`: favorite the current model for the task, or unfavorite it when it already is.
+    fn fav(&mut self, task: &'static str) -> Option<Effect> {
+        let m = self.current()?;
+        let (key, name) = (m.key.clone(), m.name.clone());
+        self.store.toggle_favorite(task, &key);
+        self.status = match self.store.favorite(task) == Some(key.as_str()) {
+            true => format!("★ {name} favorite for {task}"),
+            false => format!("{name} no longer the favorite for {task}"),
+        };
+        // With the list still open (m), its boxes follow.
+        if self.choosing_favs()
+            && let (Some(fresh), Input::Choose { items, .. }) = (self.fav_items(), &mut self.input)
+        {
+            *items = fresh;
+        }
+        self.rebuild();
+        Some(Effect::Save)
     }
 
     /// The cursor and length of the open dropdown or choice list (`o`, `x`), whose moves take the
@@ -736,12 +824,7 @@ impl App {
 
     fn toggle_mark(&mut self) {
         let Some(key) = self.current().map(|m| m.key.clone()) else { return };
-        match self.store.marked.iter().position(|k| *k == key) {
-            Some(i) => {
-                self.store.marked.remove(i);
-            }
-            None => self.store.marked.push(key),
-        }
+        self.store.toggle_marked(&key);
         if self.only_marked {
             self.rebuild();
         }
@@ -758,6 +841,7 @@ impl App {
             return self.input_key(k.code, k.modifiers);
         }
         self.status.clear();
+        self.failed = false;
         let mut count = std::mem::take(&mut self.count);
         let g_pending = self.g_pending.take();
         // Digits are a count, except a leading 0, as in vim.
@@ -801,7 +885,7 @@ impl App {
     /// The wheel scrolls whatever `j k` move and sideways moves the column cursor; a click
     /// selects a row, and again opens its details; a click on a header sorts by it, as `s`
     /// does, and on its ▾ opens the dropdown. Where several entries can be picked (Dev, Via)
-    /// a click toggles one, as space does, and the dropdown stays open until a click outside;
+    /// a click toggles one, as m does, and the dropdown stays open until a click outside;
     /// elsewhere (Price, a choice list) a click picks the entry, as enter does.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
         let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { .. });
@@ -814,13 +898,14 @@ impl App {
         if list {
             return match m {
                 Mouse::Item(n) => {
-                    let several = matches!(self.input, Input::Menu { col, .. } if col == 1 || col == VIA);
+                    let several =
+                        matches!(self.input, Input::Menu { col, .. } if col == 1 || col == VIA) || self.choosing_favs();
                     let (sel, len) = self.list()?;
                     if n >= len {
                         return None;
                     }
                     *sel = n;
-                    let key = if several { KeyCode::Char(' ') } else { KeyCode::Enter };
+                    let key = if several { KeyCode::Char('m') } else { KeyCode::Enter };
                     self.input_key(key, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
@@ -852,7 +937,7 @@ impl App {
                 let inside = self.is_selected(n);
                 if self.selecting() {
                     for k in self.targets() {
-                        if !self.store.marked.contains(&k) {
+                        if !self.store.is_marked(&k) {
                             self.store.marked.push(k);
                         }
                     }
@@ -867,6 +952,17 @@ impl App {
                     self.toggle_mark();
                 }
                 return Some(Effect::Save);
+            }
+            Mouse::Box(n) if n < self.rows.len() => {
+                self.deselect();
+                self.select(n);
+                self.toggle_mark();
+                return Some(Effect::Save);
+            }
+            Mouse::Star(n) if n < self.rows.len() => {
+                self.deselect();
+                self.select(n);
+                return self.table_key(KeyCode::Char('f'), 1);
             }
             Mouse::Pick(n) if n < self.rows.len() => {
                 // The range, if any, becomes picked rows, then the clicked row toggles.
@@ -956,9 +1052,22 @@ impl App {
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
+            KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => {
+                self.status = "no marked models: m marks the one under the bar".into();
+            }
             KeyCode::Char('M') if table => {
-                self.only_marked = !self.only_marked && !self.store.marked.is_empty();
+                self.only_marked = !self.only_marked;
                 self.rebuild();
+            }
+            KeyCode::Char('U') if table && self.store.marked.is_empty() => {
+                self.status = "no marked models: m marks the one under the bar".into();
+            }
+            KeyCode::Char('U') if table => {
+                let n = std::mem::take(&mut self.store.marked).len();
+                self.only_marked &= self.any_marked();
+                self.rebuild();
+                self.status = format!("unmarked {n}");
+                return Some(Effect::Save);
             }
             KeyCode::Char('c') if table => {
                 self.query.clear();
@@ -969,11 +1078,8 @@ impl App {
                 if self.task.take().is_some() {
                     (self.sort_col, self.descending) = (PRICE, false);
                 }
-                self.store.marked.clear();
                 self.only_marked = false;
-                self.favs = false;
                 self.rebuild();
-                return Some(Effect::Save);
             }
             KeyCode::Char('q') => self.input = Input::Quit,
             KeyCode::Esc => {
@@ -986,6 +1092,15 @@ impl App {
                 } else if !self.query.is_empty() {
                     self.query.clear();
                     self.rebuild();
+                } else if self.only_marked {
+                    // Back out of M to every model.
+                    self.only_marked = false;
+                    self.rebuild();
+                } else if self.task.take().is_some() {
+                    // Back to recommend, where enter picked the task.
+                    (self.sort_col, self.descending) = (PRICE, false);
+                    self.rebuild();
+                    self.view = View::Recommend;
                 }
             }
             KeyCode::Char('?') => self.view = if self.view == View::Help { View::Table } else { View::Help },
@@ -993,8 +1108,13 @@ impl App {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
                 self.task_sel = 0;
             }
-            KeyCode::Char('f') if row => return self.flag(Store::is_fav, Store::toggle_fav, "favorited"),
             KeyCode::Char('e') if row => return self.flag(Store::is_excluded, Store::toggle_excluded, "excluded"),
+            KeyCode::Char('f') if row => {
+                // Starting on the task at hand, so f enter toggles it.
+                let items = self.fav_items()?;
+                let sel = self.task_at_hand().and_then(|t| TASKS.iter().position(|u| u.name == t.name)).unwrap_or(0);
+                self.input = Input::Choose { title: "favorite for which tasks?", items, sel };
+            }
             KeyCode::Char('V') if table => {
                 if self.selecting() {
                     self.deselect();
@@ -1028,24 +1148,13 @@ impl App {
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
             KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
             KeyCode::Char('m') if table && self.selecting() => {
-                let keys = self.targets();
-                if keys.iter().all(|k| self.store.marked.contains(k)) {
-                    self.store.marked.retain(|k| !keys.contains(k));
-                } else {
-                    for k in keys {
-                        if !self.store.marked.contains(&k) {
-                            self.store.marked.push(k);
-                        }
-                    }
-                }
-                self.deselect();
-                self.rebuild();
-                return Some(Effect::Save);
+                return self.flag(Store::is_marked, Store::toggle_marked, "marked");
             }
             KeyCode::Char('m') if row && self.view != View::Compare => {
                 self.toggle_mark();
                 return Some(Effect::Save);
             }
+            KeyCode::Char('C') if self.view == View::Compare => self.view = View::Table,
             KeyCode::Char('C') => {
                 // A selection is what gets compared.
                 let save = table && self.selecting();
@@ -1053,14 +1162,11 @@ impl App {
                     self.store.marked = self.targets();
                     self.deselect();
                 }
-                if self.store.marked.len() >= 2 {
-                    self.view = View::Compare;
-                    self.scroll = 0;
-                    self.compare_sel = 0;
-                    self.compare_x = 0;
-                } else {
-                    self.status = "mark 2+ models with m, then press C".into();
-                }
+                // With fewer than 2 marked, the overlay says how to mark them.
+                self.view = View::Compare;
+                self.scroll = 0;
+                self.compare_sel = 0;
+                self.compare_x = 0;
                 return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
@@ -1075,7 +1181,7 @@ impl App {
                 self.status = match (self.rows.first(), self.rows.last()) {
                     (Some(&a), Some(&b)) => {
                         let ms = &self.data.models;
-                        format!("{} per price: {} best, {} cheapest; c clears", t.name, ms[a].name, ms[b].name)
+                        format!("{} per price: {} best, {} cheapest; esc back", t.name, ms[a].name, ms[b].name)
                     }
                     _ => format!("no model has data for {}", t.name),
                 };
@@ -1093,10 +1199,6 @@ impl App {
             }
             KeyCode::Char('a') if table => {
                 self.all = !self.all;
-                self.rebuild();
-            }
-            KeyCode::Char('F') if table => {
-                self.favs = !self.favs;
                 self.rebuild();
             }
             _ => {}
@@ -1179,8 +1281,9 @@ impl App {
                         }
                         self.rebuild();
                     }
-                    // Space adds or drops the entry, keeping the dropdown open; on "any" it drops all.
-                    KeyCode::Char(' ') if *col == 1 || *col == VIA => {
+                    // m adds or drops the entry, as it marks a model, keeping the dropdown open; on
+                    // "any" it drops all. While searching, m is typed.
+                    KeyCode::Char('m') if !*typing && (*col == 1 || *col == VIA) => {
                         let i = rows[*sel];
                         let list = if *col == 1 { &mut self.dev } else { &mut self.via };
                         match list.iter().position(|d| *d == items[i].0) {
@@ -1205,9 +1308,19 @@ impl App {
                 }
             }
             Input::Choose { items, sel, .. } => match code {
+                // m ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns.
+                KeyCode::Char('m') => {
+                    if let Some((_, Effect::Fav(task))) = items.get(*sel) {
+                        let task = *task;
+                        return self.fav(task);
+                    }
+                }
                 KeyCode::Enter => {
                     let (_, effect) = items.swap_remove(*sel);
                     self.input = Input::None;
+                    if let Effect::Fav(task) = effect {
+                        return self.fav(task);
+                    }
                     return Some(effect);
                 }
                 KeyCode::Esc => self.input = Input::None,
@@ -1471,21 +1584,26 @@ mod tests {
     }
 
     #[test]
-    fn space_toggles_several_dropdown_entries() {
+    fn m_toggles_several_dropdown_entries() {
         let mut a = app();
         a.col = 1;
         press(&mut a, "dj ");
+        assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "space does nothing");
+        press(&mut a, "m");
         assert!(matches!(a.input, Input::Menu { .. }), "the dropdown stays open");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
-        press(&mut a, "j ");
+        press(&mut a, "jm");
         assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "both developers show");
-        press(&mut a, "k ");
+        press(&mut a, "km");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
-        press(&mut a, "/open ");
-        assert_eq!(a.dev, ["anthropic", "openai"], "space toggles while searching too");
+        press(&mut a, "/openm");
+        assert_eq!(a.dev, ["anthropic"], "while searching, m is typed");
+        code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "k ");
-        assert!(a.dev.is_empty(), "space on any drops them all");
+        press(&mut a, "m");
+        assert_eq!(a.dev, ["anthropic", "openai"], "esc ends the search on the match, m toggles it");
+        press(&mut a, "km");
+        assert!(a.dev.is_empty(), "m on any drops them all");
         press(&mut a, "jj");
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.dev.as_slice(), &a.input), (&["anthropic".to_string()][..], &Input::None), "enter picks one");
@@ -1498,7 +1616,6 @@ mod tests {
         assert_eq!(press(&mut a, "y"), None);
         press(&mut a, "n f ");
         assert_eq!((&a.input, a.store.marked.len()), (&Input::None, 0));
-        assert!(!a.store.is_fav(&a.current().unwrap().key.clone()));
     }
 
     #[test]
@@ -1724,6 +1841,54 @@ mod tests {
     }
 
     #[test]
+    fn f_favorites_a_model_for_the_task_at_hand() {
+        let mut a = app();
+        // No task in context: f asks which, listing every task.
+        assert_eq!(press(&mut a, "f"), None);
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len()));
+        press(&mut a, "j");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
+        assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
+        // In recommend, f starts on the task under the cursor, so f enter toggles it.
+        press(&mut a, "Rj");
+        assert_eq!(a.current().unwrap().key, "mini");
+        assert_eq!(press(&mut a, "f"), None);
+        assert!(matches!(&a.input, Input::Choose { sel: 1, items, .. } if items[1].0 == "☐ coding  (now gpt55)"));
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.favorite("coding"), Some("mini"));
+        assert!(a.status.starts_with("★ mini"));
+        // m ticks and keeps the list open, its boxes following.
+        press(&mut a, "f");
+        assert_eq!(press(&mut a, "m"), Some(Effect::Save));
+        assert_eq!(a.store.favorite("coding"), None, "again unfavorites");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items[1].0 == "☐ coding"));
+        press(&mut a, "km");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "☑ overall"));
+        press(&mut a, "m");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.input, a.store.favorite_for("mini").len()), (&Input::None, 0));
+        // A favorite model joins the task's line even off the frontier: opus5 has no coding score
+        // in this fixture, so llama4 (40, below the floor) stands in once it is shown with a.
+        press(&mut a, "R");
+        press(&mut a, "a");
+        a.store.toggle_favorite("coding", "llama4");
+        a.rebuild();
+        press(&mut a, "R");
+        assert_eq!(a.task_cur, 1, "still on coding");
+        let front: Vec<_> = a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
+        assert_eq!(front, ["llama4", "mini", "gpt55"], "cheapest first, the favorite one among them");
+        // enter shows the task in the table, where f acts on the picked task and ★ marks its model.
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(keys(&a), ["gpt55", "llama4", "mini"], "priciest first, then names: llama4 and mini both cost 1");
+        assert!(a.starred("llama4") && !a.starred("gpt55"));
+        press(&mut a, "ggf");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save), "f starts on the picked task");
+        assert_eq!(a.store.favorite("coding"), Some("gpt55"));
+        assert_eq!(keys(&a), ["gpt55", "mini"], "llama4 leaves the line with the fav");
+    }
+
+    #[test]
     fn shift_r_toggles_the_recommend_overlay() {
         let mut a = app();
         press(&mut a, "R");
@@ -1789,7 +1954,8 @@ mod tests {
     fn mark_only_marked_and_compare() {
         let mut a = app();
         assert_eq!(press(&mut a, "C"), None);
-        assert_eq!(a.view, View::Table);
+        assert_eq!(a.view, View::Compare, "opens to say models must be marked first");
+        code(&mut a, KeyCode::Esc);
         press(&mut a, "mjm");
         assert_eq!(a.store.marked, vec!["gpt55", "opus5"]);
         press(&mut a, "M");
@@ -1818,8 +1984,12 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.view, a.compare_query.as_str()), (&View::Compare, ""), "esc clears the filter first");
         assert_eq!(a.input, Input::None);
-        press(&mut a, "$f");
-        assert_eq!(a.selected(), 1, "f on the compared model leaves the table row alone");
+        press(&mut a, "$e");
+        assert!(
+            a.store.is_excluded("opus5") && a.selected() == 1,
+            "e on the compared model leaves the table row alone"
+        );
+        press(&mut a, "e");
         press(&mut a, "q");
         assert_eq!(a.input, Input::Quit, "q asks to quit from any view");
         code(&mut a, KeyCode::Esc);
@@ -1827,13 +1997,44 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table, "esc closes the overlay");
         press(&mut a, "Mc");
-        assert!(a.store.marked.is_empty() && !a.only_marked, "c clears the marks too");
-        assert_eq!(a.rows.len(), 3);
-        press(&mut a, "Gfggmjm");
-        press(&mut a, "MF");
-        assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "m and F together: marked or favorite");
-        press(&mut a, "F");
-        assert_eq!(keys(&a), ["gpt55", "opus5"], "F off again: marked only");
+        assert_eq!((a.marked_models().len(), a.only_marked, a.rows.len()), (2, false, 3), "c keeps them and leaves M");
+        press(&mut a, "GmM");
+        assert_eq!(keys(&a), ["gpt55", "opus5", "mini"]);
+        press(&mut a, "ggVGm");
+        assert_eq!(
+            (a.store.marked.len(), a.only_marked, a.rows.len()),
+            (0, false, 3),
+            "unmarking every marked model leaves M for every model"
+        );
+        press(&mut a, "U");
+        assert_eq!(a.status, "no marked models: m marks the one under the bar");
+        press(&mut a, "ggmjmM");
+        assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
+        assert_eq!((a.store.marked.len(), a.only_marked, a.rows.len()), (0, false, 3), "U unmarks all and leaves M");
+    }
+
+    #[test]
+    fn esc_backs_out_of_views_and_toggles_close_what_they_open() {
+        let mut a = app();
+        press(&mut a, "M");
+        assert_eq!((a.only_marked, a.status.as_str()), (false, "no marked models: m marks the one under the bar"));
+        press(&mut a, "mM/x");
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.query.as_str(), a.only_marked), ("", true), "esc clears the search first");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.only_marked, a.rows.len()), (false, 3), "then leaves M");
+        assert_eq!(a.store.marked, ["gpt55"], "without touching the marks");
+        press(&mut a, "Rj");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.task.is_some());
+        code(&mut a, KeyCode::Esc);
+        assert!(a.task.is_none(), "esc drops the task");
+        assert_eq!((&a.view, a.task_cur), (&View::Recommend, 1), "and goes back to recommend");
+        assert_eq!((a.sort_col, a.descending), (PRICE, false));
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "CC");
+        assert_eq!(a.view, View::Table, "C closes compare, as ? and R close theirs");
     }
 
     #[test]
@@ -1851,24 +2052,42 @@ mod tests {
         assert_eq!((a.visual, a.rows.len()), (None, 3), "esc cancels the range only");
         press(&mut a, "ggVjm");
         assert_eq!(a.store.marked, ["gpt55", "opus5"]);
-        press(&mut a, "Gf");
-        assert!(a.store.is_fav("mini") && !a.store.is_fav("gpt55"), "f on an unmarked row acts on it alone");
-        press(&mut a, "Gfggf");
+        press(&mut a, "Ge");
+        assert!(a.store.is_excluded("mini") && !a.store.is_excluded("gpt55"), "e on an unmarked row acts on it alone");
+        press(&mut a, "Gegge");
         assert!(
-            a.store.is_fav("gpt55") && a.store.is_fav("opus5") && !a.store.is_fav("mini"),
-            "f on a mark: all marks"
+            a.store.is_excluded("gpt55") && a.store.is_excluded("opus5") && !a.store.is_excluded("mini"),
+            "e on a mark: all marks"
         );
-        press(&mut a, "ggVjm");
+        press(&mut a, "ggVjjm");
+        assert_eq!(a.store.marked, ["gpt55", "opus5", "mini"], "m on a partly marked range marks the rest");
+        press(&mut a, "ggVjjm");
         assert!(a.store.marked.is_empty(), "m on an all-marked range unmarks it");
-        press(&mut a, "ggVGC");
-        assert_eq!((a.view, a.store.marked.len()), (View::Compare, 3), "C compares the range");
+        press(&mut a, "mGVkC");
+        assert_eq!(
+            (&a.view, a.marked_models().len()),
+            (&View::Compare, 2),
+            "C compares the range alone, the earlier mark dropped"
+        );
     }
 
     #[test]
-    fn favorites_notes_copy_open() {
+    fn box_click_toggles_the_mark_and_star_click_picks_tasks() {
         let mut a = app();
-        assert_eq!(press(&mut a, "f"), Some(Effect::Save));
-        assert!(a.store.is_fav("gpt55"));
+        assert_eq!(a.mouse(Mouse::Box(1)), Some(Effect::Save));
+        assert_eq!((a.selected(), a.store.is_marked("opus5")), (1, true), "☐ → ☑, and the bar goes there");
+        a.mouse(Mouse::Box(1));
+        assert!(!a.store.is_marked("opus5"), "☑ → ☐");
+        assert_eq!(a.mouse(Mouse::Star(2)), None);
+        assert!(a.choosing_favs() && a.selected() == 2, "the ☆ lists the tasks for its row");
+        assert_eq!(a.mouse(Mouse::Item(1)), Some(Effect::Save));
+        assert!(a.choosing_favs(), "a click ticks a task and keeps the list open");
+        assert_eq!(a.store.favorite("coding"), Some("mini"));
+    }
+
+    #[test]
+    fn notes_copy_open() {
+        let mut a = app();
         assert_eq!(press(&mut a, "nfast"), None);
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.note("gpt55"), Some("fast"));
@@ -1883,10 +2102,6 @@ mod tests {
         assert_eq!(press(&mut a, "y"), Some(Effect::Copy("p/gpt55".into())));
         a.data.models[0].name = "GPT 5.5".into();
         assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("GPT 5.5".into())));
-        press(&mut a, "F");
-        assert_eq!(keys(&a), ["gpt55"], "F shows favorites only");
-        press(&mut a, "c");
-        assert_eq!(a.rows.len(), 3, "c clears it");
     }
 
     #[test]
@@ -1907,8 +2122,14 @@ mod tests {
         assert!(a.refreshing && a.status.is_empty(), "only the ⟳ indicator says so");
         assert_eq!(press(&mut a, "r"), None);
         a.refreshed(Err("offline".into()));
+        assert!(a.failed && a.refresh_failed, "a failure is shown as one");
         assert_eq!(a.status, "refresh failed: offline");
         assert_eq!(press(&mut a, "r"), Some(Effect::Refresh));
+        assert!(!a.failed && a.status.is_empty() && a.refresh_failed, "the frame keeps saying it failed");
+        a.refreshed(Ok(Data::default()));
+        assert!(!a.refresh_failed, "until one succeeds");
+        a.report(Ok("done".into()));
+        assert!(!a.failed);
     }
 
     #[test]

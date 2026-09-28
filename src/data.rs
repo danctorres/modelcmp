@@ -291,7 +291,10 @@ pub fn load(force: bool) -> Result<(Data, Option<String>), String> {
         cached => match refresh() {
             Ok(d) => Ok((d, None)),
             Err(e) => match cached {
-                Some(d) => Ok((d, Some(format!("refresh failed ({e}); using cached data")))),
+                Some(d) => {
+                    let w = format!("refresh failed ({e}); using data {} old", crate::view::age(d.age()));
+                    Ok((d, Some(w)))
+                }
                 None => Err(format!("could not download model data: {e}")),
             },
         },

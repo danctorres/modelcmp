@@ -32,6 +32,15 @@ pub fn level_label(l: usize) -> String {
     }
 }
 
+/// How long ago the data was fetched: `5m`, `3h`, `2d`.
+pub fn age(d: std::time::Duration) -> String {
+    match d.as_secs() {
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 48 * 3600 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86400),
+    }
+}
+
 pub fn ctx(n: u64) -> String {
     match n {
         0 => "-".into(),
@@ -72,13 +81,27 @@ pub fn frontier<'m, T: Copy>(
 /// being the best model for the task. Each price level keeps only its best entry, since models
 /// that close in price are not worth choosing between. Models without a price or a score are
 /// left out, as are those under the `low` tier's floor: the frontier is a recommendation, and
-/// cheap alone is not one.
-pub fn task_frontier<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task) -> Vec<(&'a Model, f64)> {
-    let ranked: Vec<_> = fit::rank(models, t).into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
+/// cheap alone is not one. The `favorite` model (its key) joins the line whether or not it
+/// earns a place on it, as long as it is among `models`.
+pub fn task_frontier<'a>(
+    models: impl Iterator<Item = &'a Model>,
+    t: &fit::Task,
+    favorite: Option<&str>,
+) -> Vec<(&'a Model, f64)> {
+    let ranked = fit::rank(models, t);
+    let yours = favorite.and_then(|k| ranked.iter().find(|(m, _)| m.key == k).copied());
+    let ranked: Vec<_> = ranked.into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
     let mut v = frontier(&ranked, |(m, _)| m, |m| fit::fit(m, t));
+    let by_cost = |v: &mut Vec<(&Model, f64)>| {
+        v.sort_by(|a, b| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
+    };
     // Dearest first so dedup keeps the best of each level, then back to cheapest first.
-    v.sort_by(|a, b| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
+    by_cost(&mut v);
     v.dedup_by_key(|(m, _)| level(m.cost().unwrap_or(0.0)));
+    if let Some(p) = yours.filter(|p| !v.iter().any(|(m, _)| m.key == p.0.key)) {
+        v.push(p);
+        by_cost(&mut v);
+    }
     v.reverse();
     v
 }
@@ -104,15 +127,17 @@ pub fn usd(x: f64) -> String {
 pub fn frontier_legend(keyed: bool) -> String {
     format!(
         "best per price: name{}, $ blended 3:1 in:out per 1M tokens, (task percentile: rank among Epoch's models, \
-         not a quality gap), cheapest first and the best last; only models in the top half",
+         not a quality gap), cheapest first and the best last; only models in the top half, plus ★ your favorite",
         if keyed { " [key]" } else { "" }
     )
 }
 
-/// `name $price (score)` for a frontier entry, `name [key] $price (score)` with `keyed`.
-pub fn priced(m: &Model, s: f64, keyed: bool) -> String {
+/// `name $price (score)` for a frontier entry, `name [key] $price (score)` with `keyed`,
+/// `★ name ...` when it is your favorite for the task.
+pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
-    format!("{}{key} {} ({s:.0})", m.name, usd(m.cost().unwrap_or(0.0)))
+    let flag = if favorite { "★ " } else { "" };
+    format!("{flag}{}{key} {} ({s:.0})", m.name, usd(m.cost().unwrap_or(0.0)))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
@@ -192,25 +217,20 @@ pub fn visible<'a>(
     data: &'a Data,
     store: &'a Store,
     all: bool,
-    favs_only: bool,
+    marked_only: bool,
 ) -> impl Iterator<Item = (usize, &'a Model)> {
     let any = data.models.iter().any(|m| m.available);
     data.models
         .iter()
         .enumerate()
-        .filter(move |(_, m)| (all || !any || m.available) && (!favs_only || store.is_fav(&m.key)))
+        .filter(move |(_, m)| (all || !any || m.available) && (!marked_only || store.is_marked(&m.key)))
 }
 
 /// Everything about one model, one line per entry.
 pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     let yes = |b: bool| if b { "yes" } else { "no" };
     let mut v = vec![
-        format!(
-            "{}{}{}",
-            if store.is_fav(&m.key) { "★ " } else { "" },
-            m.name,
-            if store.is_excluded(&m.key) { " (excluded)" } else { "" }
-        ),
+        format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.developer)),
         format!("  via:        {}", via(&m.via)),
         format!("  context:    {} (max output {})", ctx(m.context), ctx(m.max_output)),
@@ -224,6 +244,10 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         format!("  released:   {}   knowledge: {}", or_dash(&m.release), or_dash(&m.knowledge)),
         format!("  pages:      {}", m.links().into_iter().map(|(_, u)| u).collect::<Vec<_>>().join("  ")),
         format!("  note:       {}", store.note(&m.key).unwrap_or("-")),
+        format!(
+            "  favorite for:  {}",
+            Some(store.favorite_for(&m.key).join(", ")).filter(|s| !s.is_empty()).unwrap_or("-".into())
+        ),
         String::new(),
         format!("  ECI {}", score(m.eci)),
         "  task fit (percentile vs all evaluated models):".into(),

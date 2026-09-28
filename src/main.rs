@@ -52,9 +52,9 @@ enum Cmd {
         /// Include models you have no access to
         #[arg(short, long)]
         all: bool,
-        /// Favorites only
+        /// Marked only: your shortlist (`M` in the TUI)
         #[arg(short, long)]
-        favorites: bool,
+        marked: bool,
         /// Only these developers, e.g. --dev anthropic --dev openai (the Dev dropdown, `d`, in the TUI)
         #[arg(long)]
         dev: Vec<String>,
@@ -93,8 +93,8 @@ enum Cmd {
         #[arg(long, default_value = "openrouter")]
         on: String,
     },
-    /// Mark a model as a favorite (`f` in the TUI)
-    Fav {
+    /// Mark a model, to shortlist it: `list --marked` shows them (`m` in the TUI)
+    Mark {
         model: String,
         /// Remove it instead
         #[arg(long)]
@@ -114,6 +114,16 @@ enum Cmd {
         text: Option<String>,
         /// Delete the note
         #[arg(long)]
+        rm: bool,
+    },
+    /// Your favorite model for a task: --tier picks it and recommend marks it ★; alone, shows them (`f` in the TUI)
+    Fav {
+        #[arg(value_parser = tasks())]
+        task: Option<String>,
+        #[arg(requires = "task", conflicts_with = "rm")]
+        model: Option<String>,
+        /// Clear the task's favorite
+        #[arg(long, requires = "task")]
         rm: bool,
     },
     /// The best model per price for each task, what the task measures and when to use it (`R` in the TUI)
@@ -167,22 +177,23 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // clap has already validated task names against fit::TASKS.
     let task = |t: Option<String>| t.and_then(|t| fit::task(&t));
     match cmd {
-        Cmd::List { task: t, tier, sort, min, max, all, favorites, dev, via, limit, json, id } => {
+        Cmd::List { task: t, tier, sort, min, max, all, marked, dev, via, limit, json, id } => {
             let bounds = min
                 .into_iter()
                 .map(|(c, v)| (c, v, f64::INFINITY))
                 .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
                 .collect();
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
-            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, favorites, dev, via, limit, json, id };
+            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, marked, dev, via, limit, json, id };
             cli::list(&data, &store, &opts)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
         Cmd::Open { model, on } => cli::open(&data, &model, &on),
-        Cmd::Fav { model, rm } => cli::fav(&data, &mut store, &model, rm),
+        Cmd::Mark { model, rm } => cli::mark(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
+        Cmd::Fav { task, model, rm } => cli::fav(&data, &mut store, task.as_deref(), model.as_deref(), rm),
         Cmd::Recommend { json } => cli::recommend(&data, &store, json),
     }
 }

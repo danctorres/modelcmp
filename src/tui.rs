@@ -7,12 +7,13 @@
 //! terminal themes modelcmp too, and nothing paints a background over a transparent one.
 
 use crate::app::{
-    App, COLS, Effect, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, col_about, col_name, has_menu, menu_rows,
+    App, COLS, ECI, Effect, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, col_about, col_name, has_menu,
+    menu_rows,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
-use crate::view::{compare_rows, detail_lines, frontier_legend, hits, level, money, priced, truncate, verdict};
+use crate::view::{age, compare_rows, detail_lines, frontier_legend, hits, level, money, priced, truncate, verdict};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -65,10 +66,11 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
     loop {
         if dirty {
             terminal.draw(|f| draw(app, f)).map_err(|e| e.to_string())?;
-            dirty = false;
         }
-        // Block on input; wake periodically only while a refresh is in flight.
-        let timeout = if rx.is_some() { Duration::from_millis(200) } else { Duration::from_secs(3600) };
+        // Block on input; wake every 200ms while a refresh is in flight, else once a minute to
+        // repaint the data age in the frame.
+        let timeout = if rx.is_some() { Duration::from_millis(200) } else { Duration::from_secs(60) };
+        dirty = rx.is_none();
         // Handle every queued event before the next draw, so a held key never falls behind.
         let mut wait = timeout;
         while event::poll(wait).map_err(|e| e.to_string())? {
@@ -86,28 +88,28 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                     Some(Effect::Quit) => return Ok(()),
                     Some(Effect::Save) => {
                         if let Err(e) = app.store.save() {
-                            app.status = format!("could not save: {e}");
+                            app.report(Err(format!("could not save: {e}")));
                         }
                     }
-                    Some(Effect::Open(url)) => {
-                        app.status = match open::that_detached(&url) {
-                            Ok(()) => format!("opened {url}"),
-                            Err(e) => format!("could not open {url}: {e}"),
-                        }
-                    }
-                    Some(Effect::Copy(text)) => {
-                        app.status =
-                            if copy(&text) { format!("copied {text}") } else { "no clipboard tool found".into() };
-                    }
+                    Some(Effect::Open(url)) => app.report(match open::that_detached(&url) {
+                        Ok(()) => Ok(format!("opened {url}")),
+                        Err(e) => Err(format!("could not open {url}: {e}")),
+                    }),
+                    Some(Effect::Copy(text)) => app.report(if copy(&text) {
+                        Ok(format!("copied {text}"))
+                    } else {
+                        Err("no clipboard tool found".into())
+                    }),
                     Some(Effect::Refresh) => rx = Some(spawn_refresh()),
                     Some(Effect::Launch(cmd)) => {
                         let line = cmd.join(" ");
-                        app.status = match new_terminal(&cmd) {
-                            Ok(()) => format!("opened {line} in a new terminal"),
-                            Err(e) => format!("could not open a terminal for {line}: {e}; set $TERMINAL"),
-                        };
+                        app.report(match new_terminal(&cmd) {
+                            Ok(()) => Ok(format!("opened {line} in a new terminal")),
+                            Err(e) => Err(format!("could not open a terminal for {line}: {e}; set $TERMINAL")),
+                        });
                     }
-                    None => {}
+                    // The app applies its own chooser items before they get here.
+                    Some(Effect::Fav(_)) | None => {}
                 }
             }
             dirty = true;
@@ -186,8 +188,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     if m.row > inner.y {
         let n = app.table.offset() + (m.row - inner.y - 1) as usize;
+        // The checkbox right of the row number toggles the mark; the ☆ after it picks the tasks.
+        let (num_w, x) = (l.name_x - 5, m.column - inner.x);
         return Some(if mark {
             Mouse::Mark(n)
+        } else if (num_w + 1..num_w + 3).contains(&x) {
+            Mouse::Box(n)
+        } else if (num_w + 3..num_w + 5).contains(&x) {
+            Mouse::Star(n)
         } else if pick {
             Mouse::Pick(n)
         } else {
@@ -264,7 +272,7 @@ const NAME_MIN: u16 = 16;
 fn hints(app: &App) -> Vec<&'static str> {
     match app.view {
         View::Table if app.selecting() => {
-            vec!["j k G extend", "m mark", "e exclude", "f fav", "C compare", "esc cancel"]
+            vec!["j k G extend", "m mark", "e exclude", "C compare", "esc cancel"]
         }
         View::Table => {
             let mut v = vec![
@@ -276,18 +284,22 @@ fn hints(app: &App) -> Vec<&'static str> {
                 "enter details",
                 "x launch",
                 "> < bound",
-                "a all",
-                "F favorites",
+                if app.all { "a yours only" } else { "a all" },
                 "s sort",
                 "h l column",
             ];
             if has_menu(app.col) {
                 v.push("d dropdown");
             }
-            if !app.store.marked.is_empty() {
+            if app.only_marked {
+                v.push("M every model");
+            } else if app.any_marked() {
                 v.push("M marked only");
             }
-            if app.store.marked.len() >= 2 {
+            if !app.store.marked.is_empty() {
+                v.push("U unmark all");
+            }
+            if app.marked_models().len() >= 2 {
                 v.push("C compare");
             }
             if !app.query.is_empty()
@@ -296,17 +308,21 @@ fn hints(app: &App) -> Vec<&'static str> {
                 || !app.via.is_empty()
                 || app.task.is_some()
                 || app.only_marked
-                || app.favs
             {
                 v.push("c clear");
             }
             v.extend(["/ filter", "R recommend", "? help"]);
+            // Where esc goes back from, as in the overlays.
+            if app.only_marked || app.task.is_some() {
+                v.push("esc back");
+            }
             v
         }
         View::Detail => {
             vec!["f fav", "e exclude", "n note", "y copy id", "o open", "x launch", "j k scroll", "esc back"]
         }
         View::Help => vec!["j k scroll", "esc back"],
+        View::Compare if app.marked_models().len() < 2 => vec!["esc back"],
         View::Compare => {
             vec![
                 "h l 0 $ model",
@@ -342,8 +358,19 @@ const KEY: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
-const MARK: Color = Color::Magenta;
-const FAV: Color = Color::Yellow;
+const MARK: Color = Color::LightBlue;
+/// One colour per task in `TASKS` order: the ★ of its favorite, its column header and its
+/// name in recommend. Off the mark colour (☑ light blue), the key hints' cyan,
+/// red for the worst value and yellow for a match.
+const TASK: [Color; 7] = [
+    Color::LightCyan,
+    Color::Green,
+    Color::LightGreen,
+    Color::Blue,
+    Color::LightMagenta,
+    Color::LightYellow,
+    Color::LightRed,
+];
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
 /// Each developer and harness gets a stable colour from these; the five harness names all differ.
@@ -360,6 +387,16 @@ fn dev_color(dev: &str) -> Color {
     DEVS[dev.bytes().map(usize::from).sum::<usize>() % DEVS.len()]
 }
 
+fn task_color(task: &str) -> Color {
+    TASK[TASKS.iter().position(|t| t.name == task).unwrap_or(0)]
+}
+
+/// The task a numeric column scores, for its colour: ECI is the overall task.
+fn col_task(i: usize) -> Option<&'static str> {
+    let id = if i + 2 == ECI { "overall" } else { COLS.get(i)?.id };
+    fit::task(id).map(|t| t.name)
+}
+
 fn draw(app: &mut App, f: &mut Frame) {
     let area = f.area();
     if area.height < 4 || area.width < 4 {
@@ -367,21 +404,28 @@ fn draw(app: &mut App, f: &mut Frame) {
     }
     let body = Rect { height: area.height - 1, ..area };
     let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
-    let age = app.data.age().as_secs();
-    let age = if age < 3600 { format!("{}m", age / 60) } else { format!("{}h", age / 3600) };
+    // The refresh state is always in view: under way, failed, or how old the data is.
+    let age = format!("data {} old ", age(app.data.age()));
+    let (state, color) = match (app.refreshing, app.refresh_failed, app.data.stale()) {
+        (true, ..) => ("⟳ refreshing ".to_string(), Color::Yellow),
+        (_, true, _) => (format!("refresh failed · {age}"), BAD),
+        (_, _, true) => (age, BAD),
+        _ => (age, MUTED),
+    };
     let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, col_name(app.sort_col));
-    // What the column under the cursor means, centred and cut to clear the wider of the name
-    // (` ◆ modelcmp ` and its corner) and the sort on either side.
-    let side = 14.max(sort.chars().count() + 2);
+    // What the column under the cursor means, centred and cut to clear the sort on either side.
+    let side = sort.chars().count() + 2;
     let room = (body.width as usize).saturating_sub(2 * side).max(1);
     let about = truncate(&format!(" {}: {} ", col_name(app.col), col_about(app.col)), room);
     let frame = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(fg(MUTED))
-        .title_top(Line::from(" ◆ modelcmp ").style(fg(ACCENT).add_modifier(BOLD)))
         .title_top(Line::from(about).style(fg(MUTED)).centered())
         .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
-        .title_bottom(Line::from(format!(" models.dev + Epoch AI · data {age} old ")).style(fg(MUTED)).right_aligned());
+        .title_bottom(
+            Line::from(vec![Span::styled(" models.dev + Epoch AI · ", fg(MUTED)), Span::styled(state, fg(color))])
+                .right_aligned(),
+        );
     let inner = frame.inner(body);
     app.page = inner.height.saturating_sub(1);
     let buf = f.buffer_mut();
@@ -402,6 +446,19 @@ fn draw(app: &mut App, f: &mut Frame) {
             Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(100))))
         }
         View::Detail => app.current().map(|m| (detail_lines(m, &app.store).swap_remove(0), detail(m, &app.store))),
+        View::Compare if app.marked_models().len() < 2 => {
+            let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
+            let n = app.marked_models().len();
+            let lines = vec![
+                Line::from(format!("compare needs 2 or more marked models, {n} now")),
+                Line::from(""),
+                Line::from(vec![key("esc"), Span::raw(" back to the table, then")]),
+                Line::from(vec![key("m"), Span::raw(" marks the model under the bar, or")]),
+                Line::from(vec![key("V"), Span::raw(" / shift+click selects a range, and")]),
+                Line::from(vec![key("C"), Span::raw(" compares them")]),
+            ];
+            Some(("compare".into(), lines))
+        }
         View::Compare => {
             let (lines, first) = compare(
                 &app.marked_models(),
@@ -444,7 +501,7 @@ fn draw(app: &mut App, f: &mut Frame) {
 /// Column layout relative to the table's left edge. A numeric column is as wide as its header
 /// plus the sort arrow or its widest value, so neighbours always sit `GAP` apart whatever the filter.
 struct Layout {
-    /// Where Model starts: right of the row numbers and the ★● marks.
+    /// Where Model starts: right of the row numbers, the checkbox and the ☆.
     name_x: u16,
     name_w: u16,
     dev_w: u16,
@@ -472,8 +529,9 @@ fn layout(width: u16, app: &App) -> Layout {
         ms.iter().map(|m| m.via.iter().map(|v| v.len() + 1).sum::<usize>()).max().unwrap_or(0).clamp(6, 24) as u16;
     let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(str::len).max().unwrap_or(0).clamp(6, 40) as u16;
     let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
-    // Row numbers as wide as the last one, a space, then ★ and ● each followed by a spare
-    // cell: some terminals draw them two cells wide, and the spare keeps that off the neighbour.
+    // Row numbers as wide as the last one, a space, then the checkbox and the ☆, each with a
+    // spare cell: some terminals draw them two cells wide, and the
+    // spare keeps that off the neighbour.
     let name_x = app.rows.len().max(1).to_string().len() as u16 + 5;
     // The columns right of Dev scroll sideways: only as far as it takes to show the selected
     // one, keeping the last position otherwise. Model and Dev stay put.
@@ -521,11 +579,16 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         true => "▲",
         false => "",
     };
-    let header = |i: usize| match i == app.col {
-        true => fg(ACCENT).add_modifier(BOLD | Modifier::REVERSED),
-        false => fg(ACCENT).add_modifier(BOLD),
+    let header = |i: usize| {
+        let color = i.checked_sub(2).and_then(col_task).map_or(ACCENT, task_color);
+        match i == app.col {
+            true => fg(color).add_modifier(BOLD | Modifier::REVERSED),
+            false => fg(color).add_modifier(BOLD),
+        }
     };
-    let (num_w, marks_x) = (name_x as usize - 5, area.x + name_x - 4);
+    // The marks: the checkbox, then the ☆.
+    let num_w = (name_x - 5) as usize;
+    let (box_x, star_x) = (area.x + num_w as u16 + 1, area.x + num_w as u16 + 3);
     let (y, name_x, dev_x) = (area.y, area.x + name_x, area.x + name_x + name_w + GAP);
     let (nw, dw) = (name_w as usize, dev_w as usize);
     buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
@@ -564,11 +627,17 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         let tint = |c: Color| if on { base } else { fg(c) };
         buf.set_style(Rect { y, height: 1, ..area }, base);
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
-        if app.store.is_fav(&m.key) {
-            buf.set_stringn(marks_x, y, "★", 1, tint(FAV));
-        }
-        if app.store.marked.contains(&m.key) {
-            buf.set_stringn(marks_x + 2, y, "●", 1, tint(MARK).add_modifier(BOLD));
+        match app.store.is_marked(&m.key) {
+            true => buf.set_stringn(box_x, y, "☑", 1, tint(MARK)),
+            false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
+        };
+        if app.starred(&m.key) {
+            // In the colour of the task at hand, as its header; plain with no task, as the ★
+            // then stands for any of them.
+            let star = app.task_at_hand().map_or(base, |t| tint(task_color(t.name)));
+            buf.set_stringn(star_x, y, "★", 1, star);
+        } else {
+            buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
         let name = if m.available || !any { base } else { tint(MUTED) };
         buf.set_stringn(name_x, y, &m.name, nw, name);
@@ -581,8 +650,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             let style = match ext[i] {
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
                 _ if i + 2 == PRICE => tint(LEVEL[level(v)]),
-                Some((best, _)) if v == best => base.patch(fg(GOOD)).add_modifier(BOLD),
-                Some((_, worst)) if v == worst => base.patch(fg(BAD)),
+                Some((best, _)) if v == best => tint(GOOD).add_modifier(BOLD),
+                Some((_, worst)) if v == worst => tint(BAD),
                 _ => base,
             };
             let w = w as usize;
@@ -650,7 +719,7 @@ fn menu_box(area: Rect, x: u16, items: &[(String, usize)], rows: usize) -> Optio
 /// The list under a header opened with `d`, each entry with how many models it would show,
 /// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
 /// listed; the width fits every entry so the box keeps still while typing. `picked` entries
-/// carry a check mark.
+/// show `☑`, the rest `☐`.
 #[allow(clippy::too_many_arguments)]
 fn dropdown(
     buf: &mut Buffer,
@@ -681,7 +750,12 @@ fn dropdown(
         };
         let tint = |c: Color| if k == sel { base } else { fg(c) };
         buf.set_style(Rect { y, height: 1, ..inner }, base);
-        let mark = if picked.contains(label) { "✓ " } else { "  " };
+        // Checkboxes as on the table's marks; "any" clears the picks, so it has none.
+        let mark = match i {
+            0 => "  ",
+            _ if picked.contains(label) => "☑ ",
+            _ => "☐ ",
+        };
         let x = buf.set_stringn(inner.x + 1, y, mark, 2, tint(color)).0;
         let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, tint(color)).0;
         buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, tint(MUTED));
@@ -718,6 +792,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         (Input::Choose { items, .. }, _) if matches!(items.first(), Some((_, Effect::Launch(_)))) => {
             ("LAUNCH", Color::Green)
         }
+        (Input::Choose { .. }, _) if app.choosing_favs() => ("FAV", Color::Green),
         (Input::Choose { .. }, _) => ("OPEN", Color::Green),
         (Input::None, View::Table) if app.selecting() => ("VISUAL", Color::Yellow),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
@@ -754,8 +829,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             _ => (false, true),
         };
         let hint = match (menu, typing) {
-            (true, false) => "j k move  / search  enter pick  space toggle  esc close",
-            (true, true) => "↓ ↑ move  enter pick  space toggle  esc clear",
+            (true, false) => "j k move  / search  enter pick  m toggle  esc close",
+            (true, true) => "↓ ↑ move  enter pick  esc clear",
             _ => "enter apply  esc cancel",
         };
         let hx = area.right().saturating_sub(hint.len() as u16 + 1);
@@ -770,24 +845,35 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         (false, false) => "all (no access found)",
         (true, _) => "all",
     };
-    let mut parts = vec![(format!("{} {scope}", app.rows.len()), Color::Reset)];
-    if app.favs {
-        parts.push(("★ only".into(), FAV));
+    let part = |s: String, c: Color| Line::styled(s, fg(c));
+    let mut parts = vec![part(format!("{} {scope}", app.rows.len()), Color::Reset)];
+    if app.any_marked() {
+        let n = app.store.marked.len();
+        parts.push(part(format!("{n} marked{}", if app.only_marked { " only" } else { "" }), MARK));
     }
-    if !app.store.marked.is_empty() {
-        parts.push((format!("{} marked{}", app.store.marked.len(), if app.only_marked { " only" } else { "" }), MARK));
+    // The tasks the model under the cursor is the favorite for, each ★ in its task's colour as
+    // on its header: the row's single ★ does not say which.
+    if let Some(m) = app.current() {
+        let tasks = app.store.favorite_for(&m.key);
+        if !tasks.is_empty() {
+            let spans = tasks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| Span::styled(format!("{}★ {t}", if i > 0 { " " } else { "" }), fg(task_color(t))));
+            parts.push(Line::from(spans.collect::<Vec<_>>()));
+        }
     }
     if !app.query.is_empty() {
-        parts.push((format!("/{}", app.query), Color::Yellow));
+        parts.push(part(format!("/{}", app.query), Color::Yellow));
     }
     if let Some(t) = app.task {
-        parts.push((format!("best {} per price", t.name), Color::Yellow));
+        parts.push(part(format!("best {} per price", t.name), Color::Yellow));
     }
     if !app.dev.is_empty() {
-        parts.push((format!("Dev={}", app.dev.join(",")), Color::Yellow));
+        parts.push(part(format!("Dev={}", app.dev.join(",")), Color::Yellow));
     }
     if !app.via.is_empty() {
-        parts.push((format!("Via={}", app.via.join(",")), Color::Yellow));
+        parts.push(part(format!("Via={}", app.via.join(",")), Color::Yellow));
     }
     for &(col, lo, hi) in &app.bounds {
         let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
@@ -797,17 +883,14 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             Some(c) => (c.show)(v),
             None => v.to_string(),
         };
-        parts.push((format!("{}{sign}{shown}", col_name(col)), Color::Yellow));
-    }
-    if app.refreshing {
-        parts.push(("⟳ refreshing".into(), Color::Yellow));
+        parts.push(part(format!("{}{sign}{shown}", col_name(col)), Color::Yellow));
     }
     if !app.status.is_empty() {
-        parts.push((app.status.clone(), GOOD));
+        parts.push(part(app.status.clone(), if app.failed { BAD } else { GOOD }));
     }
     // Key hints fill what the left side leaves free; whole hints drop from the front on
     // narrow terminals, and `? help` is the last to go.
-    let left = x as usize + parts.iter().map(|(p, _)| p.chars().count() + 3).sum::<usize>();
+    let left = x as usize + parts.iter().map(|p| p.width() + 3).sum::<usize>();
     let all = hints(app);
     let mut hints = &all[..];
     while hints.len() > 1 && left + hints.join("  ").chars().count() + 1 > width {
@@ -815,11 +898,13 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     }
     let right = hints.join("  ").chars().count() as u16;
     let limit = area.right().saturating_sub(right + 1);
-    for (i, (text, color)) in parts.iter().enumerate() {
+    for (i, line) in parts.iter().enumerate() {
         if i > 0 {
             x = buf.set_stringn(x, area.y, " · ", limit.saturating_sub(x) as usize, fg(MUTED)).0;
         }
-        x = buf.set_stringn(x, area.y, text, limit.saturating_sub(x) as usize, fg(*color)).0;
+        for span in &line.spans {
+            x = buf.set_stringn(x, area.y, &span.content, limit.saturating_sub(x) as usize, span.style).0;
+        }
     }
     // Hints: the key in colour, what it does in plain text.
     let mut x = area.right().saturating_sub(right);
@@ -839,13 +924,21 @@ fn choice_lines(items: &[(String, Effect)], sel: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = items
         .iter()
         .enumerate()
-        .map(|(i, (label, _))| {
-            let first = label.split(' ').next().unwrap_or_default();
-            let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(dev_color(first)) };
+        .map(|(i, (label, effect))| {
+            // f's tasks in their colours, harnesses and sites in theirs.
+            let color = match effect {
+                Effect::Fav(t) => task_color(t),
+                _ => dev_color(label.split(' ').next().unwrap_or_default()),
+            };
+            let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(color) };
             Line::from(format!(" {label} ")).style(style)
         })
         .collect();
-    lines.push(Line::from(" j k move · enter opens").style(fg(MUTED)));
+    let hint = match items.first() {
+        Some((_, Effect::Fav(_))) => " j k move · m toggle · enter toggle and close · esc close",
+        _ => " j k move · enter opens",
+    };
+    lines.push(Line::from(hint).style(fg(MUTED)));
     lines
 }
 
@@ -896,12 +989,15 @@ fn help() -> Vec<Line<'static>> {
         })
         .collect();
     v.push(Line::default());
-    v.push(heading("Columns (green: best shown, red: worst)"));
+    v.push(heading("Columns (green: best shown, red: worst; a task's column, its ★ and its name share a colour)"));
     for c in 0..NCOLS {
         v.push(Line::from(vec![Span::styled(format!("{:<11}", col_name(c)), fg(KEY)), Span::raw(col_about(c))]));
     }
     v.push(Line::default());
-    v.push(Line::from(format!("Favorites, exclusions and notes: {}", crate::store::path().display())).style(fg(MUTED)));
+    v.push(
+        Line::from(format!("Marks, exclusions, notes and favorites: {}", crate::store::path().display()))
+            .style(fg(MUTED)),
+    );
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
     v
 }
@@ -912,11 +1008,11 @@ fn help() -> Vec<Line<'static>> {
 fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
     let cur = app.current().map(|m| m.key.clone());
     let name = |i: usize, s: String| {
-        let style = fg(KEY).add_modifier(BOLD);
+        let style = fg(TASK[i]).add_modifier(BOLD);
         Span::styled(s, if i == app.task_cur { style.add_modifier(Modifier::REVERSED) } else { style })
     };
     let label = |s: &'static str| vec![Span::styled(s, fg(MUTED))];
-    let words = |s: &str| s.split(' ').map(|w| Span::raw(w.to_string())).collect();
+    let words = |s: &str| s.split(' ').map(|w| Line::from(w.to_string())).collect();
     let space = Span::raw(" ");
     let mut v: Vec<Line> = wrapped(vec![], words(&frontier_legend(false)), space.clone(), width)
         .into_iter()
@@ -934,7 +1030,7 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
             width,
         ));
         if !t.benches.is_empty() {
-            let benches = t.benches.iter().map(|b| Span::raw(*b)).collect();
+            let benches = t.benches.iter().map(|b| Line::from(*b)).collect();
             v.extend(
                 wrapped(label("  benchmarks:      "), benches, Span::raw(", "), width)
                     .into_iter()
@@ -943,7 +1039,9 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
         }
     }
     v.push(Line::default());
-    let cli = words("CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high]");
+    let cli = words(
+        "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model>",
+    );
     v.extend(wrapped(vec![], cli, space, width).into_iter().map(|l| l.style(fg(MUTED))));
     v
 }
@@ -952,7 +1050,7 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
 /// lines indented to the label. A break keeps the glue's punctuation ("," or " ·") at the end.
 fn wrapped(
     label: Vec<Span<'static>>,
-    items: Vec<Span<'static>>,
+    items: Vec<Line<'static>>,
     glue: Span<'static>,
     width: usize,
 ) -> Vec<Line<'static>> {
@@ -974,29 +1072,31 @@ fn wrapped(
             cur.push(glue.clone());
         }
         w += item.width();
-        cur.push(item);
+        cur.extend(item.spans);
     }
     lines.push(Line::from(cur));
     lines
 }
 
 /// `name $price (score)` for each entry of the task's price frontier, cheapest first and the
-/// best last, each in its price level's colour as in the Price column. The `picked` model is
-/// a reverse-video bar, colour kept off it as in the table.
-fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Span<'static>> {
+/// best last, each in its price level's colour as in the Price column, the favorite's ★ in
+/// the task's colour. The `picked` model is a reverse-video bar, colour kept off it as in the table.
+fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'static>> {
     let front = app.task_frontier(t);
     if front.is_empty() {
-        return vec![Span::styled("no data", fg(MUTED))];
+        return vec![Line::from(Span::styled("no data", fg(MUTED)))];
     }
     front
         .iter()
         .map(|(m, s)| {
-            let style = if picked == Some(m.key.as_str()) {
-                Style::new().add_modifier(Modifier::REVERSED)
-            } else {
-                fg(LEVEL[level(m.cost().unwrap_or(0.0))])
-            };
-            Span::styled(priced(m, *s, false), style)
+            let on = picked == Some(m.key.as_str());
+            let tint = |c: Color| if on { Style::new().add_modifier(Modifier::REVERSED) } else { fg(c) };
+            let mut spans = Vec::with_capacity(2);
+            if app.store.favorite(t.name) == Some(m.key.as_str()) {
+                spans.push(Span::styled("★ ", tint(task_color(t.name))));
+            }
+            spans.push(Span::styled(priced(m, *s, false, false), tint(LEVEL[level(m.cost().unwrap_or(0.0))])));
+            Line::from(spans)
         })
         .collect()
 }
@@ -1154,6 +1254,24 @@ mod tests {
         (buf, lines)
     }
 
+    #[test]
+    fn marked_row_is_checked_and_coloured() {
+        let mut a = app();
+        a.store.marked = vec!["flash".into()];
+        let (buf, lines) = render(&mut a, 120, 4);
+        let row = |m: &str| lines.iter().position(|l| l.contains(m)).unwrap() as u16;
+        let (opus, flash) = (row("opus"), row("flash"));
+        assert!(lines[flash as usize].contains('☑') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
+        let box_x = cell(&lines[flash as usize], "☑");
+        assert_eq!(buf[(box_x, flash)].fg, MARK, "the ☑ is in the mark colour");
+        assert!((0..120).all(|x| buf[(x, flash)].bg != MARK), "the row itself is not highlighted");
+    }
+
+    /// The cell where `pat` starts on `line`, which may hold multi-byte glyphs before it.
+    fn cell(line: &str, pat: &str) -> u16 {
+        line[..line.find(pat).unwrap()].chars().count() as u16
+    }
+
     fn words(line: &str) -> Vec<&str> {
         line.split_whitespace().collect()
     }
@@ -1165,7 +1283,7 @@ mod tests {
         a.rebuild();
         let (buf, lines) = render(&mut a, 120, 4);
         let row = &lines[1];
-        let (name, dev) = (row.find("flash").unwrap() as u16, row.find("google").unwrap() as u16);
+        let (name, dev) = (cell(row, "flash"), cell(row, "google"));
         let under = |x: u16| buf[(x, 1)].modifier.contains(Modifier::UNDERLINED);
         assert!((name..name + 3).all(under) && !under(name + 3), "fla of flash");
         assert!((dev..dev + 3).all(under) && !under(dev + 3), "goo of google");
@@ -1173,8 +1291,8 @@ mod tests {
         a.query = "refac".into();
         a.rebuild();
         let (buf, lines) = render(&mut a, 200, 4);
-        assert_eq!((a.rows.len(), words(&lines[1])[1]), (1, "opus"), "notes are searched");
-        let x = lines[1].find("refactors").unwrap() as u16;
+        assert_eq!((a.rows.len(), words(&lines[1])[3]), (1, "opus"), "notes are searched");
+        let x = cell(&lines[1], "refactors");
         let under = |x: u16| buf[(x, 1)].modifier.contains(Modifier::UNDERLINED);
         assert!((x..x + 5).all(under) && !under(x + 5), "refac of the note");
         a.query = "openc".into();
@@ -1198,13 +1316,15 @@ mod tests {
             dev_color("opencode"),
             "harnesses are coloured"
         );
-        assert_eq!(&words(&lines[1])[..8], ["1", "opus", "anthropic", "5.0", "5.0", "5.0", "200k", "150"]);
-        assert_eq!(&words(&lines[2])[..8], ["2", "flash", "google", "0.10", "0.10", "0.10", "200k", "120"]);
+        assert_eq!(&words(&lines[1])[..9], ["1", "☐", "☆", "opus", "anthropic", "5.0", "5.0", "5.0", "200k"]);
+        assert_eq!(&words(&lines[2])[..9], ["2", "☐", "☆", "flash", "google", "0.10", "0.10", "0.10", "200k"]);
         assert!(lines[4].starts_with(" NORMAL  2 available"), "{}", lines[4]);
         assert!(lines[4].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[4]);
         assert!(buf[(0, 1)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
+        assert!((0..200).all(|x| buf[(x, 1)].fg == Color::Reset), "no colour breaks the selection bar");
         assert_eq!(buf[(0, 2)].fg, MUTED, "row numbers are muted");
-        assert_eq!(buf[(4, 2)].fg, Color::Reset, "names are plain text");
+        assert_eq!(buf[(cell(&lines[2], "flash"), 2)].fg, Color::Reset, "names are plain text");
+        assert_eq!(buf[(cell(&lines[2], "☆"), 2)].fg, MUTED, "the empty ☆ is muted");
         assert_eq!(buf[(lines[2].find("google").unwrap() as u16, 2)].fg, dev_color("google"));
         // Screen column of a byte offset: `▾` takes several bytes.
         let x = |i: usize| lines[2][..i].chars().count() as u16;
@@ -1225,18 +1345,19 @@ mod tests {
         assert!(lines[7].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[7]);
         a.key(KeyCode::Char('d').into());
         let (buf, lines) = render(&mut a, 170, 8);
-        let dev = lines[0].find("Dev").unwrap() - 2;
-        assert!(lines[1][dev..].starts_with("╭────────────────╮"), "{}", lines[1]);
-        assert_eq!(&words(&lines[2])[2..5], ["│", "any", "2"]);
-        assert_eq!(&words(&lines[3])[..3], ["│", "anthropic", "1"]);
+        let dev = cell(&lines[0], "Dev") as usize - 2;
+        let from = |l: &str| l.chars().skip(dev).collect::<String>();
+        assert!(from(&lines[1]).starts_with("╭────────────────╮"), "{}", lines[1]);
+        assert_eq!(&words(&lines[2])[4..7], ["│", "any", "2"]);
+        assert_eq!(&words(&lines[3])[..4], ["│", "☐", "anthropic", "1"]);
         assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
         for c in "/anth".chars() {
             a.key(KeyCode::Char(c).into());
         }
         let (_, lines) = render(&mut a, 170, 8);
-        assert_eq!(&words(&lines[3])[..3], ["│", "anthropic", "1"], "only matches are listed");
-        assert!(lines[4][dev..].starts_with("╰"), "{}", lines[4]);
+        assert_eq!(&words(&lines[3])[..4], ["│", "☐", "anthropic", "1"], "only matches are listed");
+        assert!(from(&lines[4]).starts_with("╰"), "{}", lines[4]);
         assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
     }
 
@@ -1256,11 +1377,13 @@ mod tests {
             row: y,
             modifiers: KeyModifiers::NONE,
         };
-        assert_eq!(hit(&a, area, click(3, 3)), Some(Mouse::Row(1)));
+        assert_eq!(hit(&a, area, click(12, 3)), Some(Mouse::Row(1)));
+        assert_eq!(hit(&a, area, click(3, 3)), Some(Mouse::Box(1)), "a click on the checkbox cycles it");
+        assert_eq!(hit(&a, area, click(5, 3)), Some(Mouse::Star(1)), "and on the ☆ picks tasks");
         let right = |x, y| MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), ..click(x, y) };
-        assert_eq!(hit(&a, area, right(3, 3)), Some(Mouse::Mark(1)), "right click marks");
+        assert_eq!(hit(&a, area, right(12, 3)), Some(Mouse::Mark(1)), "right click marks");
         let ctrl = |x, y| MouseEvent { modifiers: KeyModifiers::CONTROL, ..click(x, y) };
-        assert_eq!(hit(&a, area, ctrl(3, 3)), Some(Mouse::Pick(1)), "ctrl click picks");
+        assert_eq!(hit(&a, area, ctrl(12, 3)), Some(Mouse::Pick(1)), "ctrl click picks");
         let drag = |x, y| MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), ..click(x, y) };
         assert_eq!(hit(&a, area, drag(3, 4)), Some(Mouse::Extend(2)));
         let shift = |x, y| MouseEvent { modifiers: KeyModifiers::SHIFT, ..click(x, y) };
@@ -1292,41 +1415,113 @@ mod tests {
     }
 
     #[test]
+    fn favorite_models_get_a_star() {
+        let mut a = app();
+        a.store.toggle_favorite("coding", "opus");
+        a.store.toggle_favorite("agentic", "opus");
+        let (_, lines) = render(&mut a, 120, 5);
+        let row = |m: &str| lines.iter().find(|l| l.contains(m)).unwrap().clone();
+        assert!(row("opus").contains("★") && !row("flash").contains("★"), "★ before the favorite model's name");
+        // The status bar names the tasks for the model under the cursor.
+        for _ in 0..2 {
+            let (_, lines) = render(&mut a, 120, 5);
+            match a.current().unwrap().key.as_str() {
+                "opus" => assert!(lines[4].contains("★ coding ★ agentic"), "status names the tasks: {}", lines[4]),
+                _ => assert!(!lines[4].contains('★'), "flash is the favorite for nothing: {}", lines[4]),
+            }
+            a.key(KeyCode::Char('j').into());
+        }
+    }
+
+    #[test]
+    fn star_takes_its_tasks_colour() {
+        assert_eq!(TASK.len(), TASKS.len(), "a colour per task");
+        let mut a = app();
+        a.store.toggle_favorite("coding", "opus");
+        a.store.toggle_favorite("agentic", "flash");
+        a.key(KeyCode::Char('j').into()); // the bar is on flash, so opus keeps its colours
+        let (buf, lines) = render(&mut a, 120, 5);
+        // The cell where `pat` starts on line `y`; the lines hold wide glyphs before it.
+        let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
+        let star = |m: &str| buf[at(lines.iter().position(|l| l.contains(m)).unwrap(), "★")].fg;
+        assert_eq!(star("opus"), Color::Reset, "no task picked: a plain ★ that says favorite for some task");
+        assert_eq!(buf[at(0, "Coding")].fg, task_color("coding"), "the task's colour on the header");
+        assert_eq!(buf[at(0, "Price")].fg, ACCENT, "columns of no task stay plain");
+        assert_eq!(buf[at(4, "★")].fg, task_color("agentic"), "and in the status bar");
+        let name_x = at(1, "opus").0;
+        a.store.toggle_favorite("reasoning", "opus");
+        let (_, lines) = render(&mut a, 120, 5);
+        assert_eq!(lines[1].matches('★').count(), 1, "one ★ however many tasks: {}", lines[1]);
+        assert_eq!(at(1, "opus").0, name_x, "so the names never shift");
+        a.key(KeyCode::Char('k').into()); // the bar on opus: the status bar names its tasks
+        let (buf, lines) = render(&mut a, 120, 5);
+        assert!(lines[4].contains("★ coding ★ reasoning"), "each in the status bar too: {}", lines[4]);
+        let sx = lines[4].find("★ reasoning").map(|i| lines[4][..i].chars().count() as u16).unwrap();
+        assert_eq!(buf[(sx, 4)].fg, task_color("reasoning"));
+        // With a task picked, the ★ is that task's favorite in that task's colour.
+        a.task = fit::task("agentic");
+        for k in ['k', 'j'] {
+            // Off flash: on the selection bar the ★ would be plain like everything else.
+            if a.current().unwrap().key == "flash" {
+                a.key(KeyCode::Char(k).into());
+            }
+        }
+        let (buf, lines) = render(&mut a, 120, 5);
+        let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
+        assert!(!lines[opus].contains('★') && lines[3 - opus].contains('★'), "only agentic's favorite: {lines:?}");
+        let x = lines[3 - opus][..lines[3 - opus].find('★').unwrap()].chars().count() as u16;
+        assert_eq!(buf[(x, (3 - opus) as u16)].fg, task_color("agentic"));
+        // The recommend panel: the task name and the favorite's ★ in the task's colour, the model in its price level's.
+        let mut data = std::mem::take(&mut a.data);
+        for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
+            m.fit.insert("coding".into(), pct);
+        }
+        a.set_data(data);
+        let lines = recommend(&a, 200);
+        let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let pill = spans.iter().find(|s| s.content == " coding ").unwrap();
+        assert_eq!(pill.style.fg, Some(task_color("coding")));
+        let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
+        assert!(spans[star + 1].content.starts_with("opus "), "★ then the name: {:?}", spans[star + 1]);
+        assert_eq!(spans[star + 1].style.fg, Some(LEVEL[level(5.0)]), "the name keeps its price level");
+    }
+
+    #[test]
     fn narrow_table_drops_columns_and_hints_without_panicking() {
         let mut a = app();
-        let (_, lines) = render(&mut a, 44, 4);
+        let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "▼Price", "▾"], "the cursor starts on Price");
-        assert!(layout(44, &a).more, "columns cut off on the right");
+        assert!(layout(46, &a).more, "columns cut off on the right");
         assert!(!layout(400, &a).more, "all columns fit");
         // Rows above or below the window are reported for the frame's ▲ ▼.
         let mut data = std::mem::take(&mut a.data);
         data.models.push(model("mini", "openai", Some(100.0), 0.5));
         a.set_data(data);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 44, 3));
-        assert_eq!(table(&mut buf, Rect::new(0, 0, 44, 3), &mut a), (true, false, true), "one row hidden below");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 46, 3));
+        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, false, true), "one row hidden below");
         a.key(KeyCode::Char('G').into());
-        assert_eq!(table(&mut buf, Rect::new(0, 0, 44, 3), &mut a), (true, true, false), "then above");
-        let mut buf = Buffer::empty(Rect::new(0, 0, 44, 9));
-        assert_eq!(table(&mut buf, Rect::new(0, 0, 44, 9), &mut a), (true, false, false), "all rows fit");
+        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, true, false), "then above");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 46, 9));
+        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false), "all rows fit");
         assert!(lines[3].ends_with("? help"), "{}", lines[3]);
         assert!(!lines[3].contains("m mark"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
         a.col = NCOLS - 1;
-        let (_, lines) = render(&mut a, 44, 4);
+        let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹", "Notes"]);
         a.col = VIA;
-        let (_, lines) = render(&mut a, 44, 4);
+        let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹", "Via", "▾"]);
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
-        let (_, lines) = render(&mut a, 52, 4);
+        let (_, lines) = render(&mut a, 54, 4);
         assert_eq!(words(&lines[0])[4..], ["‹", "Reason", "Code/$"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
-        let (_, lines) = render(&mut a, 52, 4);
+        let (_, lines) = render(&mut a, 54, 4);
         assert_eq!(words(&lines[0])[4..], ["‹", "Reason", "Code/$"], "{}", lines[0]);
         a.col = 0;
-        let (_, lines) = render(&mut a, 44, 4);
+        let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "▼Price", "▾"]);
         for (w, h) in [(1, 1), (3, 2), (0, 0), (30, 3), (12, 1)] {
             let area = Rect::new(0, 0, w, h);
@@ -1346,10 +1541,10 @@ mod tests {
         a.key(KeyCode::Char('s').into());
         a.table.select(Some(15));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[4])[..2], ["16", "m6"], "row 15 (m6) is the last of the 4 visible rows");
+        assert_eq!(words(&lines[4])[..4], ["16", "☐", "☆", "m6"], "row 15 (m6) is the last of the 4 visible rows");
         a.table.select(Some(0));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[1])[..2], ["1", "opus"], "scrolls back up");
+        assert_eq!(words(&lines[1])[..4], ["1", "☐", "☆", "opus"], "scrolls back up");
     }
 
     #[test]
@@ -1424,7 +1619,7 @@ mod tests {
         a.col = ECI;
         term.draw(|f| draw(&mut a, f)).unwrap();
         let top: String = (0..100).map(|x| term.backend().buffer()[(x, 0)].symbol()).collect();
-        assert!(top.starts_with("╭ ◆ modelcmp ──"), "{top}");
+        assert!(top.starts_with("╭──"), "{top}");
         assert!(top.ends_with("─ ▼ by Price ╮"), "{top}");
         let (l, r) = top.split_once(" ECI: Epoch Capabilities Index, overall capability ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
@@ -1471,10 +1666,10 @@ mod tests {
     #[test]
     fn wrapped_breaks_between_items_and_keeps_punctuation() {
         let label = vec![Span::raw("  b: ")];
-        let items = ["aa", "bb", "cc", "dd"].map(Span::raw).to_vec();
+        let items = ["aa", "bb", "cc", "dd"].map(Line::from).to_vec();
         let text: Vec<String> = wrapped(label, items, Span::raw(", "), 13).iter().map(ToString::to_string).collect();
         assert_eq!(text, ["  b: aa, bb,", "     cc, dd"], "the kept comma stays inside the width");
-        let text: Vec<String> = wrapped(vec![], vec![Span::raw("a"), Span::raw("b")], Span::raw(" "), 2)
+        let text: Vec<String> = wrapped(vec![], vec![Line::from("a"), Line::from("b")], Span::raw(" "), 2)
             .iter()
             .map(ToString::to_string)
             .collect();

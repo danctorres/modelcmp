@@ -18,7 +18,7 @@ cargo install --path .
 ```
 
 Data is downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`.
-Favorites, marks, exclusions and notes live in `~/.config/modelcmp/user.json`.
+Marks, exclusions, notes and per-task favorites live in `~/.config/modelcmp/user.json`.
 
 ## TUI
 
@@ -41,20 +41,21 @@ column.
 | `s` | sort by the column; again reverses |
 | `enter` | details: every benchmark, price per provider |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
-| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, `space` toggles several |
+| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, `m` toggles several, as it marks models |
 | `(` `)` `^d` `^u` | half a page up / down; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
 | `gg` `G` `3gg` | top / bottom / row 3 |
-| `m` | mark the model |
-| `V` | select a range of rows: move to extend it, then `m` `e` `f` or `C` act on all of it; `esc` cancels |
-| `e` `f` on a mark | act on every marked model, not just the one under the cursor |
-| `M` | marked models only; with `F`, marked and favorites |
-| `C` | compare marked models: cheapest, best coder, most coding per $ |
+| `m` | mark the model: its box `☐` becomes `☑` and the row turns light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it |
+| `U` | unmark every model |
+| `V` | select a range of rows: move to extend it, then `m` `e` or `C` act on all of it; `esc` cancels |
+| `e` on a mark | act on every marked model, not just the one under the cursor |
+| `M` | marked models only; `M` again or `esc`: every model |
+| `C` | compare 2+ marked models: cheapest, best coder, most coding per $; `C` again or `esc` closes it |
 | `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare, filters the rows |
-| `c` | clear filters, bounds, task and marks |
+| `c` | clear filters, bounds, task and `M`; marks stay |
 | `a` | all models, including ones you have no access to |
-| `f` `F` | favorite / favorites only |
 | `n` | note for the model |
 | `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but recommendations (`R` and `--task`) skip it |
+| `f` | favorite the model for tasks. Every row has a `☆`, filled `★` for a favorite: with a task picked, that task's favorite in the task's colour, the colour of its column header and of its name in recommend; with none, a plain `★` for the favorite of any task. `f` or a click on the `☆` lists the tasks with `☐`/`☑`: `m` or a click ticks one, `enter` ticks the one under the bar and closes; the list starts on the picked task, or the task under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. The model joins the task's line even off the price frontier, and `--tier` picks it |
 | typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` `^←` `^→` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on models.dev, epoch.ai or openrouter.ai; asks which |
@@ -62,8 +63,8 @@ column.
 | `r` | refresh data now |
 | `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
 | `?` | help |
-| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
-| `qq` | quit; the first `q` asks. `esc` closes an overlay or the filter |
+| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its `☐` toggles the mark, on its `☆` picks its tasks; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
+| `qq` | quit; the first `q` asks. `esc` goes back: closes an overlay, drops the selection, clears the `/` filter, leaves `M`, then a task picked in recommend back to recommend |
 
 ## CLI
 
@@ -77,20 +78,24 @@ modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet                           # everything about one model
 modelcmp compare sonnet gpt-5 --json           # side by side, with a verdict
 modelcmp open sonnet --on epoch                # its web page: models.dev, epoch or openrouter (default)
-modelcmp fav sonnet                            # --rm to remove
+modelcmp mark sonnet                           # shortlist it, list --marked shows them: --rm to unmark
 modelcmp note sonnet "fast enough for refactors"   # without text shows it, --rm deletes it
 modelcmp exclude llama                         # have it, can't use it; --rm to include again
+modelcmp fav coding sonnet                     # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
 ```
 
 Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`, `long-context`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
-`recommend` leave excluded models out; plain `list` shows them marked `✗`. `--tier` picks one
+`recommend` leave excluded models out; plain `list` shows them marked `✗`, your marks `☑` and available models `●`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
-the best; the best when none reaches the floor. Scores are percentiles among the models
+the best; the best when none reaches the floor. A model you `fav` for the task beats the
+tier's pick and sits on the task's list marked `★` whether or not it is on the frontier. Scores are percentiles among the models
 Epoch benchmarked. `--all`
-includes models you have no access to. `--refresh` on any command re-downloads first.
+includes models you have no access to. `--refresh` on any command re-downloads first. The
+TUI's bottom border always shows the refresh state: `⟳ refreshing`, `refresh failed` in red
+with the age of the data still shown, or the data age alone, red once it is past 24h.
 `list` prints every match unless `-n` limits it, and then says how many it left out.
 
 Model names match by substring, among the models you have first; an ambiguous name exits
@@ -100,13 +105,14 @@ than an empty list.
 For agents:
 
 ```sh
-modelcmp recommend --json                      # choose the task by its "when"; each has its frontier
-modelcmp list --task coding --tier mid --json  # the one model to use
+modelcmp recommend --json                      # choose the task by its "when"; each has its frontier and the user's "favorite" key
+modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite one when set, else the tier's
 opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just provider/model
 ```
 
-Each JSON model carries `key`, `excluded`, `price` (with the provider's model `id`, the
-string a harness takes), `context`, `eci`, per-task `tasks` percentiles. `show` and
+Each JSON model carries `key`, `excluded`, `favorite_for` (the tasks it is the user's favorite
+for), `price` (with the provider's model `id`, the string a harness takes), `context`,
+`eci`, per-task `tasks` percentiles. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (percentile)`.
 
