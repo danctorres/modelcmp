@@ -1317,7 +1317,7 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 200, 5);
-        let header = "# Model Dev ▾ ▼Price ▾ $in $out Ctx ECI Coding Agentic Reason \
+        let header = "# Model Dev ▾ ▼Price ▾ $in $cache $out Ctx ECI Coding Agentic Reason \
                       Code/$ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         let via = lines[2].find("opencode").expect(&lines[2]);
@@ -1326,8 +1326,8 @@ mod tests {
             dev_color("opencode"),
             "harnesses are coloured"
         );
-        assert_eq!(&words(&lines[1])[..9], ["1", "☐", "☆", "opus", "anthropic", "5.0", "5.0", "5.0", "200k"]);
-        assert_eq!(&words(&lines[2])[..9], ["2", "☐", "☆", "flash", "google", "0.10", "0.10", "0.10", "200k"]);
+        assert_eq!(&words(&lines[1])[..10], ["1", "☐", "☆", "opus", "anthropic", "5.0", "5.0", "5.0", "5.0", "200k"]);
+        assert_eq!(&words(&lines[2])[..10], ["2", "☐", "☆", "flash", "google", "0.10", "0.10", "0.10", "0.10", "200k"]);
         assert!(lines[4].starts_with(" NORMAL  2 available"), "{}", lines[4]);
         assert!(lines[4].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[4]);
         assert!(buf[(0, 1)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
@@ -1406,7 +1406,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
         assert_eq!(hit(&a, area, click(col("▼Price"), 1)), Some(Mouse::Header(2)));
         assert_eq!(hit(&a, area, click(col("▼Price") + 7, 1)), Some(Mouse::Menu(2)), "the ▾ after Price");
-        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(7)));
+        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(8)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };

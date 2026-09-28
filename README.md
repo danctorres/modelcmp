@@ -27,7 +27,7 @@ modelcmp
 ```
 
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session; providers without a cache price pay full input),
-$in, $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
+$in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Code/$, Via, Note. Task columns are mean percentiles (0-100) across the task's
 benchmarks, ranked against every model Epoch has evaluated. Move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a

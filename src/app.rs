@@ -32,7 +32,7 @@ fn positive(x: f64) -> Option<f64> {
 
 /// Prices from the offer you'd pay, then the Epoch index, the task percentiles and the
 /// Artificial Analysis indices.
-pub const COLS: [Col; 9] = [
+pub const COLS: [Col; 10] = [
     Col {
         lower_better: true,
         show: money,
@@ -42,6 +42,13 @@ pub const COLS: [Col; 9] = [
         lower_better: true,
         show: money,
         ..col("$in", "in", "USD per 1M input tokens, cheapest available provider", |m| Some(m.price()?.input))
+    },
+    Col {
+        lower_better: true,
+        show: money,
+        ..col("$cache", "cache", "USD per 1M cached input tokens; $in when the provider has no discount", |m| {
+            m.price().map(|o| o.cache_read.unwrap_or(o.input))
+        })
     },
     Col {
         lower_better: true,
@@ -64,7 +71,7 @@ const TEXT: usize = 2;
 /// Column index of the blended price, the default sort and the frontier's.
 pub const PRICE: usize = TEXT;
 /// Column index of ECI.
-pub const ECI: usize = TEXT + 4;
+pub const ECI: usize = TEXT + 5;
 /// First column of each group: names, price and context, benchmarks, your own.
 const GROUPS: [usize; 4] = [0, PRICE, ECI, VIA];
 /// Column index of where you have access.
