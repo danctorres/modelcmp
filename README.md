@@ -26,7 +26,7 @@ Marks, exclusions, notes and per-task favorites live in `~/.config/modelcmp/user
 modelcmp
 ```
 
-One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output),
+One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session; providers without a cache price pay full input),
 $in, $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Code/$, Via, Note. Task columns are mean percentiles (0-100) across the task's
 benchmarks, ranked against every model Epoch has evaluated. Move the column cursor and the
@@ -112,7 +112,7 @@ opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just 
 ```
 
 Each JSON model carries `key`, `excluded`, `favorite_for` (the tasks it is the user's favorite
-for), `price` (with the provider's model `id`, the string a harness takes), `context`,
+for), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted), `context`,
 `eci`, per-task `tasks` percentiles. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (percentile)`.

@@ -36,7 +36,7 @@ pub const COLS: [Col; 9] = [
     Col {
         lower_better: true,
         show: money,
-        ..col("Price", "price", "USD per 1M tokens, blended 3:1 input:output", |m| m.cost())
+        ..col("Price", "price", "USD per 1M tokens, 3:1 input:output, 90% of the input cached", |m| m.cost())
     },
     Col {
         lower_better: true,

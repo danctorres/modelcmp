@@ -10,6 +10,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MODELS_URL: &str = "https://models.dev/api.json";
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+/// Bumped when the cached fields change meaning, so an older cache refreshes.
+const FORMAT: u32 = 1;
+/// Share of input tokens read from the prompt cache: an agent resends the whole conversation
+/// every turn, so most of what it sends was sent before.
+// ponytail: one share for every model and session; agents often cache 90%+, a one-off prompt 0%.
+pub const CACHED: f64 = 0.9;
 /// How a harness tells which models it can use.
 enum Probe {
     /// A command that prints the `provider/model` ids it has access to, one per line.
@@ -33,11 +39,26 @@ pub struct Offer {
     pub env: Vec<String>,
     pub input: f64,
     pub output: f64,
+    /// $ per 1M cached input tokens, when the provider lists a discount.
+    #[serde(default)]
+    pub cache_read: Option<f64>,
     #[serde(skip)]
     pub available: bool,
     /// Where you have access: the harnesses listing it, then "env" if the provider's API key is set.
     #[serde(skip)]
     pub via: Vec<String>,
+}
+
+impl Offer {
+    /// $ per 1M input tokens with `CACHED` of them read from the cache.
+    pub fn input_cached(&self) -> f64 {
+        CACHED * self.cache_read.unwrap_or(self.input) + (1.0 - CACHED) * self.input
+    }
+
+    /// $ per 1M tokens, 3:1 input:output with `CACHED` of the input cached.
+    pub fn blended(&self) -> f64 {
+        (3.0 * self.input_cached() + self.output) / 4.0
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -74,9 +95,8 @@ impl Model {
     /// The offer you'd actually pay: cheapest available one, else the most common list price.
     pub fn price(&self) -> Option<&Offer> {
         let paid = |o: &&Offer| o.input + o.output > 0.0;
-        let blended = |o: &Offer| 3.0 * o.input + o.output;
         let avail: Vec<&Offer> = self.offers.iter().filter(|o| o.available).collect();
-        if let Some(o) = avail.iter().copied().filter(paid).min_by(|a, b| blended(a).total_cmp(&blended(b))) {
+        if let Some(o) = avail.iter().copied().filter(paid).min_by(|a, b| a.blended().total_cmp(&b.blended())) {
             return Some(o);
         }
         if let Some(o) = avail.first() {
@@ -84,16 +104,17 @@ impl Model {
         }
         // ponytail: mode of prices ≈ list price; resellers with odd pricing are outvoted.
         // Ordered by price bits so that on a tie the cheapest wins, deterministically.
-        let mut counts: BTreeMap<(u64, u64), (usize, &Offer)> = BTreeMap::new();
+        let mut counts: BTreeMap<(u64, u64, u64), (usize, &Offer)> = BTreeMap::new();
         for o in self.offers.iter().filter(paid) {
-            counts.entry((o.input.to_bits(), o.output.to_bits())).or_insert((0, o)).0 += 1;
+            let cache = o.input_cached().to_bits();
+            counts.entry((o.input.to_bits(), o.output.to_bits(), cache)).or_insert((0, o)).0 += 1;
         }
         counts.into_values().rev().max_by_key(|(n, _)| *n).map(|(_, o)| o).or(self.offers.first())
     }
 
-    /// Blended $/1M tokens, 3:1 input:output; 0 when your only offer is free.
+    /// `Offer::blended` of the offer you'd pay; 0 when your only offer is free.
     pub fn cost(&self) -> Option<f64> {
-        self.price().map(|o| (3.0 * o.input + o.output) / 4.0)
+        self.price().map(Offer::blended)
     }
 
     /// The model's pages, (site, url): models.dev when its developer offers it, as models.dev
@@ -127,6 +148,9 @@ impl Model {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Data {
+    /// `FORMAT` when fetched.
+    #[serde(default)]
+    pub format: u32,
     pub fetched: u64,
     /// Harness -> the `provider/model` ids it reported access to at the last refresh;
     /// `provider/*` stands for all of a provider's models.
@@ -144,7 +168,7 @@ impl Data {
     }
 
     pub fn stale(&self) -> bool {
-        self.age() > MAX_AGE || self.benches != crate::fit::task_benches()
+        self.age() > MAX_AGE || self.format != FORMAT || self.benches != crate::fit::task_benches()
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness, or the
@@ -462,6 +486,7 @@ struct MdLimit {
 struct MdCost {
     input: f64,
     output: f64,
+    cache_read: Option<f64>,
 }
 
 // ---------- Epoch ----------
@@ -776,6 +801,8 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
             env: p.env.clone(),
             input: cost.map_or(0.0, |c| c.input),
             output: cost.map_or(0.0, |c| c.output),
+            // A few list a paid model's cache as 0, a placeholder; a cache never costs more than input.
+            cache_read: cost.and_then(|c| c.cache_read.filter(|&r| r > 0.0).map(|r| r.min(c.input))),
             ..Default::default()
         });
     }
@@ -838,7 +865,7 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
     crate::fit::add_value(&mut models);
     models.sort_by(|a, b| b.eci.unwrap_or(0.0).total_cmp(&a.eci.unwrap_or(0.0)).then(b.release.cmp(&a.release)));
     let benches = crate::fit::task_benches().into_iter().map(String::from).collect();
-    Ok(Data { fetched: now(), harness: BTreeMap::new(), benches, models })
+    Ok(Data { format: FORMAT, fetched: now(), harness: BTreeMap::new(), benches, models })
 }
 
 #[cfg(test)]
@@ -1039,6 +1066,22 @@ mod tests {
         // Tied counts: the cheaper price wins, whatever the offer order.
         let tie = Model { offers: vec![o("x", 9.0, false), o("y", 2.0, false)], ..Default::default() };
         assert_eq!(tie.price().unwrap().provider, "y");
+        // Cached input is billed at the cache price: 3 × (0.9 × 0.5 + 0.1 × 5) + 25, over 4.
+        let cached = Offer {
+            provider: "c".into(),
+            input: 5.0,
+            output: 25.0,
+            cache_read: Some(0.5),
+            available: true,
+            ..Default::default()
+        };
+        let plain = Offer { provider: "p".into(), input: 4.0, output: 20.0, available: true, ..Default::default() };
+        assert!((cached.blended() - 6.9625).abs() < 1e-9 && plain.blended() == 8.0, "no discount: full input");
+        let m = Model { offers: vec![plain, cached], ..Default::default() };
+        assert_eq!(m.price().unwrap().provider, "c", "the dearer list price is cheaper once cached");
+        assert!(
+            crate::app::col_about(crate::app::PRICE).contains(&format!("{:.0}% of the input cached", CACHED * 100.0))
+        );
     }
 
     #[test]

@@ -126,7 +126,7 @@ pub fn usd(x: f64) -> String {
 /// What a frontier line shows, for the recommend panel and `modelcmp recommend`, which adds the key.
 pub fn frontier_legend(keyed: bool) -> String {
     format!(
-        "best per price: name{}, $ blended 3:1 in:out per 1M tokens, (task percentile: rank among Epoch's models, \
+        "best per price: name{}, $ per 1M tokens (3:1 in:out, 90% of in cached), (task percentile: rank among Epoch's models, \
          not a quality gap), cheapest first and the best last; only models in the top half, plus ★ your favorite",
         if keyed { " [key]" } else { "" }
     )
@@ -265,18 +265,19 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         }
     }
     v.push(String::new());
-    v.push("  providers (model id, $ per 1M tokens in / out):".into());
+    v.push("  providers (model id, $ per 1M tokens in / cached in / out):".into());
     let mut offers: Vec<&Offer> = m.offers.iter().collect();
     // Available first, then cheapest; unknown price ("-") last.
-    let cost = |o: &Offer| Some(o.input + o.output).filter(|c| *c > 0.0).unwrap_or(f64::MAX);
+    let cost = |o: &Offer| Some(o.blended()).filter(|c| *c > 0.0).unwrap_or(f64::MAX);
     offers.sort_by(|a, b| b.available.cmp(&a.available).then(cost(a).total_cmp(&cost(b))));
     for o in offers {
         v.push(format!(
-            "    {} {:<20}{:<34}{:>8} {:>8}  {}",
+            "    {} {:<20}{:<34}{:>8} {:>8} {:>8}  {}",
             if o.available { "●" } else { " " },
             truncate(&o.provider_name, 19),
             truncate(&o.id, 33),
             money(o.input),
+            o.cache_read.map_or("-".into(), money),
             money(o.output),
             o.via.join(", ")
         ));
@@ -310,6 +311,8 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
         Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), best: None },
         Row { label: "via".into(), cells: models.iter().map(|m| via(&m.via)).collect(), best: None },
         row("$ in / 1M", price(|o| o.input), money, false),
+        // No cache discount: cached input costs full price.
+        row("$ cached in / 1M", price(|o| o.cache_read.unwrap_or(o.input)), money, false),
         row("$ out / 1M", price(|o| o.output), money, false),
         row("context", models.iter().map(|m| Some(m.context as f64)).collect(), |c| ctx(c as u64), true),
         row("ECI", models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true),

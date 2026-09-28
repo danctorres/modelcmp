@@ -1692,7 +1692,7 @@ mod tests {
         a.task_cur = TASKS.iter().position(|t| t.name == "vision").unwrap();
         let lines = recommend(&a, 60);
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert!(text[0].starts_with("best per price: name, $ blended"), "{}", text[0]);
+        assert!(text[0].starts_with("best per price: name, $ per 1M tokens"), "{}", text[0]);
         let gap = text.iter().position(String::is_empty).unwrap();
         assert!(gap > 1 && text[..gap].join(" ") == frontier_legend(false), "the legend wraps: {:?}", &text[..gap]);
         assert_eq!(
