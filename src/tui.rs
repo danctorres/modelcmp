@@ -319,7 +319,7 @@ fn hints(app: &App) -> Vec<&'static str> {
             }
             v.extend(["/ filter", "R recommend", "? help"]);
             // Where esc goes back from, as in the overlays.
-            if app.only_marked || app.only_fav || app.task.is_some() {
+            if !app.query.is_empty() || app.only_marked || app.only_fav || app.task.is_some() {
                 v.push("esc back");
             }
             v
@@ -368,8 +368,8 @@ const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
 const STAR: Color = Color::Yellow;
 /// One colour per task in `TASKS` order: the ★ of its favorite, its column header and its
-/// name in recommend. Off the mark colour (☑ light blue), the key hints' cyan,
-/// red for the worst value and yellow for a match.
+/// name in recommend. Off the mark colour (☑ light blue), the key hints' cyan, the worst
+/// value's red and yellow for a match; 16 colours leave no room to also skip the best's green.
 const TASK: [Color; 7] = [
     Color::LightCyan,
     Color::Green,

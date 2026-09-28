@@ -102,6 +102,14 @@ impl Store {
         crate::fit::TASKS.iter().map(|t| t.name).filter(|t| self.favorite(t) == Some(key)).collect()
     }
 
+    /// Whether the model is the task's favorite, or with no task the favorite of any.
+    pub fn is_favorite(&self, task: Option<&crate::fit::Task>, key: &str) -> bool {
+        match task {
+            Some(t) => self.favorite(t.name) == Some(key),
+            None => crate::fit::TASKS.iter().any(|t| self.favorite(t.name) == Some(key)),
+        }
+    }
+
     /// Make `key` the favorite for the task, or nothing when it already was: `f` toggles.
     pub fn toggle_favorite(&mut self, task: &str, key: &str) {
         if self.favorite.get(task).is_some_and(|k| k == key) {

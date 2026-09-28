@@ -120,7 +120,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("gg G 3gg", "top / bottom / row 3"),
     (
         "m",
-        "mark the model: its box ☐ becomes ☑ and the row turns light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it",
+        "mark the model: its box ☐ becomes ☑ in light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it",
     ),
     ("U", "unmark every model"),
     ("V", "select a range of rows: move to extend it, then m e or C act on all of it; esc cancels"),
@@ -575,13 +575,10 @@ impl App {
         !self.store.marked.is_empty()
     }
 
-    /// Whether the table row shows a ★, so `F` keeps it: the picked task's favorite, or with no
-    /// task a favorite for any. `starred` without recommend's cursor, which the table ignores.
+    /// Whether the table row shows a ★, so `F` keeps it: `starred` without recommend's cursor,
+    /// which the table ignores.
     fn is_fav(&self, key: &str) -> bool {
-        match self.task {
-            Some(t) => self.store.favorite(t.name) == Some(key),
-            None => !self.store.favorite_for(key).is_empty(),
-        }
+        self.store.is_favorite(self.task, key)
     }
 
     /// Whether any model shows a ★ in the table, so `F` has something to show.
@@ -741,10 +738,7 @@ impl App {
     /// Whether the model's row shows a ★: it is the favorite for the task at hand, or with no
     /// task for any. One ★ either way; the status bar and the detail name the tasks.
     pub fn starred(&self, key: &str) -> bool {
-        match self.task_at_hand() {
-            Some(t) => self.store.favorite(t.name) == Some(key),
-            None => !self.store.favorite_for(key).is_empty(),
-        }
+        self.store.is_favorite(self.task_at_hand(), key)
     }
 
     /// `f`: favorite the current model for the task, or unfavorite it when it already is.
@@ -1090,7 +1084,6 @@ impl App {
             }
             KeyCode::Char('U') if table => {
                 let n = std::mem::take(&mut self.store.marked).len();
-                self.only_marked &= self.any_marked();
                 self.rebuild();
                 self.status = format!("unmarked {n}");
                 return Some(Effect::Save);

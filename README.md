@@ -44,7 +44,7 @@ column.
 | `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, `m` toggles several, as it marks models |
 | `(` `)` `^d` `^u` | half a page up / down; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
 | `gg` `G` `3gg` | top / bottom / row 3 |
-| `m` | mark the model: its box `☐` becomes `☑` and the row turns light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it |
+| `m` | mark the model: its box `☐` becomes `☑` in light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it |
 | `U` | unmark every model |
 | `V` | select a range of rows: move to extend it, then `m` `e` or `C` act on all of it; `esc` cancels |
 | `e` on a mark | act on every marked model, not just the one under the cursor |

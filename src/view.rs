@@ -245,7 +245,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         format!("  pages:      {}", m.links().into_iter().map(|(_, u)| u).collect::<Vec<_>>().join("  ")),
         format!("  note:       {}", store.note(&m.key).unwrap_or("-")),
         format!(
-            "  favorite for:  {}",
+            "  favorite:   {}",
             Some(store.favorite_for(&m.key).join(", ")).filter(|s| !s.is_empty()).unwrap_or("-".into())
         ),
         String::new(),
