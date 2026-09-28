@@ -3,7 +3,7 @@
 Pick the cheapest LLM that is good enough for the job.
 
 modelcmp joins prices from [models.dev](https://models.dev) with benchmarks from
-[Epoch AI](https://epoch.ai/data/ai-benchmarking-hub) and shows only the models you can
+[Epoch AI](https://epoch.ai/benchmarks) and shows only the models you can
 already use: the ones your harnesses list (`opencode models`; `claude`, `codex` and
 `gemini` count as their own provider) plus providers whose API key is set in the
 environment. The VIA column says which.
@@ -166,7 +166,7 @@ ECI for overall, vision and long-context, the percentile for the others.
 ## Data
 
 - [models.dev](https://models.dev): prices, context windows, capabilities.
-- [Epoch AI Benchmarking Hub](https://epoch.ai/data/ai-benchmarking-hub) (CC-BY): ECI and
+- [Epoch AI Benchmarking Hub](https://epoch.ai/benchmarks) (CC-BY): ECI and
   per-benchmark scores.
 - `opencode models` and the `claude`, `codex`, `gemini` binaries on `PATH`: what you have.
 
