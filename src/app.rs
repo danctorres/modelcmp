@@ -122,12 +122,15 @@ pub const HELP: &[(&str, &str)] = &[
     ("s", "sort by the column; again reverses"),
     ("enter", "details: every benchmark, price per provider"),
     ("> <", "minimum / maximum for the column, e.g. > 70 enter on Coding"),
-    ("d", "dropdown on the Dev, Price and Via headers (▾); / searches it, m toggles several, as it marks models"),
+    (
+        "d",
+        "dropdown on the Dev, Price and Via headers (▾); / searches it, as in every list, m toggles several, as it marks models",
+    ),
     ("( ) ^d ^u", "half a page up / down"),
     ("gg G 3gg", "top / bottom / row 3"),
     (
         "m",
-        "mark the model: its box ☐ becomes ☑ in light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it",
+        "mark the model: its box ☐ becomes ✓ in light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it",
     ),
     ("U", "unmark every model"),
     ("V", "select a range of rows: move to extend it, then m e or C act on all of it; esc cancels"),
@@ -137,12 +140,15 @@ pub const HELP: &[(&str, &str)] = &[
     ("C", "compare 2+ marked models: cheapest, best coder, most coding per $; C again or esc closes it"),
     (
         "/",
-        "filter by name, developer, Via or note, words in any order (anthropic opus), a typo forgiven when nothing matches (opsu); / again starts a new search, esc clears; in compare, filters the rows",
+        "filter by name, developer, Via or note, words in any order (anthropic opus), a typo forgiven when nothing matches (opsu); / again starts a new search, esc clears; in compare it filters the rows, in this help its lines, and in a list like T's themes its entries",
     ),
     ("c", "clear filters, bounds, task, M and F; marks stay"),
     ("a", "all models, including ones you have no access to; again: yours only"),
     ("n", "note for the model"),
-    ("e", "exclude the model: you have it but cannot use it; recommendations skip it"),
+    (
+        "e",
+        "exclude the model: you have it but cannot use it; recommendations skip it. Every row has a ·, ✗ when excluded, and a click on it toggles the exclusion",
+    ),
     (
         "f",
         "favorite the model for tasks: every row has a ☆, filled ★ for a favorite (in the task's colour when that task is picked); f or a click on the ☆ lists the tasks, m ticks one, enter ticks the one under the bar and closes, starting on the picked task or the one under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. --tier picks it, agents see it",
@@ -156,11 +162,14 @@ pub const HELP: &[(&str, &str)] = &[
         "R",
         "recommend: the best model per price for each task, what the task measures and when to use it; h l pick a model for o x y f e n; enter shows the task's models in the table: best first, each row down cheaper and scoring lower",
     ),
-    ("T", "theme: the terminal's own colours, or 20 dark, light and retro palettes; j k preview, enter saves"),
-    ("?", "this help"),
+    (
+        "T",
+        "theme: the terminal's own colours, or 20 dark, light and retro palettes; j k preview, / searches, enter saves",
+    ),
+    ("?", "this help; / keeps the lines that match"),
     (
         "mouse",
-        "click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its ☐ toggles the mark, on its ☆ picks its tasks; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column",
+        "click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its ☐ toggles the mark, on its ☆ picks its tasks, on its ✗ box excludes it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column",
     ),
     (
         "qq",
@@ -216,13 +225,31 @@ pub enum Input {
         title: &'static str,
         items: Vec<(String, Effect)>,
         sel: usize,
+        /// Filter on the entries, typed after `/` as in a dropdown; `sel` indexes what is left.
+        query: String,
+        cur: usize,
+        typing: bool,
     },
+}
+
+impl Input {
+    /// A choice list (`f`, `o`, `x`, `T`) with the bar on `sel` and nothing searched yet.
+    fn choose(title: &'static str, items: Vec<(String, Effect)>, sel: usize) -> Self {
+        Self::Choose { title, items, sel, query: String::new(), cur: 0, typing: false }
+    }
 }
 
 /// Indices of the dropdown entries whose name contains `query`, any case; "any" always stays.
 pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
     let q = query.to_lowercase();
     (0..items.len()).filter(|&i| i == 0 || items[i].0.to_lowercase().contains(&q)).collect()
+}
+
+/// Indices of the choice list entries whose label contains `query`, any case; empty when none
+/// match, which the overlay says.
+pub fn choice_rows(items: &[(String, Effect)], query: &str) -> Vec<usize> {
+    let q = query.to_lowercase();
+    (0..items.len()).filter(|&i| items[i].0.to_lowercase().contains(&q)).collect()
 }
 
 /// Index `i` moved by `n` in a list of `len`: a move stops at an end, and one that starts
@@ -335,6 +362,8 @@ pub enum Mouse {
     Box(usize),
     /// A click on row `n`'s ☆: pick the tasks it is the favorite for, as `f` does.
     Star(usize),
+    /// A click on row `n`'s ✗ box: exclude it or take the exclusion off, as `e` does.
+    Exclude(usize),
     /// Ctrl click on row `n`: toggle it in the selection on its own, keeping the rest.
     Pick(usize),
     /// Shift click or left drag to row `n`: extend the selection to it as a visual range.
@@ -410,8 +439,8 @@ pub struct App {
     pub compare_sel: usize,
     /// First model the compare view shows, set by the renderer so the cursor stays in view.
     pub compare_x: usize,
-    /// Filter on the compare view's rows, typed with `/` there.
-    pub compare_query: String,
+    /// Filter on the rows of the compare or help overlay, typed with `/` in either.
+    pub overlay_query: String,
     /// Rows visible in the body, set by the renderer; drives page movement.
     pub page: u16,
     /// First of the columns right of Dev shown when they do not all fit; the renderer keeps
@@ -459,7 +488,7 @@ impl App {
             scroll: 0,
             compare_sel: 0,
             compare_x: 0,
-            compare_query: String::new(),
+            overlay_query: String::new(),
             page: 20,
             hscroll: 0,
             count: 0,
@@ -497,9 +526,14 @@ impl App {
         self.table.select(Some(i.min(self.rows.len().saturating_sub(1))));
     }
 
-    /// What `/` edits: the compare view filters its rows, everywhere else the table's models.
+    /// What `/` edits: the compare and help overlays filter their own rows, the table its models.
     pub fn search_target(&mut self) -> &mut String {
-        if self.view == View::Compare { &mut self.compare_query } else { &mut self.query }
+        if self.overlay_search() { &mut self.overlay_query } else { &mut self.query }
+    }
+
+    /// Whether `/` filters the open overlay's rows instead of the table's models.
+    pub fn overlay_search(&self) -> bool {
+        matches!(self.view, View::Compare | View::Help)
     }
 
     /// The model under the cursor: the row in the table and details, the column in compare,
@@ -604,7 +638,7 @@ impl App {
     /// The theme under the cursor of the open `T` list, which the screen previews.
     pub fn theme_preview(&self) -> Option<&'static str> {
         match &self.input {
-            Input::Choose { items, sel, .. } => match items.get(*sel) {
+            Input::Choose { items, sel, query, .. } => match choice_rows(items, query).get(*sel).map(|&i| &items[i]) {
                 Some((_, Effect::Theme(name))) => Some(name),
                 _ => None,
             },
@@ -617,7 +651,7 @@ impl App {
         let m = self.current()?;
         let name = |k: &str| self.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
         let item = |t: &Task| match self.store.favorite(t.name) {
-            Some(k) if k == m.key => format!("☑ {}", t.name),
+            Some(k) if k == m.key => format!("✓ {}", t.name),
             Some(k) => format!("☐ {}  (now {})", t.name, name(k)),
             None => format!("☐ {}", t.name),
         };
@@ -786,7 +820,7 @@ impl App {
     fn list(&mut self) -> Option<(&mut usize, usize)> {
         match &mut self.input {
             Input::Menu { items, query, sel, .. } => Some((sel, menu_rows(items, query).len())),
-            Input::Choose { items, sel, .. } => Some((sel, items.len())),
+            Input::Choose { items, sel, query, .. } => Some((sel, choice_rows(items, query).len())),
             _ => None,
         }
     }
@@ -805,7 +839,7 @@ impl App {
 
     fn go_to(&mut self, row: usize) {
         if let Some((sel, len)) = self.list() {
-            *sel = row.min(len - 1);
+            *sel = row.min(len.saturating_sub(1));
         } else if self.view == View::Table {
             self.select(row);
         } else if self.view == View::Recommend {
@@ -870,7 +904,7 @@ impl App {
             return Some(Effect::Quit);
         }
         // A dropdown not being searched and a choice list take counts and motions too.
-        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { .. });
+        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { typing: false, .. });
         if self.input != Input::None && !list {
             return self.input_key(k.code, k.modifiers);
         }
@@ -922,7 +956,7 @@ impl App {
     /// a click toggles one, as m does, and the dropdown stays open until a click outside;
     /// elsewhere (Price, a choice list) a click picks the entry, as enter does.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
-        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { .. });
+        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { typing: false, .. });
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
                 self.move_by(n);
@@ -997,6 +1031,11 @@ impl App {
                 self.deselect();
                 self.select(n);
                 return self.table_key(KeyCode::Char('f'), 1);
+            }
+            Mouse::Exclude(n) if n < self.rows.len() => {
+                self.deselect();
+                self.select(n);
+                return self.table_key(KeyCode::Char('e'), 1);
             }
             Mouse::Pick(n) if n < self.rows.len() => {
                 // The range, if any, becomes picked rows, then the clicked row toggles.
@@ -1124,8 +1163,8 @@ impl App {
             }
             KeyCode::Char('q') => self.input = Input::Quit,
             KeyCode::Esc => {
-                if self.view == View::Compare && !self.compare_query.is_empty() {
-                    self.compare_query.clear();
+                if self.overlay_search() && !self.overlay_query.is_empty() {
+                    self.overlay_query.clear();
                 } else if !table {
                     self.view = View::Table;
                 } else if self.selecting() {
@@ -1147,7 +1186,11 @@ impl App {
                     self.view = View::Recommend;
                 }
             }
-            KeyCode::Char('?') => self.view = if self.view == View::Help { View::Table } else { View::Help },
+            KeyCode::Char('?') => {
+                self.view = if self.view == View::Help { View::Table } else { View::Help };
+                self.overlay_query.clear();
+                self.scroll = 0;
+            }
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
                 self.task_sel = 0;
@@ -1157,7 +1200,7 @@ impl App {
                 // Starting on the task at hand, so f enter toggles it.
                 let items = self.fav_items()?;
                 let sel = self.task_at_hand().and_then(|t| TASKS.iter().position(|u| u.name == t.name)).unwrap_or(0);
-                self.input = Input::Choose { title: "favorite for which tasks?", items, sel };
+                self.input = Input::choose("favorite for which tasks?", items, sel);
             }
             KeyCode::Char('V') if table => {
                 if self.selecting() {
@@ -1177,7 +1220,7 @@ impl App {
                 if items.len() == 1 {
                     return items.pop().map(|(_, e)| e);
                 }
-                self.input = Input::Choose { title: "open on which site?", items, sel: 0 };
+                self.input = Input::choose("open on which site?", items, 0);
             }
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
@@ -1186,7 +1229,7 @@ impl App {
                 match items.len() {
                     0 => self.status = format!("no harness has {}; Via shows where you have access", m.name),
                     1 => return items.pop().map(|(_, e)| e),
-                    _ => self.input = Input::Choose { title: "open in which harness?", items, sel: 0 },
+                    _ => self.input = Input::choose("open in which harness?", items, 0),
                 }
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
@@ -1208,6 +1251,7 @@ impl App {
                 }
                 // With fewer than 2 marked, the overlay says how to mark them.
                 self.view = View::Compare;
+                self.overlay_query.clear();
                 self.scroll = 0;
                 self.compare_sel = 0;
                 self.compare_x = 0;
@@ -1216,7 +1260,7 @@ impl App {
             KeyCode::Char('r') => return self.refresh(),
             KeyCode::Char('T') => {
                 let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
-                self.input = Input::Choose { title: "theme?", items, sel: crate::view::theme(&self.store.theme) };
+                self.input = Input::choose("theme?", items, crate::view::theme(&self.store.theme));
             }
             KeyCode::Enter if self.view == View::Recommend => {
                 let t = &TASKS[self.task_cur];
@@ -1239,7 +1283,7 @@ impl App {
                 self.scroll = 0;
             }
             // A new search starts empty; esc brings the previous one back.
-            KeyCode::Char('/') if table || self.view == View::Compare => {
+            KeyCode::Char('/') if table || self.overlay_search() => {
                 self.input = Input::Search { cur: 0, was: std::mem::take(self.search_target()) };
                 if table {
                     self.rebuild();
@@ -1258,8 +1302,8 @@ impl App {
     fn input_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
         match &mut self.input {
             Input::Search { cur, was } => {
-                let compare = self.view == View::Compare;
-                let query = if compare { &mut self.compare_query } else { &mut self.query };
+                let overlay = matches!(self.view, View::Compare | View::Help);
+                let query = if overlay { &mut self.overlay_query } else { &mut self.query };
                 match code {
                     KeyCode::Enter => self.input = Input::None,
                     KeyCode::Esc => {
@@ -1273,7 +1317,7 @@ impl App {
                     _ if edit(query, cur, code, mods, |_| true) => {}
                     _ => return None,
                 }
-                if !compare {
+                if !overlay {
                     self.rebuild();
                 }
             }
@@ -1355,16 +1399,27 @@ impl App {
                     _ => {}
                 }
             }
-            Input::Choose { items, sel, .. } => match code {
+            Input::Choose { items, sel, query, cur, typing, .. } => match code {
+                // While searching, ↓ ↑ move the bar, as in a dropdown.
+                KeyCode::Down if *typing => *sel = (*sel + 1).min(choice_rows(items, query).len().saturating_sub(1)),
+                KeyCode::Up if *typing => *sel = sel.saturating_sub(1),
                 // m ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns.
-                KeyCode::Char('m') => {
-                    if let Some((_, Effect::Fav(task))) = items.get(*sel) {
+                // While searching, m is typed.
+                KeyCode::Char('m') if !*typing => {
+                    let i = *choice_rows(items, query).get(*sel)?;
+                    if let Some((_, Effect::Fav(task))) = items.get(i) {
                         let task = *task;
                         return self.fav(task);
                     }
                 }
+                // Esc while searching drops the search but keeps the entry under the bar.
+                KeyCode::Esc if *typing => {
+                    (*sel, *typing, *cur) = (*choice_rows(items, query).get(*sel).unwrap_or(&0), false, 0);
+                    query.clear();
+                }
                 KeyCode::Enter => {
-                    let (_, effect) = items.swap_remove(*sel);
+                    let i = *choice_rows(items, query).get(*sel)?;
+                    let (_, effect) = items.swap_remove(i);
                     self.input = Input::None;
                     match effect {
                         Effect::Fav(task) => return self.fav(task),
@@ -1376,6 +1431,9 @@ impl App {
                         effect => return Some(effect),
                     }
                 }
+                // The first match, so that enter picks it.
+                _ if *typing && edit(query, cur, code, mods, |_| true) => *sel = 0,
+                KeyCode::Char('/') => *typing = true,
                 // The key that opens the theme list also closes it.
                 KeyCode::Char('T') if self.theme_preview().is_some() => self.input = Input::None,
                 KeyCode::Esc => self.input = Input::None,
@@ -1456,6 +1514,29 @@ mod tests {
         press(&mut a, "gg");
         a.key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(a.store.theme, "", "the terminal's colours are saved as nothing");
+    }
+
+    #[test]
+    fn slash_searches_a_choice_list_and_the_help() {
+        let mut a = app();
+        press(&mut a, "T/nor");
+        assert_eq!(a.theme_preview(), Some("nord"), "/ keeps the matching themes, the bar on the first");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.theme_preview(), Some("nord"), "esc drops the search, keeping the theme under the bar");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.theme, "nord");
+        press(&mut a, "T/zzz");
+        assert_eq!(a.theme_preview(), None, "nothing matches, so enter picks nothing");
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "?/sort");
+        assert_eq!((&a.view, a.overlay_query.as_str(), a.query.as_str()), (&View::Help, "sort", ""));
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Help, ""), "esc clears the filter first");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Table);
     }
 
     fn press(app: &mut App, keys: &str) -> Option<Effect> {
@@ -1936,7 +2017,7 @@ mod tests {
         assert_eq!(a.store.favorite("coding"), None, "again unfavorites");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items[1].0 == "☐ coding"));
         press(&mut a, "km");
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "☑ overall"));
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "✓ overall"));
         press(&mut a, "m");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.input, a.store.favorite_for("mini").len()), (&Input::None, 0));
@@ -2050,11 +2131,11 @@ mod tests {
             "o opens the selected model, at once when only OpenRouter has it"
         );
         press(&mut a, "/eci");
-        assert_eq!((a.compare_query.as_str(), a.query.as_str()), ("eci", ""), "/ in compare filters its rows");
+        assert_eq!((a.overlay_query.as_str(), a.query.as_str()), ("eci", ""), "/ in compare filters its rows");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.input, Input::None);
         code(&mut a, KeyCode::Esc);
-        assert_eq!((&a.view, a.compare_query.as_str()), (&View::Compare, ""), "esc clears the filter first");
+        assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Compare, ""), "esc clears the filter first");
         assert_eq!(a.input, Input::None);
         press(&mut a, "$e");
         assert!(
@@ -2161,14 +2242,28 @@ mod tests {
     fn box_click_toggles_the_mark_and_star_click_picks_tasks() {
         let mut a = app();
         assert_eq!(a.mouse(Mouse::Box(1)), Some(Effect::Save));
-        assert_eq!((a.selected(), a.store.is_marked("opus5")), (1, true), "☐ → ☑, and the bar goes there");
+        assert_eq!((a.selected(), a.store.is_marked("opus5")), (1, true), "☐ → ✓, and the bar goes there");
         a.mouse(Mouse::Box(1));
-        assert!(!a.store.is_marked("opus5"), "☑ → ☐");
+        assert!(!a.store.is_marked("opus5"), "✓ → ☐");
         assert_eq!(a.mouse(Mouse::Star(2)), None);
         assert!(a.choosing_favs() && a.selected() == 2, "the ☆ lists the tasks for its row");
         assert_eq!(a.mouse(Mouse::Item(1)), Some(Effect::Save));
         assert!(a.choosing_favs(), "a click ticks a task and keeps the list open");
         assert_eq!(a.store.favorite("coding"), Some("mini"));
+    }
+
+    #[test]
+    fn a_click_on_the_box_excludes_the_model_and_takes_it_back() {
+        let mut a = app();
+        let key = |a: &App, n: usize| a.data.models[a.rows[n]].key.clone();
+        let (k, other) = (key(&a, 1), key(&a, 2));
+        a.mouse(Mouse::Row(2));
+        a.mouse(Mouse::Extend(0));
+        assert_eq!(a.mouse(Mouse::Exclude(1)), Some(Effect::Save));
+        assert!(a.store.is_excluded(&k) && !a.store.is_excluded(&other), "the clicked row alone, not the range");
+        assert_eq!((a.selected(), a.selecting()), (1, false));
+        assert_eq!(a.mouse(Mouse::Exclude(1)), Some(Effect::Save));
+        assert!(!a.store.is_excluded(&k), "a second click takes the exclusion off");
     }
 
     #[test]

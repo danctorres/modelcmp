@@ -7,8 +7,8 @@
 //! terminal themes modelcmp too, and nothing paints a background over a transparent one.
 
 use crate::app::{
-    App, COLS, ECI, Effect, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, col_about, col_name, has_menu,
-    menu_rows,
+    App, COLS, ECI, Effect, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about, col_name,
+    has_menu, menu_rows,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -163,8 +163,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             let rows = menu_rows(items, query);
             menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, *sel, rows.len()))
         }
-        Input::Choose { title, items, sel } => {
-            Some((overlay_rect(area, title, &choice_lines(items, *sel)), *sel, items.len()))
+        Input::Choose { title, items, sel, query, .. } => {
+            let rows = choice_rows(items, query).len();
+            Some((overlay_rect(area, title, &choice_lines(items, *sel, query)), *sel, rows))
         }
         _ => None,
     };
@@ -196,14 +197,17 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     if m.row > inner.y {
         let n = app.table.offset() + (m.row - inner.y - 1) as usize;
-        // The checkbox right of the row number toggles the mark; the ☆ after it picks the tasks.
-        let (num_w, x) = (l.name_x - 5, m.column - inner.x);
+        // The checkbox right of the row number toggles the mark, the ☆ after it picks the
+        // tasks, and the ✗ box after that excludes the model.
+        let (num_w, x) = (l.name_x - 7, m.column - inner.x);
         return Some(if mark {
             Mouse::Mark(n)
         } else if (num_w + 1..num_w + 3).contains(&x) {
             Mouse::Box(n)
         } else if (num_w + 3..num_w + 5).contains(&x) {
             Mouse::Star(n)
+        } else if (num_w + 5..num_w + 7).contains(&x) {
+            Mouse::Exclude(n)
         } else if pick {
             Mouse::Pick(n)
         } else {
@@ -335,7 +339,7 @@ fn hints(app: &App) -> Vec<&'static str> {
         View::Detail => {
             vec!["f fav", "e exclude", "n note", "y copy id", "o open", "x launch", "j k scroll", "esc back"]
         }
-        View::Help => vec!["j k scroll", "esc back"],
+        View::Help => vec!["j k scroll", "/ search", "esc back"],
         View::Compare if app.marked_models().len() < 2 => vec!["esc back"],
         View::Compare => {
             vec![
@@ -372,13 +376,13 @@ const KEY: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
-/// A marked row's ☑. Light blue, and the only thing drawn in it, so a palette's slot 12 is
+/// A marked row's ✓. Light blue, and the only thing drawn in it, so a palette's slot 12 is
 /// free to be whatever parts from the muted ☐ (`the_mark_parts_from_an_empty_box`).
 const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
 const STAR: Color = Color::Yellow;
 /// One colour per task in `TASKS` order: the ★ of its favorite, its column header and its
-/// name in recommend. Off the mark colour (☑ light blue), the key hints' cyan, the worst
+/// name in recommend. Off the mark colour (✓ light blue), the key hints' cyan, the worst
 /// value's red and yellow for a match; 16 colours leave no room to also skip the best's green.
 const TASK: [Color; 7] = [
     Color::LightCyan,
@@ -529,7 +533,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     let cursor = status(buf, bar, app);
     let lines = match app.view {
         View::Table => None,
-        View::Help => Some(("keys".to_string(), help())),
+        View::Help => Some(("keys".to_string(), help(&app.overlay_query))),
         View::Recommend => {
             Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(100))))
         }
@@ -553,7 +557,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.compare_sel,
                 app.compare_x,
                 area.width.saturating_sub(4) as usize,
-                &app.compare_query,
+                &app.overlay_query,
             );
             app.compare_x = first;
             Some(("compare".into(), lines))
@@ -578,9 +582,9 @@ fn draw(app: &mut App, f: &mut Frame) {
         let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
         overlay(buf, area, "quit?", lines, &mut 0);
     }
-    if let Input::Choose { title, items, sel } = &app.input {
+    if let Input::Choose { title, items, sel, query, .. } = &app.input {
         // Scrolled as the mouse maps it, so the bar stays in view when the list is taller than the screen.
-        let lines = choice_lines(items, *sel);
+        let lines = choice_lines(items, *sel, query);
         let shown = overlay_rect(area, title, &lines).height.saturating_sub(2).max(1);
         overlay(buf, area, title, lines, &mut (*sel as u16).saturating_sub(shown - 1));
     }
@@ -592,7 +596,7 @@ fn draw(app: &mut App, f: &mut Frame) {
 /// Column layout relative to the table's left edge. A numeric column is as wide as its header
 /// plus the sort arrow or its widest value, so neighbours always sit `GAP` apart whatever the filter.
 struct Layout {
-    /// Where Model starts: right of the row numbers, the checkbox and the ☆.
+    /// Where Model starts: right of the row numbers, the checkbox, the ☆ and the ✗ box.
     name_x: u16,
     name_w: u16,
     dev_w: u16,
@@ -620,10 +624,10 @@ fn layout(width: u16, app: &App) -> Layout {
         ms.iter().map(|m| m.via.iter().map(|v| v.len() + 1).sum::<usize>()).max().unwrap_or(0).clamp(6, 24) as u16;
     let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(str::len).max().unwrap_or(0).clamp(6, 40) as u16;
     let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
-    // Row numbers as wide as the last one, a space, then the checkbox and the ☆, each with a
-    // spare cell: some terminals draw them two cells wide, and the
+    // Row numbers as wide as the last one, a space, then the checkbox, the ☆ and the ✗ box,
+    // each with a spare cell: some terminals draw them two cells wide, and the
     // spare keeps that off the neighbour.
-    let name_x = app.rows.len().max(1).to_string().len() as u16 + 5;
+    let name_x = app.rows.len().max(1).to_string().len() as u16 + 7;
     // The columns right of Dev scroll sideways: only as far as it takes to show the selected
     // one, keeping the last position otherwise. Model and Dev stay put.
     let ws: Vec<u16> = widths.into_iter().chain([via_w, notes_w]).collect();
@@ -677,9 +681,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             false => fg(color).add_modifier(BOLD),
         }
     };
-    // The marks: the checkbox, then the ☆.
-    let num_w = (name_x - 5) as usize;
+    // The marks: the checkbox, then the ☆, then the ✗ box.
+    let num_w = (name_x - 7) as usize;
     let (box_x, star_x) = (area.x + num_w as u16 + 1, area.x + num_w as u16 + 3);
+    let ex_x = area.x + num_w as u16 + 5;
     let (y, name_x, dev_x) = (area.y, area.x + name_x, area.x + name_x + name_w + GAP);
     let (nw, dw) = (name_w as usize, dev_w as usize);
     buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
@@ -721,12 +726,12 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         match app.store.is_marked(&m.key) {
             // Bold as well as blue: on the selection bar, which keeps colours off, that is
             // all the mark has left to show itself with.
-            true => buf.set_stringn(box_x, y, "☑", 1, tint(MARK).add_modifier(BOLD)),
+            true => buf.set_stringn(box_x, y, "✓", 1, tint(MARK).add_modifier(BOLD)),
             false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
         };
         if app.starred(&m.key) {
             // In the colour of the task at hand, as its header; gold with no task, as the ★
-            // then stands for any of them. Bold so it stands out as much as the ☑.
+            // then stands for any of them. Bold so it stands out as much as the ✓.
             let star = tint(app.task_at_hand().map_or(STAR, |t| task_color(t.name)));
             buf.set_stringn(star_x, y, "★", 1, star.add_modifier(BOLD));
         } else {
@@ -764,8 +769,12 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             buf.set_stringn(area.x + x, y, note, w as usize, base.add_modifier(Modifier::ITALIC));
         }
         if app.store.is_excluded(&m.key) {
-            // The whole row is struck out and muted; search hits still show on top.
+            // The whole row is struck out and muted; search hits still show on top. The ✗ is
+            // drawn after it, so the row's own strike does not swallow its colour.
             buf.set_style(Rect { y, height: 1, ..area }, tint(MUTED).add_modifier(Modifier::CROSSED_OUT));
+            buf.set_stringn(ex_x, y, "✗", 1, tint(BAD).add_modifier(BOLD));
+        } else {
+            buf.set_stringn(ex_x, y, "·", 1, tint(MUTED));
         }
         // What the search matched, underlined in bold; Notes may be scrolled off.
         // ponytail: a char is taken as one cell; wide chars would shift the underline.
@@ -812,7 +821,7 @@ fn menu_box(area: Rect, x: u16, items: &[(String, usize)], rows: usize) -> Optio
 /// The list under a header opened with `d`, each entry with how many models it would show,
 /// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
 /// listed; the width fits every entry so the box keeps still while typing. `picked` entries
-/// show `☑`, the rest `☐`.
+/// show `✓`, the rest `☐`.
 #[allow(clippy::too_many_arguments)]
 fn dropdown(
     buf: &mut Buffer,
@@ -848,7 +857,7 @@ fn dropdown(
         // so it has none.
         let (mark, style) = match i {
             0 => ("  ", tint(color)),
-            _ if picked.contains(label) => ("☑ ", tint(MARK).add_modifier(BOLD)),
+            _ if picked.contains(label) => ("✓ ", tint(MARK).add_modifier(BOLD)),
             _ => ("☐ ", tint(color)),
         };
         let x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
@@ -898,14 +907,14 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
     };
     let mut x = pill(buf, area.x, area.y, mode, color, area.width) + 1;
-    if matches!(app.input, Input::Quit | Input::Choose { .. }) {
+    if matches!(app.input, Input::Quit | Input::Choose { typing: false, .. }) {
         // The question is in a box in the middle of the screen.
         return None;
     }
     // The prompt's label, the text being typed and the cursor's byte offset in it.
     let prompt = match &app.input {
         Input::Search { cur, .. } => {
-            let q = if app.view == View::Compare { &app.compare_query } else { &app.query };
+            let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
             Some(("/".to_string(), q, *cur))
         }
         Input::Note { text, cur } => Some(("note: ".to_string(), text, *cur)),
@@ -916,12 +925,14 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             (false, true) => (format!("{} ▾", col_name(*col)), query, *cur),
             _ => (format!("{} ▾ /", col_name(*col)), query, *cur),
         }),
-        Input::Quit | Input::Choose { .. } | Input::None => None,
+        Input::Choose { title, query, cur, .. } => Some((format!("{title} /"), query, *cur)),
+        Input::Quit | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
         let text = format!("{label}{typed}");
         let (menu, typing) = match app.input {
             Input::Menu { typing, .. } => (true, typing),
+            Input::Choose { .. } => (true, true),
             _ => (false, true),
         };
         let hint = match (menu, typing) {
@@ -1018,11 +1029,13 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
-fn choice_lines(items: &[(String, Effect)], sel: usize) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = items
+fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line<'static>> {
+    let rows = choice_rows(items, query);
+    let mut lines: Vec<Line> = rows
         .iter()
         .enumerate()
-        .map(|(i, (label, effect))| {
+        .map(|(i, &k)| {
+            let (label, effect) = &items[k];
             // f's tasks in their colours, harnesses and sites in theirs.
             let color = match effect {
                 Effect::Fav(t) => task_color(t),
@@ -1031,24 +1044,27 @@ fn choice_lines(items: &[(String, Effect)], sel: usize) -> Vec<Line<'static>> {
             let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(color) };
             // A ticked box in the mark's colour, as in the table and the dropdowns; the rest of
             // the label keeps the task's or the harness's own.
-            match label.strip_prefix('☑') {
+            match label.strip_prefix('✓') {
                 Some(rest) if i != sel => Line::from(vec![
-                    Span::styled(" ☑", fg(MARK).add_modifier(BOLD)),
+                    Span::styled(" ✓", fg(MARK).add_modifier(BOLD)),
                     Span::styled(format!("{rest} "), style),
                 ]),
                 _ => Line::from(format!(" {label} ")).style(style),
             }
         })
         .collect();
+    // What `/` left, said as the dropdowns say it.
+    if rows.is_empty() {
+        lines.push(Line::from(format!(" no entry matches {query} ")).style(fg(MUTED)));
+    }
     let hint = match items.first() {
-        Some((_, Effect::Fav(_))) => " j k move · m toggle · enter toggle and close · esc close",
-        Some((_, Effect::Theme(_))) => " j k preview · enter saves · esc T close",
-        _ => " j k move · enter opens",
+        Some((_, Effect::Fav(_))) => " j k move · / search · m toggle · enter toggle and close · esc close",
+        Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc T close",
+        _ => " j k move · / search · enter opens",
     };
     lines.push(Line::from(hint).style(fg(MUTED)));
     lines
 }
-
 /// Where an overlay with these lines sits: centred, as wide as its widest line or title.
 fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
@@ -1087,7 +1103,7 @@ fn heading(text: &str) -> Line<'static> {
     Line::from(text.to_string()).style(fg(ACCENT).add_modifier(BOLD))
 }
 
-fn help() -> Vec<Line<'static>> {
+fn help(query: &str) -> Vec<Line<'static>> {
     let key_w = HELP.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
     let mut v: Vec<Line> = HELP
         .iter()
@@ -1106,6 +1122,14 @@ fn help() -> Vec<Line<'static>> {
             .style(fg(MUTED)),
     );
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
+    // `/` keeps the lines that match, so a key or a column can be looked up in a long list.
+    if !query.is_empty() {
+        let q = query.to_lowercase();
+        v.retain(|l| l.spans.iter().any(|s| s.content.to_lowercase().contains(&q)));
+        if v.is_empty() {
+            v.push(Line::from(format!("no help line matches {query}")).style(fg(MUTED)));
+        }
+    }
     v
 }
 
@@ -1444,13 +1468,13 @@ mod tests {
         ((2.0 + rm / 256.0) * dr * dr + 4.0 * dg * dg + (3.0 - rm / 256.0) * db * db).sqrt()
     }
 
-    /// A marked row shows it by the colour of its ☑, so that colour cannot look like the muted
+    /// A marked row shows it by the colour of its ✓, so that colour cannot look like the muted
     /// ☐ beside it. Slot 12 is the mark's and slot 8 the muted one's.
     #[test]
     fn the_mark_parts_from_an_empty_box() {
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
             let d = apart(p.ansi[12], p.ansi[8]);
-            assert!(d >= 130.0, "{name}: ☑ {:06x} and ☐ {:06x} look alike, {d:.0}", p.ansi[12], p.ansi[8]);
+            assert!(d >= 130.0, "{name}: ✓ {:06x} and ☐ {:06x} look alike, {d:.0}", p.ansi[12], p.ansi[8]);
         }
     }
 
@@ -1470,9 +1494,9 @@ mod tests {
         let (buf, lines) = render(&mut a, 120, 4);
         let row = |m: &str| lines.iter().position(|l| l.contains(m)).unwrap() as u16;
         let (opus, flash) = (row("opus"), row("flash"));
-        assert!(lines[flash as usize].contains('☑') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
-        let box_x = cell(&lines[flash as usize], "☑");
-        assert_eq!(buf[(box_x, flash)].fg, MARK, "the ☑ is in the mark colour");
+        assert!(lines[flash as usize].contains('✓') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
+        let box_x = cell(&lines[flash as usize], "✓");
+        assert_eq!(buf[(box_x, flash)].fg, MARK, "the ✓ is in the mark colour");
         assert!((0..120).all(|x| buf[(x, flash)].bg != MARK), "the row itself is not highlighted");
     }
 
@@ -1500,7 +1524,7 @@ mod tests {
         a.query = "refac".into();
         a.rebuild();
         let (buf, lines) = render(&mut a, 200, 4);
-        assert_eq!((a.rows.len(), words(&lines[1])[3]), (1, "opus"), "notes are searched");
+        assert_eq!((a.rows.len(), words(&lines[1])[4]), (1, "opus"), "notes are searched");
         let x = cell(&lines[1], "refactors");
         let under = |x: u16| buf[(x, 1)].modifier.contains(Modifier::UNDERLINED);
         assert!((x..x + 5).all(under) && !under(x + 5), "refac of the note");
@@ -1508,7 +1532,7 @@ mod tests {
         a.rebuild();
         let (buf, lines) = render(&mut a, 200, 4);
         assert_eq!(a.rows.len(), 2, "Via is searched");
-        let x = lines[1].find("opencode").unwrap() as u16;
+        let x = cell(&lines[1], "opencode");
         assert!(buf[(x, 1)].modifier.contains(Modifier::UNDERLINED), "openc of the Via column");
     }
 
@@ -1525,8 +1549,8 @@ mod tests {
             dev_color("opencode"),
             "harnesses are coloured"
         );
-        assert_eq!(&words(&lines[1])[..10], ["1", "☐", "☆", "opus", "anthropic", "5.0", "5.0", "5.0", "5.0", "200k"]);
-        assert_eq!(&words(&lines[2])[..10], ["2", "☐", "☆", "flash", "google", "0.10", "0.10", "0.10", "0.10", "200k"]);
+        assert_eq!(&words(&lines[1])[..10], ["1", "☐", "☆", "·", "opus", "anthropic", "5.0", "5.0", "5.0", "5.0"]);
+        assert_eq!(&words(&lines[2])[..10], ["2", "☐", "☆", "·", "flash", "google", "0.10", "0.10", "0.10", "0.10"]);
         assert!(lines[4].starts_with(" NORMAL  2 available"), "{}", lines[4]);
         assert!(lines[4].ends_with("d dropdown  / filter  R recommend  ? help"), "{}", lines[4]);
         assert!(buf[(0, 1)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
@@ -1557,7 +1581,7 @@ mod tests {
         let dev = cell(&lines[0], "Dev") as usize - 2;
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭────────────────╮"), "{}", lines[1]);
-        assert_eq!(&words(&lines[2])[4..7], ["│", "any", "2"]);
+        assert_eq!(&words(&lines[2])[5..8], ["│", "any", "2"]);
         assert_eq!(&words(&lines[3])[..4], ["│", "☐", "anthropic", "1"]);
         assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
@@ -1589,6 +1613,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(12, 3)), Some(Mouse::Row(1)));
         assert_eq!(hit(&a, area, click(3, 3)), Some(Mouse::Box(1)), "a click on the checkbox cycles it");
         assert_eq!(hit(&a, area, click(5, 3)), Some(Mouse::Star(1)), "and on the ☆ picks tasks");
+        assert_eq!(hit(&a, area, click(7, 3)), Some(Mouse::Exclude(1)), "and on the ✗ box excludes the model");
         let right = |x, y| MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), ..click(x, y) };
         assert_eq!(hit(&a, area, right(12, 3)), Some(Mouse::Mark(1)), "right click marks");
         let ctrl = |x, y| MouseEvent { modifiers: KeyModifiers::CONTROL, ..click(x, y) };
@@ -1750,10 +1775,10 @@ mod tests {
         a.key(KeyCode::Char('s').into());
         a.table.select(Some(15));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[4])[..4], ["16", "☐", "☆", "m6"], "row 15 (m6) is the last of the 4 visible rows");
+        assert_eq!(words(&lines[4])[..5], ["16", "☐", "☆", "·", "m6"], "row 15 (m6) is the last of the 4 visible rows");
         a.table.select(Some(0));
         let (_, lines) = render(&mut a, 60, 6);
-        assert_eq!(words(&lines[1])[..4], ["1", "☐", "☆", "opus"], "scrolls back up");
+        assert_eq!(words(&lines[1])[..5], ["1", "☐", "☆", "·", "opus"], "scrolls back up");
     }
 
     #[test]
@@ -1870,13 +1895,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(), &mut scroll);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll);
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, ACCENT);
-        assert_eq!(scroll as usize, help().len() - 4, "scroll is clamped to the content");
+        assert_eq!(scroll as usize, help("").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(), &mut scroll);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll);
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         let a = app();
         let text: Vec<String> = detail(&a.data.models[0], &a.store).iter().map(ToString::to_string).collect();

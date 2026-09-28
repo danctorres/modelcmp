@@ -41,31 +41,31 @@ column.
 | `s` | sort by the column; again reverses |
 | `enter` | details: every benchmark, price per provider |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
-| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, `m` toggles several, as it marks models |
+| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `m` toggles several, as it marks models |
 | `(` `)` `^d` `^u` | half a page up / down; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
 | `gg` `G` `3gg` | top / bottom / row 3 |
-| `m` | mark the model: its box `☐` becomes `☑` in light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it |
+| `m` | mark the model: its box `☐` becomes `✓` in light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it |
 | `U` | unmark every model |
 | `V` | select a range of rows: move to extend it, then `m` `e` or `C` act on all of it; `esc` cancels |
 | `e` on a mark | act on every marked model, not just the one under the cursor |
 | `M` | marked models only; `M` again or `esc`: every model |
 | `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked); `F` again or `esc`: every model |
 | `C` | compare 2+ marked models: cheapest, best coder, most coding per $; `C` again or `esc` closes it |
-| `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare, filters the rows |
+| `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare it filters the rows, in the help its lines, and in a list like the theme panel its entries |
 | `c` | clear filters, bounds, task, `M` and `F`; marks stay |
 | `a` | all models, including ones you have no access to |
 | `n` | note for the model |
-| `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but recommendations (`R` and `--task`) skip it |
-| `f` | favorite the model for tasks. Every row has a `☆`, filled bold `★` for a favorite: with a task picked, that task's favorite in the task's colour, the colour of its column header and of its name in recommend; with none, a gold `★` for the favorite of any task. `f` or a click on the `☆` lists the tasks with `☐`/`☑`: `m` or a click ticks one, `enter` ticks the one under the bar and closes; the list starts on the picked task, or the task under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. The model joins the task's line even off the price frontier, and `--tier` picks it |
+| `e` | exclude the model: you have it but cannot use it. It stays in the table, struck through, but recommendations (`R` and `--task`) skip it. Every row has a `·`, a red `✗` when excluded, and a click on it toggles the exclusion |
+| `f` | favorite the model for tasks. Every row has a `☆`, filled bold `★` for a favorite: with a task picked, that task's favorite in the task's colour, the colour of its column header and of its name in recommend; with none, a gold `★` for the favorite of any task. `f` or a click on the `☆` lists the tasks with `☐`/`✓`: `m` or a click ticks one, `enter` ticks the one under the bar and closes; the list starts on the picked task, or the task under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. The model joins the task's line even off the price frontier, and `--tier` picks it |
 | typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` `^←` `^→` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on models.dev, epoch.ai or openrouter.ai; asks which |
 | `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |
 | `r` | refresh data now |
 | `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
-| `T` | theme panel: `j` `k` preview, `enter` saves, `esc` or `T` closes. `terminal` (its own colours, the default), then the dark `gruvbox`, `nord`, `catppuccin`, `dracula`, `tokyonight`, `kanagawa`, `monokai`, `rose-pine`, `github`, `solarized`, `synthwave` and `cyberpunk`, the light `github-light`, `gruvbox-light`, `paper` and `sepia`, and the retro `amber`, `phosphor`, `c64` and `gameboy`; saved with your marks. A theme sets the 16 terminal colours, the text colour and 5 to 14 colours for developers, each of which has to read on that theme's background and stay apart from the others. Every theme paints its own background, so a dark one stays dark on a light terminal; only `terminal` keeps a transparent background |
-| `?` | help |
-| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its `☐` toggles the mark, on its `☆` picks its tasks; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
+| `T` | theme panel: `j` `k` preview, `/` searches, `enter` saves, `esc` or `T` closes. `terminal` (its own colours, the default), then the dark `gruvbox`, `nord`, `catppuccin`, `dracula`, `tokyonight`, `kanagawa`, `monokai`, `rose-pine`, `github`, `solarized`, `synthwave` and `cyberpunk`, the light `github-light`, `gruvbox-light`, `paper` and `sepia`, and the retro `amber`, `phosphor`, `c64` and `gameboy`; saved with your marks. A theme sets the 16 terminal colours, the text colour and 5 to 14 colours for developers, each of which has to read on that theme's background and stay apart from the others. Every theme paints its own background, so a dark one stays dark on a light terminal; only `terminal` keeps a transparent background |
+| `?` | help; `/` keeps the lines that match |
+| mouse | click a row to select it, again for details; ctrl click adds or removes it from the selection, shift click or a drag selects a range, a plain click drops the selection, right click marks it, a click on its `☐` toggles the mark, on its `☆` picks its tasks, on its `✗` box excludes it; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; the wheel scrolls, sideways moves the column, or the model in compare and recommend |
 | `qq` | quit; the first `q` asks. `esc` goes back: closes an overlay, drops the selection, clears the `/` filter, leaves `M`, then `F`, then a task picked in recommend back to recommend |
 
 ## CLI
@@ -90,7 +90,7 @@ modelcmp recommend                             # best model per price for each t
 Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`, `long-context`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
-`recommend` leave excluded models out; plain `list` shows them marked `✗`, your marks `☑` and available models `●`. `--tier` picks one
+`recommend` leave excluded models out; plain `list` shows them marked `✗`, your marks `✓` and available models `●`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
 the best; the best when none reaches the floor. A model you `fav` for the task beats the
 tier's pick and sits on the task's list marked `★` whether or not it is on the frontier. Scores are percentiles among the models

@@ -149,7 +149,7 @@ fn table(models: &[&Model], store: &Store, show_avail: bool) {
         let mark = if store.is_excluded(&m.key) {
             "✗ "
         } else if store.is_marked(&m.key) {
-            "☑ "
+            "✓ "
         } else if show_avail && m.available {
             "● "
         } else {
@@ -313,7 +313,7 @@ pub fn mark(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
         store.toggle_marked(&m.key);
     }
     store.save()?;
-    println!("{} {}", if rm { "unmarked" } else { "☑ marked" }, m.name);
+    println!("{} {}", if rm { "unmarked" } else { "✓ marked" }, m.name);
     Ok(())
 }
 
