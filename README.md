@@ -2,6 +2,8 @@
 
 Pick the cheapest LLM that is good enough for the job.
 
+![modelcmp TUI](https://github.com/user-attachments/assets/0b84321d-ac18-4267-8490-702b87efd0a9)
+
 modelcmp joins prices from [models.dev](https://models.dev) with benchmarks from
 [Epoch AI](https://epoch.ai/benchmarks) and shows only the models you can
 already use: the ones your harnesses list (`opencode models`; `claude`, `codex` and
