@@ -49,7 +49,7 @@ column.
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding |
 | `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `m` toggles several, as it marks models |
 | `(` `)` `^d` `^u` | half a page up / down; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
-| `gg` `G` `3gg` | top / bottom / row 3 |
+| `gg` `G` `3gg` | top / bottom / row 3; a number before `gg` goes to that row, as `12gg` to row 12, in dropdowns and lists too |
 | `m` | mark the model: its box `☐` becomes `✓` in light blue; the shortlist you are deciding between, kept until you unmark it. A click on the box toggles it |
 | `U` | unmark every model |
 | `V` | select a range of rows: move to extend it, then `m` `e` or `C` act on all of it; `esc` cancels |
