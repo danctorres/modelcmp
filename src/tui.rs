@@ -1112,16 +1112,13 @@ fn help(query: &str) -> Vec<Line<'static>> {
         })
         .collect();
     v.push(Line::default());
-    v.push(heading("Columns (green: best shown, red: worst; a task's column, its ★ and its name share a colour)"));
+    v.push(heading("Columns: green the best shown, red the worst"));
     for c in 0..NCOLS {
         v.push(Line::from(vec![Span::styled(format!("{:<11}", col_name(c)), fg(KEY)), Span::raw(col_about(c))]));
     }
     v.push(Line::default());
-    v.push(
-        Line::from(format!("Marks, exclusions, notes, favorites and theme: {}", crate::store::path().display()))
-            .style(fg(MUTED)),
-    );
-    v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
+    v.push(Line::from(format!("Saved in {}", crate::store::path().display())).style(fg(MUTED)));
+    v.push(Line::from("More in the README · CLI: modelcmp --help").style(fg(MUTED)));
     // `/` keeps the lines that match, so a key or a column can be looked up in a long list.
     if !query.is_empty() {
         let q = query.to_lowercase();
