@@ -117,13 +117,13 @@ modelcmp list --task coding --tier mid         # just one: the cheapest scoring 
 modelcmp list --task coding --tier mid --id    # only its provider/model, for codex -m $(...)
 modelcmp list --min coding=70 --sort price     # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
-modelcmp show sonnet                           # everything about one model
-modelcmp compare sonnet gpt-5 --json           # side by side, with a verdict
-modelcmp open sonnet --on epoch                # its web page: models.dev, epoch or openrouter (default)
-modelcmp mark sonnet                           # shortlist it, list --marked shows them: --rm to unmark
-modelcmp note sonnet "fast enough for refactors"   # without text shows it, --rm deletes it
-modelcmp exclude llama                         # have it, can't use it; --rm to include again
-modelcmp fav coding sonnet                     # your favorite for a task: --tier picks it; alone lists them, --rm clears
+modelcmp show sonnet-5                         # everything about one model
+modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
+modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch or openrouter (default)
+modelcmp mark sonnet-5                         # shortlist it, list --marked shows them: --rm to unmark
+modelcmp note sonnet-5 "fast enough for refactors" # without text shows it, --rm deletes it
+modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
+modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
 modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
 ```
@@ -134,7 +134,8 @@ tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `-
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, your marks `✓` and available models `●`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
 the best; the best when none reaches the floor. A model you `fav` for the task beats the
-tier's pick and sits on the task's list marked `★` whether or not it is on the frontier. Scores are percentiles among the models
+tier's pick and sits on the task's list marked `★` whether or not it is on the frontier; one with no score for
+the task cannot be, so `fav` warns and lists it as never picked. Scores are percentiles among the models
 Epoch benchmarked. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, and `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache. The
 TUI's bottom border always shows the refresh state: `⟳ refreshing`, `refresh failed` in red
@@ -142,8 +143,9 @@ with the age of the data still shown, or the data age alone, red once it is past
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 `list` prints every match unless `-n` limits it, and then says how many it left out.
 
-Model names match by substring, among the models you have first; an ambiguous name exits
-with code 2 and lists the candidates. An unknown `--dev` or `--via` is an error rather
+Model names match by substring, among the models you have first; the shortest match wins
+only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name
+is ambiguous: it exits with code 2 and lists the candidates. An unknown `--dev` or `--via` is an error rather
 than an empty list.
 
 For agents:

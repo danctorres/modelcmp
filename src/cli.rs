@@ -329,18 +329,27 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
 
 /// Show the favorite model of every task, of one, or set or clear one.
 pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, rm: bool) -> Result {
-    let name = |key: &str| data.models.iter().find(|m| m.key == key).map_or(key.to_string(), |m| m.name.clone());
+    let model = |key: &str| data.models.iter().find(|m| m.key == key);
+    // A favorite the task cannot score never makes its line, so --tier and recommend skip it.
+    let unscored = |t: &str, m: &Model| fit::task(t).is_some_and(|t| fit::fit(m, t).is_none());
+    let line = |t: &str, k: &str| {
+        let m = model(k);
+        let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score, so never picked)" } else { "" };
+        format!("★ {} [{k}]{skipped}", m.map_or(k, |m| m.name.as_str()))
+    };
     match (task, q, rm) {
         (None, ..) => {
+            if store.favorite.is_empty() {
+                println!("no favorites; modelcmp fav <task> <model> sets one");
+            }
             for (t, k) in &store.favorite {
-                println!("{t:<13}★ {} [{k}]", name(k));
+                println!("{t:<13}{}", line(t, k));
             }
         }
-        (Some(t), None, false) => {
-            if let Some(k) = store.favorite(t) {
-                println!("★ {} [{k}]", name(k));
-            }
-        }
+        (Some(t), None, false) => match store.favorite(t) {
+            Some(k) => println!("{}", line(t, k)),
+            None => println!("no favorite for {t}"),
+        },
         (Some(t), None, true) => {
             store.favorite.remove(t);
             store.save()?;
@@ -351,6 +360,9 @@ pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, 
             store.favorite.insert(t.to_string(), m.key.clone());
             store.save()?;
             println!("★ {t}: {}", m.name);
+            if unscored(t, m) {
+                eprintln!("warning: {} has no {t} score, so --tier and recommend will not pick it", m.name);
+            }
         }
     }
     Ok(())
@@ -359,7 +371,10 @@ pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, 
 pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: bool) -> Result {
     let m = resolve(data, q)?;
     match (text, rm) {
-        (None, false) => println!("{}", store.note(&m.key).unwrap_or("")),
+        (None, false) => match store.note(&m.key) {
+            Some(n) => println!("{n}"),
+            None => println!("no note for {}", m.name),
+        },
         (t, _) => {
             store.set_note(&m.key, t.unwrap_or(""));
             store.save()?;

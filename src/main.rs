@@ -37,7 +37,7 @@ enum Cmd {
     /// List models you have access to (all with --all): rank, bound and sort them
     #[command(alias = "ls")]
     List {
-        /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`t` in the TUI)
+        /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`R` then `enter` in the TUI)
         #[arg(short, long, value_parser = tasks(), conflicts_with = "sort")]
         task: Option<String>,
         /// One model from the task's list: low = cheapest scoring 50+, mid = cheapest 75+, high = the best; the best when none reaches the floor

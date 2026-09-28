@@ -248,8 +248,9 @@ impl Data {
         hits.sort_by_key(|m| m.key.len());
         match hits.as_slice() {
             [one] => Ok(one),
-            // A strictly shortest match wins: "opus-4.5" -> claude-opus-4.5, not ...-thinking.
-            [a, b, ..] if a.key.len() < b.key.len() => Ok(a),
+            // The shortest match wins when it is part of every other: "opus-4.5" -> claude-opus-4.5,
+            // not ...-thinking; "claude" matching both Opus and Sonnet stays ambiguous.
+            [a, rest @ ..] if rest.iter().all(|b| b.key.len() > a.key.len() && b.key.contains(&a.key)) => Ok(a),
             _ => Err(hits),
         }
     }
@@ -1019,6 +1020,8 @@ mod tests {
         assert_eq!(d.find("sonnet").unwrap().key, "claudesonnet5", "yours first, then the shortest");
         assert_eq!(d.find("sonnet4").unwrap().key, "claudesonnet4", "all models when none of yours match");
         assert_eq!(d.find("claudesonnet45").unwrap().key, "claudesonnet45", "an exact key wins");
+        let d = Data { models: vec![mine("claudeopus5"), mine("claudefable5")], ..Default::default() };
+        assert_eq!(d.find("claude").unwrap_err().len(), 2, "shorter is not enough: ambiguous");
     }
 
     #[test]
