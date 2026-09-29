@@ -48,7 +48,7 @@ commands and JSON.
 | `e` on a mark | act on every marked model, not just the one under the cursor |
 | `n` | note for the model |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
-| `o` | open the model on models.dev, epoch.ai or openrouter.ai; asks which |
+| `o` | open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai; asks which |
 | `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |
 
 ## Panels

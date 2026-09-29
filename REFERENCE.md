@@ -30,7 +30,7 @@ modelcmp list --min coding=70 --sort price     # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet-5                         # everything about one model
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
-modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch or openrouter (default)
+modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, artificial(analysis) or openrouter (default)
 modelcmp mark sonnet-5                         # shortlist it, list --marked shows them: --rm to unmark
 modelcmp note sonnet-5 "fast enough for refactors" # without text shows it, --rm deletes it
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again

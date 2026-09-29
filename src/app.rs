@@ -157,7 +157,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("e", "exclude the model (✗): recommendations skip it; on a mark, all marks"),
             ("n", "note for the model"),
             ("y Y", "copy the model id / name"),
-            ("o", "open the model on models.dev, epoch.ai or openrouter.ai"),
+            ("o", "open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai"),
             ("x", "open a harness on the model in a new terminal"),
         ],
     ),
@@ -2435,8 +2435,8 @@ mod tests {
         assert_eq!(a.store.note("gpt55"), Some("fast"));
         assert_eq!(press(&mut a, "o"), None, "o asks which site");
         assert!(
-            matches!(&a.input, Input::Choose { items, .. } if items.len() == 2),
-            "epoch.ai, openrouter.ai: no models.dev page, as the developer does not offer it"
+            matches!(&a.input, Input::Choose { items, .. } if items.len() == 3),
+            "epoch.ai, artificialanalysis.ai, openrouter.ai: no models.dev page, as the developer does not offer it"
         );
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));
         press(&mut a, "oG");

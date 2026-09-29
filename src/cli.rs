@@ -83,7 +83,7 @@ struct ModelOut<'a> {
     release: &'a str,
     knowledge: &'a str,
     url: &'a str,
-    /// Site -> the model's page there: models.dev, epoch.ai, openrouter.ai
+    /// Site -> the model's page there: models.dev, epoch.ai, artificialanalysis.ai, openrouter.ai
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<BTreeMap<&'static str, String>>,
     /// Epoch Capabilities Index

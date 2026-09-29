@@ -161,23 +161,27 @@ impl Model {
 
     /// The model's pages, (site, url): models.dev when its developer offers it, as models.dev
     /// has pages only under the lab (`openai/gpt-5.5`, not a reseller's); Epoch AI when it has
-    /// benchmarked the model, whose name is then Epoch's; OpenRouter always, `url`.
+    /// benchmarked the model, whose name is then Epoch's, and Artificial Analysis under the same
+    /// slug; OpenRouter always, `url`.
     pub fn links(&self) -> Vec<(&'static str, String)> {
         let dev = norm(&self.developer);
         let md = self.offers.iter().find(|o| !dev.is_empty() && norm(&short_org(&o.provider)) == dev);
-        let epoch = (self.eci.is_some() || !self.scores.is_empty()).then(|| {
-            let slug: Vec<String> = self
-                .name
-                .to_lowercase()
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .filter(|w| !w.is_empty())
-                .map(String::from)
-                .collect();
-            ("epoch.ai", format!("https://epoch.ai/models/{}", slug.join("-")))
+        // ponytail: Epoch's benchmarks stand in for Artificial Analysis covering the model too;
+        // fetch AA's model list if its links turn out dead too often.
+        let benched = (self.eci.is_some() || !self.scores.is_empty()).then(|| {
+            let slug: Vec<&str> =
+                self.name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+            slug.join("-").to_lowercase()
+        });
+        let bench = benched.iter().flat_map(|slug| {
+            [
+                ("epoch.ai", format!("https://epoch.ai/models/{slug}")),
+                ("artificialanalysis.ai", format!("https://artificialanalysis.ai/models/{slug}")),
+            ]
         });
         md.map(|o| ("models.dev", format!("https://models.dev/models/{}/{}/", o.provider, o.id)))
             .into_iter()
-            .chain(epoch)
+            .chain(bench)
             .chain([("openrouter.ai", self.url.clone())])
             .collect()
     }
@@ -999,11 +1003,16 @@ mod tests {
             [
                 ("models.dev", "https://models.dev/models/anthropic/claude-opus-5-5/".into()),
                 ("epoch.ai", "https://epoch.ai/models/claude-opus-5-5".into()),
+                ("artificialanalysis.ai", "https://artificialanalysis.ai/models/claude-opus-5-5".into()),
                 ("openrouter.ai", m.url.clone()),
             ]
         );
         m.offers.remove(1);
-        assert_eq!(sites(&m), ["epoch.ai", "openrouter.ai"], "models.dev has pages only under the developer");
+        assert_eq!(
+            sites(&m),
+            ["epoch.ai", "artificialanalysis.ai", "openrouter.ai"],
+            "models.dev has pages only under the developer"
+        );
     }
 
     #[test]

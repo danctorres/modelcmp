@@ -92,7 +92,7 @@ enum Cmd {
     /// Open the model's web page (`o` in the TUI)
     Open {
         model: String,
-        /// The site: models.dev, epoch.ai or openrouter.ai; a prefix will do
+        /// The site: models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai; a prefix will do
         #[arg(long, default_value = "openrouter")]
         on: String,
     },
