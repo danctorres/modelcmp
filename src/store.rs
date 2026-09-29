@@ -16,7 +16,7 @@ pub struct Store {
     /// Pins from older files, read once and loaded as marks.
     #[serde(alias = "favorites", skip_serializing)]
     pinned: BTreeSet<String>,
-    /// Marks (`m` in the TUI) outlive a session.
+    /// Marks (`m` in the TUI); closing the TUI clears them.
     pub marked: Vec<String>,
     /// Models you have but cannot use; recommendations skip them.
     pub excluded: BTreeSet<String>,

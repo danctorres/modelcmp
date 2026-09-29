@@ -33,7 +33,7 @@ commands and JSON.
 
 | Key | Action |
 |-----|--------|
-| `m` | select the model: its box `☐` becomes `✓` in light blue; the shortlist you are deciding between, kept until you deselect it. A click on the box toggles it |
+| `m` | select the model: its box `☐` becomes `✓` in light blue; the shortlist you are deciding between, kept until you deselect it or close the TUI. A click on the box toggles it |
 | `U` | deselect every model |
 | `V` | highlight a range of rows: move to extend it, then `m` `e` or `C` act on all of it; `esc` cancels |
 | `C` | compare 2+ selected models: cheapest, best coder, most coding per $; `h` `l` pick a model, and the table's bar follows it; `C` again or `esc` closes it |

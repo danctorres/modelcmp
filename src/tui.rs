@@ -100,7 +100,15 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
             };
             {
                 match effect {
-                    Some(Effect::Quit) => return Ok(()),
+                    // The selection is the shortlist of one session: closing the TUI clears it.
+                    Some(Effect::Quit) => {
+                        app.store.reload_if_changed();
+                        if app.store.marked.is_empty() {
+                            return Ok(());
+                        }
+                        app.store.marked.clear();
+                        return app.store.save().map_err(|e| format!("could not save: {e}"));
+                    }
                     Some(Effect::Save) => {
                         if let Err(e) = app.store.save() {
                             app.report(Err(format!("could not save: {e}")));
