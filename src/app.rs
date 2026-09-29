@@ -147,7 +147,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("space", "select the model (✓): the shortlist for C"),
             ("U", "deselect every model"),
-            ("V", "highlight a range; space e C act on all of it"),
+            ("v", "highlight a range; space e C act on all of it"),
             ("C", "compare the selected models"),
         ],
     ),
@@ -454,7 +454,7 @@ pub struct App {
     pub only_fav: bool,
     /// `E`: show excluded models only.
     pub only_excluded: bool,
-    /// Row where `V` started a visual range; the range runs to the cursor.
+    /// Row where `v` started a visual range; the range runs to the cursor.
     pub visual: Option<usize>,
     /// Rows picked one by one with ctrl click; selected along with the visual range.
     pub picked: Vec<usize>,
@@ -1322,7 +1322,7 @@ impl App {
                 let sel = self.task_at_hand().and_then(|t| TASKS.iter().position(|u| u.name == t.name)).unwrap_or(0);
                 self.input = Input::choose("favorite for which tasks?", items, sel);
             }
-            KeyCode::Char('V') if table => {
+            KeyCode::Char('v') if table => {
                 if self.selecting() {
                     self.deselect();
                 } else {
@@ -2318,7 +2318,7 @@ mod tests {
     #[test]
     fn a_refresh_keeps_the_selection() {
         let mut a = app();
-        press(&mut a, "Vj");
+        press(&mut a, "vj");
         let same = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
         a.refreshed(Ok(same));
         assert_eq!((a.visual_range(), a.selected()), (Some(0..=1), 1), "the range follows its models");
@@ -2378,7 +2378,7 @@ mod tests {
         assert_eq!((a.marked_models().len(), a.only_marked, a.rows.len()), (2, false, 3), "c keeps them and leaves M");
         press(&mut a, "G M");
         assert_eq!(keys(&a), ["gpt55", "opus5", "mini"]);
-        press(&mut a, "ggVG ");
+        press(&mut a, "ggvG ");
         assert_eq!(
             (a.store.marked.len(), a.only_marked, a.rows.len()),
             (0, false, 3),
@@ -2453,17 +2453,17 @@ mod tests {
     #[test]
     fn visual_ranges_and_marks_act_on_groups() {
         let mut a = app();
-        press(&mut a, "Vj");
+        press(&mut a, "vj");
         assert_eq!(a.visual_range(), Some(0..=1));
         assert_eq!(press(&mut a, "e"), Some(Effect::Save));
         assert!(a.store.is_excluded("gpt55") && a.store.is_excluded("opus5") && !a.store.is_excluded("mini"));
         assert_eq!((a.visual, a.status.as_str()), (None, "excluded 2 models"), "an action ends the range");
-        press(&mut a, "ggVje");
+        press(&mut a, "ggvje");
         assert!(!a.store.is_excluded("gpt55") && !a.store.is_excluded("opus5"), "all had it: cleared");
-        press(&mut a, "GVk");
+        press(&mut a, "Gvk");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.visual, a.rows.len()), (None, 3), "esc cancels the range only");
-        press(&mut a, "ggVj ");
+        press(&mut a, "ggvj ");
         assert_eq!(a.store.marked, ["gpt55", "opus5"]);
         press(&mut a, "Ge");
         assert!(a.store.is_excluded("mini") && !a.store.is_excluded("gpt55"), "e on an unmarked row acts on it alone");
@@ -2472,15 +2472,15 @@ mod tests {
             a.store.is_excluded("gpt55") && a.store.is_excluded("opus5") && !a.store.is_excluded("mini"),
             "e on a mark: all marks"
         );
-        press(&mut a, "ggVjj ");
+        press(&mut a, "ggvjj ");
         assert_eq!(a.store.marked, ["gpt55", "opus5", "mini"], "space on a partly marked range marks the rest");
-        press(&mut a, "ggVjj ");
+        press(&mut a, "ggvjj ");
         assert_eq!(
             (a.store.marked.len(), a.status.as_str()),
             (0, "deselected 3 models"),
             "space on an all-marked range unmarks it"
         );
-        press(&mut a, " GVkC");
+        press(&mut a, " GvkC");
         assert_eq!(
             (&a.view, a.marked_models().len()),
             (&View::Compare, 2),

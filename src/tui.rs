@@ -659,7 +659,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 Line::from(""),
                 Line::from(vec![key("esc"), Span::raw(" back to the table, then")]),
                 Line::from(vec![key("space"), Span::raw(" selects the model under the bar, or")]),
-                Line::from(vec![key("V"), Span::raw(" / shift+click highlights a range, and")]),
+                Line::from(vec![key("v"), Span::raw(" / shift+click highlights a range, and")]),
                 Line::from(vec![key("C"), Span::raw(" compares them")]),
             ];
             Some(("compare".into(), lines))
@@ -2250,7 +2250,7 @@ mod tests {
         };
         term.draw(|f| draw(&mut a, f)).unwrap();
         assert_eq!([on(&term, 0, 3), on(&term, 99, 3), on(&term, 0, 4)], [true, true, false]);
-        a.key(KeyCode::Char('V').into());
+        a.key(KeyCode::Char('v').into());
         a.key(KeyCode::Char('j').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         assert_eq!([on(&term, 0, 3), on(&term, 99, 4)], [true, true], "the visual range too");
