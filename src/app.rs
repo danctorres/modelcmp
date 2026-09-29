@@ -120,6 +120,15 @@ pub fn col_about(col: usize) -> String {
 
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
+        "General",
+        &[
+            ("?", "this help; / keeps the lines that match"),
+            ("esc", "back: overlay, highlight, filter, M, F, E, task"),
+            ("q", "quit; asks first"),
+            ("r", "refresh data now (auto every 24h)"),
+        ],
+    ),
+    (
         "Move",
         &[
             ("j k ↓ ↑", "move; a count repeats, as in 3j"),
@@ -127,6 +136,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("0 _ $ w b", "first / last column; next / previous group"),
             ("gg G 3gg", "top / bottom / row 3"),
             ("( ) ^d ^u", "half a page up / down"),
+            ("v", "highlight a range; space e C act on all of it"),
         ],
     ),
     (
@@ -138,56 +148,45 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("d", "dropdown on Dev, Price and Via (▾); space toggles several"),
             ("a", "all models, including ones you have no access to"),
             ("%", "Price with none of the input cached, or back to --cache (90%)"),
-            ("M F E", "selected / favorite / excluded models only; again: every model"),
             ("c", "clear filters, bounds, task, M, F and E; the selection stays"),
         ],
     ),
     (
-        "Select and compare",
-        &[
-            ("space", "select the model (✓): the shortlist for C"),
-            ("U", "deselect every model"),
-            ("v", "highlight a range; space e C act on all of it"),
-            ("C", "compare the selected models"),
-        ],
-    ),
-    (
-        "Selected, favorite, excluded",
+        "Selected ✓, favorite ★, excluded ✗",
         &[
             ("✓", "selected: your shortlist for now; cleared when modelcmp closes"),
-            ("★", "favorite: your pick for a task; always in that task's recommendation"),
+            ("★", "favorite: your pick for a task; always in its recommendation"),
             ("✗", "excluded: you have it but cannot use it; recommendations skip it"),
+            ("space", "select the model; C compares the selected"),
+            ("f", "favorite the model for a task"),
+            ("e", "exclude the model"),
+            ("U", "deselect every model"),
+            ("M F E", "selected / favorite / excluded only; again: every model"),
         ],
     ),
     (
         "Model under the cursor",
         &[
-            ("enter", "details: every benchmark, price per provider"),
-            ("f", "favorite the model for tasks (★)"),
-            ("e", "exclude (✗): recommendations skip it; on a selected model, every selected one"),
             ("n", "note for the model"),
             ("y Y", "copy the model id / name"),
-            ("o", "open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai"),
+            ("o", "open the model's page on a site"),
             ("x", "open a harness on the model in a new terminal"),
         ],
     ),
-    ("Panels", &[("R", "recommend: the best model per price for each task"), ("t", "theme"), ("?", "this help")]),
+    (
+        "Panels",
+        &[
+            ("enter", "details: every benchmark, price per provider"),
+            ("C", "compare the selected models"),
+            ("R", "recommend: the best model per price for each task"),
+            ("t", "theme"),
+        ],
+    ),
     (
         "Input and mouse",
         &[
             ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
-            ("mouse", "click highlights, again details; ctrl / shift click, drag; right click selects"),
-            ("", "click ☐ ☆ · to select, favorite, exclude; a header sorts, its ▾ opens"),
-            ("", "click #: first row; the ✓ ★ ✗ header: selected, favorites, excluded only"),
-            ("", "click a key hint in the status bar to press it"),
-        ],
-    ),
-    (
-        "General",
-        &[
-            ("r", "refresh data now (auto every 24h)"),
-            ("esc", "back: overlay, highlight, filter, M, F, E, task"),
-            ("q", "quit; asks first"),
+            ("mouse", "click highlights, again details; right click selects"),
         ],
     ),
 ];
