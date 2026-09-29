@@ -3,10 +3,10 @@
 use crate::app::{COLS, model_id};
 use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
-use crate::store::Store;
+use crate::store::{Store, slot};
 use crate::view::{
-    compare_rows, detail_lines, frontier_legend, pick, priced, recommended, task_frontier, truncate, verdict, via,
-    visible,
+    TIERS, compare_rows, detail_lines, frontier_legend, pick, priced, recommended, task_frontier, truncate, verdict,
+    via, visible,
 };
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -72,8 +72,8 @@ struct ModelOut<'a> {
     /// You have it but cannot use it; --task and recommend skip it
     excluded: bool,
     note: Option<&'a str>,
-    /// Tasks this model is your favorite for (`modelcmp fav`); `--tier` picks it for them
-    favorite_for: Vec<&'a str>,
+    /// Tasks, or `task:tier`s, this model is your favorite for (`modelcmp fav`); `--tier` picks it for them
+    favorite_for: Vec<String>,
     price: Option<Price<'a>>,
     context: u64,
     max_output: u64,
@@ -213,14 +213,15 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         })
         .collect();
     if let Some(t) = o.task {
-        let yours = store.favorite(t.name);
-        let fav = models.iter().copied().find(|m| Some(m.key.as_str()) == yours);
-        let front = task_frontier(models.into_iter(), t, fav);
+        let favs = store.task_favorites(t.name);
+        let fav: Vec<&Model> = models.iter().copied().filter(|m| favs.contains(&m.key.as_str())).collect();
+        let front = task_frontier(models.into_iter(), t, &fav);
         models = match &o.tier {
-            // Your favorite beats the tier's pick.
-            Some(tier) => front
-                .iter()
-                .find(|(m, _)| Some(m.key.as_str()) == yours)
+            // Your favorite for the tier, else for the task, beats the tier's pick; one the
+            // filters hide gives way to the next.
+            Some(tier) => store
+                .tier_favorites(t.name, tier)
+                .find_map(|k| front.iter().find(|(m, _)| m.key == k))
                 .or_else(|| pick(&front, tier))
                 .map(|e| e.0)
                 .into_iter()
@@ -338,10 +339,20 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
 }
 
 /// Show the favorite model of every task, of one, or set or clear one.
-pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, rm: bool) -> Result {
+pub fn fav(
+    data: &Data,
+    store: &mut Store,
+    task: Option<&str>,
+    tier: Option<&str>,
+    q: Option<&str>,
+    rm: bool,
+) -> Result {
     let model = |key: &str| data.models.iter().find(|m| m.key == key);
     // A favorite the task cannot score still makes its line, unranked.
-    let unscored = |t: &str, m: &Model| fit::task(t).is_some_and(|t| fit::fit(m, t).is_none());
+    let unscored =
+        |s: &str, m: &Model| fit::task(s.split(':').next().unwrap_or(s)).is_some_and(|t| fit::fit(m, t).is_none());
+    let task = task.map(|t| slot(t, tier));
+    let task = task.as_deref();
     let line = |t: &str, k: &str| {
         let m = model(k);
         let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score)" } else { "" };
@@ -353,7 +364,7 @@ pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, 
                 println!("no favorites; modelcmp fav <task> <model> sets one");
             }
             for (t, k) in &store.favorite {
-                println!("{t:<13}{}", line(t, k));
+                println!("{t:<18}{}", line(t, k));
             }
         }
         (Some(t), None, false) => match store.favorite(t) {
@@ -394,14 +405,16 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
 fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<(&'a Model, f64)> {
     let models: Vec<&Model> =
         visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)).collect();
-    let fav = models.iter().copied().find(|m| Some(m.key.as_str()) == store.favorite(t.name));
-    task_frontier(models.into_iter(), t, fav)
+    let favs = store.task_favorites(t.name);
+    let fav: Vec<&Model> = models.iter().copied().filter(|m| favs.contains(&m.key.as_str())).collect();
+    task_frontier(models.into_iter(), t, &fav)
 }
 
-/// The task's favorite when it is on the line only for being the favorite.
-fn unrecommended<'a>(data: &Data, store: &'a Store, t: &Task) -> Option<&'a str> {
-    let models = visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key));
-    store.favorite(t.name).filter(|k| !recommended(models, t, k))
+/// The task's favorites that are on the line only for being favorites.
+fn unrecommended<'a>(data: &Data, store: &'a Store, t: &Task) -> Vec<&'a str> {
+    let models: Vec<&Model> =
+        visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)).collect();
+    store.task_favorites(t.name).into_iter().filter(|k| !recommended(models.iter().copied(), t, k)).collect()
 }
 
 /// `recommend --json`: what agents read to choose a task and its model.
@@ -413,14 +426,16 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             let front: Vec<_> = front(data, store, t)
                 .into_iter()
                 .map(|(m, s)| {
-                    let mut e = serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0, "recommended": off != Some(m.key.as_str())});
+                    let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0, "recommended": !off.contains(&m.key.as_str())});
                     if let Some(n) = store.note(&m.key) {
                         e["note"] = n.into();
                     }
                     e
                 })
                 .collect();
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "frontier": front})
+            let tier_favs: BTreeMap<&str, &str> =
+                TIERS.iter().filter_map(|x| Some((x.0, store.favorite(&slot(t.name, Some(x.0)))?))).collect();
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "tier_favorites": tier_favs, "frontier": front})
         })
         .collect()
 }
@@ -434,13 +449,12 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     for t in TASKS {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
-        let yours = store.favorite(t.name);
         let off = unrecommended(data, store, t);
         let front: Vec<String> = front(data, store, t)
             .iter()
             .map(|(m, s)| {
-                let p = priced(m, fit::shown(m, t, *s), true, Some(m.key.as_str()) == yours);
-                if off == Some(m.key.as_str()) { format!("{p} not recommended") } else { p }
+                let p = priced(m, fit::shown(m, t, *s), true, store.is_favorite(Some(t), &m.key));
+                if off.contains(&m.key.as_str()) { format!("{p} not recommended") } else { p }
             })
             .collect();
         println!("  best per price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
@@ -524,8 +538,8 @@ mod tests {
         let coding = |v: &[Value]| v.iter().find(|t| t["name"] == "coding").unwrap().clone();
         let names = |t: &Value| t["frontier"].as_array().unwrap().iter().map(|e| e["key"].clone()).collect::<Vec<_>>();
         let t = coding(&recommend_json(&data, &store));
-        assert_eq!(keys(&t), ["about", "benchmarks", "favorite", "frontier", "name", "when"]);
-        assert_eq!(keys(&t["frontier"][0]), ["key", "name", "price", "recommended", "score"]);
+        assert_eq!(keys(&t), ["about", "benchmarks", "favorite", "frontier", "name", "tier_favorites", "when"]);
+        assert_eq!(keys(&t["frontier"][0]), ["context", "key", "name", "price", "recommended", "score"]);
         assert_eq!(names(&t), ["mini", "gpt55"]);
         store.set_note("gpt55", "slow");
         assert_eq!(
@@ -533,6 +547,8 @@ mod tests {
             "slow",
             "a note only when there is one"
         );
+        store.toggle_favorite("coding:low", "mini");
+        assert_eq!(coding(&recommend_json(&data, &store))["tier_favorites"], serde_json::json!({"low": "mini"}));
         store.toggle_excluded("mini");
         assert_eq!(names(&coding(&recommend_json(&data, &store))), ["gpt55"]);
     }

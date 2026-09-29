@@ -137,7 +137,7 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                         });
                     }
                     // The app applies its own chooser items before they get here.
-                    Some(Effect::Fav(_) | Effect::Theme(_)) | None => {}
+                    Some(Effect::Fav(..) | Effect::Theme(_)) | None => {}
                 }
             }
             dirty = true;
@@ -498,15 +498,8 @@ const MARK: Color = Color::LightBlue;
 const STAR: Color = Color::Yellow;
 /// One colour per task in `TASKS` order: the ★ of its favorite and its name in recommend. Off the mark colour (✓ light blue), the key hints' cyan, the worst
 /// value's red and yellow for a match; 16 colours leave no room to also skip the best's green.
-const TASK: [Color; 7] = [
-    Color::LightCyan,
-    Color::Green,
-    Color::LightGreen,
-    Color::Blue,
-    Color::LightMagenta,
-    Color::LightYellow,
-    Color::LightRed,
-];
+const TASK: [Color; 6] =
+    [Color::LightCyan, Color::Green, Color::LightGreen, Color::Blue, Color::LightMagenta, Color::LightYellow];
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
 /// Developers' and harnesses' colours in the terminal's own theme; the five harness names all differ.
@@ -593,7 +586,9 @@ fn dev_color(dev: &str) -> Color {
     Color::Indexed((dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)
 }
 
+/// A task's colour, or its tier's (`coding:low`), which is the task's.
 fn task_color(task: &str) -> Color {
+    let task = task.split(':').next().unwrap_or(task);
     TASK[TASKS.iter().position(|t| t.name == task).unwrap_or(0)]
 }
 
@@ -1279,7 +1274,7 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
             let (label, effect) = &items[k];
             // f's tasks in their colours, harnesses and sites in theirs.
             let color = match effect {
-                Effect::Fav(t) => task_color(t),
+                Effect::Fav(t, _) => task_color(t),
                 _ => dev_color(label.split(' ').next().unwrap_or_default()),
             };
             let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(color) };
@@ -1300,7 +1295,7 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
         lines.push(Line::from(format!(" no entry matches {query} ")).style(fg(MUTED)));
     }
     let hint = match items.first() {
-        Some((_, Effect::Fav(_))) => " j k move · / search · space toggle · enter toggle and close · esc close",
+        Some((_, Effect::Fav(..))) => " j k move · / search · space toggle · enter toggle and close · esc close",
         Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc t close",
         _ => " j k move · / search · enter opens",
     };
@@ -1406,7 +1401,7 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
     }
     v.push(Line::default());
     let cli = words(
-        "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model>",
+        "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model> [--tier low|mid|high]",
     );
     v.extend(wrapped(vec![], cli, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
     v
@@ -1453,13 +1448,13 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
     if front.is_empty() {
         return vec![Line::from(Span::styled("no data", fg(MUTED)))];
     }
-    let off = app.favorite_unrecommended(t);
     front
         .iter()
         .map(|(m, s)| {
             let on = picked == Some(m.key.as_str());
             let tint = |c: Color| if on { Style::new().add_modifier(Modifier::REVERSED) } else { fg(c) };
-            let fav = app.store.favorite(t.name) == Some(m.key.as_str());
+            let fav = app.store.is_favorite(Some(t), &m.key);
+            let off = fav && app.favorite_unrecommended(t, &m.key);
             let mut spans = Vec::with_capacity(3);
             if fav {
                 spans.push(Span::styled("★ ", tint(task_color(t.name)).add_modifier(BOLD)));

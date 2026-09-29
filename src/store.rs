@@ -21,12 +21,25 @@ pub struct Store {
     /// Models you have but cannot use; recommendations skip them.
     pub excluded: BTreeSet<String>,
     pub notes: BTreeMap<String, String>,
-    /// Task name -> your favorite model for it: `--tier` picks it over the computed one.
+    /// `slot` -> your favorite model for it: the task's, or one `--tier`'s of it, which `--tier`
+    /// picks over the task's and both over the computed one.
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
     /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub theme: String,
+}
+
+/// The `favorite` key of a task, or of one `--tier` of it: `coding`, `coding:low`.
+pub fn slot(task: &str, tier: Option<&str>) -> String {
+    tier.map_or_else(|| task.to_string(), |x| format!("{task}:{x}"))
+}
+
+/// Every favorite slot as (task, tier), in `TASKS` order, each task before its tiers.
+pub fn slots() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
+    crate::fit::TASKS.iter().flat_map(|t| {
+        std::iter::once(None).chain(crate::view::TIERS.iter().map(|x| Some(x.0))).map(move |x| (t.name, x))
+    })
 }
 
 fn mtime(p: &Path) -> Option<SystemTime> {
@@ -68,6 +81,8 @@ impl Store {
                 s.marked.push(k);
             }
         }
+        // Favorites of removed tasks (long-context) could not be cleared: the CLI rejects the name.
+        s.favorite.retain(|k, _| crate::fit::task(k.split(':').next().unwrap_or(k)).is_some());
         s.mtime = mtime(&path);
         s.path = path;
         s
@@ -128,25 +143,41 @@ impl Store {
         self.favorite.get(task).map(String::as_str)
     }
 
-    /// The tasks the model is the favorite for, in `TASKS` order, as its ★s are drawn.
-    pub fn favorite_for(&self, key: &str) -> Vec<&'static str> {
-        crate::fit::TASKS.iter().map(|t| t.name).filter(|t| self.favorite(t) == Some(key)).collect()
+    /// What `--tier` tries before the computed pick, in order: the tier's favorite, then the task's.
+    pub fn tier_favorites(&self, task: &str, tier: &str) -> impl Iterator<Item = &str> {
+        [self.favorite(&slot(task, Some(tier))), self.favorite(task)].into_iter().flatten()
     }
 
-    /// Whether the model is the task's favorite, or with no task the favorite of any.
+    /// Every model that is a favorite of the task or of one of its tiers: all join its line.
+    pub fn task_favorites(&self, task: &str) -> Vec<&str> {
+        let mut v: Vec<&str> = Vec::new();
+        for k in slots().filter(|s| s.0 == task).filter_map(|(t, x)| self.favorite(&slot(t, x))) {
+            if !v.contains(&k) {
+                v.push(k);
+            }
+        }
+        v
+    }
+
+    /// The slots the model is the favorite for, in `slots` order, as its ★s are drawn.
+    pub fn favorite_for(&self, key: &str) -> Vec<String> {
+        slots().map(|(t, x)| slot(t, x)).filter(|s| self.favorite(s) == Some(key)).collect()
+    }
+
+    /// Whether the model is a favorite of the task or its tiers, or with no task of any.
     pub fn is_favorite(&self, task: Option<&crate::fit::Task>, key: &str) -> bool {
         match task {
-            Some(t) => self.favorite(t.name) == Some(key),
-            None => crate::fit::TASKS.iter().any(|t| self.favorite(t.name) == Some(key)),
+            Some(t) => self.task_favorites(t.name).contains(&key),
+            None => !self.favorite_for(key).is_empty(),
         }
     }
 
-    /// Make `key` the favorite for the task, or nothing when it already was: `f` toggles.
-    pub fn toggle_favorite(&mut self, task: &str, key: &str) {
-        if self.favorite.get(task).is_some_and(|k| k == key) {
-            self.favorite.remove(task);
+    /// Make `key` the favorite for the slot, or nothing when it already was: `f` toggles.
+    pub fn toggle_favorite(&mut self, slot: &str, key: &str) {
+        if self.favorite.get(slot).is_some_and(|k| k == key) {
+            self.favorite.remove(slot);
         } else {
-            self.favorite.insert(task.to_string(), key.to_string());
+            self.favorite.insert(slot.to_string(), key.to_string());
         }
     }
 
@@ -188,10 +219,17 @@ mod tests {
         assert!(back.note("x").is_none());
         assert_eq!(back.favorite("coding"), Some("gpt55"));
         assert_eq!(back.favorite_for("gpt55"), ["coding"], "toggling twice clears it");
+        s.toggle_favorite(&slot("coding", Some("low")), "flash");
+        s.toggle_favorite(&slot("coding", Some("high")), "gpt55");
+        assert_eq!(s.tier_favorites("coding", "low").collect::<Vec<_>>(), ["flash", "gpt55"], "the tier's first");
+        assert_eq!(s.tier_favorites("coding", "mid").collect::<Vec<_>>(), ["gpt55"], "else the task's");
+        assert_eq!(s.task_favorites("coding"), ["gpt55", "flash"], "each model once");
+        assert_eq!(s.favorite_for("gpt55"), ["coding", "coding:high"]);
         // Files written before the renames call favorites "preferred" and pins "favorites".
-        std::fs::write(&p, br#"{"preferred":{"coding":"old"},"favorites":["old"]}"#).unwrap();
+        std::fs::write(&p, br#"{"preferred":{"coding":"old","long-context":"x"},"favorites":["old"]}"#).unwrap();
         let old = Store::load_from(p.clone());
         assert!(old.favorite("coding") == Some("old") && old.is_marked("old"));
+        assert_eq!(old.favorite("long-context"), None, "a removed task's favorite is dropped");
         // Pins were dropped: they load as marks, once each, and are not written back.
         std::fs::write(&p, br#"{"pinned":["a","c"],"marked":["a","b"]}"#).unwrap();
         let mut both = Store::load_from(p.clone());

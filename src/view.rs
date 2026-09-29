@@ -394,16 +394,15 @@ pub fn frontier<'m, T: Copy>(
 /// being the best model for the task. Each price level keeps only its best entry, since models
 /// that close in price are not worth choosing between. Models without a price or a score are
 /// left out, as are those under the `low` tier's floor: the frontier is a recommendation, and
-/// cheap alone is not one. The `favorite` model joins the line whether or not it earns a place
-/// on it, and is ranked only if it is among `models`; with no score for the task, its score
-/// is NaN, which `priced` shows as `-` and no tier floor reaches.
+/// cheap alone is not one. The `favorites` join the line whether or not they earn a place
+/// on it, and are ranked only if they are among `models`; with no score for the task, a
+/// favorite's score is NaN, which `priced` shows as `-` and no tier floor reaches.
 pub fn task_frontier<'a>(
     models: impl Iterator<Item = &'a Model>,
     t: &fit::Task,
-    favorite: Option<&'a Model>,
+    favorites: &[&'a Model],
 ) -> Vec<(&'a Model, f64)> {
     let ranked = fit::rank(models, t);
-    let yours = favorite.map(|m| (m, fit::fit(m, t).unwrap_or(f64::NAN)));
     let ranked: Vec<_> = ranked.into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
     let mut v = frontier(&ranked, |(m, _)| m, |m| fit::fit(m, t));
     let by_cost = |v: &mut Vec<(&Model, f64)>| {
@@ -412,17 +411,19 @@ pub fn task_frontier<'a>(
     // Dearest first so dedup keeps the best of each level, then back to cheapest first.
     by_cost(&mut v);
     v.dedup_by_key(|(m, _)| level(m.cost().unwrap_or(0.0)));
-    if let Some(p) = yours.filter(|p| !v.iter().any(|(m, _)| m.key == p.0.key)) {
-        v.push(p);
-        by_cost(&mut v);
+    for &f in favorites {
+        if !v.iter().any(|(m, _)| m.key == f.key) {
+            v.push((f, fit::fit(f, t).unwrap_or(f64::NAN)));
+        }
     }
+    by_cost(&mut v);
     v.reverse();
     v
 }
 
 /// Whether `key` is on the task's frontier among `models` on its merits, not only as the favorite.
 pub fn recommended<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task, key: &str) -> bool {
-    task_frontier(models, t, None).iter().any(|(m, _)| m.key == key)
+    task_frontier(models, t, &[]).iter().any(|(m, _)| m.key == key)
 }
 
 /// `--tier` names and their score floors. A tier picks the cheapest frontier entry at or

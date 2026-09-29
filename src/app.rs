@@ -3,7 +3,7 @@
 
 use crate::data::{Data, Model};
 use crate::fit::{TASKS, Task};
-use crate::store::Store;
+use crate::store::{Store, slot, slots};
 use crate::view::{
     LEVELS, THEMES, ctx, hits, level_label, money, recommended, score, task_frontier, task_score, visible,
 };
@@ -158,7 +158,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("★", "favorite: your pick for a task; always in its recommendation"),
             ("✗", "excluded: you have it but cannot use it; recommendations skip it"),
             ("space", "select the model; C compares the selected"),
-            ("f", "favorite the model for a task"),
+            ("f", "favorite the model for a task, or a tier of one"),
             ("e", "exclude the model"),
             ("U", "deselect every model"),
             ("M F E", "selected / favorite / excluded only; again: every model"),
@@ -357,8 +357,9 @@ pub enum Effect {
     Refresh,
     /// Run this command in a new terminal window.
     Launch(Vec<String>),
-    /// Favorite the current model for the task; the `f` chooser's items, applied by `App` itself.
-    Fav(&'static str),
+    /// Favorite the current model for the task, or for one tier of it; the `f` chooser's items,
+    /// applied by `App` itself.
+    Fav(&'static str, Option<&'static str>),
     /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
 }
@@ -681,7 +682,7 @@ impl App {
 
     /// Whether the open choice list is `f`'s tasks, where space ticks one and the list stays open.
     pub fn choosing_favs(&self) -> bool {
-        matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(_)))))
+        matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(..)))))
     }
 
     /// The theme under the cursor of the open `t` list, which the screen previews.
@@ -695,16 +696,16 @@ impl App {
         }
     }
 
-    /// `f`'s list: every task, ticked where the current model is its favorite.
+    /// `f`'s list: every task and each of its tiers, ticked where the current model is the favorite.
     fn fav_items(&self) -> Option<Vec<(String, Effect)>> {
         let m = self.current()?;
         let name = |k: &str| self.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
-        let item = |t: &Task| match self.store.favorite(t.name) {
-            Some(k) if k == m.key => format!("✓ {}", t.name),
-            Some(k) => format!("☐ {}  (now {})", t.name, name(k)),
-            None => format!("☐ {}", t.name),
+        let item = |s: String| match self.store.favorite(&s) {
+            Some(k) if k == m.key => format!("✓ {s}"),
+            Some(k) => format!("☐ {s}  (now {})", name(k)),
+            None => format!("☐ {s}"),
         };
-        Some(TASKS.iter().map(|t| (item(t), Effect::Fav(t.name))).collect())
+        Some(slots().map(|(t, x)| (item(slot(t, x)), Effect::Fav(t, x))).collect())
     }
 
     /// Models passing every filter but the frontier, ignoring the ones on column `skip`, so a
@@ -829,17 +830,19 @@ impl App {
     /// favorite whatever the filters, excluded ones left out: cheapest first, the best model last.
     pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
         let usable = |m: &&Model| !self.store.is_excluded(&m.key);
-        // Ranked only when the filters show it, so a hidden favorite drops no shown model.
-        let fav = self.store.favorite(t.name).and_then(|k| {
-            visible(&self.data, &self.store, self.all, false).map(|(_, m)| m).filter(usable).find(|m| m.key == k)
-        });
-        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(usable), t, fav)
+        // Ranked only when the filters show them, so a hidden favorite drops no shown model.
+        let favs = self.store.task_favorites(t.name);
+        let fav: Vec<&Model> = visible(&self.data, &self.store, self.all, false)
+            .map(|(_, m)| m)
+            .filter(|m| usable(m) && favs.contains(&m.key.as_str()))
+            .collect();
+        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(usable), t, &fav)
     }
 
-    /// Whether the task's favorite is on its line only for being the favorite.
-    pub fn favorite_unrecommended(&self, t: &Task) -> bool {
+    /// Whether `key`, a favorite of the task, is on its line only for being a favorite.
+    pub fn favorite_unrecommended(&self, t: &Task, key: &str) -> bool {
         let usable = self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key));
-        self.store.favorite(t.name).is_some_and(|k| !recommended(usable, t, k))
+        self.store.is_favorite(Some(t), key) && !recommended(usable, t, key)
     }
 
     /// The task `f` and the ★ mark refer to: the one under the cursor in recommend, else the
@@ -854,10 +857,12 @@ impl App {
         self.store.is_favorite(self.task_at_hand(), key)
     }
 
-    /// `f`: favorite the current model for the task, or unfavorite it when it already is.
-    fn fav(&mut self, task: &'static str) -> Option<Effect> {
+    /// `f`: favorite the current model for the task or one tier of it, or unfavorite it when it
+    /// already is.
+    fn fav(&mut self, task: &'static str, tier: Option<&'static str>) -> Option<Effect> {
         let m = self.current()?;
         let (key, name) = (m.key.clone(), m.name.clone());
+        let task = &slot(task, tier);
         self.store.toggle_favorite(task, &key);
         self.status = match self.store.favorite(task) == Some(key.as_str()) {
             true => format!("★ {name} favorite for {task}"),
@@ -1318,7 +1323,7 @@ impl App {
             KeyCode::Char('f') if row => {
                 // Starting on the task at hand, so f enter toggles it.
                 let items = self.fav_items()?;
-                let sel = self.task_at_hand().and_then(|t| TASKS.iter().position(|u| u.name == t.name)).unwrap_or(0);
+                let sel = self.task_at_hand().and_then(|t| slots().position(|s| s == (t.name, None))).unwrap_or(0);
                 self.input = Input::choose("favorite for which tasks?", items, sel);
             }
             KeyCode::Char('v') if table => {
@@ -1538,9 +1543,8 @@ impl App {
                 // While searching, space is typed.
                 KeyCode::Char(' ') if !*typing => {
                     let i = *choice_rows(items, query).get(*sel)?;
-                    if let Some((_, Effect::Fav(task))) = items.get(i) {
-                        let task = *task;
-                        return self.fav(task);
+                    if let Some(&(_, Effect::Fav(task, tier))) = items.get(i) {
+                        return self.fav(task, tier);
                     }
                 }
                 // Esc while searching drops the search but keeps the entry under the bar.
@@ -1553,7 +1557,7 @@ impl App {
                     let (_, effect) = items.swap_remove(i);
                     self.input = Input::None;
                     match effect {
-                        Effect::Fav(task) => return self.fav(task),
+                        Effect::Fav(task, tier) => return self.fav(task, tier),
                         Effect::Theme(name) => {
                             self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
                             self.status = format!("theme {name}");
@@ -2173,7 +2177,7 @@ mod tests {
         a.rebuild();
         assert_eq!(front(&a), ["mini", "gpt55"], "the filter hides mini from the table, not from recommend");
         let coding = fit::task("coding").unwrap();
-        assert!(a.favorite_unrecommended(coding), "hidden, so not recommended");
+        assert!(a.favorite_unrecommended(coding, "mini"), "hidden, so not recommended");
         // A hidden favorite is not ranked, so it drops no model the filter shows: mini is
         // cheaper and better than gptlite, yet gptlite stays.
         let mut data = std::mem::take(&mut a.data);
@@ -2195,18 +2199,23 @@ mod tests {
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
         assert!(crate::view::priced(m, s, false, true).ends_with("(-)"));
         assert_eq!(crate::view::pick(&[(m, s)], "low").map(|e| e.0.key.as_str()), Some("opus5"), "the only entry");
-        assert!(a.favorite_unrecommended(coding), "no score, so not recommended");
+        assert!(a.favorite_unrecommended(coding, "opus5"), "no score, so not recommended");
+        // A tier's favorite joins the line too, beside the task's.
+        a.store.toggle_favorite("coding:low", "mini");
+        a.store.toggle_excluded("mini");
+        assert_eq!(front(&a), ["mini", "opus5", "gpt55"]);
+        assert!(!a.favorite_unrecommended(coding, "mini"), "on the frontier on its own");
         a.store.toggle_favorite("coding", "gpt55");
-        assert!(!a.favorite_unrecommended(coding), "the best model is recommended on its own");
+        assert!(!a.favorite_unrecommended(coding, "gpt55"), "the best model is recommended on its own");
     }
 
     #[test]
     fn f_favorites_a_model_for_the_task_at_hand() {
         let mut a = app();
-        // No task in context: f asks which, listing every task.
+        // No task in context: f asks which, listing every task, each followed by its tiers.
         assert_eq!(press(&mut a, "f"), None);
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len()));
-        press(&mut a, "j");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len() * 4));
+        press(&mut a, "4j");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
         assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
@@ -2214,7 +2223,7 @@ mod tests {
         press(&mut a, "Rj");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
-        assert!(matches!(&a.input, Input::Choose { sel: 1, items, .. } if items[1].0 == "☐ coding  (now gpt55)"));
+        assert!(matches!(&a.input, Input::Choose { sel: 4, items, .. } if items[4].0 == "☐ coding  (now gpt55)"));
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), Some("mini"));
         assert!(a.status.starts_with("★ mini"));
@@ -2222,8 +2231,13 @@ mod tests {
         press(&mut a, "f");
         assert_eq!(press(&mut a, " "), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), None, "again unfavorites");
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items[1].0 == "☐ coding"));
-        press(&mut a, "k ");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items[4].0 == "☐ coding"));
+        // The entry below is coding's low tier: --tier low picks mini, the others the computed one.
+        press(&mut a, "j ");
+        assert_eq!((a.store.favorite("coding:low"), a.store.favorite("coding:mid")), (Some("mini"), None));
+        assert!(a.status.ends_with("coding:low"));
+        press(&mut a, " ");
+        press(&mut a, "5k ");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "✓ overall"));
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
@@ -2496,7 +2510,7 @@ mod tests {
         assert!(!a.store.is_marked("opus5"), "✓ → ☐");
         assert_eq!(a.mouse(Mouse::Star(2)), None);
         assert!(a.choosing_favs() && a.selected() == 2, "the ☆ lists the tasks for its row");
-        assert_eq!(a.mouse(Mouse::Item(1)), Some(Effect::Save));
+        assert_eq!(a.mouse(Mouse::Item(4)), Some(Effect::Save));
         assert!(a.choosing_favs(), "a click ticks a task and keeps the list open");
         assert_eq!(a.store.favorite("coding"), Some("mini"));
     }

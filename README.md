@@ -78,6 +78,10 @@ Press `f` on a model in the TUI and tick its tasks with `space`, or run
 clears one. Your choice beats the computed pick: `recommend` marks it `★` and agents use it
 first.
 
+A favorite can also cover one tier of a task, so easy work goes to a cheaper model than hard
+work: `modelcmp fav coding flash --tier low` makes `--tier low` return Flash while the other
+tiers keep your coding favorite. In the TUI, `f` lists each task's tiers under it.
+
 ## For agents
 
 ```sh
@@ -85,7 +89,8 @@ npx skills add danctorres/modelcmp -g                        # teach your agent 
 opencode -m $(modelcmp list --task coding --tier mid --id)   # or ask it yourself
 ```
 
-`recommend --json` gives your model for a task as its `favorite`, and `--tier` returns it. It
+`recommend --json` gives your model for a task as its `favorite`, and per tier as
+`tier_favorites`; `--tier` returns the tier's, else the task's. It
 also gives each frontier model's `note` (written with `n` or `modelcmp note`), which the skill
 uses to rule out a model or choose between close ones.
 

@@ -16,7 +16,6 @@ pub enum Need {
     None,
     Tools,
     Vision,
-    LongContext,
     /// At or above `VALUE_FLOOR` on coding.
     Coder,
 }
@@ -103,13 +102,6 @@ pub const TASKS: &[Task] = &[
         need: Need::Vision,
         benches: &[],
     },
-    Task {
-        name: "long-context",
-        about: "≥200k context (ranked by overall capability)",
-        when: "a whole repo, a long log or many files in one prompt",
-        need: Need::LongContext,
-        benches: &[],
-    },
 ];
 
 pub fn task(name: &str) -> Option<&'static Task> {
@@ -129,7 +121,7 @@ pub fn task_names() -> impl Iterator<Item = &'static str> {
 }
 
 /// Tasks ranked by the ECI percentile; they show the raw ECI, as the table's ECI column does.
-const ECI_TASKS: [&str; 3] = ["overall", "vision", "long-context"];
+const ECI_TASKS: [&str; 2] = ["overall", "vision"];
 
 /// The value a task's frontier shows for a model ranked `s`: its value in the task's table column.
 pub fn shown(m: &Model, t: &Task, s: f64) -> f64 {
@@ -195,7 +187,6 @@ pub fn fit(m: &Model, t: &Task) -> Option<f64> {
         Need::None => true,
         Need::Tools => m.tool_call,
         Need::Vision => m.vision,
-        Need::LongContext => m.context >= 200_000,
         Need::Coder => m.fit.get("coding").is_some_and(|&c| c >= VALUE_FLOOR),
     };
     if ok { m.fit.get(t.name).copied() } else { None }

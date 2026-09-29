@@ -35,17 +35,18 @@ modelcmp select sonnet-5                       # shortlist it, list --selected s
 modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosing; without text shows it, --rm deletes it
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
+modelcmp fav coding flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
 modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
 ```
 
-Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`, `long-context`.
+Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`. For a large prompt, bound the context instead: `--min ctx=200`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, your selection `✓` and available models `●`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
-the best; the best when none reaches the floor. A model you `fav` for the task beats the
-tier's pick and sits on the task's list marked `★` whether or not it is on the frontier or has a score for
+the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
+tier's pick. Every favorite of the task sits on the task's list marked `★` whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. Scores are percentiles among the models
 Epoch benchmarked. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, and `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache.
@@ -68,14 +69,14 @@ the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
 ```sh
 opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just provider/model
-modelcmp recommend --json                      # choose the task by its "when"; each has its frontier and the user's "favorite" key
-modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite one when set, else the tier's
+modelcmp recommend --json                      # choose the task by its "when"; each has its frontier, the user's "favorite" and "tier_favorites"
+modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite for the tier or task when set, else the tier's
 ```
 
 Each JSON model carries `key`, `selected` (on your shortlist), `excluded`, `favorite_for` (the tasks it is the user's favorite
-for), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
+for, and `task:tier` for a tier's), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
 `eci`, per-task `tasks` percentiles. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
-ECI for overall, vision and long-context, the percentile for the others. A favorite that is on the line only as
-the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries the user's `note` when the model has one.
+ECI for overall and vision, the percentile for the others. A favorite that is on the line only as
+the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, and the user's `note` when the model has one.

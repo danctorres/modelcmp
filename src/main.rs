@@ -40,7 +40,7 @@ enum Cmd {
         /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`R` then `enter` in the TUI)
         #[arg(short, long, value_parser = tasks(), conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: low = cheapest scoring 50+, mid = cheapest 75+, high = the best; the best when none reaches the floor
+        /// One model from the task's list: your favorite for the tier, else for the task; else low = cheapest scoring 50+, mid = cheapest 75+, high = the best, or the best when none reaches the floor
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -120,13 +120,16 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Your favorite model for a task: --tier picks it and recommend marks it ★; alone, shows them (`f` in the TUI)
+    /// Your favorite model for a task, or for one tier of it: --tier picks it and recommend marks it ★; alone, shows them (`f` in the TUI)
     Fav {
         #[arg(value_parser = tasks())]
         task: Option<String>,
         #[arg(requires = "task", conflicts_with = "rm")]
         model: Option<String>,
-        /// Clear the task's favorite
+        /// Only for `list --tier` with this tier, e.g. a cheap model for low and a strong one for the task
+        #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
+        tier: Option<String>,
+        /// Clear the task's favorite, or with --tier the tier's
         #[arg(long, requires = "task")]
         rm: bool,
     },
@@ -199,7 +202,9 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
-        Cmd::Fav { task, model, rm } => cli::fav(&data, &mut store, task.as_deref(), model.as_deref(), rm),
+        Cmd::Fav { task, model, tier, rm } => {
+            cli::fav(&data, &mut store, task.as_deref(), tier.as_deref(), model.as_deref(), rm)
+        }
         Cmd::Recommend { json } => cli::recommend(&data, &store, json),
     }
 }
