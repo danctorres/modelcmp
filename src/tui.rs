@@ -14,7 +14,8 @@ use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
-    Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level, money, priced, truncate, verdict,
+    Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level, level_label, money, priced,
+    truncate, verdict,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -961,7 +962,12 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     }
     if let Input::Menu { col, items, sel, query, .. } = &app.input {
         let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
-        let picked = if *col == 1 { &app.dev } else { &app.via };
+        let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
+        let picked = match *col {
+            1 => &app.dev,
+            VIA => &app.via,
+            _ => &level,
+        };
         dropdown(buf, area, menu_x(area, &l, *col), *col, items, query, *sel, picked);
     }
     (more, top > 0, top + height < app.rows.len())
@@ -1024,11 +1030,11 @@ fn dropdown(
         // The bar runs through the box's border, as in the table.
         buf.set_style(Rect { y, height: 1, ..rect }, base);
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
-        // entry does not read as an empty box in the entry's colour; "any" clears the picks,
-        // so it has none.
+        // entry does not read as an empty box in the entry's colour; "any" is ticked while
+        // nothing is picked, as it is then what applies.
+        let on = if i == 0 { picked.is_empty() } else { picked.contains(label) };
         let (mark, style) = match i {
-            0 => ("  ", tint(color)),
-            _ if picked.contains(label) => ("✓ ", tint(MARK).add_modifier(BOLD)),
+            _ if on => ("✓ ", tint(MARK).add_modifier(BOLD)),
             _ => ("☐ ", tint(color)),
         };
         let x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
@@ -1882,7 +1888,7 @@ mod tests {
         let dev = cell(&lines[0], "Dev") as usize - 2;
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭────────────────╮"), "{}", lines[1]);
-        assert_eq!(&words(&lines[2])[5..8], ["│", "any", "2"]);
+        assert_eq!(&words(&lines[2])[5..9], ["│", "✓", "any", "2"], "any is ticked while nothing is picked");
         assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"]);
         assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
         assert!(buf[(dev as u16, 2)].modifier.contains(Modifier::REVERSED), "the bar runs through the border");

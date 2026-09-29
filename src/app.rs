@@ -935,8 +935,7 @@ impl App {
                     (level_label(l), ms.iter().filter(|&&(i, _)| self.val(i, PRICE).is_some_and(|c| c <= e)).count())
                 })
                 .collect();
-            let max = self.bounds.iter().find(|b| b.0 == PRICE && b.1.is_infinite()).map(|b| b.2);
-            (items, max.and_then(|v| LEVELS.iter().position(|&e| e == v)))
+            (items, self.price_level())
         };
         items.insert(0, ("any".into(), ms.len()));
         self.input = Input::Menu {
@@ -1165,6 +1164,20 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// Index in `LEVELS` of the Price maximum picked in its dropdown, if any.
+    pub fn price_level(&self) -> Option<usize> {
+        let max = self.bounds.iter().find(|b| b.0 == PRICE && b.1.is_infinite())?.2;
+        LEVELS.iter().position(|&e| e == max)
+    }
+
+    /// A price level, entry `i` of the Price dropdown, replaces the Price maximum; "any" drops it.
+    fn set_price_level(&mut self, i: usize) {
+        self.bounds.retain(|&(c, lo, _)| c != PRICE || lo.is_finite());
+        if i > 0 {
+            self.bounds.push((PRICE, f64::NEG_INFINITY, LEVELS[i - 1]));
+        }
     }
 
     /// Keys other than motions when no prompt or list is open.
@@ -1481,12 +1494,15 @@ impl App {
                                 list.push(name);
                             }
                         } else {
-                            // A price level replaces the Price maximum; "any" drops it.
-                            self.bounds.retain(|&(c, lo, _)| c != PRICE || lo.is_finite());
-                            if i > 0 {
-                                self.bounds.push((PRICE, f64::NEG_INFINITY, LEVELS[i - 1]));
-                            }
+                            self.set_price_level(i);
                         }
+                        self.rebuild();
+                    }
+                    // On Price, space picks the level, or drops it when it is the picked one, and
+                    // keeps the dropdown open.
+                    KeyCode::Char(' ') if !*typing && *col == PRICE => {
+                        let i = rows[*sel];
+                        self.set_price_level(if self.price_level() == i.checked_sub(1) { 0 } else { i });
                         self.rebuild();
                     }
                     // Space adds or drops the entry, as it marks a model, keeping the dropdown open; on
@@ -1737,6 +1753,15 @@ mod tests {
         press(&mut a, "dkkk");
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.bounds.len(), keys(&a).len()), (0, 2));
+        // Space picks a level and keeps the dropdown open; again on it drops it.
+        press(&mut a, "djjj ");
+        assert_eq!((a.price_level(), keys(&a)), (Some(2), vec!["mini"]));
+        assert!(matches!(a.input, Input::Menu { sel: 3, .. }));
+        press(&mut a, "j ");
+        assert_eq!((a.price_level(), keys(&a).len()), (Some(3), 1), "another level replaces it");
+        press(&mut a, " ");
+        assert_eq!((a.price_level(), keys(&a).len()), (None, 2));
+        code(&mut a, KeyCode::Esc);
         press(&mut a, "c");
         assert_eq!((a.dev.len(), keys(&a).len()), (0, 3));
     }
