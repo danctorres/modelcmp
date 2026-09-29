@@ -420,6 +420,11 @@ pub fn task_frontier<'a>(
     v
 }
 
+/// Whether `key` is on the task's frontier among `models` on its merits, not only as the favorite.
+pub fn recommended<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task, key: &str) -> bool {
+    task_frontier(models, t, None).iter().any(|(m, _)| m.key == key)
+}
+
 /// `--tier` names and their score floors. A tier picks the cheapest frontier entry at or
 /// above its floor, scores compared as shown like the frontier does, or the best entry when
 /// none reaches it; `high` always picks the best.
@@ -441,7 +446,7 @@ pub fn usd(x: f64) -> String {
 pub fn frontier_legend(keyed: bool) -> String {
     format!(
         "best per price: the top model at each price level, cheapest first, as name{} $/1M tokens (the task's column), \
-         plus ★ your favorite",
+         plus ★ your favorite, marked not recommended when it is not one",
         if keyed { " [key]" } else { "" }
     )
 }

@@ -4,7 +4,9 @@
 use crate::data::{Data, Model};
 use crate::fit::{TASKS, Task};
 use crate::store::Store;
-use crate::view::{LEVELS, THEMES, ctx, hits, level_label, money, score, task_frontier, task_score, visible};
+use crate::view::{
+    LEVELS, THEMES, ctx, hits, level_label, money, recommended, score, task_frontier, task_score, visible,
+};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::{Ordering, Reverse};
@@ -833,6 +835,12 @@ impl App {
             visible(&self.data, &self.store, self.all, false).map(|(_, m)| m).filter(usable).find(|m| m.key == k)
         });
         task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(usable), t, fav)
+    }
+
+    /// Whether the task's favorite is on its line only for being the favorite.
+    pub fn favorite_unrecommended(&self, t: &Task) -> bool {
+        let usable = self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key));
+        self.store.favorite(t.name).is_some_and(|k| !recommended(usable, t, k))
     }
 
     /// The task `f` and the ★ mark refer to: the one under the cursor in recommend, else the
@@ -2140,6 +2148,8 @@ mod tests {
         a.query = "gpt".into();
         a.rebuild();
         assert_eq!(front(&a), ["mini", "gpt55"], "the filter hides mini from the table, not from recommend");
+        let coding = fit::task("coding").unwrap();
+        assert!(a.favorite_unrecommended(coding), "hidden, so not recommended");
         // A hidden favorite is not ranked, so it drops no model the filter shows: mini is
         // cheaper and better than gptlite, yet gptlite stays.
         let mut data = std::mem::take(&mut a.data);
@@ -2161,6 +2171,9 @@ mod tests {
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
         assert!(crate::view::priced(m, s, false, true).ends_with("(-)"));
         assert_eq!(crate::view::pick(&[(m, s)], "low").map(|e| e.0.key.as_str()), Some("opus5"), "the only entry");
+        assert!(a.favorite_unrecommended(coding), "no score, so not recommended");
+        a.store.toggle_favorite("coding", "gpt55");
+        assert!(!a.favorite_unrecommended(coding), "the best model is recommended on its own");
     }
 
     #[test]

@@ -77,4 +77,5 @@ for), `price` (with the provider's model `id`, the string a harness takes, and `
 `eci`, per-task `tasks` percentiles. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
-ECI for overall, vision and long-context, the percentile for the others.
+ECI for overall, vision and long-context, the percentile for the others. A favorite that is on the line only as
+the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`.

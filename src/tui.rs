@@ -1439,25 +1439,29 @@ fn wrapped(
 
 /// `name $price (score)` for each entry of the task's price frontier, cheapest first and the
 /// best last, each in its price level's colour as in the Price column, the favorite's ★ in
-/// the task's colour. The `picked` model is a reverse-video bar, colour kept off it as in the table.
+/// the task's colour, or grey and marked not recommended when it is on the line only as the
+/// favorite. The `picked` model is a reverse-video bar, colour kept off it as in the table.
 fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'static>> {
     let front = app.task_frontier(t);
     if front.is_empty() {
         return vec![Line::from(Span::styled("no data", fg(MUTED)))];
     }
+    let off = app.favorite_unrecommended(t);
     front
         .iter()
         .map(|(m, s)| {
             let on = picked == Some(m.key.as_str());
             let tint = |c: Color| if on { Style::new().add_modifier(Modifier::REVERSED) } else { fg(c) };
-            let mut spans = Vec::with_capacity(2);
-            if app.store.favorite(t.name) == Some(m.key.as_str()) {
+            let fav = app.store.favorite(t.name) == Some(m.key.as_str());
+            let mut spans = Vec::with_capacity(3);
+            if fav {
                 spans.push(Span::styled("★ ", tint(task_color(t.name)).add_modifier(BOLD)));
             }
-            spans.push(Span::styled(
-                priced(m, fit::shown(m, t, *s), false, false),
-                tint(m.cost().map_or(MUTED, |c| LEVEL[level(c)])),
-            ));
+            let price = if fav && off { MUTED } else { m.cost().map_or(MUTED, |c| LEVEL[level(c)]) };
+            spans.push(Span::styled(priced(m, fit::shown(m, t, *s), false, false), tint(price)));
+            if fav && off {
+                spans.push(Span::styled(" not recommended", tint(MUTED)));
+            }
             Line::from(spans)
         })
         .collect()
@@ -2048,6 +2052,17 @@ mod tests {
         let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert!(spans[star + 1].content.starts_with("opus "), "★ then the name: {:?}", spans[star + 1]);
         assert_eq!(spans[star + 1].style.fg, Some(LEVEL[level(5.0)]), "the name keeps its price level");
+        // A favorite off the frontier, flash under the low tier's floor, is grey and says so.
+        let mut data = std::mem::take(&mut a.data);
+        data.models.iter_mut().find(|m| m.key == "flash").unwrap().fit.insert("coding".into(), 40.0);
+        a.set_data(data);
+        a.store.toggle_favorite("coding", "flash");
+        let lines = recommend(&a, 200);
+        let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
+        assert!(spans[star + 1].content.starts_with("flash "));
+        assert_eq!(spans[star + 1].style.fg, Some(MUTED));
+        assert_eq!(spans[star + 2].content, " not recommended");
     }
 
     #[test]

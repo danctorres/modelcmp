@@ -5,7 +5,8 @@ use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::Store;
 use crate::view::{
-    compare_rows, detail_lines, frontier_legend, pick, priced, task_frontier, truncate, verdict, via, visible,
+    compare_rows, detail_lines, frontier_legend, pick, priced, recommended, task_frontier, truncate, verdict, via,
+    visible,
 };
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -397,14 +398,21 @@ fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<(&'a Model, f64)
     task_frontier(models.into_iter(), t, fav)
 }
 
+/// The task's favorite when it is on the line only for being the favorite.
+fn unrecommended<'a>(data: &Data, store: &'a Store, t: &Task) -> Option<&'a str> {
+    let models = visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key));
+    store.favorite(t.name).filter(|k| !recommended(models, t, k))
+}
+
 /// `recommend --json`: what agents read to choose a task and its model.
 fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
     TASKS
         .iter()
         .map(|t| {
+            let off = unrecommended(data, store, t);
             let front: Vec<_> = front(data, store, t)
                 .into_iter()
-                .map(|(m, s)| serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0}))
+                .map(|(m, s)| serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0, "recommended": off != Some(m.key.as_str())}))
                 .collect();
             serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "frontier": front})
         })
@@ -421,9 +429,13 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
         let yours = store.favorite(t.name);
+        let off = unrecommended(data, store, t);
         let front: Vec<String> = front(data, store, t)
             .iter()
-            .map(|(m, s)| priced(m, fit::shown(m, t, *s), true, Some(m.key.as_str()) == yours))
+            .map(|(m, s)| {
+                let p = priced(m, fit::shown(m, t, *s), true, Some(m.key.as_str()) == yours);
+                if off == Some(m.key.as_str()) { format!("{p} not recommended") } else { p }
+            })
             .collect();
         println!("  best per price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
         println!();
@@ -507,7 +519,7 @@ mod tests {
         let names = |t: &Value| t["frontier"].as_array().unwrap().iter().map(|e| e["key"].clone()).collect::<Vec<_>>();
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(keys(&t), ["about", "benchmarks", "favorite", "frontier", "name", "when"]);
-        assert_eq!(keys(&t["frontier"][0]), ["key", "name", "price", "score"]);
+        assert_eq!(keys(&t["frontier"][0]), ["key", "name", "price", "recommended", "score"]);
         assert_eq!(names(&t), ["mini", "gpt55"]);
         store.toggle_excluded("mini");
         assert_eq!(names(&coding(&recommend_json(&data, &store))), ["gpt55"]);
