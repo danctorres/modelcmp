@@ -22,7 +22,7 @@ use ratatui::crossterm::event::{
     MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
@@ -481,7 +481,7 @@ const KEY: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
-/// A marked row's ✓. Light blue, and the only thing drawn in it, so a palette's slot 12 is
+/// A marked row's ✓ and model name. Light blue, and the only thing drawn in it, so a palette's slot 12 is
 /// free to be whatever parts from the muted ☐ (`the_mark_parts_from_an_empty_box`).
 const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
@@ -688,8 +688,14 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Input::Choose { title, items, sel, query, .. } = &app.input {
         // Scrolled as the mouse maps it, so the bar stays in view when the list is taller than the screen.
         let lines = choice_lines(items, *sel, query);
-        let shown = overlay_rect(body, title, &lines).height.saturating_sub(2).max(1);
-        overlay(buf, body, title, lines, &mut (*sel as u16).saturating_sub(shown - 1));
+        let rect = overlay_rect(body, title, &lines);
+        let mut scroll = (*sel as u16).saturating_sub(rect.height.saturating_sub(2).max(1) - 1);
+        overlay(buf, body, title, lines, &mut scroll);
+        if !choice_rows(items, query).is_empty() {
+            // The bar runs through the box's border, as in the table.
+            let y = (rect.y + 1 + *sel as u16 - scroll).min(rect.bottom() - 1);
+            buf.set_style(Rect::new(rect.x, y, rect.width, 1), Style::new().add_modifier(Modifier::REVERSED));
+        }
     }
     if let Some(x) = cursor {
         f.set_cursor_position((x, bar.y));
@@ -856,12 +862,12 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + 2 + (k - top) as u16;
         let m = &app.data.models[r];
-        // The selection, or the visual range, is a reverse-video bar; colours stay off it so it
-        // reads as one.
+        // The selection, or the visual range, is a reverse-video bar through the frame's border;
+        // colours stay off it so it reads as one.
         let on = k == sel || app.is_selected(k);
         let base = if on { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
         let tint = |c: Color| if on { base } else { fg(c) };
-        buf.set_style(Rect { y, height: 1, ..area }, base);
+        buf.set_style(Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
         match app.store.is_marked(&m.key) {
             // Bold as well as blue: on the selection bar, which keeps colours off, that is
@@ -877,7 +883,14 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         } else {
             buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
-        let name = if m.available || !any { base } else { tint(MUTED) };
+        // A marked model's name is light blue and bold, as the ✓; on the bar, bold only. One you
+        // have no access to stays muted, marked or not, with the bold still showing the mark.
+        let name = match (app.store.is_marked(&m.key), m.available || !any) {
+            (true, true) => tint(MARK).add_modifier(BOLD),
+            (true, false) => tint(MUTED).add_modifier(BOLD),
+            (false, true) => base,
+            (false, false) => tint(MUTED),
+        };
         buf.set_stringn(name_x, y, &m.name, nw, name);
         buf.set_stringn(dev_x, y, &m.developer, dw, tint(dev_color(&m.developer)));
         for &(i, x, w) in &cols {
@@ -999,7 +1012,8 @@ fn dropdown(
             _ => dev_color(label),
         };
         let tint = |c: Color| if k == sel { base } else { fg(c) };
-        buf.set_style(Rect { y, height: 1, ..inner }, base);
+        // The bar runs through the box's border, as in the table.
+        buf.set_style(Rect { y, height: 1, ..rect }, base);
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
         // entry does not read as an empty box in the entry's colour; "any" clears the picks,
         // so it has none.
@@ -1730,7 +1744,21 @@ mod tests {
         assert!(lines[flash as usize].contains('✓') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
         let box_x = cell(&lines[flash as usize], "✓");
         assert_eq!(buf[(box_x, flash)].fg, MARK, "the ✓ is in the mark colour");
-        assert!((0..120).all(|x| buf[(x, flash)].bg != MARK), "the row itself is not highlighted");
+        assert!((0..120).all(|x| buf[(x, flash)].bg != MARK), "no fill, so the values keep their colours");
+        let name_x = cell(&lines[flash as usize], "flash");
+        assert_eq!(buf[(name_x, flash)].fg, MARK, "the name is in the mark colour");
+        assert!(buf[(name_x, flash)].modifier.contains(BOLD));
+        assert_ne!(buf[(cell(&lines[opus as usize], "opus"), opus)].fg, MARK);
+        // Marked but out of reach: muted as any unavailable model, so that still shows.
+        a.store.marked.push("opus".into());
+        a.data.models[0].available = false;
+        a.key(KeyCode::Char('a').into());
+        a.key(KeyCode::Char('G').into()); // off the bar, which keeps colours off
+        let (buf, lines) = render(&mut a, 120, 5);
+        let opus = lines.iter().position(|l| l.contains("opus")).unwrap() as u16;
+        let name_x = cell(&lines[opus as usize], "opus");
+        assert_eq!(buf[(name_x, opus)].fg, MUTED, "{lines:?}");
+        assert!(buf[(name_x, opus)].modifier.contains(BOLD));
     }
 
     /// The cell where `pat` starts on `line`, which may hold multi-byte glyphs before it.
@@ -1832,6 +1860,8 @@ mod tests {
         assert_eq!(&words(&lines[2])[5..8], ["│", "any", "2"]);
         assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"]);
         assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
+        assert!(buf[(dev as u16, 2)].modifier.contains(Modifier::REVERSED), "the bar runs through the border");
+        assert!(!buf[(dev as u16, 3)].modifier.contains(Modifier::REVERSED));
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
         for c in "/anth".chars() {
             a.key(KeyCode::Char(c).into());
@@ -2162,6 +2192,28 @@ mod tests {
         let buf = term.backend().buffer();
         let text: String = (0..8).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(text.contains(THEMES[THEMES.len() - 1].0) && text.contains('▲'), "{text}");
+    }
+
+    #[test]
+    fn selection_bar_runs_through_the_frame() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
+        let mut a = app();
+        let on = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
+            term.backend().buffer()[(x, y)].modifier.contains(Modifier::REVERSED)
+        };
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        assert_eq!([on(&term, 0, 3), on(&term, 99, 3), on(&term, 0, 4)], [true, true, false]);
+        a.key(KeyCode::Char('V').into());
+        a.key(KeyCode::Char('j').into());
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        assert_eq!([on(&term, 0, 3), on(&term, 99, 4)], [true, true], "the visual range too");
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Char('t').into());
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let buf = term.backend().buffer();
+        // The overlay's top-left corner; the bar is on the row under it, the first entry.
+        let (x, y) = (0..8).flat_map(|y| (1..100).map(move |x| (x, y))).find(|&p| buf[p].symbol() == "╭").unwrap();
+        assert!(on(&term, x, y + 1), "and the choice list's");
     }
 
     #[test]
