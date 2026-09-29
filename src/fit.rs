@@ -45,7 +45,7 @@ pub const TASKS: &[Task] = &[
     Task {
         name: "coding",
         about: "writing and fixing code",
-        when: "fixing a bug, adding a feature to an existing repo, refactors: code that must compile and pass tests",
+        when: "fixing a bug, adding a feature to an existing repo, refactors",
         need: Need::None,
         benches: &[
             "DeepSWE",
@@ -61,14 +61,14 @@ pub const TASKS: &[Task] = &[
     Task {
         name: "value",
         about: "coding per dollar, among models ≥50th percentile on coding",
-        when: "routine coding that needs no top reasoning: the good enough, cheaper pick",
+        when: "routine coding that needs no top reasoning",
         need: Need::Coder,
         benches: &[],
     },
     Task {
         name: "agentic",
         about: "multi-step tool use, long autonomous tasks",
-        when: "unattended multi-step runs: migrate, run tests, fix what breaks; recovering from errors without drifting",
+        when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         need: Need::Tools,
         benches: &[
             "APEX-Agents",
@@ -106,7 +106,7 @@ pub const TASKS: &[Task] = &[
     Task {
         name: "long-context",
         about: "≥200k context (ranked by overall capability)",
-        when: "a whole repo, a long log or many files in one prompt; the window fits, not proof it is used well",
+        when: "a whole repo, a long log or many files in one prompt",
         need: Need::LongContext,
         benches: &[],
     },
