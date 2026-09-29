@@ -1,6 +1,6 @@
 <h1 align="center"><img src="https://github.com/user-attachments/assets/175d7284-8b17-4ce4-bfd9-36790017ccca" alt="modelcmp" width="480"></h1>
 
-<p align="center"><b>Pick the cheapest LLM that is good enough for the job.</b></p>
+<p align="center"><b>Compare models by price and benchmarks, choose one per task or get a recommendation.</b></p>
 
 <p align="center">
   <a href="https://github.com/danctorres/modelcmp/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danctorres/modelcmp/ci.yml?branch=main&event=push&label=ci" alt="CI"></a>
@@ -72,6 +72,14 @@ In the TUI, `R` recommends, `f` sets a model as your pick for tasks, `space` sel
 
 [KEYS.md](KEYS.md) has every key and the mouse, [REFERENCE.md](REFERENCE.md) the columns,
 every command and the JSON fields, and `modelcmp --help` every flag.
+
+## Your model for each task
+
+You choose which model to use for each task: coding, agentic, reasoning and the rest. Set one
+with `f` on a model in the TUI, where `space` ticks the tasks it should take, or with
+`modelcmp fav <task> <model>`. `modelcmp fav` lists your choices, and `modelcmp fav <task> --rm`
+clears one. Your choice wins over the computed pick: `recommend` marks it `★` on the task's
+line, and agents use it before the cheapest model that is good enough.
 
 ## For agents
 

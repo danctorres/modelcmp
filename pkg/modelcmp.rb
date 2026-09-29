@@ -1,7 +1,7 @@
 # Homebrew formula template. The release workflow fills in @VERSION@ and the
 # @SHA256_<target>@ placeholders and pushes it to danctorres/homebrew-tap.
 class Modelcmp < Formula
-  desc "Pick the cheapest LLM that is good enough for the job"
+  desc "Compare models, get recommendations or choose one per task"
   homepage "https://github.com/danctorres/modelcmp"
   license "MIT"
 
