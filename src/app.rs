@@ -167,7 +167,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Model under the cursor",
         &[
-            ("n", "note for the model"),
+            ("n", "note for the model, agents read it"),
             ("y Y", "copy the model id / name"),
             ("o", "open the model's page on a site"),
             ("x", "open a harness on the model in a new terminal"),

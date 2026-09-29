@@ -57,7 +57,7 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 
 | Key | Action |
 |-----|--------|
-| `n` | note for the model |
+| `n` | note for the model; `recommend --json` gives it to agents, who use it to choose between models |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
 | `o` | open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai; asks which |
 | `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |

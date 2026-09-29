@@ -91,6 +91,10 @@ opencode -m $(modelcmp list --task coding --tier mid --id)   # or ask it yoursel
 The model you set for a task with `fav` or `f` wins: `recommend --json` gives it as the task's
 `favorite`, and `--tier` returns it.
 
+Notes you write with `n` or `modelcmp note` help decide too: `recommend --json` gives each
+frontier model's `note`, and the skill tells agents to use it to rule out a model or choose
+between close ones.
+
 The [skill](skills/modelcmp/SKILL.md) works in Claude Code, opencode, Codex and the other
 agents the [skills CLI](https://skills.sh) knows, and `npx skills update` updates it. An agent
 without skills can take its body in `AGENTS.md`.

@@ -32,7 +32,7 @@ modelcmp show sonnet-5                         # everything about one model
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
 modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, artificialanalysis or openrouter (default)
 modelcmp select sonnet-5                       # shortlist it, list --selected shows them: --rm to deselect
-modelcmp note sonnet-5 "fast enough for refactors" # without text shows it, --rm deletes it
+modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosing; without text shows it, --rm deletes it
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
@@ -78,4 +78,4 @@ for), `price` (with the provider's model `id`, the string a harness takes, and `
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
 ECI for overall, vision and long-context, the percentile for the others. A favorite that is on the line only as
-the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`.
+the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries the user's `note` when the model has one.

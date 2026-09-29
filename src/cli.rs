@@ -412,7 +412,13 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             let off = unrecommended(data, store, t);
             let front: Vec<_> = front(data, store, t)
                 .into_iter()
-                .map(|(m, s)| serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0, "recommended": off != Some(m.key.as_str())}))
+                .map(|(m, s)| {
+                    let mut e = serde_json::json!({"key": m.key, "name": m.name, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0, "recommended": off != Some(m.key.as_str())});
+                    if let Some(n) = store.note(&m.key) {
+                        e["note"] = n.into();
+                    }
+                    e
+                })
                 .collect();
             serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "frontier": front})
         })
@@ -521,6 +527,12 @@ mod tests {
         assert_eq!(keys(&t), ["about", "benchmarks", "favorite", "frontier", "name", "when"]);
         assert_eq!(keys(&t["frontier"][0]), ["key", "name", "price", "recommended", "score"]);
         assert_eq!(names(&t), ["mini", "gpt55"]);
+        store.set_note("gpt55", "slow");
+        assert_eq!(
+            coding(&recommend_json(&data, &store))["frontier"][1]["note"],
+            "slow",
+            "a note only when there is one"
+        );
         store.toggle_excluded("mini");
         assert_eq!(names(&coding(&recommend_json(&data, &store))), ["gpt55"]);
     }

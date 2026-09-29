@@ -111,7 +111,7 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Show a model's note, or set it (`n` in the TUI)
+    /// Show a model's note, or set it (`n` in the TUI); agents read it when choosing
     Note {
         model: String,
         #[arg(conflicts_with = "rm")]

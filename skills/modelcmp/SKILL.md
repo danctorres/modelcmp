@@ -12,6 +12,7 @@ The user's **favorite** for a task always wins. Without one, the goal is **good 
 1. Run `modelcmp recommend --json`. Pick the task whose `when` fits the work (`overall` when none does).
 2. If the task has a `favorite`, use it. The user chose it, and it overrides everything below.
 3. Otherwise read the task's `frontier`: the Pareto frontier, cheapest first, each entry costing more and scoring higher. Start at the cheapest entry that fits the difficulty.
+   An entry's `note`, when present, is the user's own experience with that model: let it rule out an entry or decide between close ones.
 4. **Step up** one entry only after the current model fails the task.
 
 Done when you hold one model `key` and can say which task and frontier entry it came from.
