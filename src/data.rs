@@ -14,7 +14,8 @@ const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
-const FORMAT: u32 = 3;
+/// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles.
+const FORMAT: u32 = 4;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -604,6 +605,8 @@ struct Epoch {
     alias: HashMap<String, String>,
     /// norm(group) -> organization.
     org: HashMap<String, String>,
+    /// Benchmark -> Epoch's fit of it.
+    benches: HashMap<String, crate::fit::Bench>,
 }
 
 /// Short developer names, the same whichever source named them.
@@ -792,6 +795,8 @@ fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
     };
 
     let task_benches = crate::fit::task_benches();
+    // Benchmark -> (floor, ceiling).
+    let mut range: HashMap<&str, (f64, f64)> = HashMap::new();
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
     for b in &benches {
         let (file, score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
@@ -799,6 +804,8 @@ fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
             continue;
         }
         let scale: f64 = col(b, "scale")?.parse().unwrap_or(1.0);
+        let num = |c: &str, or: f64| b.get(c).and_then(|v| v.parse().ok()).unwrap_or(or);
+        range.insert(bench, (num("random_baseline", 0.0), num("score_ceiling", 1.0)));
         let Some(rows) = csv_rows(&mut zip, file) else { continue };
         for r in &rows {
             let (Some(v), Some(s)) = (r.get("Model version"), r.get(score_col)) else { continue };
@@ -817,6 +824,18 @@ fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
             ep.org.entry(norm(&g)).or_insert_with(|| o.clone());
         }
         ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new())).1 = Some(eci);
+    }
+    // Without it tasks go unscored, as without eci_scores.csv models go without an ECI.
+    for r in csv_rows(&mut zip, "epoch_capabilities_index/edi_scores.csv").unwrap_or_default() {
+        let num = |c: &str| r.get(c).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+        let (Some(name), Some(edi), Some(slope)) = (r.get("benchmark_name"), num("edi"), num("estimated_slope_scaled"))
+        else {
+            continue;
+        };
+        let Some(&(floor, ceiling)) = range.get(name.as_str()) else { continue };
+        if slope > 0.0 && ceiling > floor {
+            ep.benches.insert(name.clone(), crate::fit::Bench { edi, slope, floor, ceiling });
+        }
     }
     let mut newest: HashMap<String, &str> = HashMap::new();
     for (k, (name, _, _)) in &ep.groups {
@@ -840,7 +859,7 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
     let providers: HashMap<String, MdProvider> =
         serde_json::from_slice(models_json).map_err(|e| format!("models.dev: {e}"))?;
     let ep = parse_epoch(epoch_zip)?;
-    let pct = crate::fit::percentiles(ep.groups.iter().map(|(k, (_, eci, s))| (k.as_str(), *eci, s)));
+    let pct = crate::fit::percentiles(ep.groups.iter().map(|(k, (_, eci, s))| (k.as_str(), *eci, s)), &ep.benches);
     let mut by_key: HashMap<String, Model> = HashMap::new();
     let mut openrouter: HashMap<String, String> = HashMap::new();
     // OpenRouter ids by their last part: "llama-4-maverick" -> "meta-llama/llama-4-maverick".

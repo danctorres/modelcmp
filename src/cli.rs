@@ -89,7 +89,7 @@ struct ModelOut<'a> {
     pages: Option<BTreeMap<&'static str, String>>,
     /// Epoch Capabilities Index
     eci: Option<f64>,
-    /// Task -> 0..100 percentile among Epoch-evaluated models
+    /// Task -> 0..100 capability percentile among Epoch-evaluated models
     tasks: BTreeMap<&'static str, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,

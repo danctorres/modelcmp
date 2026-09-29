@@ -1,14 +1,23 @@
 //! Task fit: which model is good for what.
 //!
-//! A task score is the mean percentile (0..100) of a model across the task's benchmarks,
-//! ranked against every model Epoch has evaluated. Percentiles make benchmarks of different
-//! difficulty comparable, and a model missing one benchmark is still scored by the others.
+//! Epoch fits `score ≈ sigmoid(slope × (ECI − EDI))` per benchmark, on scores rescaled so that
+//! guessing is 0. A model's capability on a task is the one that best explains its scores on the
+//! task's benchmarks, starting from its ECI: a few scores move it a little, many scores that
+//! agree move it more. It is shown as a percentile (0..100) among every Epoch model, the same
+//! models for every task.
+//! Models tested on different benchmarks stay comparable, and a 0 or 100% only says "at most"
+//! or "at least".
 
 use crate::data::Model;
 use std::collections::{BTreeMap, HashMap};
 
-/// A benchmark scored by fewer models than this gives no percentile: the pool is too small.
-pub const MIN_POOL: usize = 10;
+/// Scores sit about 0.5 (logit) around Epoch's fit, so one score weighs as 1 / 0.5² / ¼ = 16
+/// coin flips at 50%.
+const WEIGHT: f64 = 16.0;
+/// How far a task's capability strays from ECI: 1 to 2.5 points in Epoch's data (2026-09).
+// ponytail: one spread for every task, fit it per task if one shows much more than the others.
+const TASK_SD: f64 = 2.0;
+
 /// Models below this coding percentile are never recommended for "value": cheap alone is not enough.
 pub const VALUE_FLOOR: f64 = 50.0;
 
@@ -135,33 +144,86 @@ fn pct_rank(x: f64, all: &[f64]) -> f64 {
     100.0 * (below + equal / 2.0) / all.len() as f64
 }
 
-/// Per Epoch group `(key, eci, bench -> score)`: key -> task -> percentile.
-pub fn percentiles<'a>(
-    groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)> + Clone,
-) -> HashMap<String, BTreeMap<String, f64>> {
-    let mut per_bench: HashMap<&str, Vec<f64>> = HashMap::new();
-    let mut ecis = Vec::new();
-    for (_, eci, scores) in groups.clone() {
-        ecis.extend(eci);
-        for (b, s) in scores {
-            per_bench.entry(b).or_default().push(*s);
+/// Epoch's fit of one benchmark.
+#[derive(Clone, Copy, Debug)]
+pub struct Bench {
+    /// Epoch Difficulty Index: the capability that scores 50%.
+    pub edi: f64,
+    /// How sharply the benchmark separates models: always > 0.
+    pub slope: f64,
+    /// Score from guessing alone.
+    pub floor: f64,
+    /// Best possible score: always > `floor`.
+    pub ceiling: f64,
+}
+
+/// Most likely capability given `(bench, raw score)` pairs and a normal prior `(mean, sd)`.
+fn capability(obs: &[(Bench, f64)], mean: f64, sd: f64) -> f64 {
+    let prior = 1.0 / (sd * sd);
+    let mut c = mean;
+    // Newton's method: the log-likelihood is concave, so it converges in a few steps.
+    for _ in 0..50 {
+        let (mut grad, mut curv) = (prior * (mean - c), prior);
+        for (b, s) in obs {
+            let y = ((s - b.floor) / (b.ceiling - b.floor)).clamp(0.0, 1.0);
+            let p = 1.0 / (1.0 + (-b.slope * (c - b.edi)).exp());
+            grad += WEIGHT * b.slope * (y - p);
+            curv += WEIGHT * b.slope * b.slope * p * (1.0 - p);
+        }
+        let step = (grad / curv).clamp(-10.0, 10.0);
+        c += step;
+        if step.abs() < 1e-6 {
+            break;
         }
     }
-    per_bench.retain(|_, pool| pool.len() >= MIN_POOL);
+    c
+}
+
+/// Per Epoch group `(key, eci, bench -> score)` and bench -> fit: key -> task -> percentile.
+pub fn percentiles<'a>(
+    groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)>,
+    benches: &HashMap<String, Bench>,
+) -> HashMap<String, BTreeMap<String, f64>> {
+    let groups: Vec<_> = groups.collect();
+    let ecis: Vec<f64> = groups.iter().filter_map(|g| g.1).collect();
+    let n = ecis.len().max(1) as f64;
+    let mean = ecis.iter().sum::<f64>() / n;
+    let sd = (ecis.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / n).sqrt().max(1.0);
+    let obs = |names: &[&str], scores: &BTreeMap<String, f64>| -> Vec<(Bench, f64)> {
+        names.iter().filter_map(|b| Some((*benches.get(*b)?, *scores.get(*b)?))).collect()
+    };
+    let all = task_benches();
+    // (overall, task -> (capability, scored)). A task without scores leaves the capability at
+    // the overall one, so every model sits in every task's pool and all columns rank the same models.
+    let caps: Vec<(f64, Vec<(f64, bool)>)> = groups
+        .iter()
+        .map(|(_, eci, scores)| {
+            // A model Epoch gave no ECI starts from one fit to all its scores.
+            let center = eci.unwrap_or_else(|| capability(&obs(&all, scores), mean, sd));
+            let tasks = TASKS
+                .iter()
+                .map(|t| {
+                    let o = obs(t.benches, scores);
+                    (capability(&o, center, TASK_SD), !o.is_empty())
+                })
+                .collect();
+            (center, tasks)
+        })
+        .collect();
+    let centers: Vec<f64> = caps.iter().map(|c| c.0).collect();
+    let pools: Vec<Vec<f64>> = (0..TASKS.len()).map(|i| caps.iter().map(|c| c.1[i].0).collect()).collect();
     let mut out = HashMap::new();
-    for (key, eci, scores) in groups {
+    for ((key, eci, _), (center, tasks)) in groups.iter().zip(&caps) {
         let mut fit = BTreeMap::new();
-        if let Some(e) = eci {
-            let p = pct_rank(e, &ecis);
+        if eci.is_some() {
+            let p = pct_rank(*center, &centers);
             for t in ECI_TASKS {
                 fit.insert(t.to_string(), p);
             }
         }
-        for t in TASKS.iter().filter(|t| !t.benches.is_empty()) {
-            let ps: Vec<f64> =
-                t.benches.iter().filter_map(|b| Some(pct_rank(*scores.get(*b)?, per_bench.get(b)?))).collect();
-            if !ps.is_empty() {
-                fit.insert(t.name.to_string(), ps.iter().sum::<f64>() / ps.len() as f64);
+        for (i, t) in TASKS.iter().enumerate() {
+            if let (c, true) = tasks[i] {
+                fit.insert(t.name.to_string(), pct_rank(c, &pools[i]));
             }
         }
         out.insert(key.to_string(), fit);
@@ -208,18 +270,23 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
 
+    fn bench(edi: f64, slope: f64, floor: f64) -> Bench {
+        Bench { edi, slope, floor, ceiling: 1.0 }
+    }
+
+    fn benches(pairs: &[(&str, Bench)]) -> HashMap<String, Bench> {
+        pairs.iter().map(|(b, f)| (b.to_string(), *f)).collect()
+    }
+
     #[test]
     fn ranks_by_task() {
         let a = scores(&[("METR Time Horizons", 0.9), ("DeepSWE", 0.2)]);
         let b = scores(&[("METR Time Horizons", 0.5), ("DeepSWE", 0.7)]);
-        // Filler groups so both benchmarks reach MIN_POOL.
-        let filler = scores(&[("METR Time Horizons", 0.0), ("DeepSWE", 1.0)]);
-        let mut groups = vec![("a", Some(150.0), &a), ("b", Some(140.0), &b)];
-        groups.extend((0..MIN_POOL).map(|_| ("f", None, &filler)));
-        let p = percentiles(groups.iter().copied());
+        let e = benches(&[("METR Time Horizons", bench(140.0, 0.1, 0.0)), ("DeepSWE", bench(140.0, 0.1, 0.0))]);
+        let groups = [("a", Some(145.0), &a), ("b", Some(145.0), &b)];
+        let p = percentiles(groups.iter().copied(), &e);
         assert!(p["a"]["agentic"] > p["b"]["agentic"]);
         assert!(p["b"]["coding"] > p["a"]["coding"]);
-        assert!(p["a"]["overall"] > p["b"]["overall"]);
 
         let mk = |k: &str, fit: &BTreeMap<String, f64>, tools: bool| Model {
             key: k.into(),
@@ -235,11 +302,39 @@ mod tests {
     }
 
     #[test]
-    fn small_pools_give_no_percentile() {
-        let s = scores(&[("DeepSWE", 0.9)]);
-        let groups = [("a", None, &s), ("b", None, &s)];
-        let p = percentiles(groups.iter().copied());
+    fn one_score_moves_little() {
+        let hard = bench(150.0, 0.2, 0.0);
+        // 99% far above its ECI converts to 173 on its own; with the ECI it stays well below.
+        let one = capability(&[(hard, 0.99)], 130.0, TASK_SD);
+        assert!(one > 130.0 && one < 150.0, "{one}");
+        // Many agreeing scores move it further than one.
+        assert!(capability(&[(hard, 0.99); 8], 130.0, TASK_SD) > one + 5.0);
+        // A 0 where 0 is expected says nothing new, instead of pinning the model at a clamp.
+        let zero = capability(&[(hard, 0.0)], 130.0, TASK_SD);
+        assert!((zero - 130.0).abs() < 1.0, "{zero}");
+    }
+
+    #[test]
+    fn guessing_counts_as_zero() {
+        let mc = capability(&[(bench(140.0, 0.1, 0.25), 0.25)], 140.0, TASK_SD);
+        let open = capability(&[(bench(140.0, 0.1, 0.0), 0.0)], 140.0, TASK_SD);
+        assert!((mc - open).abs() < 1e-9);
+        // A benchmark with no fit is skipped.
+        let s = scores(&[("DeepSWE", 0.5)]);
+        let p = percentiles([("a", None, &s)].into_iter(), &HashMap::new());
         assert!(!p["a"].contains_key("coding"));
+    }
+
+    #[test]
+    fn tasks_rank_the_same_models() {
+        // a scores just as its ECI predicts; b and c have no coding scores but still count.
+        let a = scores(&[("DeepSWE", 0.5)]);
+        let none = scores(&[]);
+        let e = benches(&[("DeepSWE", bench(170.0, 0.1, 0.0))]);
+        let groups = [("a", Some(170.0), &a), ("b", Some(140.0), &none), ("c", Some(130.0), &none)];
+        let p = percentiles(groups.iter().copied(), &e);
+        assert_eq!(p["a"]["coding"], p["a"]["overall"]);
+        assert!(!p["b"].contains_key("coding"));
     }
 
     #[test]

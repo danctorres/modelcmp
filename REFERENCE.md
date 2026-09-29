@@ -8,12 +8,17 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
-Code/$, Via, Note. Task columns are mean percentiles (0-100) across the task's
-benchmarks, ranked against every model Epoch has evaluated:
+Code/$, Via, Note. Task columns are percentiles (0-100) of the model's capability on
+the task's benchmarks, ranked against every model Epoch has evaluated:
 
 - Coding: DeepSWE, FrontierCode, SWE-Bench verified, Terminal Bench, WeirdML, MirrorCode, GSO-Bench, Aider polyglot
 - Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, OSWorld, METR Time Horizons, The Agent Company, DeepResearch Bench, Terminal Bench
 - Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles
+
+The capability starts at the model's ECI and moves toward what its scores on those benchmarks
+say, using Epoch's difficulty and slope for each benchmark, with guessing counted as 0. One score
+moves it a little, many that agree move it more. A model without an ECI starts from a fit to
+all its scores.
 
 `modelcmp recommend` prints the same lists. In the TUI, move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a

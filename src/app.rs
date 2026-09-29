@@ -63,9 +63,9 @@ pub const COLS: [Col; 10] = [
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
     col("ECI", "eci", "Epoch AI's overall capability index", |m| m.eci),
-    col("Coding", "coding", "mean percentile, coding benchmarks", |m| task_score(m, "coding")),
-    col("Agentic", "agentic", "mean percentile, agentic benchmarks", |m| task_score(m, "agentic")),
-    col("Reason", "reasoning", "mean percentile, reasoning benchmarks", |m| task_score(m, "reasoning")),
+    col("Coding", "coding", "capability percentile, coding benchmarks", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "capability percentile, agentic benchmarks", |m| task_score(m, "agentic")),
+    col("Reason", "reasoning", "capability percentile, reasoning benchmarks", |m| task_score(m, "reasoning")),
     col("Code/$", "value", "Coding ÷ Price, as a percentile", |m| m.fit.get("value").copied()),
 ];
 
