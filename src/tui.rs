@@ -1612,6 +1612,7 @@ mod tests {
             available: true,
             via: vec!["opencode".into()],
             eci,
+            epoch: eci.map(|_| name.into()),
             context: 200_000,
             offers: vec![Offer {
                 provider: "p".into(),

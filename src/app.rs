@@ -1600,6 +1600,7 @@ mod tests {
             available,
             url: format!("https://x/{key}"),
             eci: coding.map(|c| c + 100.0),
+            epoch: coding.map(|_| key.into()),
             offers: vec![Offer {
                 provider: "p".into(),
                 id: key.into(),

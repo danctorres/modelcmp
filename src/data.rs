@@ -14,8 +14,8 @@ const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
-/// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles.
-const FORMAT: u32 = 4;
+/// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
+const FORMAT: u32 = 5;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -119,6 +119,10 @@ pub struct Model {
     /// The model's page name on artificialanalysis.ai, when it has one (`aa_pages`).
     #[serde(default)]
     pub aa: Option<String>,
+    /// Epoch AI's name for the model, when Epoch has benchmark results for it: its page there,
+    /// though no task uses those benchmarks.
+    #[serde(default)]
+    pub epoch: Option<String>,
     #[serde(skip)]
     pub available: bool,
     /// Every `Offer::via` of the model, once each.
@@ -167,13 +171,13 @@ impl Model {
 
     /// The model's pages, (site, url): models.dev when its developer offers it, as models.dev
     /// has pages only under the lab (`openai/gpt-5.5`, not a reseller's); Epoch AI when it has
-    /// benchmarked the model, whose name is then Epoch's; Artificial Analysis when it has a page
+    /// benchmarked the model (`epoch`); Artificial Analysis when it has a page
     /// for it (`aa`); OpenRouter always, `url`.
     pub fn links(&self) -> Vec<(&'static str, String)> {
         let dev = norm(&self.developer);
         let md = self.offers.iter().find(|o| !dev.is_empty() && norm(&short_org(&o.provider)) == dev);
-        let epoch = (self.eci.is_some() || !self.scores.is_empty())
-            .then(|| ("epoch.ai", format!("https://epoch.ai/models/{}", words(&self.name).join("-"))));
+        let epoch =
+            self.epoch.as_ref().map(|n| ("epoch.ai", format!("https://epoch.ai/models/{}", words(n).join("-"))));
         let aa =
             self.aa.as_ref().map(|p| ("artificialanalysis.ai", format!("https://artificialanalysis.ai/models/{p}")));
         md.map(|o| ("models.dev", format!("https://models.dev/models/{}/{}/", o.provider, o.id)))
@@ -800,18 +804,25 @@ fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
     for b in &benches {
         let (file, score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
-        if file.is_empty() || score_col.is_empty() || !task_benches.contains(&bench) {
+        if file.is_empty() || score_col.is_empty() {
             continue;
         }
         let scale: f64 = col(b, "scale")?.parse().unwrap_or(1.0);
         let num = |c: &str, or: f64| b.get(c).and_then(|v| v.parse().ok()).unwrap_or(or);
-        range.insert(bench, (num("random_baseline", 0.0), num("score_ceiling", 1.0)));
+        let task = task_benches.contains(&bench);
+        if task {
+            range.insert(bench, (num("random_baseline", 0.0), num("score_ceiling", 1.0)));
+        }
         let Some(rows) = csv_rows(&mut zip, file) else { continue };
         for r in &rows {
             let (Some(v), Some(s)) = (r.get("Model version"), r.get(score_col)) else { continue };
             let Ok(s) = s.trim_end_matches('%').parse::<f64>() else { continue };
             let g = group_of(v);
+            // Any benchmark result gives the model a page on Epoch; only a task's scores it.
             let e = ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new()));
+            if !task {
+                continue;
+            }
             let best = e.2.entry(bench.to_string()).or_insert(0.0);
             *best = best.max(s * scale);
         }
@@ -837,17 +848,17 @@ fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
             ep.benches.insert(name.clone(), crate::fit::Bench { edi, slope, floor, ceiling });
         }
     }
-    let mut newest: HashMap<String, &str> = HashMap::new();
-    for (k, (name, _, _)) in &ep.groups {
+    let mut newest: HashMap<String, (bool, &str)> = HashMap::new();
+    for (k, (name, eci, scores)) in &ep.groups {
         let short = norm(&clean_name(name));
-        let date = dates.get(k).map_or("", String::as_str);
-        // Strictly newer wins; on equal dates the first group in key order keeps the alias.
-        if short != *k && newest.get(&short).is_none_or(|d| date > *d) {
-            newest.insert(short.clone(), date);
+        let rank = (eci.is_some() || !scores.is_empty(), dates.get(k).map_or("", String::as_str));
+        // Scored beats unscored, then strictly newer wins; on ties the first in key order keeps it.
+        if short != *k && newest.get(&short).is_none_or(|r| rank > *r) {
+            newest.insert(short.clone(), rank);
             ep.alias.insert(short, k.clone());
         }
     }
-    if ep.groups.is_empty() {
+    if ep.groups.values().all(|(_, eci, scores)| eci.is_none() && scores.is_empty()) {
         return Err("epoch zip: no benchmark data found".into());
     }
     Ok(ep)
@@ -859,7 +870,9 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
     let providers: HashMap<String, MdProvider> =
         serde_json::from_slice(models_json).map_err(|e| format!("models.dev: {e}"))?;
     let ep = parse_epoch(epoch_zip)?;
-    let pct = crate::fit::percentiles(ep.groups.iter().map(|(k, (_, eci, s))| (k.as_str(), *eci, s)), &ep.benches);
+    // Unscored groups would sit in every pool at the mean, skewing everyone's percentile.
+    let scored = ep.groups.iter().filter(|(_, (_, eci, s))| eci.is_some() || !s.is_empty());
+    let pct = crate::fit::percentiles(scored.map(|(k, (_, eci, s))| (k.as_str(), *eci, s)), &ep.benches);
     let mut by_key: HashMap<String, Model> = HashMap::new();
     let mut openrouter: HashMap<String, String> = HashMap::new();
     // OpenRouter ids by their last part: "llama-4-maverick" -> "meta-llama/llama-4-maverick".
@@ -971,6 +984,11 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
         if let Some(k) = gk
             && let Some((gname, eci, scores)) = ep.groups.get(k)
         {
+            m.epoch = Some(gname.clone());
+            // Scored on no task, Epoch's page is all it adds; its name for the model may be a bare id.
+            if eci.is_none() && scores.is_empty() {
+                continue;
+            }
             m.name = gname.clone();
             if let Some(o) = ep.org.get(k) {
                 m.developer = short_org(o);
@@ -1066,7 +1084,7 @@ mod tests {
         let sites = |m: &Model| m.links().into_iter().map(|(s, _)| s).collect::<Vec<_>>();
         m.offers.push(offer("302ai", "claude-opus-5-5"));
         assert_eq!(sites(&m), ["models.dev", "openrouter.ai"], "no Epoch page without its benchmarks");
-        m.eci = Some(160.0);
+        m.epoch = Some("Claude Opus 5.5".into());
         m.aa = Some("claude-opus-5-5".into());
         assert_eq!(
             m.links(),
@@ -1284,5 +1302,29 @@ mod tests {
         }
         let err = parse_epoch(buf.get_ref()).unwrap_err();
         assert!(err.contains("model_group"), "{err}");
+    }
+
+    #[test]
+    fn epoch_links_models_benchmarked_on_no_task() {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let mut file = |name: &str, body: &[u8]| {
+                z.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                std::io::Write::write_all(&mut z, body).unwrap();
+            };
+            file(
+                "model_metadata.csv",
+                b"model_version,model_group,date\nnew_high,New,2026-09-01\nother_high,Other,2026-08-01\nold,Old,2026-01-01\n",
+            );
+            file("benchmark_metadata.csv", b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\n");
+            file("ocr.csv", b"Model version,score\nother_high,0.5\n");
+            file("epoch_capabilities_index/eci_scores.csv", b"Model,eci\nOld,150\n");
+            z.finish().unwrap();
+        }
+        let ep = parse_epoch(buf.get_ref()).unwrap();
+        assert!(!ep.groups.contains_key("new"), "listed without results: Epoch has no page for it");
+        assert_eq!(ep.groups["other"], ("Other".into(), None, BTreeMap::new()), "a page, though no task scores");
+        assert_eq!(ep.groups["old"].1, Some(150.0));
     }
 }
