@@ -393,18 +393,15 @@ fn words(s: &str) -> Vec<String> {
 }
 
 /// Set each model's `aa` from the page names in Artificial Analysis's sitemap: the page named
-/// as Epoch or models.dev names the model, else the shortest one with the same words in any
-/// order, leaving out dates and qualifiers: "Claude Sonnet 4.5" is `claude-4-5-sonnet`,
-/// "Llama 3.3 70B" `llama-3-3-instruct-70b`, "Gemini 2.5 Pro (Jun 2025)" `gemini-2-5-pro`.
-// ponytail: a dated snapshot gets its family's page; the sitemap misses some pages, so those
-// models get no link rather than a guessed one.
+/// as Epoch or models.dev names the model, else the one with the same words in any order,
+/// leaving out the vendor and "instruct": "Claude Sonnet 4.5" is `claude-4-5-sonnet`, "Llama
+/// 3.3 70B" `llama-3-3-instruct-70b`. Dates, "preview" and "exp" count, as they name another
+/// release: "Gemini 2.5 Pro (Jun 2025)" is not `gemini-2-5-pro`.
+// ponytail: the sitemap misses some pages, so those models get no link rather than a guessed one.
 fn aa_pages(models: &mut [Model], sitemap: &str) {
-    const SKIP: &[&str] = &[
-        "instruct", "preview", "exp", "hosted", "amazon", "cohere", "jan", "feb", "mar", "apr", "may", "jun", "june",
-        "jul", "aug", "sep", "oct", "nov", "dec",
-    ];
+    const SKIP: &[&str] = &["instruct", "hosted", "amazon", "cohere"];
     let key = |slug: &str| {
-        // "qwen3" is "qwen 3", as AA writes it both ways; "2025" and "0731" are dates.
+        // "qwen3" is "qwen 3", as AA writes it both ways.
         let mut k: Vec<String> = words(slug)
             .iter()
             .flat_map(|w| match w.find(|c: char| c.is_ascii_digit()) {
@@ -414,7 +411,6 @@ fn aa_pages(models: &mut [Model], sitemap: &str) {
                 _ => vec![w.clone()],
             })
             .filter(|w| !SKIP.contains(&w.as_str()))
-            .filter(|w| !(w.len() == 4 && w.bytes().all(|b| b.is_ascii_digit())))
             .collect();
         k.sort();
         k
@@ -1081,6 +1077,7 @@ mod tests {
             "gemini-2-5-pro",
             "qwen3-8-max",
             "qwen3-8-max-0803",
+            "deepseek-v3-2",
         ];
         let sitemap: String =
             pages.iter().map(|p| format!("<url><loc>https://artificialanalysis.ai/models/{p}</loc></url>")).collect();
@@ -1090,6 +1087,8 @@ mod tests {
             "Llama 3.3 70B",
             "Gemini 2.5 Pro (Jun 2025)",
             "Qwen 3.8 Max",
+            "Qwen 3.8 Max 0803",
+            "DeepSeek V3.2 Exp",
             "Claude Sonnet 4",
         ];
         let mut models: Vec<Model> = names.map(|n| Model { name: n.into(), ..Default::default() }).into();
@@ -1101,11 +1100,13 @@ mod tests {
                 Some("claude-4-5-sonnet"),
                 Some("claude-opus-4-5"),
                 Some("llama-3-3-instruct-70b"),
-                Some("gemini-2-5-pro"),
+                None,
                 Some("qwen3-8-max"),
+                Some("qwen3-8-max-0803"),
+                None,
                 None,
             ],
-            "the shortest page with the same words; none rather than a guess"
+            "the page with the same words, dates and all; none rather than another release's"
         );
     }
 
