@@ -331,7 +331,7 @@ const NAME_MIN: u16 = 16;
 const SEP: &str = "│";
 /// The actions on one model, in the one order every view shows them in.
 const ACTIONS: [&str; 8] =
-    ["enter details", "x launch", "o open", "y copy id", "m select", "f fav", "e exclude", "n note"];
+    ["enter details", "x launch", "o open", "y copy id", "space select", "f fav", "e exclude", "n note"];
 
 /// The last group of every overlay: `? help` is the last hint a narrow terminal drops.
 const BACK: [&str; 3] = ["esc back", "q quit", "? help"];
@@ -349,7 +349,7 @@ fn actions(keys: &str) -> Vec<&'static str> {
 fn hints(app: &App) -> Vec<&'static str> {
     let groups: Vec<Vec<&'static str>> = match app.view {
         View::Table if app.selecting() => {
-            vec![vec!["j k G extend"], vec!["C compare"], actions("m f e"), vec!["esc cancel", "q quit", "? help"]]
+            vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit", "? help"]]
         }
         View::Table => {
             let mut view = vec!["/ filter", "s sort"];
@@ -401,9 +401,9 @@ fn hints(app: &App) -> Vec<&'static str> {
                 back.push("esc back");
             }
             back.extend(["q quit", "? help"]);
-            vec![vec!["h l column"], view, actions("enter x o y m f e n"), back]
+            vec![vec!["h l column"], view, actions("enter x o y space f e n"), back]
         }
-        View::Detail => vec![vec!["j k scroll"], actions("x o y m f e n"), BACK.to_vec()],
+        View::Detail => vec![vec!["j k scroll"], actions("x o y space f e n"), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
         View::Help => vec![vec!["j k scroll"], vec!["/ search"], vec!["esc back", "q quit"]],
         View::Compare if app.marked_models().len() < 2 => vec![BACK.to_vec()],
@@ -413,7 +413,7 @@ fn hints(app: &App) -> Vec<&'static str> {
         View::Recommend => vec![
             vec!["j k task", "h l 0 $ model"],
             vec!["enter best models first"],
-            actions("x o y m f e n"),
+            actions("x o y space f e n"),
             BACK.to_vec(),
         ],
     };
@@ -422,11 +422,11 @@ fn hints(app: &App) -> Vec<&'static str> {
 }
 
 /// A hint's keys and what they do, which keeps its leading space: the keys are the leading
-/// words of one character, or `enter` or `esc`.
+/// words of one character, or `enter`, `esc` or `space`.
 fn split_hint(hint: &str) -> (&str, &str) {
     let mut end = 0;
     for word in hint.split(' ') {
-        if word.chars().count() != 1 && word != "enter" && word != "esc" {
+        if word.chars().count() != 1 && !["enter", "esc", "space"].contains(&word) {
             break;
         }
         end += word.len() + 1;
@@ -439,6 +439,7 @@ fn hint_key(hint: &str) -> Option<KeyCode> {
     match split_hint(hint).0 {
         "enter" => Some(KeyCode::Enter),
         "esc" => Some(KeyCode::Esc),
+        "space" => Some(KeyCode::Char(' ')),
         k => {
             let mut chars = k.chars();
             match (chars.next(), chars.next()) {
@@ -656,7 +657,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 Line::from(format!("compare needs 2 or more selected models, {n} now")),
                 Line::from(""),
                 Line::from(vec![key("esc"), Span::raw(" back to the table, then")]),
-                Line::from(vec![key("m"), Span::raw(" selects the model under the bar, or")]),
+                Line::from(vec![key("space"), Span::raw(" selects the model under the bar, or")]),
                 Line::from(vec![key("V"), Span::raw(" / shift+click highlights a range, and")]),
                 Line::from(vec![key("C"), Span::raw(" compares them")]),
             ];
@@ -1182,7 +1183,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             _ => (false, true),
         };
         let hint = match (menu, typing) {
-            (true, false) => "j k move  / search  enter pick  m toggle  esc close",
+            (true, false) => "j k move  / search  enter pick  space toggle  esc close",
             (true, true) => "↓ ↑ move  enter pick  esc clear",
             _ => "enter apply  esc cancel",
         };
@@ -1293,7 +1294,7 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
         lines.push(Line::from(format!(" no entry matches {query} ")).style(fg(MUTED)));
     }
     let hint = match items.first() {
-        Some((_, Effect::Fav(_))) => " j k move · / search · m toggle · enter toggle and close · esc close",
+        Some((_, Effect::Fav(_))) => " j k move · / search · space toggle · enter toggle and close · esc close",
         Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc t close",
         _ => " j k move · / search · enter opens",
     };
@@ -1824,7 +1825,7 @@ mod tests {
     #[test]
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
-        let (buf, lines) = render(&mut a, 202, 6);
+        let (buf, lines) = render(&mut a, 206, 6);
         let header = "# ✓ ★ ✗ Model Dev ▾ │ ▼Price ▾ $in $cache $out Ctx │ ECI Coding Agentic Reason \
                       Code/$ │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
@@ -1847,7 +1848,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  % no cache  │  enter details  x launch  o open  y copy id  m select  f fav  e exclude  n note  │  q quit  ? help"
+                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  % no cache  │  enter details  x launch  o open  y copy id  space select  f fav  e exclude  n note  │  q quit  ? help"
             ),
             "{}",
             lines[5]
@@ -1902,8 +1903,8 @@ mod tests {
         assert_eq!(split_hint("h l 0 $ model"), ("h l 0 $", " model"));
         assert_eq!(split_hint("enter best models first"), ("enter", " best models first"));
         assert_eq!(
-            (hint_key("a all"), hint_key("esc back"), hint_key("j k scroll")),
-            (Some(KeyCode::Char('a')), Some(KeyCode::Esc), None)
+            (hint_key("a all"), hint_key("esc back"), hint_key("space select"), hint_key("j k scroll")),
+            (Some(KeyCode::Char('a')), Some(KeyCode::Esc), Some(KeyCode::Char(' ')), None)
         );
         let mut a = app();
         let (w, h) = (200, 6);
@@ -2087,7 +2088,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 46, 9));
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false), "all rows fit");
         assert!(lines[3].ends_with("? help"), "{}", lines[3]);
-        assert!(!lines[3].contains("m select"), "hints that do not fit are dropped whole");
+        assert!(!lines[3].contains("space select"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 46, 4);

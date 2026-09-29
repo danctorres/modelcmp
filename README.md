@@ -65,7 +65,7 @@ agentic  multi-step tool use, long autonomous tasks  (modelcmp list --task agent
 Each pick is name, [key], $ per 1M tokens and, in brackets, its score on the task (a
 0-100 percentile), cheapest first.
 
-In the TUI, `R` recommends, `f` sets a model as your pick for tasks, `m` selects models and
+In the TUI, `R` recommends, `f` sets a model as your pick for tasks, `space` selects models and
 `C` compares them, `/` filters and `?` lists every key. Only `q` quits, and it asks first;
 `esc` goes back one step.
 

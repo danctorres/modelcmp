@@ -96,7 +96,7 @@ enum Cmd {
         #[arg(long, default_value = "openrouter")]
         on: String,
     },
-    /// Select a model, to shortlist it until the TUI closes: `list --selected` shows them (`m` in the TUI)
+    /// Select a model, to shortlist it until the TUI closes: `list --selected` shows them (space in the TUI)
     #[command(alias = "mark")]
     Select {
         model: String,

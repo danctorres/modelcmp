@@ -21,7 +21,7 @@ commands and JSON.
 | `s` | sort by the column; again reverses |
 | `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare it filters the rows, in the help its lines, and in a list like the theme panel its entries; what matched is underlined in yellow everywhere |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding; Ctx in thousands of tokens, `>` `200` for 200k |
-| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `m` toggles several, as it selects models |
+| `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `space` toggles several, as it selects models |
 | `a` | all models, including ones you have no access to |
 | `%` | Price with no input cached, as a one-off prompt, instead of the share it started with (an agent's 90%, or `--cache`); again: back to that share. The top border on Price says which, and the hint shows on the price columns, or anywhere while no input is cached. Code/$, the cheapest provider and recommend follow it. `modelcmp --cache 50` starts the TUI with any other share |
 | `M` | selected models only; `M` again or `esc`: every model |
@@ -33,9 +33,9 @@ commands and JSON.
 
 | Key | Action |
 |-----|--------|
-| `m` | select the model: its box `☐` becomes `✓` in light blue; the shortlist you are deciding between, kept until you deselect it or close the TUI. A click on the box toggles it |
+| `space` | select the model: its box `☐` becomes `✓` in light blue; the shortlist you are deciding between, kept until you deselect it or close the TUI. A click on the box toggles it |
 | `U` | deselect every model |
-| `V` | highlight a range of rows: move to extend it, then `m` `e` or `C` act on all of it; `esc` cancels |
+| `V` | highlight a range of rows: move to extend it, then `space` `e` or `C` act on all of it; `esc` cancels |
 | `C` | compare 2+ selected models: cheapest, best coder, most coding per $; `h` `l` pick a model, and the table's bar follows it; `C` again or `esc` closes it |
 
 ## Model under the cursor
@@ -43,7 +43,7 @@ commands and JSON.
 | Key | Action |
 |-----|--------|
 | `enter` | details: every benchmark, price per provider |
-| `f` | favorite the model for tasks. Every row has a `☆`, filled bold `★` for a favorite: with a task picked, that task's favorite in the task's colour, the colour of its name in recommend; with none, a gold `★` for the favorite of any task. `f` or a click on the `☆` lists the tasks with `☐`/`✓`: `m` or a click ticks one, `enter` ticks the one under the bar and closes; the list starts on the picked task, or the task under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. The model joins the task's line even off the price frontier, greyed and marked `not recommended` there, and `--tier` picks it |
+| `f` | favorite the model for tasks. Every row has a `☆`, filled bold `★` for a favorite: with a task picked, that task's favorite in the task's colour, the colour of its name in recommend; with none, a gold `★` for the favorite of any task. `f` or a click on the `☆` lists the tasks with `☐`/`✓`: `space` or a click ticks one, `enter` ticks the one under the bar and closes; the list starts on the picked task, or the task under the cursor in recommend. The status bar names the tasks the model under the cursor is the favorite for. The model joins the task's line even off the price frontier, greyed and marked `not recommended` there, and `--tier` picks it |
 | `e` | exclude the model: you have it but cannot use it. It stays in the table, greyed out, but recommendations (`R` and `--task`) skip it. Every row has a `·`, a red `✗` when excluded, and a click on it toggles the exclusion of that row alone, even on a selected one |
 | `e` on a selected model | act on every selected model, not just the one under the cursor |
 | `n` | note for the model |

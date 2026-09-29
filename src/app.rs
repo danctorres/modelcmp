@@ -135,7 +135,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("s", "sort by the column; again reverses"),
             ("/", "filter models, compare rows, this help or a list"),
             ("> <", "minimum / maximum for the column, e.g. > 70 enter"),
-            ("d", "dropdown on Dev, Price and Via (▾); m toggles several"),
+            ("d", "dropdown on Dev, Price and Via (▾); space toggles several"),
             ("a", "all models, including ones you have no access to"),
             ("%", "Price with none of the input cached, or back to --cache (90%)"),
             ("M F E", "selected / favorite / excluded models only; again: every model"),
@@ -145,9 +145,9 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Select and compare",
         &[
-            ("m", "select the model (✓): the shortlist for C"),
+            ("space", "select the model (✓): the shortlist for C"),
             ("U", "deselect every model"),
-            ("V", "highlight a range; m e C act on all of it"),
+            ("V", "highlight a range; space e C act on all of it"),
             ("C", "compare the selected models"),
         ],
     ),
@@ -371,9 +371,9 @@ pub enum Mouse {
     Scroll(isize),
     /// Click on row `n` of the table (an index into `rows`).
     Row(usize),
-    /// Right click on row `n`: mark it, as `m` does, without moving; a selection becomes marks.
+    /// Right click on row `n`: mark it, as space does, without moving; a selection becomes marks.
     Mark(usize),
-    /// A click on row `n`'s checkbox: toggle its mark, as `m` does.
+    /// A click on row `n`'s checkbox: toggle its mark, as space does.
     Box(usize),
     /// A click on row `n`'s ☆: pick the tasks it is the favorite for, as `f` does.
     Star(usize),
@@ -680,7 +680,7 @@ impl App {
         self.data.models.iter().any(|m| self.is_fav(&m.key))
     }
 
-    /// Whether the open choice list is `f`'s tasks, where m ticks one and the list stays open.
+    /// Whether the open choice list is `f`'s tasks, where space ticks one and the list stays open.
     pub fn choosing_favs(&self) -> bool {
         matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(_)))))
     }
@@ -1030,7 +1030,7 @@ impl App {
     /// The wheel scrolls whatever `j k` move and sideways moves the column cursor; a click
     /// selects a row, and again opens its details; a click on a header sorts by it, as `s`
     /// does, and on its ▾ opens the dropdown. Where several entries can be picked (Dev, Via)
-    /// a click toggles one, as m does, and the dropdown stays open until a click outside;
+    /// a click toggles one, as space does, and the dropdown stays open until a click outside;
     /// elsewhere (Price, a choice list) a click picks the entry, as enter does.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
         let effect = self.on_mouse(m);
@@ -1059,7 +1059,7 @@ impl App {
                         return None;
                     }
                     *sel = n;
-                    let key = if several { KeyCode::Char('m') } else { KeyCode::Enter };
+                    let key = if several { KeyCode::Char(' ') } else { KeyCode::Enter };
                     self.input_key(key, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
@@ -1220,7 +1220,7 @@ impl App {
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
             KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => {
-                self.status = "no selected models: m selects the one under the bar".into();
+                self.status = "no selected models: space selects the one under the bar".into();
             }
             KeyCode::Char('M') if table => {
                 self.only_marked = !self.only_marked;
@@ -1241,7 +1241,7 @@ impl App {
                 self.rebuild();
             }
             KeyCode::Char('U') if table && self.store.marked.is_empty() => {
-                self.status = "no selected models: m selects the one under the bar".into();
+                self.status = "no selected models: space selects the one under the bar".into();
             }
             KeyCode::Char('U') if table => {
                 let n = std::mem::take(&mut self.store.marked).len();
@@ -1341,10 +1341,10 @@ impl App {
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
             KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
-            KeyCode::Char('m') if table && self.selecting() => {
+            KeyCode::Char(' ') if table && self.selecting() => {
                 return self.flag(Store::is_marked, Store::toggle_marked, ["selected", "deselected"]);
             }
-            KeyCode::Char('m') if row && self.view != View::Compare => {
+            KeyCode::Char(' ') if row && self.view != View::Compare => {
                 self.toggle_mark();
                 return Some(Effect::Save);
             }
@@ -1489,9 +1489,9 @@ impl App {
                         }
                         self.rebuild();
                     }
-                    // m adds or drops the entry, as it marks a model, keeping the dropdown open; on
-                    // "any" it drops all. While searching, m is typed.
-                    KeyCode::Char('m') if !*typing && (*col == 1 || *col == VIA) => {
+                    // Space adds or drops the entry, as it marks a model, keeping the dropdown open; on
+                    // "any" it drops all. While searching, space is typed.
+                    KeyCode::Char(' ') if !*typing && (*col == 1 || *col == VIA) => {
                         let i = rows[*sel];
                         let list = if *col == 1 { &mut self.dev } else { &mut self.via };
                         match list.iter().position(|d| *d == items[i].0) {
@@ -1519,9 +1519,9 @@ impl App {
                 // While searching, ↓ ↑ move the bar, as in a dropdown.
                 KeyCode::Down if *typing => *sel = (*sel + 1).min(choice_rows(items, query).len().saturating_sub(1)),
                 KeyCode::Up if *typing => *sel = sel.saturating_sub(1),
-                // m ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns.
-                // While searching, m is typed.
-                KeyCode::Char('m') if !*typing => {
+                // Space ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns.
+                // While searching, space is typed.
+                KeyCode::Char(' ') if !*typing => {
                     let i = *choice_rows(items, query).get(*sel)?;
                     if let Some((_, Effect::Fav(task))) = items.get(i) {
                         let task = *task;
@@ -1881,23 +1881,23 @@ mod tests {
     fn m_toggles_several_dropdown_entries() {
         let mut a = app();
         a.col = 1;
-        press(&mut a, "dj ");
-        assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "space does nothing");
-        press(&mut a, "m");
+        press(&mut a, "djm");
+        assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "m does nothing");
+        press(&mut a, " ");
         assert!(matches!(a.input, Input::Menu { .. }), "the dropdown stays open");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
-        press(&mut a, "jm");
+        press(&mut a, "j ");
         assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "both developers show");
-        press(&mut a, "km");
+        press(&mut a, "k ");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
-        press(&mut a, "/openm");
-        assert_eq!(a.dev, ["anthropic"], "while searching, m is typed");
+        press(&mut a, "/open ");
+        assert_eq!(a.dev, ["anthropic"], "while searching, space is typed");
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "m");
-        assert_eq!(a.dev, ["anthropic", "openai"], "esc ends the search on the match, m toggles it");
-        press(&mut a, "km");
-        assert!(a.dev.is_empty(), "m on any drops them all");
+        press(&mut a, " ");
+        assert_eq!(a.dev, ["anthropic", "openai"], "esc ends the search on the match, space toggles it");
+        press(&mut a, "k ");
+        assert!(a.dev.is_empty(), "space on any drops them all");
         press(&mut a, "jj");
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.dev.as_slice(), &a.input), (&["anthropic".to_string()][..], &Input::None), "enter picks one");
@@ -2194,14 +2194,14 @@ mod tests {
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), Some("mini"));
         assert!(a.status.starts_with("★ mini"));
-        // m ticks and keeps the list open, its boxes following.
+        // Space ticks and keeps the list open, its boxes following.
         press(&mut a, "f");
-        assert_eq!(press(&mut a, "m"), Some(Effect::Save));
+        assert_eq!(press(&mut a, " "), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), None, "again unfavorites");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items[1].0 == "☐ coding"));
-        press(&mut a, "km");
+        press(&mut a, "k ");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "✓ overall"));
-        press(&mut a, "m");
+        press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.input, a.store.favorite_for("mini").len()), (&Input::None, 0));
         // A favorite model joins the task's line even off the frontier: opus5 has no coding score
@@ -2309,7 +2309,7 @@ mod tests {
         assert_eq!(press(&mut a, "C"), None);
         assert_eq!(a.view, View::Compare, "opens to say models must be marked first");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "mjm");
+        press(&mut a, " j ");
         assert_eq!(a.store.marked, vec!["gpt55", "opus5"]);
         press(&mut a, "M");
         assert_eq!(keys(&a), ["gpt55", "opus5"]);
@@ -2351,17 +2351,17 @@ mod tests {
         assert_eq!(a.view, View::Table, "esc closes the overlay");
         press(&mut a, "Mc");
         assert_eq!((a.marked_models().len(), a.only_marked, a.rows.len()), (2, false, 3), "c keeps them and leaves M");
-        press(&mut a, "GmM");
+        press(&mut a, "G M");
         assert_eq!(keys(&a), ["gpt55", "opus5", "mini"]);
-        press(&mut a, "ggVGm");
+        press(&mut a, "ggVG ");
         assert_eq!(
             (a.store.marked.len(), a.only_marked, a.rows.len()),
             (0, false, 3),
             "unmarking every marked model leaves M for every model"
         );
         press(&mut a, "U");
-        assert_eq!(a.status, "no selected models: m selects the one under the bar");
-        press(&mut a, "ggmjmM");
+        assert_eq!(a.status, "no selected models: space selects the one under the bar");
+        press(&mut a, "gg j M");
         assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
         assert_eq!((a.store.marked.len(), a.only_marked, a.rows.len()), (0, false, 3), "U unmarks all and leaves M");
     }
@@ -2370,8 +2370,11 @@ mod tests {
     fn esc_backs_out_of_views_and_toggles_close_what_they_open() {
         let mut a = app();
         press(&mut a, "M");
-        assert_eq!((a.only_marked, a.status.as_str()), (false, "no selected models: m selects the one under the bar"));
-        press(&mut a, "mM/x");
+        assert_eq!(
+            (a.only_marked, a.status.as_str()),
+            (false, "no selected models: space selects the one under the bar")
+        );
+        press(&mut a, " M/x");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.query.as_str(), a.only_marked), ("", true), "esc clears the search first");
@@ -2435,7 +2438,7 @@ mod tests {
         press(&mut a, "GVk");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.visual, a.rows.len()), (None, 3), "esc cancels the range only");
-        press(&mut a, "ggVjm");
+        press(&mut a, "ggVj ");
         assert_eq!(a.store.marked, ["gpt55", "opus5"]);
         press(&mut a, "Ge");
         assert!(a.store.is_excluded("mini") && !a.store.is_excluded("gpt55"), "e on an unmarked row acts on it alone");
@@ -2444,15 +2447,15 @@ mod tests {
             a.store.is_excluded("gpt55") && a.store.is_excluded("opus5") && !a.store.is_excluded("mini"),
             "e on a mark: all marks"
         );
-        press(&mut a, "ggVjjm");
-        assert_eq!(a.store.marked, ["gpt55", "opus5", "mini"], "m on a partly marked range marks the rest");
-        press(&mut a, "ggVjjm");
+        press(&mut a, "ggVjj ");
+        assert_eq!(a.store.marked, ["gpt55", "opus5", "mini"], "space on a partly marked range marks the rest");
+        press(&mut a, "ggVjj ");
         assert_eq!(
             (a.store.marked.len(), a.status.as_str()),
             (0, "deselected 3 models"),
-            "m on an all-marked range unmarks it"
+            "space on an all-marked range unmarks it"
         );
-        press(&mut a, "mGVkC");
+        press(&mut a, " GVkC");
         assert_eq!(
             (&a.view, a.marked_models().len()),
             (&View::Compare, 2),
@@ -2486,7 +2489,7 @@ mod tests {
         assert_eq!((a.selected(), a.selecting()), (1, false));
         assert_eq!(a.mouse(Mouse::Exclude(1)), Some(Effect::Save));
         assert!(!a.store.is_excluded(&k), "a second click takes the exclusion off");
-        press(&mut a, "ggm");
+        press(&mut a, "gg ");
         a.mouse(Mouse::Box(1));
         a.mouse(Mouse::Exclude(1));
         assert!(a.store.is_excluded(&k) && !a.store.is_excluded(&key(&a, 0)), "on a mark, not every mark as e does");
@@ -2514,7 +2517,7 @@ mod tests {
     #[test]
     fn a_refresh_that_drops_models_keeps_the_cursors_valid() {
         let mut a = app();
-        press(&mut a, "mjmC$");
+        press(&mut a, " j C$");
         assert_eq!((&a.view, a.compare_sel), (&View::Compare, 1));
         let one = Data { models: a.data.models.drain(..1).collect(), ..Data::default() };
         a.refreshed(Ok(one));
