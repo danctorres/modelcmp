@@ -2435,8 +2435,8 @@ mod tests {
         assert_eq!(a.store.note("gpt55"), Some("fast"));
         assert_eq!(press(&mut a, "o"), None, "o asks which site");
         assert!(
-            matches!(&a.input, Input::Choose { items, .. } if items.len() == 3),
-            "epoch.ai, artificialanalysis.ai, openrouter.ai: no models.dev page, as the developer does not offer it"
+            matches!(&a.input, Input::Choose { items, .. } if items.len() == 2),
+            "epoch.ai, openrouter.ai: no models.dev page, as the developer does not offer it, nor an AA one"
         );
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));
         press(&mut a, "oG");

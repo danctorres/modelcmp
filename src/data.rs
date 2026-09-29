@@ -9,10 +9,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
+/// Artificial Analysis's page names, only to link a model there: its API needs a key.
+const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
-/// 2: `Offer::unpriced`, where a missing price used to read as free.
-const FORMAT: u32 = 2;
+/// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
+const FORMAT: u32 = 3;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -113,6 +115,9 @@ pub struct Model {
     pub scores: BTreeMap<String, f64>,
     /// Task name -> 0..100 percentile (see fit.rs).
     pub fit: BTreeMap<String, f64>,
+    /// The model's page name on artificialanalysis.ai, when it has one (`aa_pages`).
+    #[serde(default)]
+    pub aa: Option<String>,
     #[serde(skip)]
     pub available: bool,
     /// Every `Offer::via` of the model, once each.
@@ -161,27 +166,19 @@ impl Model {
 
     /// The model's pages, (site, url): models.dev when its developer offers it, as models.dev
     /// has pages only under the lab (`openai/gpt-5.5`, not a reseller's); Epoch AI when it has
-    /// benchmarked the model, whose name is then Epoch's, and Artificial Analysis under the same
-    /// slug; OpenRouter always, `url`.
+    /// benchmarked the model, whose name is then Epoch's; Artificial Analysis when it has a page
+    /// for it (`aa`); OpenRouter always, `url`.
     pub fn links(&self) -> Vec<(&'static str, String)> {
         let dev = norm(&self.developer);
         let md = self.offers.iter().find(|o| !dev.is_empty() && norm(&short_org(&o.provider)) == dev);
-        // ponytail: Epoch's benchmarks stand in for Artificial Analysis covering the model too;
-        // fetch AA's model list if its links turn out dead too often.
-        let benched = (self.eci.is_some() || !self.scores.is_empty()).then(|| {
-            let slug: Vec<&str> =
-                self.name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
-            slug.join("-").to_lowercase()
-        });
-        let bench = benched.iter().flat_map(|slug| {
-            [
-                ("epoch.ai", format!("https://epoch.ai/models/{slug}")),
-                ("artificialanalysis.ai", format!("https://artificialanalysis.ai/models/{slug}")),
-            ]
-        });
+        let epoch = (self.eci.is_some() || !self.scores.is_empty())
+            .then(|| ("epoch.ai", format!("https://epoch.ai/models/{}", words(&self.name).join("-"))));
+        let aa =
+            self.aa.as_ref().map(|p| ("artificialanalysis.ai", format!("https://artificialanalysis.ai/models/{p}")));
         md.map(|o| ("models.dev", format!("https://models.dev/models/{}/{}/", o.provider, o.id)))
             .into_iter()
-            .chain(bench)
+            .chain(epoch)
+            .chain(aa)
             .chain([("openrouter.ai", self.url.clone())])
             .collect()
     }
@@ -345,13 +342,18 @@ fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache.
 pub fn refresh() -> Result<Data, String> {
-    let (models, epoch, harness) = std::thread::scope(|s| {
+    let (models, epoch, aa, harness) = std::thread::scope(|s| {
         let a = s.spawn(|| fetch(MODELS_URL));
         let b = s.spawn(|| fetch(EPOCH_URL));
+        let c = s.spawn(|| fetch(AA_URL));
         let d = s.spawn(harness_models);
-        (a.join().unwrap(), b.join().unwrap(), d.join().unwrap())
+        (a.join().unwrap(), b.join().unwrap(), c.join().unwrap(), d.join().unwrap())
     });
     let mut data = merge(&models?, &epoch?)?;
+    // Only links hang on it, so without it the refresh still succeeds, with no AA links.
+    if let Ok(xml) = aa {
+        aa_pages(&mut data.models, &String::from_utf8_lossy(&xml));
+    }
     data.harness = harness;
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
     crate::store::write_atomic(&cache_path(), &json).map_err(|e| format!("cache: {e}"))?;
@@ -383,6 +385,58 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
         .call()
         .and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec())
         .map_err(|e| format!("{url}: {e}"))
+}
+
+/// "Claude Opus 4.5" -> ["claude", "opus", "4", "5"]: its lowercase alphanumeric runs.
+fn words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_ascii_lowercase).collect()
+}
+
+/// Set each model's `aa` from the page names in Artificial Analysis's sitemap: the page named
+/// as Epoch or models.dev names the model, else the shortest one with the same words in any
+/// order, leaving out dates and qualifiers: "Claude Sonnet 4.5" is `claude-4-5-sonnet`,
+/// "Llama 3.3 70B" `llama-3-3-instruct-70b`, "Gemini 2.5 Pro (Jun 2025)" `gemini-2-5-pro`.
+// ponytail: a dated snapshot gets its family's page; the sitemap misses some pages, so those
+// models get no link rather than a guessed one.
+fn aa_pages(models: &mut [Model], sitemap: &str) {
+    const SKIP: &[&str] = &[
+        "instruct", "preview", "exp", "hosted", "amazon", "cohere", "jan", "feb", "mar", "apr", "may", "jun", "june",
+        "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let key = |slug: &str| {
+        // "qwen3" is "qwen 3", as AA writes it both ways; "2025" and "0731" are dates.
+        let mut k: Vec<String> = words(slug)
+            .iter()
+            .flat_map(|w| match w.find(|c: char| c.is_ascii_digit()) {
+                Some(i) if i > 0 && w[..i].bytes().all(|b| b.is_ascii_alphabetic()) => {
+                    vec![w[..i].to_string(), w[i..].to_string()]
+                }
+                _ => vec![w.clone()],
+            })
+            .filter(|w| !SKIP.contains(&w.as_str()))
+            .filter(|w| !(w.len() == 4 && w.bytes().all(|b| b.is_ascii_digit())))
+            .collect();
+        k.sort();
+        k
+    };
+    let pages: HashSet<&str> = sitemap
+        .split("<loc>https://artificialanalysis.ai/models/")
+        .skip(1)
+        .filter_map(|s| s.split_once('<').map(|(p, _)| p))
+        .filter(|p| !p.is_empty() && !p.contains('/'))
+        .collect();
+    let mut by_key: HashMap<Vec<String>, &str> = HashMap::new();
+    for &p in &pages {
+        let e = by_key.entry(key(p)).or_insert(p);
+        if (p.len(), p) < (e.len(), *e) {
+            *e = p;
+        }
+    }
+    for m in models {
+        let slug = words(&m.name).join("-");
+        let page = pages.get(slug.as_str()).or_else(|| by_key.get(&key(&slug)));
+        m.aa = page.map(|p| p.to_string());
+    }
 }
 
 /// Lowercase alphanumerics only: "Claude Opus 4.5" == "claude-opus-4-5" == "claude_opus_4.5".
@@ -998,6 +1052,7 @@ mod tests {
         m.offers.push(offer("302ai", "claude-opus-5-5"));
         assert_eq!(sites(&m), ["models.dev", "openrouter.ai"], "no Epoch page without its benchmarks");
         m.eci = Some(160.0);
+        m.aa = Some("claude-opus-5-5".into());
         assert_eq!(
             m.links(),
             [
@@ -1012,6 +1067,45 @@ mod tests {
             sites(&m),
             ["epoch.ai", "artificialanalysis.ai", "openrouter.ai"],
             "models.dev has pages only under the developer"
+        );
+    }
+
+    #[test]
+    fn aa_pages_match_names_in_any_order() {
+        let pages = [
+            "claude-4-5-sonnet",
+            "claude-4-5-sonnet-thinking",
+            "claude-opus-4-5",
+            "claude-opus-4-5-thinking",
+            "llama-3-3-instruct-70b",
+            "gemini-2-5-pro",
+            "qwen3-8-max",
+            "qwen3-8-max-0803",
+        ];
+        let sitemap: String =
+            pages.iter().map(|p| format!("<url><loc>https://artificialanalysis.ai/models/{p}</loc></url>")).collect();
+        let names = [
+            "Claude Sonnet 4.5",
+            "Claude Opus 4.5",
+            "Llama 3.3 70B",
+            "Gemini 2.5 Pro (Jun 2025)",
+            "Qwen 3.8 Max",
+            "Claude Sonnet 4",
+        ];
+        let mut models: Vec<Model> = names.map(|n| Model { name: n.into(), ..Default::default() }).into();
+        aa_pages(&mut models, &sitemap);
+        let pages: Vec<Option<&str>> = models.iter().map(|m| m.aa.as_deref()).collect();
+        assert_eq!(
+            pages,
+            [
+                Some("claude-4-5-sonnet"),
+                Some("claude-opus-4-5"),
+                Some("llama-3-3-instruct-70b"),
+                Some("gemini-2-5-pro"),
+                Some("qwen3-8-max"),
+                None,
+            ],
+            "the shortest page with the same words; none rather than a guess"
         );
     }
 

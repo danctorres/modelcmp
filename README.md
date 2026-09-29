@@ -91,6 +91,8 @@ without skills can take its body in `AGENTS.md`.
 - [models.dev](https://models.dev): prices, context windows, capabilities.
 - [Epoch AI Benchmarking Hub](https://epoch.ai/benchmarks) (CC-BY): ECI and
   per-benchmark scores.
+- [Artificial Analysis](https://artificialanalysis.ai) sitemap: which models have a page
+  there, to link them (`o`). None of its data is shown.
 - What you have: the models `opencode models` lists, the `claude`, `codex` and `gemini`
   binaries on `PATH` (each counts as its own provider), and providers whose API key is set
   in the environment. The Via column says which.
