@@ -1525,7 +1525,15 @@ fn compare(models: &[&Model], sel: usize, first: usize, avail: usize, query: &st
     }
     // The model row carries `‹` and `›` for models scrolled off, as the table's header does.
     let edge = fg(ACCENT).add_modifier(BOLD);
-    out.extend(rows.into_iter().enumerate().flat_map(|(k, r)| {
+    let (mut width, mut section) = (0usize, "");
+    for (k, r) in rows.into_iter().enumerate() {
+        // A rule naming each topic above its first shown row, as wide as the model row.
+        if r.section != section {
+            section = r.section;
+            let name = format!("── {section} ");
+            let rest = width.saturating_sub(name.chars().count());
+            out.push(Line::styled(name + &"─".repeat(rest), fg(MUTED)));
+        }
         let label = Line::from(Span::styled(format!("{:<label_w$}", r.label), fg(KEY)));
         let hit = hits(query, [&r.label], typos).map_or(vec![], |[r]| r);
         let mut spans = lit(label, |_| hit.clone()).spans;
@@ -1548,10 +1556,14 @@ fn compare(models: &[&Model], sel: usize, first: usize, avail: usize, query: &st
             spans.push(Span::styled(" ›", edge));
         }
         let line = Line::from(spans);
-        // A rule under the model row, as under the table's header.
-        let rule = (k == 0).then(|| Line::styled("─".repeat(line.width()), fg(MUTED)));
-        std::iter::once(line).chain(rule)
-    }));
+        if k == 0 {
+            // A rule under the model row, as under the table's header.
+            width = line.width();
+            out.extend([line, Line::styled("─".repeat(width), fg(MUTED))]);
+        } else {
+            out.push(line);
+        }
+    }
     (out, first)
 }
 
@@ -2170,12 +2182,17 @@ mod tests {
         };
         let rule = full.iter().position(|l| l.to_string().starts_with("model ")).unwrap() + 1;
         assert!(full[rule].to_string().chars().all(|c| c == '─'), "a rule under the model row, as in the table");
+        let topics: Vec<String> = full.iter().map(Line::to_string).filter(|l| l.starts_with("── ")).collect();
+        assert!(topics[0].starts_with("── scores ─"), "{topics:?}");
+        assert!(topics.iter().all(|t| t.chars().count() == full[rule].width()), "topic rules span the model row");
         let (some, _) = compare(&ms, 0, 0, 200, "eci");
         assert_eq!(
             labels(&some).iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
             ["model", "ECI"],
             "the model row stays as the header"
         );
+        let names = |v: &Vec<Line>| v.iter().filter(|l| l.to_string().starts_with("── ")).count();
+        assert_eq!(names(&some), 1, "only the topics with a shown row keep their rule");
         let (typo, _) = compare(&ms, 0, 0, 200, "contxt");
         assert!(labels(&typo).contains(&"context".to_string()), "a typo is forgiven when nothing matches");
     }

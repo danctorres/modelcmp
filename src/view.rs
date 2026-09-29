@@ -605,6 +605,9 @@ pub struct Row {
     pub cells: Vec<String>,
     /// Index of the best cell, if the row is comparable.
     pub best: Option<usize>,
+    /// The topic the row belongs to, named in a rule above its first row; `""` for the
+    /// model, price and context rows at the top.
+    pub section: &'static str,
 }
 
 /// Rows for side-by-side comparison.
@@ -617,23 +620,24 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
             .max_by(|a, b| if higher { a.1.total_cmp(&b.1) } else { b.1.total_cmp(&a.1) })
             .map(|(i, _)| i)
             .filter(|_| vals.iter().flatten().count() > 1);
-        Row { label: label.into(), cells: vals.into_iter().map(|v| v.map_or("-".into(), &fmt)).collect(), best }
+        let cells = vals.into_iter().map(|v| v.map_or("-".into(), &fmt)).collect();
+        Row { label: label.into(), cells, best, section: "" }
     }
     let price = |f: fn(&Offer) -> f64| -> Vec<Option<f64>> { models.iter().map(|m| m.priced_offer().map(f)).collect() };
     let mut rows = vec![
-        Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), best: None },
-        Row { label: "via".into(), cells: models.iter().map(|m| via(&m.via)).collect(), best: None },
+        Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), best: None, section: "" },
+        Row { label: "via".into(), cells: models.iter().map(|m| via(&m.via)).collect(), best: None, section: "" },
         row("$ in / 1M", price(|o| o.input), money, false),
         // No cache discount: cached input costs full price.
         row("$ cached in / 1M", price(|o| o.cache_read.unwrap_or(o.input)), money, false),
         row("$ out / 1M", price(|o| o.output), money, false),
         row("context", models.iter().map(|m| Some(m.context as f64)).collect(), |c| ctx(c as u64), true),
-        row("ECI", models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true),
+        Row { section: "scores", ..row("ECI", models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true) },
     ];
     for t in TASKS.iter().filter(|t| t.name != "overall") {
         let vals: Vec<Option<f64>> = models.iter().map(|m| fit::fit(m, t)).collect();
         if vals.iter().any(Option::is_some) {
-            rows.push(row(t.name, vals, |v| format!("{v:.0}"), true));
+            rows.push(Row { section: "scores", ..row(t.name, vals, |v| format!("{v:.0}"), true) });
         }
     }
     let mut benches: Vec<&String> = models.iter().flat_map(|m| m.scores.keys()).collect();
@@ -641,7 +645,7 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
     benches.dedup();
     for b in benches {
         let vals = models.iter().map(|m| m.scores.get(b).copied()).collect();
-        rows.push(row(b, vals, |v| format!("{:.1}%", v * 100.0), true));
+        rows.push(Row { section: "benchmarks", ..row(b, vals, |v| format!("{:.1}%", v * 100.0), true) });
     }
     rows
 }
@@ -759,6 +763,7 @@ mod tests {
         assert_eq!(find("context").best, Some(1));
         assert_eq!(find("ECI").best, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);
+        assert_eq!((find("context").section, find("ECI").section), ("", "scores"));
     }
 
     #[test]

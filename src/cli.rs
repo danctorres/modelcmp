@@ -287,7 +287,14 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
         println!("  {q:<w0$}  {win:<w1$}  {margin}");
     }
     println!();
+    let mut section = "";
     for row in compare_rows(&models) {
+        // A rule naming each topic above its first row, as in the TUI.
+        if row.section != section {
+            section = row.section;
+            let name = format!("── {section} ");
+            println!("{name}{}", "─".repeat((22 + 18 * models.len()).saturating_sub(name.chars().count())));
+        }
         print!("{:<22}", row.label);
         for c in &row.cells {
             print!("{:>18}", truncate(c, 17));
