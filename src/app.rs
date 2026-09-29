@@ -150,6 +150,14 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Selected, favorite, excluded",
+        &[
+            ("✓", "selected: your shortlist for now; cleared when modelcmp closes"),
+            ("★", "favorite: your pick for a task; always in that task's recommendation"),
+            ("✗", "excluded: you have it but cannot use it; recommendations skip it"),
+        ],
+    ),
+    (
         "Model under the cursor",
         &[
             ("enter", "details: every benchmark, price per provider"),
