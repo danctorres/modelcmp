@@ -21,10 +21,10 @@ Frontier models cost ten times or more what smaller ones do, and many software t
 need them. modelcmp puts prices and software-engineering benchmarks side by side and, for each
 kind of task (coding, agentic runs, reasoning, ...), names the best model at each price.
 
-- **You** get a TUI to compare models, select a shortlist and set the model you want for a task.
-- **Your agent** gets the same answer from `modelcmp recommend --json` in one call, instead of
-  comparing models in its own context: your model for the task when you set one, else the
-  cheapest one good enough to take the subtask.
+- **You** get a TUI to compare models, keep a shortlist and set the model you want for each task.
+- **Your agent** gets your model for the task from `modelcmp recommend --json` if you set one.
+  Otherwise it gets the best model at each price and decides whether the subtask needs the top
+  one or a cheaper one will do.
 
 ![modelcmp TUI](https://github.com/user-attachments/assets/6ffde581-f8f1-4b06-b35d-a79c3ecb6277)
 
@@ -63,23 +63,20 @@ agentic  multi-step tool use, long autonomous tasks  (modelcmp list --task agent
 ...
 ```
 
-Each pick is name, [key], $ per 1M tokens and, in brackets, its score on the task (a
-0-100 percentile), cheapest first.
+Picks run cheapest first. Each shows the name, key, $ per 1M tokens and the task score (a
+0-100 percentile) in parentheses.
 
-In the TUI, `R` recommends, `f` sets a model as your pick for tasks, `space` selects models and
-`C` compares them, `/` filters and `?` lists every key. Only `q` quits, and it asks first;
-`esc` goes back one step.
-
-[KEYS.md](KEYS.md) has every key and the mouse, [REFERENCE.md](REFERENCE.md) the columns,
-every command and the JSON fields, and `modelcmp --help` every flag.
+In the TUI, `R` recommends, `space` selects models, `C` compares them and `/` filters. `esc`
+goes back, `q` quits and `?` lists every key. [KEYS.md](KEYS.md) covers keys and mouse,
+[REFERENCE.md](REFERENCE.md) the columns, commands and JSON fields, and `modelcmp --help` the
+flags.
 
 ## Your model for each task
 
-You choose which model to use for each task: coding, agentic, reasoning and the rest. Set one
-with `f` on a model in the TUI, where `space` ticks the tasks it should take, or with
-`modelcmp fav <task> <model>`. `modelcmp fav` lists your choices, and `modelcmp fav <task> --rm`
-clears one. Your choice wins over the computed pick: `recommend` marks it `★` on the task's
-line, and agents use it before the cheapest model that is good enough.
+Press `f` on a model in the TUI and tick its tasks with `space`, or run
+`modelcmp fav <task> <model>`. `modelcmp fav` lists your choices and `modelcmp fav <task> --rm`
+clears one. Your choice beats the computed pick: `recommend` marks it `★` and agents use it
+first.
 
 ## For agents
 
@@ -88,16 +85,13 @@ npx skills add danctorres/modelcmp -g                        # teach your agent 
 opencode -m $(modelcmp list --task coding --tier mid --id)   # or ask it yourself
 ```
 
-The model you set for a task with `fav` or `f` wins: `recommend --json` gives it as the task's
-`favorite`, and `--tier` returns it.
+`recommend --json` gives your model for a task as its `favorite`, and `--tier` returns it. It
+also gives each frontier model's `note` (written with `n` or `modelcmp note`), which the skill
+uses to rule out a model or choose between close ones.
 
-Notes you write with `n` or `modelcmp note` help decide too: `recommend --json` gives each
-frontier model's `note`, and the skill tells agents to use it to rule out a model or choose
-between close ones.
-
-The [skill](skills/modelcmp/SKILL.md) works in Claude Code, opencode, Codex and the other
-agents the [skills CLI](https://skills.sh) knows, and `npx skills update` updates it. An agent
-without skills can take its body in `AGENTS.md`.
+The [skill](skills/modelcmp/SKILL.md) works in Claude Code, opencode, Codex and any other agent
+the [skills CLI](https://skills.sh) supports; `npx skills update` updates it. An agent without
+skills can take its body in `AGENTS.md`.
 
 ## Data
 
