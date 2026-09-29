@@ -55,9 +55,9 @@ enum Cmd {
         /// Include models you have no access to
         #[arg(short, long)]
         all: bool,
-        /// Marked only: your shortlist (`M` in the TUI)
-        #[arg(short, long)]
-        marked: bool,
+        /// Selected only: your shortlist (`M` in the TUI)
+        #[arg(short = 'm', long, alias = "marked")]
+        selected: bool,
         /// Only these developers, e.g. --dev anthropic --dev openai (the Dev dropdown, `d`, in the TUI)
         #[arg(long)]
         dev: Vec<String>,
@@ -96,8 +96,9 @@ enum Cmd {
         #[arg(long, default_value = "openrouter")]
         on: String,
     },
-    /// Mark a model, to shortlist it: `list --marked` shows them (`m` in the TUI)
-    Mark {
+    /// Select a model, to shortlist it: `list --selected` shows them (`m` in the TUI)
+    #[command(alias = "mark")]
+    Select {
         model: String,
         /// Remove it instead
         #[arg(long)]
@@ -182,20 +183,20 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // clap has already validated task names against fit::TASKS.
     let task = |t: Option<String>| t.and_then(|t| fit::task(&t));
     match cmd {
-        Cmd::List { task: t, tier, sort, min, max, all, marked, dev, via, limit, json, id } => {
+        Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id } => {
             let bounds = min
                 .into_iter()
                 .map(|(c, v)| (c, v, f64::INFINITY))
                 .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
                 .collect();
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
-            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, marked, dev, via, limit, json, id };
+            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, selected, dev, via, limit, json, id };
             cli::list(&data, &store, &opts)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
         Cmd::Open { model, on } => cli::open(&data, &model, &on),
-        Cmd::Mark { model, rm } => cli::mark(&data, &mut store, &model, rm),
+        Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task, model, rm } => cli::fav(&data, &mut store, task.as_deref(), model.as_deref(), rm),

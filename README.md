@@ -21,7 +21,7 @@ Frontier models cost ten times or more what smaller ones do, and many software t
 need them. modelcmp puts prices and software-engineering benchmarks side by side and, for each
 kind of task (coding, agentic runs, reasoning, ...), names the best model at each price.
 
-- **You** get a TUI to compare models, mark a shortlist and set the model you want for a task.
+- **You** get a TUI to compare models, select a shortlist and set the model you want for a task.
 - **Your agent** gets the same answer from `modelcmp recommend --json` in one call, instead of
   comparing models in its own context, and can hand a subtask to a cheaper model.
 
@@ -65,7 +65,7 @@ agentic  multi-step tool use, long autonomous tasks  (modelcmp list --task agent
 Each pick is name, [key], $ per 1M tokens and, in brackets, its score on the task (a
 0-100 percentile), cheapest first.
 
-In the TUI, `R` recommends, `f` sets a model as your pick for tasks, `m` marks models and
+In the TUI, `R` recommends, `f` sets a model as your pick for tasks, `m` selects models and
 `C` compares them, `/` filters and `?` lists every key. Only `q` quits, and it asks first;
 `esc` goes back one step.
 
@@ -97,7 +97,7 @@ without skills can take its body in `AGENTS.md`.
   binaries on `PATH` (each counts as its own provider), and providers whose API key is set
   in the environment. The Via column says which.
 
-Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`. Marks,
+Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`. Your selection,
 exclusions, notes and per-task favorites live in `~/.config/modelcmp/user.json`.
 
 Benchmarks are proxies: a score says how a model did on that test, not how it will do in

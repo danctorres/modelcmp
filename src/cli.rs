@@ -67,7 +67,7 @@ struct ModelOut<'a> {
     developer: &'a str,
     available: bool,
     via: &'a [String],
-    marked: bool,
+    selected: bool,
     /// You have it but cannot use it; --task and recommend skip it
     excluded: bool,
     note: Option<&'a str>,
@@ -103,7 +103,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         developer: &m.developer,
         available: m.available,
         via: &m.via,
-        marked: s.is_marked(&m.key),
+        selected: s.is_marked(&m.key),
         excluded: s.is_excluded(&m.key),
         note: s.note(&m.key),
         favorite_for: s.favorite_for(&m.key),
@@ -188,7 +188,7 @@ pub struct ListOpts {
     /// (index into `COLS`, min, max)
     pub bounds: Vec<(usize, f64, f64)>,
     pub all: bool,
-    pub marked: bool,
+    pub selected: bool,
     pub dev: Vec<String>,
     pub via: Vec<String>,
     pub limit: usize,
@@ -202,7 +202,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     check("--via", &o.via, data.models.iter().flat_map(|m| &m.via).map(String::as_str))?;
     let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
     // A task's frontier is a recommendation, so models you cannot use stay out of it.
-    let mut models: Vec<&Model> = visible(data, store, o.all, o.marked)
+    let mut models: Vec<&Model> = visible(data, store, o.all, o.selected)
         .map(|(_, m)| m)
         .filter(|m| {
             (o.dev.is_empty() || has(&o.dev, &m.developer))
@@ -316,13 +316,13 @@ pub fn open(data: &Data, q: &str, on: &str) -> Result {
     Ok(())
 }
 
-pub fn mark(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
+pub fn select(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     let m = resolve(data, q)?;
     if rm == store.is_marked(&m.key) {
         store.toggle_marked(&m.key);
     }
     store.save()?;
-    println!("{} {}", if rm { "unmarked" } else { "✓ marked" }, m.name);
+    println!("{} {}", if rm { "deselected" } else { "✓ selected" }, m.name);
     Ok(())
 }
 
@@ -472,7 +472,6 @@ mod tests {
             "favorite_for",
             "key",
             "knowledge",
-            "marked",
             "max_output",
             "name",
             "note",
@@ -480,6 +479,7 @@ mod tests {
             "price",
             "reasoning",
             "release",
+            "selected",
             "tasks",
             "tool_call",
             "url",

@@ -136,17 +136,17 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("d", "dropdown on Dev, Price and Via (▾); m toggles several"),
             ("a", "all models, including ones you have no access to"),
             ("%", "Price with none of the input cached, or back to --cache (90%)"),
-            ("M F E", "marked / favorite / excluded models only; again: every model"),
-            ("c", "clear filters, bounds, task, M, F and E; marks stay"),
+            ("M F E", "selected / favorite / excluded models only; again: every model"),
+            ("c", "clear filters, bounds, task, M, F and E; the selection stays"),
         ],
     ),
     (
-        "Mark and compare",
+        "Select and compare",
         &[
-            ("m", "mark the model (✓): the shortlist for C"),
-            ("U", "unmark every model"),
-            ("V", "select a range; m e C act on all of it"),
-            ("C", "compare the marked models"),
+            ("m", "select the model (✓): the shortlist for C"),
+            ("U", "deselect every model"),
+            ("V", "highlight a range; m e C act on all of it"),
+            ("C", "compare the selected models"),
         ],
     ),
     (
@@ -154,7 +154,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("enter", "details: every benchmark, price per provider"),
             ("f", "favorite the model for tasks (★)"),
-            ("e", "exclude the model (✗): recommendations skip it; on a mark, all marks"),
+            ("e", "exclude (✗): recommendations skip it; on a selected model, every selected one"),
             ("n", "note for the model"),
             ("y Y", "copy the model id / name"),
             ("o", "open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai"),
@@ -166,9 +166,9 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Input and mouse",
         &[
             ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
-            ("mouse", "click selects, again details; ctrl / shift click, drag; right click marks"),
-            ("", "click ☐ ☆ · to mark, favorite, exclude; a header sorts, its ▾ opens"),
-            ("", "click #: first row; the ✓ ★ ✗ header: marked, favorites, excluded only"),
+            ("mouse", "click highlights, again details; ctrl / shift click, drag; right click selects"),
+            ("", "click ☐ ☆ · to select, favorite, exclude; a header sorts, its ▾ opens"),
+            ("", "click #: first row; the ✓ ★ ✗ header: selected, favorites, excluded only"),
             ("", "click a key hint in the status bar to press it"),
         ],
     ),
@@ -176,7 +176,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "General",
         &[
             ("r", "refresh data now (auto every 24h)"),
-            ("esc", "back: overlay, selection, filter, M, F, E, task"),
+            ("esc", "back: overlay, highlight, filter, M, F, E, task"),
             ("q", "quit; asks first"),
         ],
     ),
@@ -629,7 +629,12 @@ impl App {
 
     /// Sets a flag on every target, or clears it when all of them have it. Ends a visual range
     /// and says what happened when it was more than one model.
-    fn flag(&mut self, has: fn(&Store, &str) -> bool, toggle: fn(&mut Store, &str), verb: &str) -> Option<Effect> {
+    fn flag(
+        &mut self,
+        has: fn(&Store, &str) -> bool,
+        toggle: fn(&mut Store, &str),
+        [done, undone]: [&str; 2],
+    ) -> Option<Effect> {
         let keys = self.targets();
         let on = !keys.iter().all(|k| has(&self.store, k));
         for k in &keys {
@@ -638,7 +643,7 @@ impl App {
             }
         }
         if keys.len() > 1 {
-            self.status = format!("{}{verb} {} models", if on { "" } else { "un" }, keys.len());
+            self.status = format!("{} {} models", if on { done } else { undone }, keys.len());
         }
         self.deselect();
         self.rebuild();
@@ -1199,7 +1204,7 @@ impl App {
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
             KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => {
-                self.status = "no marked models: m marks the one under the bar".into();
+                self.status = "no selected models: m selects the one under the bar".into();
             }
             KeyCode::Char('M') if table => {
                 self.only_marked = !self.only_marked;
@@ -1220,12 +1225,12 @@ impl App {
                 self.rebuild();
             }
             KeyCode::Char('U') if table && self.store.marked.is_empty() => {
-                self.status = "no marked models: m marks the one under the bar".into();
+                self.status = "no selected models: m selects the one under the bar".into();
             }
             KeyCode::Char('U') if table => {
                 let n = std::mem::take(&mut self.store.marked).len();
                 self.rebuild();
-                self.status = format!("unmarked {n}");
+                self.status = format!("deselected {n}");
                 return Some(Effect::Save);
             }
             KeyCode::Char('c') if table => {
@@ -1279,7 +1284,9 @@ impl App {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
                 self.task_sel = 0;
             }
-            KeyCode::Char('e') if row => return self.flag(Store::is_excluded, Store::toggle_excluded, "excluded"),
+            KeyCode::Char('e') if row => {
+                return self.flag(Store::is_excluded, Store::toggle_excluded, ["excluded", "unexcluded"]);
+            }
             KeyCode::Char('f') if row => {
                 // Starting on the task at hand, so f enter toggles it.
                 let items = self.fav_items()?;
@@ -1319,7 +1326,7 @@ impl App {
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
             KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
             KeyCode::Char('m') if table && self.selecting() => {
-                return self.flag(Store::is_marked, Store::toggle_marked, "marked");
+                return self.flag(Store::is_marked, Store::toggle_marked, ["selected", "deselected"]);
             }
             KeyCode::Char('m') if row && self.view != View::Compare => {
                 self.toggle_mark();
@@ -2332,7 +2339,7 @@ mod tests {
             "unmarking every marked model leaves M for every model"
         );
         press(&mut a, "U");
-        assert_eq!(a.status, "no marked models: m marks the one under the bar");
+        assert_eq!(a.status, "no selected models: m selects the one under the bar");
         press(&mut a, "ggmjmM");
         assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
         assert_eq!((a.store.marked.len(), a.only_marked, a.rows.len()), (0, false, 3), "U unmarks all and leaves M");
@@ -2342,7 +2349,7 @@ mod tests {
     fn esc_backs_out_of_views_and_toggles_close_what_they_open() {
         let mut a = app();
         press(&mut a, "M");
-        assert_eq!((a.only_marked, a.status.as_str()), (false, "no marked models: m marks the one under the bar"));
+        assert_eq!((a.only_marked, a.status.as_str()), (false, "no selected models: m selects the one under the bar"));
         press(&mut a, "mM/x");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
@@ -2419,7 +2426,11 @@ mod tests {
         press(&mut a, "ggVjjm");
         assert_eq!(a.store.marked, ["gpt55", "opus5", "mini"], "m on a partly marked range marks the rest");
         press(&mut a, "ggVjjm");
-        assert!(a.store.marked.is_empty(), "m on an all-marked range unmarks it");
+        assert_eq!(
+            (a.store.marked.len(), a.status.as_str()),
+            (0, "deselected 3 models"),
+            "m on an all-marked range unmarks it"
+        );
         press(&mut a, "mGVkC");
         assert_eq!(
             (&a.view, a.marked_models().len()),

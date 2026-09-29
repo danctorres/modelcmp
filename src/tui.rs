@@ -323,7 +323,7 @@ const NAME_MIN: u16 = 16;
 const SEP: &str = "│";
 /// The actions on one model, in the one order every view shows them in.
 const ACTIONS: [&str; 8] =
-    ["enter details", "x launch", "o open", "y copy id", "m mark", "f fav", "e exclude", "n note"];
+    ["enter details", "x launch", "o open", "y copy id", "m select", "f fav", "e exclude", "n note"];
 
 /// The last group of every overlay: `? help` is the last hint a narrow terminal drops.
 const BACK: [&str; 3] = ["esc back", "q quit", "? help"];
@@ -355,7 +355,7 @@ fn hints(app: &App) -> Vec<&'static str> {
             if app.only_marked {
                 view.push("M every model");
             } else if app.any_marked() {
-                view.push("M marked only");
+                view.push("M selected only");
             }
             if app.only_fav {
                 view.push("F every model");
@@ -645,11 +645,11 @@ fn draw(app: &mut App, f: &mut Frame) {
             let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
             let n = app.marked_models().len();
             let lines = vec![
-                Line::from(format!("compare needs 2 or more marked models, {n} now")),
+                Line::from(format!("compare needs 2 or more selected models, {n} now")),
                 Line::from(""),
                 Line::from(vec![key("esc"), Span::raw(" back to the table, then")]),
-                Line::from(vec![key("m"), Span::raw(" marks the model under the bar, or")]),
-                Line::from(vec![key("V"), Span::raw(" / shift+click selects a range, and")]),
+                Line::from(vec![key("m"), Span::raw(" selects the model under the bar, or")]),
+                Line::from(vec![key("V"), Span::raw(" / shift+click highlights a range, and")]),
                 Line::from(vec![key("C"), Span::raw(" compares them")]),
             ];
             Some(("compare".into(), lines))
@@ -1065,7 +1065,7 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     }
     if app.any_marked() {
         let n = app.store.marked.len();
-        parts.push(part(format!("{n} marked{}", if app.only_marked { " only" } else { "" }), MARK));
+        parts.push(part(format!("{n} selected{}", if app.only_marked { " only" } else { "" }), MARK));
     }
     if app.only_fav {
         parts.push(part("★ favorites only".into(), STAR));
@@ -1126,7 +1126,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Choose { .. }, _) if app.choosing_favs() => ("FAV", Color::Green),
         (Input::Choose { .. }, _) if app.theme_preview().is_some() => ("THEME", Color::Green),
         (Input::Choose { .. }, _) => ("OPEN", Color::Green),
-        (Input::None, View::Table) if app.selecting() => ("VISUAL", Color::Yellow),
+        (Input::None, View::Table) if app.selecting() => ("HIGHLIGHT", Color::Yellow),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
         (Input::None, View::Help) => ("HELP", Color::Cyan),
         (Input::None, View::Recommend) => ("RECOMMEND", Color::Cyan),
@@ -1812,7 +1812,7 @@ mod tests {
     #[test]
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
-        let (buf, lines) = render(&mut a, 200, 6);
+        let (buf, lines) = render(&mut a, 202, 6);
         let header = "# ✓ ★ ✗ Model Dev ▾ │ ▼Price ▾ $in $cache $out Ctx │ ECI Coding Agentic Reason \
                       Code/$ │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
@@ -1835,7 +1835,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  % no cache  │  enter details  x launch  o open  y copy id  m mark  f fav  e exclude  n note  │  q quit  ? help"
+                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  % no cache  │  enter details  x launch  o open  y copy id  m select  f fav  e exclude  n note  │  q quit  ? help"
             ),
             "{}",
             lines[5]
@@ -2064,7 +2064,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 46, 9));
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false), "all rows fit");
         assert!(lines[3].ends_with("? help"), "{}", lines[3]);
-        assert!(!lines[3].contains("m mark"), "hints that do not fit are dropped whole");
+        assert!(!lines[3].contains("m select"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 46, 4);

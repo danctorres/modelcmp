@@ -31,7 +31,7 @@ modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet-5                         # everything about one model
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
 modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, artificialanalysis or openrouter (default)
-modelcmp mark sonnet-5                         # shortlist it, list --marked shows them: --rm to unmark
+modelcmp select sonnet-5                       # shortlist it, list --selected shows them: --rm to deselect
 modelcmp note sonnet-5 "fast enough for refactors" # without text shows it, --rm deletes it
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
@@ -42,7 +42,7 @@ modelcmp recommend --cache 0                   # priced as one-off prompts: no i
 Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`, `long-context`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
-`recommend` leave excluded models out; plain `list` shows them marked `✗`, your marks `✓` and available models `●`. `--tier` picks one
+`recommend` leave excluded models out; plain `list` shows them marked `✗`, your selection `✓` and available models `●`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
 the best; the best when none reaches the floor. A model you `fav` for the task beats the
 tier's pick and sits on the task's list marked `★` whether or not it is on the frontier or has a score for
@@ -72,7 +72,7 @@ modelcmp recommend --json                      # choose the task by its "when"; 
 modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite one when set, else the tier's
 ```
 
-Each JSON model carries `key`, `excluded`, `favorite_for` (the tasks it is the user's favorite
+Each JSON model carries `key`, `selected` (on your shortlist), `excluded`, `favorite_for` (the tasks it is the user's favorite
 for), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
 `eci`, per-task `tasks` percentiles. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
