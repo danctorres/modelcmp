@@ -811,14 +811,15 @@ impl App {
         Some(Effect::Refresh)
     }
 
-    /// The task's price frontier among the models the filters let through, excluded ones
-    /// left out: cheapest first, the best model last.
+    /// The task's price frontier among the models the filters let through, plus the task's
+    /// favorite whatever the filters, excluded ones left out: cheapest first, the best model last.
     pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
-        task_frontier(
-            self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key)),
-            t,
-            self.store.favorite(t.name),
-        )
+        let usable = |m: &&Model| !self.store.is_excluded(&m.key);
+        // Ranked only when the filters show it, so a hidden favorite drops no shown model.
+        let fav = self.store.favorite(t.name).and_then(|k| {
+            visible(&self.data, &self.store, self.all, false).map(|(_, m)| m).filter(usable).find(|m| m.key == k)
+        });
+        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(usable), t, fav)
     }
 
     /// The task `f` and the ★ mark refer to: the one under the cursor in recommend, else the
@@ -1353,11 +1354,10 @@ impl App {
                 self.view = View::Table;
                 self.rebuild();
                 self.select(0);
-                self.status = match (self.rows.first(), self.rows.last()) {
-                    (Some(&a), Some(&b)) => {
-                        let ms = &self.data.models;
-                        format!("{} best, {} cheapest", ms[a].name, ms[b].name)
-                    }
+                // An unscored favorite is on the line but neither best nor cheapest.
+                let front: Vec<_> = self.task_frontier(t).into_iter().filter(|(_, s)| !s.is_nan()).collect();
+                self.status = match (front.last(), front.first()) {
+                    (Some(a), Some(b)) => format!("{} best, {} cheapest", a.0.name, b.0.name),
                     _ => format!("no model has data for {}", t.name),
                 };
             }
@@ -2113,6 +2113,39 @@ mod tests {
         press(&mut a, "c");
         a.store.toggle_excluded("gpt55");
         assert_eq!(front(&a), ["mini", "gpt55"], "e again brings it back");
+    }
+
+    #[test]
+    fn a_favorite_stays_in_recommend_whatever_the_filters() {
+        let mut a = app();
+        let front = |a: &App| {
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>()
+        };
+        a.store.toggle_favorite("coding", "mini");
+        a.query = "gpt".into();
+        a.rebuild();
+        assert_eq!(front(&a), ["mini", "gpt55"], "the filter hides mini from the table, not from recommend");
+        // A hidden favorite is not ranked, so it drops no model the filter shows: mini is
+        // cheaper and better than gptlite, yet gptlite stays.
+        let mut data = std::mem::take(&mut a.data);
+        let mut lite = model("gptlite", true, Some(55.0), 2.0);
+        (lite.developer, lite.via) = ("openai".into(), vec!["codex".into()]);
+        data.models.push(lite);
+        a.set_data(data);
+        assert_eq!(front(&a), ["mini", "gptlite", "gpt55"]);
+        let mut data = std::mem::take(&mut a.data);
+        data.models.pop();
+        a.set_data(data);
+        a.store.toggle_excluded("mini");
+        assert_eq!(front(&a), ["gpt55"], "an excluded favorite still leaves");
+        // opus5 has no coding score: it joins the line all the same, its score shown as `-`.
+        a.store.toggle_favorite("coding", "opus5");
+        a.query.clear();
+        a.rebuild();
+        assert_eq!(front(&a), ["opus5", "gpt55"]);
+        let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
+        assert!(crate::view::priced(m, s, false, true).ends_with("(-)"));
+        assert_eq!(crate::view::pick(&[(m, s)], "low").map(|e| e.0.key.as_str()), Some("opus5"), "the only entry");
     }
 
     #[test]

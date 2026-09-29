@@ -213,7 +213,8 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         .collect();
     if let Some(t) = o.task {
         let yours = store.favorite(t.name);
-        let front = task_frontier(models.into_iter(), t, yours);
+        let fav = models.iter().copied().find(|m| Some(m.key.as_str()) == yours);
+        let front = task_frontier(models.into_iter(), t, fav);
         models = match &o.tier {
             // Your favorite beats the tier's pick.
             Some(tier) => front
@@ -331,11 +332,11 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
 /// Show the favorite model of every task, of one, or set or clear one.
 pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, rm: bool) -> Result {
     let model = |key: &str| data.models.iter().find(|m| m.key == key);
-    // A favorite the task cannot score never makes its line, so --tier and recommend skip it.
+    // A favorite the task cannot score still makes its line, unranked.
     let unscored = |t: &str, m: &Model| fit::task(t).is_some_and(|t| fit::fit(m, t).is_none());
     let line = |t: &str, k: &str| {
         let m = model(k);
-        let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score, so never picked)" } else { "" };
+        let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score)" } else { "" };
         format!("★ {} [{k}]{skipped}", m.map_or(k, |m| m.name.as_str()))
     };
     match (task, q, rm) {
@@ -361,9 +362,6 @@ pub fn fav(data: &Data, store: &mut Store, task: Option<&str>, q: Option<&str>, 
             store.favorite.insert(t.to_string(), m.key.clone());
             store.save()?;
             println!("★ {t}: {}", m.name);
-            if unscored(t, m) {
-                eprintln!("warning: {} has no {t} score, so --tier and recommend will not pick it", m.name);
-            }
         }
     }
     Ok(())
@@ -386,11 +384,10 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
 
 /// The frontier among the models you have and can use, as `list --task` gives it.
 fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<(&'a Model, f64)> {
-    task_frontier(
-        visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)),
-        t,
-        store.favorite(t.name),
-    )
+    let models: Vec<&Model> =
+        visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)).collect();
+    let fav = models.iter().copied().find(|m| Some(m.key.as_str()) == store.favorite(t.name));
+    task_frontier(models.into_iter(), t, fav)
 }
 
 /// `recommend --json`: what agents read to choose a task and its model.

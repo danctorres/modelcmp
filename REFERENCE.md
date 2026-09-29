@@ -45,8 +45,8 @@ tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `-
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, your marks `✓` and available models `●`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
 the best; the best when none reaches the floor. A model you `fav` for the task beats the
-tier's pick and sits on the task's list marked `★` whether or not it is on the frontier; one with no score for
-the task cannot be, so `fav` warns and lists it as never picked. Scores are percentiles among the models
+tier's pick and sits on the task's list marked `★` whether or not it is on the frontier or has a score for
+the task, which then shows as `-`. Scores are percentiles among the models
 Epoch benchmarked. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, and `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache.
 `list` prints every match unless `-n` limits it, and then says how many it left out.

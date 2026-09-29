@@ -394,15 +394,16 @@ pub fn frontier<'m, T: Copy>(
 /// being the best model for the task. Each price level keeps only its best entry, since models
 /// that close in price are not worth choosing between. Models without a price or a score are
 /// left out, as are those under the `low` tier's floor: the frontier is a recommendation, and
-/// cheap alone is not one. The `favorite` model (its key) joins the line whether or not it
-/// earns a place on it, as long as it is among `models`.
+/// cheap alone is not one. The `favorite` model joins the line whether or not it earns a place
+/// on it, and is ranked only if it is among `models`; with no score for the task, its score
+/// is NaN, which `priced` shows as `-` and no tier floor reaches.
 pub fn task_frontier<'a>(
     models: impl Iterator<Item = &'a Model>,
     t: &fit::Task,
-    favorite: Option<&str>,
+    favorite: Option<&'a Model>,
 ) -> Vec<(&'a Model, f64)> {
     let ranked = fit::rank(models, t);
-    let yours = favorite.and_then(|k| ranked.iter().find(|(m, _)| m.key == k).copied());
+    let yours = favorite.map(|m| (m, fit::fit(m, t).unwrap_or(f64::NAN)));
     let ranked: Vec<_> = ranked.into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
     let mut v = frontier(&ranked, |(m, _)| m, |m| fit::fit(m, t));
     let by_cost = |v: &mut Vec<(&Model, f64)>| {
@@ -446,11 +447,12 @@ pub fn frontier_legend(keyed: bool) -> String {
 }
 
 /// `name $price (score)` for a frontier entry, `name [key] $price (score)` with `keyed`,
-/// `★ name ...` when it is your favorite for the task.
+/// `★ name ...` when it is your favorite for the task, `(-)` for a favorite with no score.
 pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
     let flag = if favorite { "★ " } else { "" };
-    format!("{flag}{}{key} {} ({s:.0})", m.name, m.cost().map_or("-".into(), usd))
+    let s = if s.is_nan() { "-".into() } else { format!("{s:.0}") };
+    format!("{flag}{}{key} {} ({s})", m.name, m.cost().map_or("-".into(), usd))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
