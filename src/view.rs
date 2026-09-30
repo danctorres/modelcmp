@@ -535,18 +535,33 @@ fn one_typo(a: &[u8], b: &[u8]) -> bool {
     }
 }
 
-/// Models the user should see: the ones they have access to, unless `all` or none is available.
+/// Via of a model you have no access to.
+pub const OUT_OF_REACH: &str = "not available";
+
+/// Whether `m` is one to use: any with `all`, else the ones you have access to, or every model
+/// when you have access to none (`any` is whether you have access to one).
+pub fn in_reach(m: &Model, all: bool, any: bool) -> bool {
+    all || m.available || !any
+}
+
+/// Via as shown: the harnesses, or `OUT_OF_REACH` for a model you have no access to.
+pub fn shown_via(m: &Model, any: bool) -> Vec<&str> {
+    if in_reach(m, false, any) { m.via.iter().map(String::as_str).collect() } else { vec![OUT_OF_REACH] }
+}
+
+/// Models the user should see: the ones in reach, with `marked_only` only the selected ones.
+/// Unlike `M` in the TUI, it leaves out a selected model out of reach, as an agent cannot call it.
 pub fn visible<'a>(
     data: &'a Data,
     store: &'a Store,
     all: bool,
     marked_only: bool,
 ) -> impl Iterator<Item = (usize, &'a Model)> {
-    let any = data.models.iter().any(|m| m.available);
+    let any = data.any_available();
     data.models
         .iter()
         .enumerate()
-        .filter(move |(_, m)| (all || !any || m.available) && (!marked_only || store.is_marked(&m.key)))
+        .filter(move |(_, m)| in_reach(m, all, any) && (!marked_only || store.is_marked(&m.key)))
 }
 
 /// Everything about one model, one line per entry.

@@ -190,7 +190,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     if let Some(w) = warn {
         eprintln!("warning: {w}");
     }
-    if !data.models.iter().any(|m| m.available) {
+    if !data.any_available() {
         eprintln!("note: no harness models or provider API keys found, showing all models");
     }
     // Loaded after the download, which can take a minute: what the TUI or an agent saved meanwhile is kept.

@@ -5,8 +5,8 @@ use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
-    TIERS, compare_rows, detail_lines, frontier_legend, pick, priced, recommended, task_frontier, truncate, verdict,
-    via, visible,
+    TIERS, compare_rows, detail_lines, frontier_legend, pick, priced, recommended, shown_via, task_frontier, truncate,
+    verdict, visible,
 };
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -148,7 +148,7 @@ fn print_json<T: Serialize>(v: &T) -> Result {
 
 /// The TUI's columns, so both show the same thing: Model, Dev, every numeric column the
 /// source measures, Via.
-fn table(models: &[&Model], store: &Store, show_avail: bool) {
+fn table(models: &[&Model], store: &Store, any: bool) {
     let cols: Vec<&Col> = COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT)).map(|(_, c)| c).collect();
     let cells: Vec<Vec<String>> =
         models.iter().map(|m| cols.iter().map(|c| (c.get)(m).map_or("-".into(), c.show)).collect()).collect();
@@ -169,12 +169,12 @@ fn table(models: &[&Model], store: &Store, show_avail: bool) {
             "✗ "
         } else if store.is_marked(&m.key) {
             "✓ "
-        } else if show_avail && m.available {
-            "● "
         } else {
             "  "
         };
-        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(&m.via));
+        let v = shown_via(m, any);
+        let via = if v.is_empty() { "-".into() } else { v.join(", ") };
+        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via);
     }
 }
 
@@ -217,14 +217,16 @@ pub struct ListOpts {
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     check("--dev", &o.dev, data.models.iter().map(|m| m.developer.as_str()))?;
-    check("--via", &o.via, data.models.iter().flat_map(|m| &m.via).map(String::as_str))?;
+    // Via as the table shows it, so "not available" can be picked too.
+    let any = data.any_available();
+    check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, any)))?;
     let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
     // A task's frontier is a recommendation, so models you cannot use stay out of it.
     let mut models: Vec<&Model> = visible(data, store, o.all, o.selected)
         .map(|(_, m)| m)
         .filter(|m| {
             (o.dev.is_empty() || has(&o.dev, &m.developer))
-                && (o.via.is_empty() || m.via.iter().any(|v| has(&o.via, v)))
+                && (o.via.is_empty() || shown_via(m, any).iter().any(|v| has(&o.via, v)))
                 && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
                 && !(o.task.is_some() && store.is_excluded(&m.key))
         })
@@ -275,7 +277,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         println!("no models match");
         return Ok(());
     }
-    table(&models, store, o.all);
+    table(&models, store, any);
     if models.len() < total {
         println!("\n{} of {total} shown; -n 0 for all", models.len());
     }
@@ -500,6 +502,34 @@ mod tests {
         };
         m.fit.insert("coding".into(), coding);
         m
+    }
+
+    /// `list --selected` leaves out a selected model out of reach, as an agent cannot call it.
+    #[test]
+    fn the_selected_list_leaves_out_models_out_of_reach() {
+        let mut data =
+            Data { models: vec![model("gpt55", 90.0, 10.0), model("llama4", 60.0, 1.0)], ..Default::default() };
+        data.models[0].available = true;
+        let mut store = Store::default();
+        store.toggle_marked("gpt55");
+        store.toggle_marked("llama4");
+        let keys = |marked| visible(&data, &store, false, marked).map(|(_, m)| m.key.as_str()).collect::<Vec<_>>();
+        assert_eq!(keys(true), ["gpt55"]);
+        // With --all, Via reads "not available" for it, and filters by that too.
+        let o = ListOpts {
+            task: None,
+            tier: None,
+            sort: None,
+            bounds: vec![],
+            all: true,
+            selected: false,
+            dev: vec![],
+            via: vec!["Not Available".into()],
+            limit: 0,
+            json: false,
+            id: true,
+        };
+        assert!(list(&data, &store, &o).is_ok());
     }
 
     fn keys(v: &Value) -> Vec<&str> {

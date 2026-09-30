@@ -5,7 +5,7 @@ use crate::data::{Data, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::{Store, slot, slots};
 use crate::view::{
-    LEVELS, THEMES, ctx, hits, level_label, money, recommended, score, task_frontier, task_score, visible,
+    LEVELS, THEMES, ctx, hits, in_reach, level_label, money, recommended, score, shown_via, task_frontier, task_score,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -498,6 +498,10 @@ pub struct App {
     pub ext: [Option<(f64, f64)>; COLS.len()],
     pub store: Store,
     pub all: bool,
+    /// Whether the user has access to any model, set with the data: with none, every model is in reach.
+    any_available: bool,
+    /// Key of the model details show, held apart from the rows, which may drop it meanwhile.
+    detail: String,
     /// Column under the cursor: 0 is the name, 1 the developer, then `COLS`.
     pub col: usize,
     pub sort_col: usize,
@@ -569,6 +573,8 @@ impl App {
             ext: [None; COLS.len()],
             store,
             all: false,
+            any_available: false,
+            detail: String::new(),
             col: PRICE,
             sort_col: DEFAULT_SORT.0,
             descending: DEFAULT_SORT.1,
@@ -619,6 +625,7 @@ impl App {
         self.widths = std::array::from_fn(|c| {
             self.vals.iter().filter_map(|v| v[c]).map(|v| (COLS[c].show)(v).chars().count()).max().unwrap_or(0)
         });
+        self.any_available = data.any_available();
         self.data = data;
         self.compare_sel = self.compare_sel.min(self.marked_models().len().saturating_sub(1));
         self.rebuild();
@@ -663,6 +670,9 @@ impl App {
         if self.view == View::Recommend {
             let front = self.task_frontier(&TASKS[self.task_cur]);
             return front.get(self.task_sel.min(front.len().saturating_sub(1))).map(|&(m, _)| m);
+        }
+        if self.view == View::Detail {
+            return self.data.models.iter().find(|m| m.key == self.detail);
         }
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
     }
@@ -729,7 +739,7 @@ impl App {
             self.status = format!("{} {} models", if on { done } else { undone }, keys.len());
         }
         self.deselect();
-        self.rebuild();
+        self.rebuild_in_place();
         (!keys.is_empty()).then_some(Effect::Save)
     }
 
@@ -784,18 +794,22 @@ impl App {
     /// Models passing every filter but the frontier, ignoring the ones on column `skip`, so a
     /// dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
-        visible(&self.data, &self.store, self.all, false).filter(move |&(i, m)| {
-            hits(
-                &self.query,
-                [&m.name, &m.developer, &m.via.join(", "), self.store.note(&m.key).unwrap_or("")],
-                self.typos,
-            )
-            .is_some()
+        // A selected model shows even out of reach, so it can be compared.
+        self.data.models.iter().enumerate().filter(move |&(i, m)| {
+            (self.in_reach(m) || self.store.is_marked(&m.key))
+                && hits(
+                    &self.query,
+                    [&m.name, &m.developer, &m.via.join(", "), self.store.note(&m.key).unwrap_or("")],
+                    self.typos,
+                )
+                .is_some()
                 && (!self.only_marked || self.store.is_marked(&m.key))
                 && (!self.only_fav || self.is_fav(&m.key))
                 && (!self.only_excluded || self.store.is_excluded(&m.key))
                 && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
-                && (skip == VIA || self.via.is_empty() || self.via.iter().any(|h| m.via.contains(h)))
+                && (skip == VIA
+                    || self.via.is_empty()
+                    || self.via.iter().any(|h| self.shown_via(m).contains(&h.as_str())))
                 && self
                     .bounds
                     .iter()
@@ -846,7 +860,7 @@ impl App {
             // By name, or by developer or access with names breaking ties.
             let text = |m: &Model| match self.sort_col {
                 1 => m.developer.to_lowercase(),
-                VIA => m.via.join(","),
+                VIA => self.shown_via(m).join(", "),
                 NOTES => self.store.note(&m.key).unwrap_or("").to_lowercase(),
                 _ => String::new(),
             };
@@ -867,6 +881,16 @@ impl App {
         self.visual = anchor.and_then(|k| pos(&k));
         self.picked = picked.iter().filter_map(|k| pos(k)).collect();
         self.select(sel);
+    }
+
+    /// Rebuild after a selection or flag changes: a row that drops out, under `M` or for being
+    /// out of reach, leaves the bar where it was, as selecting never moves it.
+    pub fn rebuild_in_place(&mut self) {
+        let (at, row) = (self.selected(), self.rows.get(self.selected()).copied());
+        self.rebuild();
+        if self.rows.get(self.selected()).copied() != row {
+            self.select(at);
+        }
     }
 
     /// A background refresh finished.
@@ -957,19 +981,38 @@ impl App {
     /// The task's price frontier among the models the filters let through, plus the task's
     /// favorite whatever the filters, excluded ones left out: cheapest first, the best model last.
     pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
-        let usable = |m: &&Model| !self.store.is_excluded(&m.key);
+        let usable = |m: &&Model| self.usable(m);
         // Ranked only when the filters show them, so a hidden favorite drops no shown model.
         let favs = self.store.task_favorites(t.name);
-        let fav: Vec<&Model> = visible(&self.data, &self.store, self.all, false)
-            .map(|(_, m)| m)
-            .filter(|m| usable(m) && favs.contains(&m.key.as_str()))
-            .collect();
+        let fav: Vec<&Model> =
+            self.data.models.iter().filter(|m| usable(m) && favs.contains(&m.key.as_str())).collect();
         task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(usable), t, &fav)
+    }
+
+    /// Whether the user has access to `m` whatever `a`, as its Via shows.
+    pub fn accessible(&self, m: &Model) -> bool {
+        in_reach(m, false, self.any_available)
+    }
+
+    /// Via as the table shows it: the harnesses, or `OUT_OF_REACH` for one you have no access to.
+    fn shown_via<'a>(&self, m: &'a Model) -> Vec<&'a str> {
+        shown_via(m, self.any_available)
+    }
+
+    /// Whether `m` is one to use: accessible, or any with `a` or none available. Only these are
+    /// recommended: a selected model out of reach shows, but is never a pick.
+    pub fn in_reach(&self, m: &Model) -> bool {
+        in_reach(m, self.all, self.any_available)
+    }
+
+    /// Whether `m` can be recommended: in reach and not excluded.
+    fn usable(&self, m: &Model) -> bool {
+        self.in_reach(m) && !self.store.is_excluded(&m.key)
     }
 
     /// Whether `key`, a favorite of the task, is on its line only for being a favorite.
     pub fn favorite_unrecommended(&self, t: &Task, key: &str) -> bool {
-        let usable = self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| !self.store.is_excluded(&m.key));
+        let usable = self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| self.usable(m));
         self.store.is_favorite(Some(t), key) && !recommended(usable, t, key)
     }
 
@@ -1046,11 +1089,10 @@ impl App {
         let (mut items, picked) = if self.col == 1 || self.col == VIA {
             let by_dev = self.col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            for l in ms
-                .iter()
-                .flat_map(|(_, m)| if by_dev { std::slice::from_ref(&m.developer) } else { m.via.as_slice() })
-                .filter(|l| !l.is_empty())
-            {
+            // Via as the table shows it, so "not available" can be picked too.
+            let labels =
+                ms.iter().flat_map(|&(_, m)| if by_dev { vec![m.developer.as_str()] } else { self.shown_via(m) });
+            for l in labels.filter(|l| !l.is_empty()) {
                 *counts.entry(l).or_default() += 1;
             }
             // Most models first; the stable sort keeps ties A-Z.
@@ -1083,9 +1125,7 @@ impl App {
     fn toggle_mark(&mut self) {
         let Some(key) = self.current().map(|m| m.key.clone()) else { return };
         self.store.toggle_marked(&key);
-        if self.only_marked {
-            self.rebuild();
-        }
+        self.rebuild_in_place();
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Option<Effect> {
@@ -1229,11 +1269,8 @@ impl App {
                     self.deselect();
                 }
                 self.select(n);
-                if inside {
-                    if self.only_marked {
-                        self.rebuild();
-                    }
-                } else {
+                // Marking the range only adds marks, so no row drops out.
+                if !inside {
                     self.toggle_mark();
                 }
                 return Some(Effect::Save);
@@ -1255,7 +1292,7 @@ impl App {
                 self.select(n);
                 let key = self.current()?.key.clone();
                 self.store.toggle_excluded(&key);
-                self.rebuild();
+                self.rebuild_in_place();
                 return Some(Effect::Save);
             }
             Mouse::Pick(n) if n < self.rows.len() => {
@@ -1390,7 +1427,7 @@ impl App {
             }
             KeyCode::Char('U') if table => {
                 let n = std::mem::take(&mut self.store.marked).len();
-                self.rebuild();
+                self.rebuild_in_place();
                 self.status = format!("deselected {n}");
                 return Some(Effect::Save);
             }
@@ -1500,6 +1537,7 @@ impl App {
                 if save {
                     self.store.marked = self.targets();
                     self.deselect();
+                    self.rebuild_in_place();
                 }
                 // With fewer than 2 marked, the overlay says how to mark them.
                 self.view = View::Compare;
@@ -1531,6 +1569,7 @@ impl App {
                 };
             }
             KeyCode::Enter if table && self.current().is_some() => {
+                self.detail = self.current()?.key.clone();
                 self.view = View::Detail;
                 self.scroll = 0;
             }
@@ -2004,6 +2043,14 @@ mod tests {
         assert_eq!((a.via.as_slice(), keys(&a)), (&["claude".to_string()][..], vec!["opus5"]));
         press(&mut a, "c");
         assert_eq!((a.via.len(), keys(&a).len()), (0, 3));
+        // A selected model you have no access to shows, and is picked, as its Via reads.
+        a.store.toggle_marked("llama4");
+        a.rebuild();
+        press(&mut a, "d");
+        assert!(menu(&a).contains(&("not available", 1)), "{:?}", menu(&a));
+        press(&mut a, "/not");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(keys(&a), ["llama4"]);
     }
 
     #[test]
@@ -2395,6 +2442,63 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_model_shows_out_of_reach_but_is_never_a_pick() {
+        let mut a = app();
+        let shown = |a: &App| a.rows.iter().map(|&i| a.data.models[i].key.clone()).collect::<Vec<_>>();
+        let front = |a: &App| {
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>()
+        };
+        let mut data = std::mem::take(&mut a.data);
+        let llama = &mut data.models[2];
+        (llama.offers[0].input, llama.offers[0].output) = (0.1, 0.1);
+        llama.fit.insert("coding".into(), 55.0);
+        a.store.toggle_marked("llama4");
+        a.set_data(data);
+        assert!(shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
+        assert!(!front(&a).contains(&"llama4".into()), "{:?}", front(&a));
+        // Deselecting drops its row at once, and the bar stays where it was.
+        let at = shown(&a).iter().position(|k| k == "llama4").unwrap();
+        a.select(at);
+        a.key(KeyCode::Char(' ').into());
+        assert!(!shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
+        assert_eq!(a.selected(), at.min(a.rows.len() - 1));
+        // In details the model stays on screen until you are back on the table, however.
+        for leave in [&[KeyCode::Esc][..], &[KeyCode::Char('?'), KeyCode::Char('?')]] {
+            a.store.toggle_marked("llama4");
+            a.rebuild();
+            a.select(at);
+            a.key(KeyCode::Enter.into());
+            a.key(KeyCode::Char(' ').into());
+            assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Detail, "llama4"));
+            leave.iter().for_each(|&k| _ = a.key(k.into()));
+            assert_eq!(a.view, View::Table);
+            assert!(!shown(&a).contains(&"llama4".into()), "{leave:?}: {:?}", shown(&a));
+        }
+        // Details keep their model through a refresh that drops its row.
+        a.store.toggle_marked("llama4");
+        a.rebuild();
+        a.select(at);
+        a.key(KeyCode::Enter.into());
+        a.store.toggle_marked("llama4");
+        let data = std::mem::take(&mut a.data);
+        a.refreshed(Ok(data));
+        assert!(!shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
+        assert_eq!(a.current().unwrap().key, "llama4");
+        a.key(KeyCode::Esc.into());
+        // Comparing a selection replaces the marks, so one out of reach drops out.
+        a.store.toggle_marked("llama4");
+        a.rebuild();
+        a.select(0);
+        press(&mut a, "vjC");
+        assert!(!shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
+        a.key(KeyCode::Esc.into());
+        a.store.toggle_marked("llama4");
+        a.all = true;
+        a.rebuild();
+        assert!(front(&a).contains(&"llama4".into()), "with `a` it is ranked as any: {:?}", front(&a));
+    }
+
+    #[test]
     fn a_favorite_stays_in_recommend_whatever_the_filters() {
         let mut a = app();
         let front = |a: &App| {
@@ -2759,6 +2863,25 @@ mod tests {
         a.mouse(Mouse::Box(1));
         a.mouse(Mouse::Exclude(1));
         assert!(a.store.is_excluded(&k) && !a.store.is_excluded(&key(&a, 0)), "on a mark, not every mark as e does");
+        // Under E a click that drops the row leaves the bar where it was, as e does.
+        for n in 0..3 {
+            if !a.store.is_excluded(&key(&a, n)) {
+                a.mouse(Mouse::Exclude(n));
+            }
+        }
+        press(&mut a, "E");
+        a.select(1);
+        a.mouse(Mouse::Exclude(1));
+        assert_eq!((a.rows.len(), a.selected()), (2, 1));
+    }
+
+    #[test]
+    fn via_sorts_as_it_reads() {
+        let mut a = app();
+        a.store.toggle_marked("llama4");
+        (a.sort_col, a.descending) = (VIA, false);
+        a.rebuild();
+        assert_eq!(keys(&a), ["opus5", "gpt55", "mini", "llama4"], "not available after codex");
     }
 
     #[test]

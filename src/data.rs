@@ -372,6 +372,11 @@ impl Data {
         Duration::from_secs(now().saturating_sub(self.fetched))
     }
 
+    /// Whether you have access to any model: with none, every model counts as in reach.
+    pub fn any_available(&self) -> bool {
+        self.models.iter().any(|m| m.available)
+    }
+
     /// The newest release when it is newer than this build.
     pub fn update(&self) -> Option<&str> {
         let v = |s: &str| s.split('.').map(|n| n.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();

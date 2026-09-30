@@ -14,8 +14,8 @@ use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
-    Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level, level_label, money, priced,
-    truncate, verdict,
+    OUT_OF_REACH, Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level, level_label, money,
+    priced, truncate, verdict,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -104,7 +104,7 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
             wait = Duration::ZERO;
             // An agent may have marked or noted a model meanwhile: act on its file, not a stale copy.
             if app.store.reload_if_changed() {
-                app.rebuild();
+                app.rebuild_in_place();
             }
             let effect = match event::read().map_err(|e| e.to_string())? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
@@ -766,8 +766,15 @@ fn layout(width: u16, app: &App) -> Layout {
         head.max(app.widths[i]) as u16
     });
     let dev_w = ms.iter().map(|m| m.developer.chars().count()).max().unwrap_or(0).clamp(6, 12) as u16;
-    let via_w =
-        ms.iter().map(|m| m.via.iter().map(|v| v.len() + 1).sum::<usize>()).max().unwrap_or(0).clamp(6, 24) as u16;
+    // A shown model you have no access to says so in Via.
+    let out = app.rows.iter().any(|&r| !app.accessible(&ms[r]));
+    let via_w = ms
+        .iter()
+        .map(|m| m.via.iter().map(|v| v.len() + 1).sum::<usize>())
+        .chain(out.then_some(OUT_OF_REACH.len()))
+        .max()
+        .unwrap_or(0)
+        .clamp(6, 24) as u16;
     let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(str::len).max().unwrap_or(0).clamp(6, 40) as u16;
     let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
     // Row numbers as wide as the last one, a space, then the checkbox, the ☆ and the ✗ box,
@@ -902,7 +909,6 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let top = top.min(app.rows.len().saturating_sub(height));
     *app.table.offset_mut() = top;
     let ext = app.ext;
-    let any = app.data.models.iter().any(|m| m.available);
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + 2 + (k - top) as u16;
         let m = &app.data.models[r];
@@ -928,8 +934,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
         // A marked model's name is light blue and bold, as the ✓; on the bar, bold only. One you
-        // have no access to stays muted, marked or not, with the bold still showing the mark.
-        let name = match (app.store.is_marked(&m.key), m.available || !any) {
+        // have no access to stays muted, marked or not, with the bold still showing the mark, and
+        // its Via says so.
+        let reach = app.accessible(m);
+        let name = match (app.store.is_marked(&m.key), reach) {
             (true, true) => tint(MARK).add_modifier(BOLD),
             (true, false) => tint(MUTED).add_modifier(BOLD),
             (false, true) => base,
@@ -954,11 +962,15 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         }
         if let Some((x, w)) = via {
             let (mut x, end) = (area.x + x, area.x + x + w);
-            for (j, h) in m.via.iter().enumerate() {
-                if j > 0 {
-                    x = buf.set_stringn(x, y, ", ", end.saturating_sub(x) as usize, base).0;
+            if !reach {
+                buf.set_stringn(x, y, OUT_OF_REACH, w as usize, tint(MUTED).add_modifier(Modifier::ITALIC));
+            } else {
+                for (j, h) in m.via.iter().enumerate() {
+                    if j > 0 {
+                        x = buf.set_stringn(x, y, ", ", end.saturating_sub(x) as usize, base).0;
+                    }
+                    x = buf.set_stringn(x, y, h, end.saturating_sub(x) as usize, tint(dev_color(h))).0;
                 }
-                x = buf.set_stringn(x, y, h, end.saturating_sub(x) as usize, tint(dev_color(h))).0;
             }
         }
         let note = app.store.note(&m.key).unwrap_or("");
@@ -1101,14 +1113,19 @@ fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) ->
 
 /// The status bar's left side, joined with " · ": the model count, then what filters it.
 fn parts(app: &App) -> Vec<Line<'static>> {
-    let any = app.data.models.iter().any(|m| m.available);
-    let scope = match (app.all, any) {
+    let scope = match (app.all, app.data.any_available()) {
         (false, true) => "available",
         (false, false) => "all (no access found)",
         (true, _) => "all",
     };
     let part = |s: String, c: Color| Line::styled(s, fg(c));
-    let mut parts = vec![part(format!("{} {scope}", app.rows.len()), Color::Reset)];
+    // Selected models show out of reach too, so they are counted apart, as their Via says.
+    let out = app.rows.iter().filter(|&&r| !app.in_reach(&app.data.models[r])).count();
+    let count = match out {
+        0 => format!("{} {scope}", app.rows.len()),
+        _ => format!("{} {scope} + {out} {OUT_OF_REACH}", app.rows.len() - out),
+    };
+    let mut parts = vec![part(count, Color::Reset)];
     if stale(app) {
         parts.push(part(data_age(&app.data), BAD));
     }
@@ -1835,14 +1852,23 @@ mod tests {
         assert_ne!(buf[(cell(&lines[opus as usize], "opus"), opus)].fg, MARK);
         // Marked but out of reach: muted as any unavailable model, so that still shows.
         a.store.marked.push("opus".into());
-        a.data.models[0].available = false;
+        let mut data = std::mem::take(&mut a.data);
+        data.models[0].available = false;
+        a.set_data(data);
         a.key(KeyCode::Char('a').into());
         a.key(KeyCode::Char('G').into()); // off the bar, which keeps colours off
-        let (buf, lines) = render(&mut a, 120, 5);
+        let (buf, lines) = render(&mut a, 160, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap() as u16;
         let name_x = cell(&lines[opus as usize], "opus");
         assert_eq!(buf[(name_x, opus)].fg, MUTED, "{lines:?}");
         assert!(buf[(name_x, opus)].modifier.contains(BOLD));
+        assert!(lines[opus as usize].contains("not available"), "{lines:?}");
+        // Back in the available view it shows only for being marked, and says so.
+        a.key(KeyCode::Char('a').into());
+        let (_, lines) = render(&mut a, 160, 5);
+        let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
+        assert!(lines[opus].contains("not available"), "{lines:?}");
+        assert!(lines[4].starts_with(" NORMAL  1 available + 1 not available"), "{}", lines[4]);
     }
 
     /// The cell where `pat` starts on `line`, which may hold multi-byte glyphs before it.
