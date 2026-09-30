@@ -91,7 +91,8 @@ struct ModelOut<'a> {
     eci: Option<f64>,
     /// Where `eci`, `tasks` and `benchmarks` come from: "epoch" or "aa"
     source: &'static str,
-    /// Task -> 0..100 capability percentile among the models the source evaluated
+    /// Task -> its score on the source's scale: ECI points (epoch) or the task's benchmark
+    /// score, 0..100 (aa); overall and vision are `eci`, value a 0..100 percentile
     tasks: BTreeMap<&'static str, f64>,
     /// Output tokens per second, median across providers; Artificial Analysis only
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,7 +130,10 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         pages: full.then(|| m.links().into_iter().collect()),
         eci: m.eci,
         source: crate::data::source().id(),
-        tasks: TASKS.iter().filter_map(|t| Some((t.name, (fit::fit(m, t)? * 10.0).round() / 10.0))).collect(),
+        tasks: TASKS
+            .iter()
+            .filter_map(|t| Some((t.name, (fit::shown(m, t, fit::fit(m, t)?) * 10.0).round() / 10.0)))
+            .collect(),
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
         benchmarks: full.then_some(&m.scores),
@@ -439,7 +443,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             let front: Vec<_> = front(data, store, t)
                 .into_iter()
                 .map(|(m, s)| {
-                    let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (s * 10.0).round() / 10.0, "recommended": !off.contains(&m.key.as_str())});
+                    let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (fit::shown(m, t, s) * 10.0).round() / 10.0, "recommended": !off.contains(&m.key.as_str())});
                     if let Some(n) = store.note(&m.key) {
                         e["note"] = n.into();
                     }

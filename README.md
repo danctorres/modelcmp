@@ -47,7 +47,7 @@ page. `cargo install` needs Rust 1.88 or later.
 modelcmp                                    # the TUI
 modelcmp recommend                          # best model per price for each task
 modelcmp list --task coding                 # the models worth paying for, cheapest first
-modelcmp list --min coding=70 --sort price  # good enough, cheapest first
+modelcmp list --min coding=155 --sort price # good enough, cheapest first
 modelcmp compare sonnet-5 gpt-5             # side by side, with a verdict
 modelcmp show sonnet-5                      # everything about one model
 modelcmp fav coding sonnet-5                # your model for coding: recommend and agents use it
@@ -56,15 +56,15 @@ modelcmp fav coding sonnet-5                # your model for coding: recommend a
 ```
 $ modelcmp recommend
 coding  writing and fixing code  (modelcmp list --task coding)
-  best per price:  Gemini 3.7 Flash [gemini37flash] $1.0 (65) · Claude Sonnet 5 [claudesonnet5] $2.8 (68) · Claude Opus 5 [claudeopus5] $7.0 (95)
+  best per price:  Gemini 3.1 Flash-Lite [gemini31flashlite] $0.41 (145) · Gemini 3.7 Flash [gemini37flash] $1.0 (158) · Claude Sonnet 5.5 [claudesonnet55] $2.8 (164) · Claude Opus 5.5 [claudeopus55] $5.4 (168)
 
 agentic  multi-step tool use, long autonomous tasks  (modelcmp list --task agentic)
-  best per price:  Gemini 3.7 Flash [gemini37flash] $1.0 (77) · Claude Fable 5.1 [claudefable51] $13 (93)
+  best per price:  Gemini 3.1 Flash-Lite [gemini31flashlite] $0.41 (144) · Gemini 3.7 Flash [gemini37flash] $1.0 (158) · Claude Sonnet 5.5 [claudesonnet55] $2.8 (165) · Claude Opus 5.5 [claudeopus55] $5.4 (167)
 ...
 ```
 
-Picks run cheapest first. Each shows the name, key, $ per 1M tokens and the task score (a
-0-100 percentile) in parentheses.
+Picks run cheapest first. Each shows the name, key, $ per 1M tokens and the task score (in
+ECI points with Epoch AI) in parentheses.
 
 In the TUI, `R` recommends, `space` selects models, `C` compares them and `/` filters. `esc`
 goes back, `q` quits and `?` lists every key. [KEYS.md](KEYS.md) covers keys and mouse,
@@ -104,7 +104,7 @@ skills can take its body in `AGENTS.md`.
 - [Epoch AI Benchmarking Hub](https://epoch.ai/benchmarks) (CC-BY): ECI and
   per-benchmark scores.
 - [Artificial Analysis](https://artificialanalysis.ai), instead of Epoch AI when picked with
-  `B` or `--source aa`: its Intelligence Index, Coding Index, Terminal-Bench, GPQA and HLE,
+  `B` or `--source aa`: its Intelligence Index, Coding Index, Terminal-Bench Hard and HLE,
   and each model's speed (output tokens per second, time to first token).
   Needs a free API key: the TUI's first start asks which source to use, then for the key
   if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,

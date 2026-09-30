@@ -20,7 +20,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
-const FORMAT: u32 = 5;
+/// 6: `Model::shown`.
+const FORMAT: u32 = 6;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -81,6 +82,14 @@ impl Source {
         match self {
             Source::Epoch => ("ECI", "Epoch AI's overall capability index"),
             Source::Aa => ("AAII", "Artificial Analysis Intelligence Index"),
+        }
+    }
+
+    /// What the task scores are in (`fit::shown`).
+    pub fn scale(self) -> &'static str {
+        match self {
+            Source::Epoch => "ECI points",
+            Source::Aa => "scores 0-100",
         }
     }
 
@@ -249,8 +258,12 @@ pub struct Model {
     pub eci: Option<f64>,
     /// Benchmark name -> best score (0..1) across reasoning-effort settings.
     pub scores: BTreeMap<String, f64>,
-    /// Task name -> 0..100 percentile (see fit.rs).
+    /// Task name -> 0..100 percentile (see fit.rs), which ranks it.
     pub fit: BTreeMap<String, f64>,
+    /// Task name -> the value it shows: capability in ECI points (Epoch), or the task's
+    /// benchmark score, 0..100 (Artificial Analysis). See `fit::shown`.
+    #[serde(default)]
+    pub shown: BTreeMap<String, f64>,
     /// The model's page name on artificialanalysis.ai, when it has one (`aa_pages`).
     #[serde(default)]
     pub aa: Option<String>,
@@ -825,8 +838,8 @@ struct Scores {
     org: HashMap<String, String>,
     /// Benchmark -> Epoch's fit of it.
     benches: HashMap<String, crate::fit::Bench>,
-    /// group -> task -> percentile.
-    fit: HashMap<String, BTreeMap<String, f64>>,
+    /// group -> task -> percentile, and the value it shows.
+    fit: crate::fit::Fit,
     /// group -> its page on artificialanalysis.ai.
     page: HashMap<String, String>,
     /// group -> (tokens/s, time to first token) of that page's setting.
@@ -1291,8 +1304,11 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
             }
             m.eci = *eci;
             m.scores = scores.clone();
-            if let Some(f) = ep.fit.get(k) {
+            if let Some(f) = ep.fit.0.get(k) {
                 m.fit = f.clone();
+            }
+            if let Some(f) = ep.fit.1.get(k) {
+                m.shown = f.clone();
             }
         }
     }
@@ -1610,10 +1626,10 @@ mod tests {
         let json = br#"{"status":200,"data":[
             {"slug":"claude-4-5-sonnet","name":"Claude 4.5 Sonnet (Non-reasoning)","model_creator":{"name":"Anthropic"},
              "median_output_tokens_per_second":80.5,"median_time_to_first_token_seconds":1.2,
-             "evaluations":{"artificial_analysis_intelligence_index":50,"artificial_analysis_coding_index":40,"gpqa":0.7}},
+             "evaluations":{"artificial_analysis_intelligence_index":50,"artificial_analysis_coding_index":40,"hle":0.2}},
             {"slug":"claude-4-5-sonnet-thinking","name":"Claude 4.5 Sonnet (Reasoning)","model_creator":{"name":"Anthropic"},
              "median_output_tokens_per_second":40.0,"median_time_to_first_token_seconds":9.0,
-             "evaluations":{"artificial_analysis_intelligence_index":60,"artificial_analysis_coding_index":null,"gpqa":0.8}},
+             "evaluations":{"artificial_analysis_intelligence_index":60,"artificial_analysis_coding_index":null,"hle":0.3}},
             {"slug":"unscored","name":"Unscored","evaluations":{}}
         ]}"#;
         let sc = parse_aa(json).unwrap();
@@ -1621,7 +1637,7 @@ mod tests {
         let (name, index, scores) = &sc.groups[&key];
         assert_eq!((name.as_str(), *index), ("Claude 4.5 Sonnet", Some(60.0)), "the best setting's index");
         assert_eq!(scores["artificial_analysis_coding_index"], 0.4, "an index is /100, a null is no score");
-        assert_eq!(scores["gpqa"], 0.8);
+        assert_eq!(scores["hle"], 0.3);
         assert_eq!((sc.page[&key].as_str(), sc.org[&key].as_str()), ("claude-4-5-sonnet", "Anthropic"));
         assert_eq!(sc.speed[&key], (Some(40.0), Some(9.0)), "the speed of the setting whose index it shows");
         assert_eq!(sc.groups.len(), 1, "a model with no scores is left out");

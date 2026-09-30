@@ -46,13 +46,13 @@ enum Cmd {
         /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`R` then `enter` in the TUI)
         #[arg(short, long, value_parser = tasks(), conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, else for the task; else low = cheapest scoring 50+, mid = cheapest 75+, high = the best, or the best when none reaches the floor
+        /// One model from the task's list: your favorite for the tier, else for the task; else low = cheapest in the top half, mid = cheapest in the top quarter, high = the best, or the best when none reaches the floor
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
         #[arg(short, long, value_parser = PossibleValuesParser::new(app::COLS.map(|c| c.id)))]
         sort: Option<String>,
-        /// Keep models at or above a value, e.g. --min coding=70; columns as in --sort, ctx in thousands of tokens; repeatable (`>` in the TUI)
+        /// Keep models at or above a value, e.g. --min coding=155; columns as in --sort, ctx in thousands of tokens; repeatable (`>` in the TUI)
         #[arg(long, value_parser = bound)]
         min: Vec<(usize, f64)>,
         /// Keep models at or below a value, e.g. --max price=2; repeatable (`<` in the TUI)
@@ -147,11 +147,11 @@ enum Cmd {
     },
 }
 
-/// `coding=70` for --min and --max: the column's index in `app::COLS` and the value.
+/// `coding=155` for --min and --max: the column's index in `app::COLS` and the value.
 fn bound(s: &str) -> Result<(usize, f64), String> {
     let ids = || app::COLS.map(|c| c.id).join(", ");
     let (id, v) =
-        s.split_once('=').ok_or_else(|| format!("expected column=value, e.g. coding=70; columns: {}", ids()))?;
+        s.split_once('=').ok_or_else(|| format!("expected column=value, e.g. coding=155; columns: {}", ids()))?;
     let col =
         app::COLS.iter().position(|c| c.id == id).ok_or_else(|| format!("no column '{id}'; columns: {}", ids()))?;
     Ok((col, v.parse().map_err(|_| format!("'{v}' is not a number"))?))

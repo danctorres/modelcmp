@@ -366,8 +366,10 @@ pub fn score(x: Option<f64>) -> String {
     x.map_or("-".into(), |v| format!("{v:.0}"))
 }
 
+/// The value a task shows for the model (`fit::shown`), when it qualifies.
 pub fn task_score(m: &Model, task: &str) -> Option<f64> {
-    fit::fit(m, fit::task(task)?)
+    let t = fit::task(task)?;
+    Some(fit::shown(m, t, fit::fit(m, t)?))
 }
 
 /// The items whose model no other beats on both `score` and blended price: the cheapest at
@@ -404,7 +406,7 @@ pub fn task_frontier<'a>(
 ) -> Vec<(&'a Model, f64)> {
     let ranked = fit::rank(models, t);
     let ranked: Vec<_> = ranked.into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
-    let mut v = frontier(&ranked, |(m, _)| m, |m| fit::fit(m, t));
+    let mut v = frontier(&ranked, |(m, _)| m, |m| task_score(m, t.name));
     let by_cost = |v: &mut Vec<(&Model, f64)>| {
         v.sort_by(|a, b| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
     };
@@ -427,8 +429,8 @@ pub fn recommended<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task, k
 }
 
 /// `--tier` names and their score floors. A tier picks the cheapest frontier entry at or
-/// above its floor, scores compared as shown like the frontier does, or the best entry when
-/// none reaches it; `high` always picks the best.
+/// above its floor, scores compared as the task's percentile (`fit::fit`), or the best entry
+/// when none reaches it; `high` always picks the best.
 // ponytail: fixed floors on a percentile, tune them if the picks look off.
 pub const TIERS: [(&str, f64); 3] = [("low", 50.0), ("mid", 75.0), ("high", f64::INFINITY)];
 
@@ -571,7 +573,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         ),
         String::new(),
         format!("  {} {}", crate::data::source().index().0, score(m.eci)),
-        "  task fit (percentile vs all evaluated models):".into(),
+        format!("  task fit ({}, value a percentile):", crate::data::source().scale()),
     ];
     if m.tps.is_some() || m.ttft.is_some() {
         let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
@@ -585,7 +587,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     }
     for t in TASKS {
         if let Some(s) = fit::fit(m, t) {
-            v.push(format!("    {:<13}{:>4.0}  {}", t.name, s, t.about));
+            v.push(format!("    {:<13}{:>4.0}  {}", t.name, fit::shown(m, t, s), t.about));
         }
     }
     if !m.scores.is_empty() {
@@ -660,7 +662,7 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
         rows.insert(at, row("tokens/s", models.iter().map(|m| m.tps).collect(), |v| format!("{v:.0}"), true));
     }
     for t in TASKS.iter().filter(|t| t.name != "overall") {
-        let vals: Vec<Option<f64>> = models.iter().map(|m| fit::fit(m, t)).collect();
+        let vals: Vec<Option<f64>> = models.iter().map(|m| task_score(m, t.name)).collect();
         if vals.iter().any(Option::is_some) {
             rows.push(Row { section: "scores", ..row(t.name, vals, |v| format!("{v:.0}"), true) });
         }
@@ -684,7 +686,8 @@ pub fn verdict(models: &[&Model]) -> Vec<[String; 3]> {
     vec![
         best(models, "cheaper", Model::cost, false, usd),
         best(models, "better at coding", coding, true, |v| format!("{v:.0}")),
-        best(models, "coding per $", |m| Some(coding(m)? / m.blended()?), true, |v| format!("{v:.1}")),
+        // The coding percentile, as Code/$: capability points over dollars would read as nothing.
+        best(models, "coding per $", |m| Some(m.fit.get("coding")? / m.blended()?), true, |v| format!("{v:.1}")),
     ]
 }
 

@@ -31,7 +31,7 @@ commands and JSON.
 |-----|--------|
 | `s` | sort by the column; again reverses |
 | `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare it filters the rows, in the help its lines, and in a list like the theme panel its entries; what matched is underlined in yellow everywhere |
-| `>` `<` | minimum / maximum for the column, e.g. `>` `70` `enter` on Coding; Ctx in thousands of tokens, `>` `200` for 200k |
+| `>` `<` | minimum / maximum for the column, e.g. `>` `155` `enter` on Coding; Ctx in thousands of tokens, `>` `200` for 200k |
 | `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `space` toggles several, as it selects models; on Price, where one level applies, `space` picks it or drops it and keeps the dropdown open |
 | `a` | all models, including ones you have no access to |
 | `%` | Price with no input cached, as a one-off prompt, instead of the share it started with (an agent's 90%, or `--cache`); again: back to that share. The top border on Price says which, and the hint shows on the price columns, or anywhere while no input is cached. Code/$, the cheapest provider and recommend follow it. `modelcmp --cache 50` starts the TUI with any other share |

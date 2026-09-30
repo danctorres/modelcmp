@@ -25,12 +25,12 @@ Done when you hold one model `key` and can say which task and frontier entry it 
 opencode -m "$(modelcmp list --task coding --tier mid --id)"
 ```
 
-`low` is the cheapest entry scoring 50+, `mid` the cheapest 75+, `high` the best. The tier's favorite, else the task's, wins over the tier's pick.
+`low` is the cheapest entry in the top half of the models the source evaluated, `mid` the cheapest in the top quarter, `high` the best. The tier's favorite, else the task's, wins over the tier's pick.
 
 ## Reading the numbers
 
 - `price` is $ per 1M tokens. `null` means unknown, not free.
-- `score` is a 0-100 percentile, except for `overall` and `vision`, where it is the overall index of the model's `source`: Epoch Capabilities Index (`epoch`) or Artificial Analysis Intelligence Index (`aa`). Scores from different sources do not compare.
+- `score` is on the scale of the model's `source`. With `epoch` it is in Epoch Capabilities Index points, the task's capability for coding, agentic and reasoning. With `aa` it is the Artificial Analysis Intelligence Index for `overall` and `vision`, and one benchmark's 0-100 score for the others (Coding Index, Terminal-Bench Hard, HLE). `value` is a 0-100 percentile with either. Scores from different sources do not compare.
 - `"recommended": false` marks a favorite that sits on the frontier only because the user chose it. Still use it.
 - Models the user excluded never appear in `recommend` or `--task`.
 
@@ -41,7 +41,7 @@ When two entries are close, compare them before choosing:
 ```sh
 modelcmp show <model> --json          # every benchmark and every provider's price
 modelcmp compare <a> <b> --json       # side by side
-modelcmp list --min coding=70 --sort price --json   # everything good enough, cheapest first
+modelcmp list --min coding=155 --sort price --json  # everything good enough, cheapest first
 ```
 
 A model name matches by substring. Exit code 2 means it matched several; stderr lists the candidates with their keys, and a key always matches exactly. `modelcmp --help` has every flag.

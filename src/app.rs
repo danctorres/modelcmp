@@ -28,9 +28,17 @@ pub struct Col {
 }
 
 impl Col {
-    /// Its name and meaning; the index column's are the benchmark source's.
+    /// Its name and meaning; the index column's are the benchmark source's, and so are the
+    /// task columns' meanings, each a single benchmark with Artificial Analysis.
     fn text(&self) -> (&'static str, &'static str) {
-        if self.id == "eci" { crate::data::source().index() } else { (self.name, self.about) }
+        let about = match (self.id, crate::data::source()) {
+            ("eci", s) => return s.index(),
+            ("coding", Source::Aa) => "Artificial Analysis Coding Index",
+            ("agentic", Source::Aa) => "Terminal-Bench Hard score (0-100)",
+            ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
+            _ => self.about,
+        };
+        (self.name, about)
     }
 
     pub fn head(&self) -> &'static str {
@@ -50,7 +58,7 @@ fn positive(x: f64) -> Option<f64> {
     (x > 0.0).then_some(x)
 }
 
-/// Prices from the offer you'd pay, then the source's overall index, the task percentiles and
+/// Prices from the offer you'd pay, then the source's overall index, the task scores and
 /// Code/$, then speed when Artificial Analysis measures it.
 pub const COLS: [Col; 12] = [
     Col {
@@ -83,10 +91,10 @@ pub const COLS: [Col; 12] = [
     },
     // Named by the source in use: `Col::text`.
     col("", "eci", "", |m| m.eci),
-    col("Coding", "coding", "capability percentile, coding benchmarks", |m| task_score(m, "coding")),
-    col("Agentic", "agentic", "capability percentile, agentic benchmarks", |m| task_score(m, "agentic")),
-    col("Reason", "reasoning", "capability percentile, reasoning benchmarks", |m| task_score(m, "reasoning")),
-    col("Code/$", "value", "Coding ÷ Price, as a percentile", |m| m.fit.get("value").copied()),
+    col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
+    col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
+    col("Code/$", "value", "coding percentile ÷ Price, as a percentile", |m| m.fit.get("value").copied()),
     Col {
         aa_only: true,
         show: |v| format!("{v:.0}"),
@@ -196,7 +204,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("s", "sort by the column; again reverses"),
             ("/", "filter models, compare rows, this help or a list"),
-            ("> <", "minimum / maximum for the column, e.g. > 70 enter"),
+            ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
             ("d", "dropdown on Dev, Price and Via (▾); space toggles several"),
             ("a", "all models, including ones you have no access to"),
             ("%", "Price with none of the input cached, or back to --cache (90%)"),

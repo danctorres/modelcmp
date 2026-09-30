@@ -3,8 +3,8 @@
 //! Epoch fits `score ≈ sigmoid(slope × (ECI − EDI))` per benchmark, on scores rescaled so that
 //! guessing is 0. A model's capability on a task is the one that best explains its scores on the
 //! task's benchmarks, starting from its ECI: a few scores move it a little, many scores that
-//! agree move it more. It is shown as a percentile (0..100) among every Epoch model, the same
-//! models for every task.
+//! agree move it more. It is ranked as a percentile (0..100) among every Epoch model, the same
+//! models for every task, and shown in ECI points.
 //! Models tested on different benchmarks stay comparable, and a 0 or 100% only says "at most"
 //! or "at least".
 
@@ -35,8 +35,8 @@ pub struct Task {
     /// When a model high on this task is the right pick.
     pub when: &'static str,
     pub benches: &'static [&'static str],
-    /// The same for Artificial Analysis: its API's `evaluations` fields.
-    pub aa: &'static [&'static str],
+    /// The same for Artificial Analysis: one of its API's `evaluations` fields, shown as is.
+    pub aa: Option<&'static str>,
     pub need: Need,
 }
 
@@ -53,7 +53,7 @@ pub const TASKS: &[Task] = &[
         about: "overall index: ECI or AAII",
         when: "a tiebreaker, or work that fits no other task",
         need: Need::None,
-        aa: &[],
+        aa: None,
         benches: &[],
     },
     Task {
@@ -61,7 +61,7 @@ pub const TASKS: &[Task] = &[
         about: "writing and fixing code",
         when: "fixing a bug, adding a feature to an existing repo, refactors",
         need: Need::None,
-        aa: &["artificial_analysis_coding_index"],
+        aa: Some("artificial_analysis_coding_index"),
         benches: &[
             "DeepSWE",
             "FrontierCode",
@@ -75,10 +75,10 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "value",
-        about: "coding per dollar, among models ≥50th percentile on coding",
+        about: "coding per dollar, among the top half on coding",
         when: "routine coding that needs no top reasoning",
         need: Need::Coder,
-        aa: &[],
+        aa: None,
         benches: &[],
     },
     Task {
@@ -86,7 +86,7 @@ pub const TASKS: &[Task] = &[
         about: "multi-step tool use, long autonomous tasks",
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         need: Need::Tools,
-        aa: &["terminalbench_hard", "terminal_bench"],
+        aa: Some("terminalbench_hard"),
         benches: &[
             "APEX-Agents",
             "Remote Labor Index",
@@ -103,7 +103,7 @@ pub const TASKS: &[Task] = &[
         about: "hard science questions, puzzles, abstraction",
         when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
         need: Need::None,
-        aa: &["gpqa", "hle"],
+        aa: Some("hle"),
         benches: &[
             "GPQA diamond",
             "HLE",
@@ -119,7 +119,7 @@ pub const TASKS: &[Task] = &[
         about: "image input (ranked by overall capability)",
         when: "screenshots, UI mockups, diagrams as input",
         need: Need::Vision,
-        aa: &[],
+        aa: None,
         benches: &[],
     },
 ];
@@ -138,7 +138,7 @@ pub fn task_benches() -> Vec<&'static str> {
 
 /// Every Artificial Analysis field a task uses, sorted.
 pub fn aa_fields() -> Vec<&'static str> {
-    let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.aa.iter().copied()).collect();
+    let mut v: Vec<&str> = TASKS.iter().filter_map(|t| t.aa).collect();
     v.sort();
     v.dedup();
     v
@@ -151,10 +151,15 @@ pub fn task_names() -> impl Iterator<Item = &'static str> {
 /// Tasks ranked by the ECI percentile; they show the raw ECI, as the table's ECI column does.
 const ECI_TASKS: [&str; 2] = ["overall", "vision"];
 
-/// The value a task's frontier shows for a model ranked `s`: its value in the task's table column.
+/// The value a task shows for a model ranked `s`, in its table column and frontier: the
+/// source's overall index, a task's capability in ECI points (Epoch) or its benchmark's score
+/// (Artificial Analysis); "value" alone stays a percentile.
 pub fn shown(m: &Model, t: &Task, s: f64) -> f64 {
-    if ECI_TASKS.contains(&t.name) { m.eci.unwrap_or(s) } else { s }
+    if ECI_TASKS.contains(&t.name) { m.eci.unwrap_or(s) } else { m.shown.get(t.name).copied().unwrap_or(s) }
 }
+
+/// Per task: key -> task -> percentile, and key -> task -> the value it shows (`shown`).
+pub type Fit = (HashMap<String, BTreeMap<String, f64>>, HashMap<String, BTreeMap<String, f64>>);
 
 /// Fraction of `all` below x (ties count half), as 0..100.
 fn pct_rank(x: f64, all: &[f64]) -> f64 {
@@ -198,11 +203,11 @@ fn capability(obs: &[(Bench, f64)], mean: f64, sd: f64) -> f64 {
     c
 }
 
-/// Per Epoch group `(key, eci, bench -> score)` and bench -> fit: key -> task -> percentile.
+/// Per Epoch group `(key, eci, bench -> score)` and bench -> fit: each task's percentile and capability.
 pub fn percentiles<'a>(
     groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)>,
     benches: &HashMap<String, Bench>,
-) -> HashMap<String, BTreeMap<String, f64>> {
+) -> Fit {
     let groups: Vec<_> = groups.collect();
     let ecis: Vec<f64> = groups.iter().filter_map(|g| g.1).collect();
     let n = ecis.len().max(1) as f64;
@@ -231,9 +236,9 @@ pub fn percentiles<'a>(
         .collect();
     let centers: Vec<f64> = caps.iter().map(|c| c.0).collect();
     let pools: Vec<Vec<f64>> = (0..TASKS.len()).map(|i| caps.iter().map(|c| c.1[i].0).collect()).collect();
-    let mut out = HashMap::new();
+    let (mut out, mut shown) = (HashMap::new(), HashMap::new());
     for ((key, eci, _), (center, tasks)) in groups.iter().zip(&caps) {
-        let mut fit = BTreeMap::new();
+        let (mut fit, mut show) = (BTreeMap::new(), BTreeMap::new());
         if eci.is_some() {
             let p = pct_rank(*center, &centers);
             for t in ECI_TASKS {
@@ -243,40 +248,43 @@ pub fn percentiles<'a>(
         for (i, t) in TASKS.iter().enumerate() {
             if let (c, true) = tasks[i] {
                 fit.insert(t.name.to_string(), pct_rank(c, &pools[i]));
+                show.insert(t.name.to_string(), c);
             }
         }
         out.insert(key.to_string(), fit);
+        shown.insert(key.to_string(), show);
     }
-    out
+    (out, shown)
 }
 
-/// Per Artificial Analysis group `(key, index, field -> score)`: key -> task -> percentile. A
-/// task is the mean of its fields' percentiles among the models scored on each; overall and
-/// vision the index's, as with ECI. Epoch's fit needs Epoch's benchmark difficulties, so not here.
-pub fn aa_percentiles<'a>(
-    groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)>,
-) -> HashMap<String, BTreeMap<String, f64>> {
+/// Per Artificial Analysis group `(key, index, field -> score)`: each task's percentile among the
+/// models scored on its field, and that score as 0..100; overall and vision the index's, as with
+/// ECI. Epoch's fit needs Epoch's benchmark difficulties, so not here.
+pub fn aa_percentiles<'a>(groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)>) -> Fit {
     let groups: Vec<_> = groups.collect();
     let index: Vec<f64> = groups.iter().filter_map(|g| g.1).collect();
     let fields: HashMap<&str, Vec<f64>> =
         aa_fields().into_iter().map(|f| (f, groups.iter().filter_map(|g| g.2.get(f).copied()).collect())).collect();
-    let mut out = HashMap::new();
+    let (mut out, mut shown) = (HashMap::new(), HashMap::new());
     for (key, i, scores) in &groups {
-        let mut fit = BTreeMap::new();
+        let (mut fit, mut show) = (BTreeMap::new(), BTreeMap::new());
         if let Some(i) = i {
             for t in ECI_TASKS {
                 fit.insert(t.to_string(), pct_rank(*i, &index));
             }
         }
-        for t in TASKS.iter().filter(|t| !t.aa.is_empty()) {
-            let p: Vec<f64> = t.aa.iter().filter_map(|f| Some(pct_rank(*scores.get(*f)?, &fields[f]))).collect();
-            if !p.is_empty() {
-                fit.insert(t.name.to_string(), p.iter().sum::<f64>() / p.len() as f64);
+        for t in TASKS {
+            if let Some(f) = t.aa
+                && let Some(&x) = scores.get(f)
+            {
+                fit.insert(t.name.to_string(), pct_rank(x, &fields[f]));
+                show.insert(t.name.to_string(), x * 100.0);
             }
         }
         out.insert(key.to_string(), fit);
+        shown.insert(key.to_string(), show);
     }
-    out
+    (out, shown)
 }
 
 /// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
@@ -332,7 +340,7 @@ mod tests {
         let b = scores(&[("METR Time Horizons", 0.5), ("DeepSWE", 0.7)]);
         let e = benches(&[("METR Time Horizons", bench(140.0, 0.1, 0.0)), ("DeepSWE", bench(140.0, 0.1, 0.0))]);
         let groups = [("a", Some(145.0), &a), ("b", Some(145.0), &b)];
-        let p = percentiles(groups.iter().copied(), &e);
+        let (p, _) = percentiles(groups.iter().copied(), &e);
         assert!(p["a"]["agentic"] > p["b"]["agentic"]);
         assert!(p["b"]["coding"] > p["a"]["coding"]);
 
@@ -369,7 +377,7 @@ mod tests {
         assert!((mc - open).abs() < 1e-9);
         // A benchmark with no fit is skipped.
         let s = scores(&[("DeepSWE", 0.5)]);
-        let p = percentiles([("a", None, &s)].into_iter(), &HashMap::new());
+        let (p, _) = percentiles([("a", None, &s)].into_iter(), &HashMap::new());
         assert!(!p["a"].contains_key("coding"));
     }
 
@@ -380,18 +388,21 @@ mod tests {
         let none = scores(&[]);
         let e = benches(&[("DeepSWE", bench(170.0, 0.1, 0.0))]);
         let groups = [("a", Some(170.0), &a), ("b", Some(140.0), &none), ("c", Some(130.0), &none)];
-        let p = percentiles(groups.iter().copied(), &e);
+        let (p, shown) = percentiles(groups.iter().copied(), &e);
         assert_eq!(p["a"]["coding"], p["a"]["overall"]);
         assert!(!p["b"].contains_key("coding"));
+        assert!((shown["a"]["coding"] - 170.0).abs() < 0.01, "shown in ECI points: {}", shown["a"]["coding"]);
+        assert!(!shown["b"].contains_key("coding"));
     }
 
     #[test]
     fn aa_ranks_by_task() {
-        let a = scores(&[("artificial_analysis_coding_index", 0.6), ("gpqa", 0.9)]);
-        let b = scores(&[("artificial_analysis_coding_index", 0.4), ("gpqa", 0.7), ("hle", 0.3)]);
-        let p = aa_percentiles([("a", Some(60.0), &a), ("b", None, &b)].into_iter());
+        let a = scores(&[("artificial_analysis_coding_index", 0.6), ("hle", 0.4)]);
+        let b = scores(&[("artificial_analysis_coding_index", 0.4), ("hle", 0.3)]);
+        let (p, shown) = aa_percentiles([("a", Some(60.0), &a), ("b", None, &b)].into_iter());
         assert!(p["a"]["coding"] > p["b"]["coding"]);
-        assert!(p["a"]["reasoning"] > p["b"]["reasoning"], "hle only b has: its gpqa alone ranks a first");
+        assert!(p["a"]["reasoning"] > p["b"]["reasoning"]);
+        assert_eq!((shown["a"]["coding"], shown["b"]["reasoning"]), (60.0, 30.0), "shown as the score, 0..100");
         assert!(p["a"].contains_key("overall") && !p["b"].contains_key("overall"), "no index, no overall");
         assert!(!p["a"].contains_key("agentic"), "no agentic field, no agentic score");
     }

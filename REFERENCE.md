@@ -9,12 +9,12 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Code/$, Via, Note. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
-its Intelligence Index, and each task column is the mean percentile of its fields: Coding the
-Coding Index, Agentic Terminal-Bench, Reason GPQA and HLE; two more columns show speed,
+its Intelligence Index, and each task column is one benchmark's score (0-100): Coding the
+Coding Index, Agentic Terminal-Bench Hard, Reason HLE; two more columns show speed,
 Tok/s (output tokens per second) and TTFT (seconds to the first token), medians across
 providers. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
-columns are percentiles (0-100) of the model's capability on the task's benchmarks, ranked
-against every model Epoch has evaluated:
+columns are the model's capability on the task's benchmarks, in ECI points, fitted from its
+ECI and its scores (a model with few scores stays near its ECI):
 
 - Coding: DeepSWE, FrontierCode, SWE-Bench verified, Terminal Bench, WeirdML, MirrorCode, GSO-Bench, Aider polyglot
 - Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, OSWorld, METR Time Horizons, The Agent Company, DeepResearch Bench, Terminal Bench
@@ -33,10 +33,10 @@ column.
 
 ```sh
 modelcmp list                                  # models you have access to
-modelcmp list --task coding                    # best model per price level scoring 50+, cheapest first
-modelcmp list --task coding --tier mid         # just one: the cheapest scoring 75+
+modelcmp list --task coding                    # best model per price level in the top half, cheapest first
+modelcmp list --task coding --tier mid         # just one: the cheapest in the top quarter
 modelcmp list --task coding --tier mid --id    # only its provider/model, for opencode -m $(...)
-modelcmp list --min coding=70 --sort price     # good enough, cheapest first
+modelcmp list --min coding=155 --sort price    # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet-5                         # everything about one model
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
@@ -54,11 +54,10 @@ Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`. For a lar
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$), and with Artificial Analysis `tps` and `ttft`. `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, your selection `✓` and available models `●`. `--tier` picks one
-model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
-the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
+model from the task's list: `low` the cheapest in the top half of the models the source
+evaluated, `mid` the cheapest in the top quarter, `high` the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
 tier's pick. Every favorite of the task sits on the task's list marked `★` whether or not it is on the frontier or has a score for
-the task, which then shows as `-`. Scores are percentiles among the models
-Epoch benchmarked. `--all`
+the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
 `list` prints every match unless `-n` limits it, and then says how many it left out.
 
@@ -85,8 +84,8 @@ modelcmp list --task coding --tier mid --json  # the one model to use: the user'
 
 Each JSON model carries `key`, `selected` (on your shortlist), `excluded`, `favorite_for` (the tasks it is the user's favorite
 for, and `task:tier` for a tier's), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
-`eci` (the overall index of `source`, `epoch` or `aa`), per-task `tasks` percentiles, and with `aa` `tokens_per_second` and `ttft_seconds`. `show` and
+`eci` (the overall index of `source`, `epoch` or `aa`), per-task `tasks` (each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile), and with `aa` `tokens_per_second` and `ttft_seconds`. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
-ECI for overall and vision, the percentile for the others. A favorite that is on the line only as
+same as `tasks`. A favorite that is on the line only as
 the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, and the user's `note` when the model has one.
