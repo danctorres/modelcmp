@@ -68,10 +68,59 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     }
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    let res = event_loop(&mut app, &mut terminal, rx);
+    let res = if ask { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
+        .and_then(|()| event_loop(&mut app, &mut terminal, rx));
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     res
+}
+
+const LOGO: [&str; 6] = [
+    "███╗   ███╗ ██████╗ ██████╗ ███████╗██╗      ██████╗███╗   ███╗██████╗ ",
+    "████╗ ████║██╔═══██╗██╔══██╗██╔════╝██║     ██╔════╝████╗ ████║██╔══██╗",
+    "██╔████╔██║██║   ██║██║  ██║█████╗  ██║     ██║     ██╔████╔██║██████╔╝",
+    "██║╚██╔╝██║██║   ██║██║  ██║██╔══╝  ██║     ██║     ██║╚██╔╝██║██╔═══╝ ",
+    "██║ ╚═╝ ██║╚██████╔╝██████╔╝███████╗███████╗╚██████╗██║ ╚═╝ ██║██║     ",
+    "╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝ ╚═════╝╚═╝     ╚═╝╚═╝     ",
+];
+
+/// The first launch's intro: the wordmark dim, a bright band sweeping across it, then all of
+/// it lit. Any key skips it, and is not passed on; a terminal too small for it skips it too.
+fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+    const BAND: usize = 8;
+    let w = LOGO[0].chars().count();
+    let palette = THEMES[crate::view::theme(&app.store.theme)].1.as_ref();
+    // One frame per column the band moves, then the whole wordmark lit.
+    for t in 0..=w + BAND {
+        let done = t == w + BAND;
+        let mut fits = true;
+        terminal.draw(|f| {
+            let a = f.area();
+            let h = LOGO.len() as u16;
+            if usize::from(a.width) < w || a.height < h {
+                fits = false;
+                return;
+            }
+            let (x, y) = (a.x + (a.width - w as u16) / 2, a.y + (a.height - h) / 2);
+            let buf = f.buffer_mut();
+            for (r, row) in LOGO.iter().enumerate() {
+                for (c, ch) in row.chars().enumerate() {
+                    let lit = done || (t.saturating_sub(BAND)..t).contains(&c);
+                    let style = if lit { fg(ACCENT).add_modifier(Modifier::BOLD) } else { fg(MUTED) };
+                    buf[(x + c as u16, y + r as u16)].set_char(ch).set_style(style);
+                }
+            }
+            recolor(buf, palette);
+        })?;
+        if !fits {
+            return Ok(());
+        }
+        if event::poll(Duration::from_millis(if done { 600 } else { 15 }))? {
+            event::read()?;
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 fn spawn_refresh() -> Refresh {
@@ -1679,6 +1728,12 @@ mod tests {
     use crate::app::ECI;
     use crate::data::Offer;
     use ratatui::crossterm::event::KeyCode;
+
+    #[test]
+    fn the_logo_rows_line_up() {
+        let w = LOGO[0].chars().count();
+        assert!(LOGO.iter().all(|r| r.chars().count() == w), "centring and the band assume one width");
+    }
 
     fn model(name: &str, dev: &str, eci: Option<f64>, price: f64) -> Model {
         Model {
