@@ -16,10 +16,10 @@ pub fn money(x: f64) -> String {
 
 /// A theme's colours: the terminal's 16 in ANSI order (black, red, green, yellow, blue,
 /// magenta, cyan, white, then the bright ones), default text, the background, and the accents
-/// developers and harnesses take theirs from. Their count has to divide the 210 of `dev_color`
-/// to keep the five harness names apart (5, 10 and 14 do; 6 and 7 collide), and they have to stand
-/// far enough apart to tell two developers by colour (`accents_are_told_apart`). Nord's own
-/// palette is four blues, so its last two are tints of it rather than a fifth near-blue.
+/// developers and harnesses take theirs from. There have to be at least as many as Via names
+/// (`data::vias`), their count has to divide the 210 of `dev_color` (6, 10 and 14 do), and
+/// they have to stand far enough apart to tell two developers by colour
+/// (`accents_are_told_apart`). Nord's own palette is four blues, so its last two are tints of it rather than a fifth near-blue.
 /// Every colour here is drawn as text on the background, so each has to read on it
 /// (`every_theme_reads_on_its_own_background`); a status pill takes its text from `bg`
 /// and its fill from the half of a colour furthest from it, so `ansi[0]` need not stand out.
@@ -314,10 +314,10 @@ pub const THEMES: [(&str, Option<Palette>); 21] = [
             ],
             text: 0x0f380f,
             bg: 0x9bbc0f,
-            // Five, not ten: the DMG screen is four shades of green, and ten colours that far
-            // apart would have to leave it for navy and purple. Five still divide the 210 and
-            // keep the harnesses apart, as the terminal's own five do.
-            accents: &[0x0f380f, 0x306230, 0x3b2d0c, 0x13463a, 0x704214],
+            // Six, not ten: the DMG screen is four shades of green, and ten colours that far
+            // apart would have to leave it for navy and purple. Six still divide the 210 and
+            // keep the Via names apart, as the terminal's own six do.
+            accents: &[0x0f380f, 0x306230, 0x3b2d0c, 0x13463a, 0x704214, 0x046800],
         }),
     ),
 ];

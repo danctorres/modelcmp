@@ -20,8 +20,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
-/// 6: `Model::shown`.
-const FORMAT: u32 = 6;
+/// 6: `Model::shown`. 7: `Data::harness` from pi.
+const FORMAT: u32 = 7;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -192,16 +192,24 @@ pub fn save_aa_key(key: &str) -> std::io::Result<()> {
 enum Probe {
     /// A command that prints the `provider/model` ids it has access to, one per line.
     List(&'static [&'static str]),
+    /// A command that prints a table with a header row, then provider and model as the first two columns.
+    Table(&'static [&'static str]),
     /// No such command: being installed means access to every model of this provider.
     Provider(&'static str),
 }
 
 const HARNESSES: &[(&str, Probe)] = &[
     ("opencode", Probe::List(&["models"])),
+    ("pi", Probe::Table(&["--list-models"])),
     ("claude", Probe::Provider("anthropic")),
     ("codex", Probe::Provider("openai")),
     ("gemini", Probe::Provider("google")),
 ];
+
+/// Every name the Via column can show: the harnesses, then "env".
+pub fn vias() -> impl Iterator<Item = &'static str> {
+    HARNESSES.iter().map(|h| h.0).chain(["env"])
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Offer {
@@ -483,10 +491,26 @@ fn harness_models() -> BTreeMap<String, Vec<String>> {
                     let out = run(bin, args, Duration::from_secs(30))?;
                     out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect()
                 }
+                Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30))?)?,
             };
             Some((bin.to_string(), ids))
         })
         .collect()
+}
+
+/// The `provider/model` ids of a table under a header row that starts with `provider`, as
+/// `pi --list-models` prints; `None` without that header.
+fn table_ids(out: &str) -> Option<Vec<String>> {
+    let mut lines = out.lines().skip_while(|l| !l.starts_with("provider"));
+    lines.next()?;
+    Some(
+        lines
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                Some(format!("{}/{}", f.next()?, f.next()?))
+            })
+            .collect(),
+    )
 }
 
 /// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit`.
@@ -1327,6 +1351,13 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_ids_start_after_the_header() {
+        let out = "update available\nprovider  model  context\nanthropic  claude-x  1M\n\nopenrouter  a/b:free  8K\n";
+        assert_eq!(table_ids(out).unwrap(), ["anthropic/claude-x", "openrouter/a/b:free"]);
+        assert_eq!(table_ids("no models\n"), None, "no header, no ids");
+    }
 
     #[test]
     fn run_returns_output_and_gives_up_on_hangs() {

@@ -1,6 +1,6 @@
 ---
 name: modelcmp
-description: "Pick the model for a software task: the user's favorite, else the cheapest that is good enough. Use when choosing a model for a subagent, a delegated task or a harness run (opencode, codex, claude, gemini), or when the user asks which model to use."
+description: "Pick the model for a software task: the user's favorite, else the cheapest that is good enough. Use when choosing a model for a subagent, a delegated task or a harness run (opencode, pi, codex, claude, gemini), or when the user asks which model to use."
 ---
 
 `modelcmp` already joins the models the user can call with their prices and software benchmark scores. It is the source of truth for model choice: ask it rather than the web or your own memory of which model is best.

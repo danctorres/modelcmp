@@ -524,8 +524,8 @@ const TASK: [Color; 6] =
     [Color::LightCyan, Color::Green, Color::LightGreen, Color::Blue, Color::LightMagenta, Color::LightYellow];
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
-/// Developers' and harnesses' colours in the terminal's own theme; the five harness names all differ.
-const DEVS: [Color; 5] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green];
+/// Developers' and harnesses' colours in the terminal's own theme: one per Via name (`data::vias`).
+const DEVS: [Color; 6] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green, Color::LightRed];
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
@@ -603,9 +603,11 @@ const fn fg(c: Color) -> Style {
 }
 
 /// A developer's or harness's colour, as a placeholder `recolor` resolves to one of the theme's
-/// accents: the name's byte sum mod 210, which keeps it mod 5, 10 and 14 (`DEVS`, `Palette::accents`).
+/// accents: a Via name's place in `data::vias`, so no two share one, else the name's byte sum mod
+/// 210, which keeps it mod 6, 10 and 14 (`DEVS`, `Palette::accents`).
 fn dev_color(dev: &str) -> Color {
-    Color::Indexed((dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)
+    let k = crate::data::vias().position(|v| v == dev);
+    Color::Indexed(k.unwrap_or_else(|| dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)
 }
 
 /// A task's colour, or its tier's (`coding:low`), which is the task's.
@@ -1793,7 +1795,7 @@ mod tests {
 
     /// Two developers must not get colours that look the same: the accents stay apart by the
     /// weighted RGB distance (a redmean approximation), and their count divides `dev_color`'s 210
-    /// so the five harness names never collide.
+    /// so a developer keeps its colour from theme to theme where the counts share a factor.
     #[test]
     fn accents_are_told_apart() {
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
@@ -1829,9 +1831,8 @@ mod tests {
     #[test]
     fn every_theme_keeps_the_harnesses_apart() {
         for (name, p) in &THEMES {
-            let colors: Vec<_> =
-                ["opencode", "claude", "codex", "gemini", "env"].map(|h| resolve(dev_color(h), p.as_ref())).into();
-            assert!((1..5).all(|i| !colors[..i].contains(&colors[i])), "{name}: {colors:?}");
+            let colors: Vec<_> = crate::data::vias().map(|h| resolve(dev_color(h), p.as_ref())).collect();
+            assert!((1..colors.len()).all(|i| !colors[..i].contains(&colors[i])), "{name}: {colors:?}");
         }
     }
 

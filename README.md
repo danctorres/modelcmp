@@ -109,9 +109,9 @@ skills can take its body in `AGENTS.md`.
   Needs a free API key: the TUI's first start asks which source to use, then for the key
   if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,
   only its sitemap is read, to link models that have a page there (`o`).
-- What you have: the models `opencode models` lists, the `claude`, `codex` and `gemini`
-  binaries on `PATH` (each counts as its own provider), and providers whose API key is set
-  in the environment. The Via column says which.
+- What you have: the models `opencode models` and `pi --list-models` list, the `claude`, `codex`
+  and `gemini` binaries on `PATH` (each counts as its own provider), and providers whose API key
+  is set in the environment. The Via column says which.
 
 Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`. Your selection,
 exclusions, notes and per-task favorites live in `~/.config/modelcmp/user.json`.

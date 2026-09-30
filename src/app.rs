@@ -479,11 +479,11 @@ pub fn model_id(m: &Model) -> String {
     m.price().map_or_else(|| m.key.clone(), |o| format!("{}/{}", o.provider, o.id))
 }
 
-/// The command that starts `harness` on `m`, if the harness has it: opencode takes
+/// The command that starts `harness` on `m`, if the harness has it: opencode and pi take
 /// `provider/model`, the single-provider CLIs (claude, codex, gemini) the bare model id.
 pub fn launch_cmd(m: &Model, harness: &str) -> Option<Vec<String>> {
     let o = m.offers.iter().find(|o| o.via.iter().any(|v| v == harness) && harness != "env")?;
-    let id = if harness == "opencode" { format!("{}/{}", o.provider, o.id) } else { o.id.clone() };
+    let id = if matches!(harness, "opencode" | "pi") { format!("{}/{}", o.provider, o.id) } else { o.id.clone() };
     Some(vec![harness.into(), "--model".into(), id])
 }
 
