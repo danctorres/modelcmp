@@ -11,6 +11,8 @@ const MODELS_URL: &str = "https://models.dev/api.json";
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
 /// Artificial Analysis's page names, only to link a model there: its API needs a key.
 const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
+/// modelcmp's newest release, fetched with the data so a new version is told once a day at most.
+const RELEASE_URL: &str = "https://api.github.com/repos/danctorres/modelcmp/releases/latest";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
@@ -207,12 +209,21 @@ pub struct Data {
     /// `fit::task_benches()` when fetched; a cache made with other benchmarks is stale.
     #[serde(default)]
     pub benches: Vec<String>,
+    /// modelcmp's newest release at the last refresh, "0.2.0"; empty when unknown.
+    #[serde(default)]
+    pub latest: String,
     pub models: Vec<Model>,
 }
 
 impl Data {
     pub fn age(&self) -> Duration {
         Duration::from_secs(now().saturating_sub(self.fetched))
+    }
+
+    /// The newest release when it is newer than this build.
+    pub fn update(&self) -> Option<&str> {
+        let v = |s: &str| s.split('.').map(|n| n.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+        (v(&self.latest) > v(env!("CARGO_PKG_VERSION"))).then_some(self.latest.as_str())
     }
 
     pub fn stale(&self) -> bool {
@@ -347,12 +358,13 @@ fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache.
 pub fn refresh() -> Result<Data, String> {
-    let (models, epoch, aa, harness) = std::thread::scope(|s| {
+    let (models, epoch, aa, harness, release) = std::thread::scope(|s| {
         let a = s.spawn(|| fetch(MODELS_URL));
         let b = s.spawn(|| fetch(EPOCH_URL));
         let c = s.spawn(|| fetch(AA_URL));
         let d = s.spawn(harness_models);
-        (a.join().unwrap(), b.join().unwrap(), c.join().unwrap(), d.join().unwrap())
+        let e = s.spawn(|| fetch(RELEASE_URL));
+        (a.join().unwrap(), b.join().unwrap(), c.join().unwrap(), d.join().unwrap(), e.join().unwrap())
     });
     let mut data = merge(&models?, &epoch?)?;
     // Only links hang on it, so without it the refresh still succeeds, with no AA links.
@@ -360,6 +372,12 @@ pub fn refresh() -> Result<Data, String> {
         aa_pages(&mut data.models, &String::from_utf8_lossy(&xml));
     }
     data.harness = harness;
+    // Only the update notice hangs on it, so without it the refresh still succeeds.
+    data.latest = release
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
+        .unwrap_or_default();
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
     crate::store::write_atomic(&cache_path(), &json).map_err(|e| format!("cache: {e}"))?;
     data.apply_available();
@@ -1004,7 +1022,7 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
     crate::fit::add_value(&mut models);
     models.sort_by(|a, b| b.eci.unwrap_or(0.0).total_cmp(&a.eci.unwrap_or(0.0)).then(b.release.cmp(&a.release)));
     let benches = crate::fit::task_benches().into_iter().map(String::from).collect();
-    Ok(Data { format: FORMAT, fetched: now(), harness: BTreeMap::new(), benches, models })
+    Ok(Data { format: FORMAT, fetched: now(), harness: BTreeMap::new(), benches, latest: String::new(), models })
 }
 
 #[cfg(test)]
@@ -1302,6 +1320,18 @@ mod tests {
         }
         let err = parse_epoch(buf.get_ref()).unwrap_err();
         assert!(err.contains("model_group"), "{err}");
+    }
+
+    #[test]
+    fn only_a_newer_release_is_an_update() {
+        let d = |latest: &str| Data { latest: latest.into(), ..Data::default() };
+        assert_eq!(d("99.0.0").update(), Some("99.0.0"));
+        assert!(d(env!("CARGO_PKG_VERSION")).update().is_none());
+        assert!(d("0.0.1").update().is_none());
+        assert!(d("").update().is_none());
+        // 0.10 is newer than 0.9: compared as numbers, not text.
+        let v: Vec<u64> = env!("CARGO_PKG_VERSION").split('.').map(|n| n.parse().unwrap()).collect();
+        assert!(d(&format!("{}.{}.{}", v[0], v[1] + 10, 0)).update().is_some());
     }
 
     #[test]

@@ -617,6 +617,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         .border_style(fg(MUTED))
         .title_top(Line::from(about).style(fg(MUTED)).centered())
         .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
+        .title_bottom(match app.data.update() {
+            Some(new) => Line::from(format!(" modelcmp v{new} available ")).style(fg(Color::Yellow)),
+            None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
+        })
         .title_bottom(
             Line::from(vec![Span::styled(" models.dev + Epoch AI · ", fg(MUTED)), Span::styled(state, fg(color))])
                 .right_aligned(),
@@ -2282,6 +2286,7 @@ mod tests {
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         let bottom: String = (0..100).map(|x| term.backend().buffer()[(x, 6)].symbol()).collect();
         assert!(bottom.contains("models.dev + Epoch AI"), "{bottom}");
+        assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{bottom}");
         assert_eq!(a.page, 3, "8 lines minus status bar, two borders, the header and its rule");
         // The right border marks columns off to the right, the left one rows below, then above.
         let mut data = std::mem::take(&mut a.data);
