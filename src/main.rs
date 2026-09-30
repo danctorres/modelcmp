@@ -154,7 +154,8 @@ fn bound(s: &str) -> Result<(usize, f64), String> {
         s.split_once('=').ok_or_else(|| format!("expected column=value, e.g. coding=155; columns: {}", ids()))?;
     let col =
         app::COLS.iter().position(|c| c.id == id).ok_or_else(|| format!("no column '{id}'; columns: {}", ids()))?;
-    Ok((col, v.parse().map_err(|_| format!("'{v}' is not a number"))?))
+    let v = v.parse().ok().filter(|x: &f64| !x.is_nan()).ok_or_else(|| format!("'{v}' is not a number"))?;
+    Ok((col, v))
 }
 
 fn main() {
@@ -193,6 +194,11 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     if !data.any_available() {
         eprintln!("note: no harness models or provider API keys found, showing all models");
     }
+    // A command that saves holds the lock from load to save.
+    let _lock = matches!(cmd, Cmd::Select { .. } | Cmd::Exclude { .. } | Cmd::Note { .. } | Cmd::Fav { .. })
+        .then(|| store::lock(&store::path()))
+        .transpose()
+        .map_err(|e| Exit::from(format!("cannot lock {}: {e}", store::path().display())))?;
     // Loaded after the download, which can take a minute: what the TUI or an agent saved meanwhile is kept.
     let mut store = Store::load();
     // clap has already validated task names against fit::TASKS.

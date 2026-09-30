@@ -6,7 +6,7 @@
   <a href="https://github.com/danctorres/modelcmp/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danctorres/modelcmp/ci.yml?branch=main&event=push&label=ci" alt="CI"></a>
   <a href="https://github.com/danctorres/modelcmp/releases"><img src="https://img.shields.io/github/v/release/danctorres/modelcmp" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/danctorres/modelcmp" alt="License"></a>
-  <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/rust-1.89%2B-orange" alt="Rust 1.89+">
 </p>
 
 <p align="center">
@@ -39,7 +39,7 @@ cargo install --git https://github.com/danctorres/modelcmp
 ```
 
 Linux and macOS; binaries are on the [releases](https://github.com/danctorres/modelcmp/releases)
-page. `cargo install` needs Rust 1.88 or later.
+page. `cargo install` needs Rust 1.89 or later.
 
 ## Usage
 

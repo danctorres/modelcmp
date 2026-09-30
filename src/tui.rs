@@ -157,6 +157,8 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
         let mut wait = timeout;
         while event::poll(wait).map_err(|e| e.to_string())? {
             wait = Duration::ZERO;
+            // Held until the key's change is saved, so an agent's write cannot land in between.
+            let _lock = crate::store::lock(&crate::store::path());
             // An agent may have marked or noted a model meanwhile: act on its file, not a stale copy.
             if app.store.reload_if_changed() {
                 app.rebuild_in_place();

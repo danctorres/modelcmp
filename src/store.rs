@@ -10,9 +10,12 @@ use std::time::SystemTime;
 pub struct Store {
     #[serde(skip)]
     path: PathBuf,
-    /// The file's mtime when this process last read or wrote it, to spot another writer.
+    /// The file's stamp when this process last read or wrote it, to spot another writer.
     #[serde(skip)]
-    mtime: Option<SystemTime>,
+    mtime: Option<Stamp>,
+    /// Why the file could not be read, when it exists: saving over it would lose it.
+    #[serde(skip)]
+    unreadable: Option<String>,
     /// Pins from older files, read once and loaded as marks.
     #[serde(alias = "favorites", skip_serializing)]
     pinned: BTreeSet<String>,
@@ -45,8 +48,26 @@ pub fn slots() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
     })
 }
 
-fn mtime(p: &Path) -> Option<SystemTime> {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+/// mtime and inode: each save renames a new file in, so the inode tells two saves apart
+/// within one tick of the filesystem's coarse clock.
+type Stamp = (SystemTime, u64);
+
+fn mtime(p: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(p).ok()?;
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&m);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some((m.modified().ok()?, ino))
+}
+
+/// Hold it from reading the file to saving it, so two writers (parallel `modelcmp select`s,
+/// the TUI and an agent) cannot both change the same old copy and drop one's change.
+pub fn lock(p: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")))?;
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.with_extension("lock"))?;
+    f.lock()?;
+    Ok(f)
 }
 
 pub fn path() -> PathBuf {
@@ -66,7 +87,10 @@ pub fn write_private(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 fn write_mode(p: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")))?;
-    let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
+    // Per call too: two refreshes in the TUI can write one cache at once.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = p.with_extension(format!("{}.{n}.tmp", std::process::id()));
     // `mode` applies only to a new file, so not to one a crash left behind.
     let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
@@ -88,7 +112,11 @@ impl Store {
     /// instead of being silently replaced by the next save.
     pub fn load_from(path: PathBuf) -> Self {
         let mut s = match std::fs::read(&path) {
-            Err(_) => Store::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
+            Err(e) => {
+                eprintln!("warning: cannot read {} ({e}); changes will not be saved", path.display());
+                Store { unreadable: Some(e.to_string()), ..Store::default() }
+            }
             Ok(bytes) => serde_json::from_slice::<Store>(&bytes).unwrap_or_else(|e| {
                 let bad = path.with_extension("json.bad");
                 eprintln!("warning: {} is not valid ({e}); moved to {}", path.display(), bad.display());
@@ -109,6 +137,10 @@ impl Store {
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
+        if let Some(e) = &self.unreadable {
+            let msg = format!("{} could not be read ({e}), so it is not overwritten", self.path.display());
+            return Err(std::io::Error::other(msg));
+        }
         write_atomic(&self.path, serde_json::to_string_pretty(self)?.as_bytes())?;
         self.mtime = mtime(&self.path);
         Ok(())
@@ -122,7 +154,10 @@ impl Store {
         if now == self.mtime {
             return false;
         }
-        let parses = std::fs::read(&self.path).map_or(true, |b| serde_json::from_slice::<Store>(&b).is_ok());
+        let parses = match std::fs::read(&self.path) {
+            Ok(b) => serde_json::from_slice::<Store>(&b).is_ok(),
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        };
         if parses {
             *self = Store::load_from(std::mem::take(&mut self.path));
         } else {
@@ -277,13 +312,23 @@ mod tests {
         tui.toggle_marked("a");
         tui.save().unwrap();
         assert!(!tui.reload_if_changed(), "its own save is not a change");
-        // An agent marks another model; the file's mtime moves on.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // An agent marks another model, in the same tick of the clock as likely as not.
         let mut agent = Store::load_from(p.clone());
         agent.toggle_marked("b");
         agent.save().unwrap();
         assert!(tui.reload_if_changed());
         assert_eq!(tui.marked, ["a", "b"]);
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_file_is_not_saved_over() {
+        let p = tmp("unreadable");
+        std::fs::create_dir_all(&p).unwrap();
+        let mut s = Store::load_from(p.clone());
+        s.toggle_marked("a");
+        assert!(s.save().is_err());
+        assert!(p.is_dir());
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 
