@@ -20,8 +20,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
-/// 6: `Model::shown`.
-const FORMAT: u32 = 6;
+/// 6: `Model::shown`. 7: no deprecated offers, no fine-tunes folded into their base.
+const FORMAT: u32 = 7;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -800,18 +800,25 @@ fn slug(id: &str) -> String {
     id.rsplit('/').next().unwrap_or(id).to_lowercase()
 }
 
+/// Prefixes that name a vendor or reseller only in model names, not as a provider or an id's
+/// namespace (`orgs`): "au.anthropic...", "coding-glm-5.1", "Dola Seed", "Doubao Seed".
+const NAME_ORGS: &[&str] = &["au", "coding", "dola", "doubao"];
+
 /// "openaigpt41" -> "gpt41" when "gpt41" exists: providers that prefix the vendor
 /// ("OpenAI: GPT-4.1", "Anthropic Claude Opus 4.7") fold into the plain entry. A stealth
 /// "Space Bunny Alpha" folds the same way into "Space Bunny" when a provider lists that.
-fn fold_vendor(key: &str, keys: &HashSet<String>) -> String {
+/// Only a prefix in `orgs` folds, so a fine-tune ("Shisa v2 Llama 3.3 70B", "GrayLine Qwen3
+/// 8B") keeps its own entry and prices.
+fn fold_vendor(key: &str, keys: &HashSet<String>, orgs: &HashSet<String>) -> String {
     let mut k = key;
     const VENDORS: &[&str] = &["openai", "anthropic", "google", "xai", "meta", "mistral"];
     // ponytail: suffix must be ≥5 chars with a digit (or follow a known vendor, for "o3"),
     // a cheap guard against false merges.
     while let Some(r) = (2..k.len()).map(|i| &k[i..]).find(|r| {
+        let prefix = &k[..k.len() - r.len()];
         let long = r.len() >= 5 && r.bytes().any(|b| b.is_ascii_digit());
-        let vendor = VENDORS.contains(&&k[..k.len() - r.len()]);
-        (long || vendor) && r.len() >= 2 && keys.contains(*r)
+        let vendor = VENDORS.contains(&prefix);
+        (long && orgs.contains(prefix) || vendor) && keys.contains(*r)
     }) {
         k = r;
     }
@@ -845,6 +852,8 @@ struct MdModel {
     modalities: MdModalities,
     limit: MdLimit,
     cost: Option<MdCost>,
+    /// "deprecated" for a retired endpoint, whose id no longer works.
+    status: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1238,17 +1247,25 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
     let entries: Vec<(&String, &String, &MdModel, String)> = pids
         .into_iter()
         .flat_map(|pid| providers[pid].models.iter().map(move |(mid, md)| (pid, mid, md)))
-        // Text generation models only: skip image/video/embedding endpoints.
+        // Text generation models only: skip image/video/embedding endpoints, and retired ones.
         .filter(|(_, _, md)| md.modalities.output.is_empty() || md.modalities.output.iter().any(|o| o == "text"))
+        .filter(|(_, _, md)| md.status != "deprecated")
         .map(|(pid, mid, md)| (pid, mid, md, offer_name(mid, &md.name)))
         .filter(|e| !norm(&e.3).is_empty())
         .collect();
     let keys: HashSet<String> = entries.iter().map(|e| norm(&e.3)).collect();
+    // Providers and the namespaces of ids ("Pro/zai-org/GLM-5": pro, zaiorg).
+    let orgs: HashSet<String> = entries
+        .iter()
+        .flat_map(|e| std::iter::once(e.0.as_str()).chain(e.1.split('/').rev().skip(1)))
+        .map(norm)
+        .chain(NAME_ORGS.iter().map(|s| s.to_string()))
+        .collect();
 
     for (pid, mid, md, name) in entries {
         let p = &providers[pid];
         let raw = norm(&name);
-        let key = fold_vendor(&raw, &keys);
+        let key = fold_vendor(&raw, &keys, &orgs);
         if pid == "openrouter" {
             openrouter.entry(key.clone()).or_insert_with(|| mid.clone());
             or_slug.entry(slug(mid)).or_insert_with(|| mid.clone());
@@ -1433,17 +1450,32 @@ mod tests {
     }
 
     #[test]
+    fn retired_and_fine_tuned_models_keep_out_of_the_base() {
+        let json = br#"{"p": {"models": {
+            "gpt-4.1": {"name": "GPT-4.1", "cost": {"input": 2, "output": 8}},
+            "old/gpt-4.1": {"name": "GPT-4.1", "status": "deprecated", "cost": {"input": 1, "output": 1}},
+            "shisa/shisa-v2-gpt-4.1": {"name": "Shisa v2 GPT-4.1", "cost": {"input": 0.5, "output": 0.5}}
+        }}}"#;
+        let d = merge(json, &Scores::default()).unwrap();
+        let offers = |k: &str| d.models.iter().find(|m| m.key == k).map(|m| m.offers.len());
+        assert_eq!((offers("gpt41"), offers("shisav2gpt41")), (Some(1), Some(1)));
+    }
+
+    #[test]
     fn folds_vendor_prefix() {
         let keys: HashSet<String> =
             ["gpt41", "openaigpt41", "prozaiorgglm5", "zaiorgglm5", "glm5x", "o3", "openaio3", "spacebunny"]
                 .map(String::from)
                 .into();
-        assert_eq!(fold_vendor("openaigpt41", &keys), "gpt41");
-        assert_eq!(fold_vendor("prozaiorgglm5", &keys), "zaiorgglm5");
-        assert_eq!(fold_vendor("gpt41", &keys), "gpt41");
-        assert_eq!(fold_vendor("openaio3", &keys), "o3");
-        assert_eq!(fold_vendor("spacebunnyalpha", &keys), "spacebunny");
-        assert_eq!(fold_vendor("oxalpha", &keys), "oxalpha", "no plain entry, no fold");
+        let orgs: HashSet<String> = ["pro", "zaiorg"].map(String::from).into();
+        let fold = |k| fold_vendor(k, &keys, &orgs);
+        assert_eq!(fold("openaigpt41"), "gpt41");
+        assert_eq!(fold("prozaiorgglm5"), "zaiorgglm5");
+        assert_eq!(fold("gpt41"), "gpt41");
+        assert_eq!(fold("openaio3"), "o3");
+        assert_eq!(fold("spacebunnyalpha"), "spacebunny");
+        assert_eq!(fold("oxalpha"), "oxalpha", "no plain entry, no fold");
+        assert_eq!(fold("shisav2gpt41"), "shisav2gpt41", "a fine-tune is not its base");
     }
 
     #[test]
