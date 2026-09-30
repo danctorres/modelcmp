@@ -4,13 +4,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
+/// Epoch's scores; with Artificial Analysis's, only its model pages, to link a model there.
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
-/// Artificial Analysis's page names, only to link a model there: its API needs a key.
+/// Artificial Analysis's page names, to link a model there that its API did not name one for.
 const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
+/// Artificial Analysis's scores, with an API key (`aa_key`).
+const AA_API_URL: &str = "https://artificialanalysis.ai/api/v2/data/llms/models";
 /// modelcmp's newest release, fetched with the data so a new version is told once a day at most.
 const RELEASE_URL: &str = "https://api.github.com/repos/danctorres/modelcmp/releases/latest";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
@@ -45,6 +48,136 @@ pub fn set_cached(share: f64) {
     CACHED.with(|c| c.store(bits, Relaxed));
     #[cfg(not(test))]
     CACHED.store(bits, Relaxed);
+}
+
+/// Where the benchmark scores come from: Epoch AI needs nothing, Artificial Analysis an API key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Source {
+    #[default]
+    Epoch,
+    Aa,
+}
+
+impl Source {
+    pub const ALL: [Source; 2] = [Source::Epoch, Source::Aa];
+
+    /// Its name in `--source`, the store and the cache: "epoch", "aa".
+    pub fn id(self) -> &'static str {
+        match self {
+            Source::Epoch => "epoch",
+            Source::Aa => "aa",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Epoch => "Epoch AI",
+            Source::Aa => "Artificial Analysis",
+        }
+    }
+
+    /// The overall index's column name and what it is.
+    pub fn index(self) -> (&'static str, &'static str) {
+        match self {
+            Source::Epoch => ("ECI", "Epoch AI's overall capability index"),
+            Source::Aa => ("AAII", "Artificial Analysis Intelligence Index"),
+        }
+    }
+
+    /// What it takes, for the `B` chooser.
+    pub fn about(self) -> &'static str {
+        match self {
+            Source::Epoch => "the default, no API key needed",
+            Source::Aa => "needs an API key, free at artificialanalysis.ai",
+        }
+    }
+
+    /// By `id`; empty is the default.
+    pub fn parse(s: &str) -> Option<Source> {
+        if s.is_empty() {
+            return Some(Source::default());
+        }
+        Source::ALL.into_iter().find(|x| x.id() == s)
+    }
+
+    /// The benchmarks its tasks use; a cache made with others is stale.
+    fn benches(self) -> Vec<&'static str> {
+        match self {
+            Source::Epoch => crate::fit::task_benches(),
+            Source::Aa => crate::fit::aa_fields(),
+        }
+    }
+}
+
+/// The source in use: one process-wide setting, like `CACHED`.
+#[cfg(not(test))]
+static SOURCE: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+thread_local!(static SOURCE: AtomicU8 = const { AtomicU8::new(0) });
+
+pub fn source() -> Source {
+    #[cfg(test)]
+    let i = SOURCE.with(|s| s.load(Relaxed));
+    #[cfg(not(test))]
+    let i = SOURCE.load(Relaxed);
+    Source::ALL[i as usize]
+}
+
+pub fn set_source(s: Source) {
+    let i = Source::ALL.iter().position(|x| *x == s).unwrap_or(0) as u8;
+    #[cfg(test)]
+    SOURCE.with(|x| x.store(i, Relaxed));
+    #[cfg(not(test))]
+    SOURCE.store(i, Relaxed);
+}
+
+/// Artificial Analysis's API key: `AA_KEY_ENV`, else the one saved with `save_aa_key`.
+pub const AA_KEY_ENV: &str = "ARTIFICIAL_ANALYSIS_API_KEY";
+/// A refresh's error when Artificial Analysis turns the key down, for the TUI to ask again.
+pub const AA_REJECTED: &str = "Artificial Analysis rejected the API key";
+/// A refresh's error when there is no key at all, for the TUI to ask for one.
+pub const AA_MISSING: &str = "Artificial Analysis needs an API key";
+
+#[cfg(not(test))]
+fn aa_key_path() -> PathBuf {
+    crate::store::path().with_file_name("aa_key")
+}
+
+/// Blank counts as unset, in the environment as in the file.
+fn nonblank(k: &str) -> Option<String> {
+    Some(k.trim().to_string()).filter(|k| !k.is_empty())
+}
+
+// Tests set the environment's key and the saved one here, never reading or writing yours.
+#[cfg(test)]
+thread_local!(pub static TEST_KEYS: std::cell::RefCell<[Option<String>; 2]> = const { std::cell::RefCell::new([None, None]) });
+
+pub fn aa_key() -> Option<String> {
+    #[cfg(test)]
+    let saved = TEST_KEYS.with(|k| k.borrow()[1].clone());
+    #[cfg(not(test))]
+    let saved = std::fs::read_to_string(aa_key_path()).ok();
+    aa_key_env().or_else(|| saved.as_deref().and_then(nonblank))
+}
+
+/// The key set in `AA_KEY_ENV`, which a saved one would not replace.
+pub fn aa_key_env() -> Option<String> {
+    #[cfg(test)]
+    let env = TEST_KEYS.with(|k| k.borrow()[0].clone());
+    #[cfg(not(test))]
+    let env = std::env::var(AA_KEY_ENV).ok();
+    env.as_deref().and_then(nonblank)
+}
+
+/// Saved apart from user.json, readable by you alone, so the key is never shared with your settings.
+pub fn save_aa_key(key: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        TEST_KEYS.with(|k| k.borrow_mut()[1] = Some(key.trim().to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    crate::store::write_private(&aa_key_path(), key.trim().as_bytes())
 }
 /// How a harness tells which models it can use.
 enum Probe {
@@ -125,6 +258,12 @@ pub struct Model {
     /// though no task uses those benchmarks.
     #[serde(default)]
     pub epoch: Option<String>,
+    /// Output tokens per second and seconds to the first token, medians across providers:
+    /// Artificial Analysis measures them, Epoch does not.
+    #[serde(default)]
+    pub tps: Option<f64>,
+    #[serde(default)]
+    pub ttft: Option<f64>,
     #[serde(skip)]
     pub available: bool,
     /// Every `Offer::via` of the model, once each.
@@ -227,7 +366,7 @@ impl Data {
     }
 
     pub fn stale(&self) -> bool {
-        self.age() > MAX_AGE || self.format != FORMAT || self.benches != crate::fit::task_benches()
+        self.age() > MAX_AGE || self.format != FORMAT || self.benches != source().benches()
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness, or the
@@ -294,12 +433,17 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn cache_path() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join("data.json")
+/// One per source, so a switch back needs no download: data.json for Epoch, data-aa.json.
+fn cache_path(src: Source) -> PathBuf {
+    let name = match src {
+        Source::Epoch => "data.json".to_string(),
+        s => format!("data-{}.json", s.id()),
+    };
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join(name)
 }
 
 pub fn load_cache() -> Option<Data> {
-    let bytes = std::fs::read(cache_path()).ok()?;
+    let bytes = std::fs::read(cache_path(source())).ok()?;
     let mut d: Data = serde_json::from_slice(&bytes).ok()?;
     // Derived from cached fields, so a change to the formula applies without a re-download.
     crate::fit::add_value(&mut d.models);
@@ -358,15 +502,34 @@ fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache.
 pub fn refresh() -> Result<Data, String> {
-    let (models, epoch, aa, harness, release) = std::thread::scope(|s| {
-        let a = s.spawn(|| fetch(MODELS_URL));
-        let b = s.spawn(|| fetch(EPOCH_URL));
-        let c = s.spawn(|| fetch(AA_URL));
-        let d = s.spawn(harness_models);
-        let e = s.spawn(|| fetch(RELEASE_URL));
-        (a.join().unwrap(), b.join().unwrap(), c.join().unwrap(), d.join().unwrap(), e.join().unwrap())
+    let src = source();
+    let key = match src {
+        Source::Epoch => None,
+        Source::Aa => {
+            Some(aa_key().ok_or_else(|| format!("{AA_MISSING}: set {AA_KEY_ENV}, or pick it with B in the TUI"))?)
+        }
+    };
+    let (models, epoch, api, aa, harness, release) = std::thread::scope(|s| {
+        let a = s.spawn(|| fetch(MODELS_URL, None));
+        let b = s.spawn(|| fetch(EPOCH_URL, None));
+        let c = s.spawn(|| key.as_deref().map(|k| fetch(AA_API_URL, Some(k))));
+        let d = s.spawn(|| fetch(AA_URL, None));
+        let e = s.spawn(harness_models);
+        let f = s.spawn(|| fetch(RELEASE_URL, None));
+        let (a, b, c) = (a.join().unwrap(), b.join().unwrap(), c.join().unwrap());
+        (a, b, c, d.join().unwrap(), e.join().unwrap(), f.join().unwrap())
     });
-    let mut data = merge(&models?, &epoch?)?;
+    let mut data = match api {
+        None => merge(&models?, &parse_epoch(&epoch?)?)?,
+        Some(api) => {
+            let mut data = merge(&models?, &parse_aa(&api?)?)?;
+            // Only links hang on it, so without it the refresh still succeeds, with no epoch.ai links.
+            if let Ok(ep) = epoch.and_then(|z| parse_epoch(&z)) {
+                epoch_pages(&mut data.models, &ep);
+            }
+            data
+        }
+    };
     // Only links hang on it, so without it the refresh still succeeds, with no AA links.
     if let Ok(xml) = aa {
         aa_pages(&mut data.models, &String::from_utf8_lossy(&xml));
@@ -379,7 +542,8 @@ pub fn refresh() -> Result<Data, String> {
         .and_then(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
         .unwrap_or_default();
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
-    crate::store::write_atomic(&cache_path(), &json).map_err(|e| format!("cache: {e}"))?;
+    // Its own source's file, though a switch may have happened meanwhile.
+    crate::store::write_atomic(&cache_path(src), &json).map_err(|e| format!("cache: {e}"))?;
     data.apply_available();
     Ok(data)
 }
@@ -401,13 +565,17 @@ pub fn load(force: bool) -> Result<(Data, Option<String>), String> {
     }
 }
 
-fn fetch(url: &str) -> Result<Vec<u8>, String> {
+/// `url`'s body; `key` goes in Artificial Analysis's `x-api-key` header.
+fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).build().into();
-    agent
-        .get(url)
-        .call()
-        .and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec())
-        .map_err(|e| format!("{url}: {e}"))
+    let mut req = agent.get(url);
+    if let Some(k) = key {
+        req = req.header("x-api-key", k);
+    }
+    req.call().and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec()).map_err(|e| match e {
+        ureq::Error::StatusCode(401 | 403) if key.is_some() => AA_REJECTED.to_string(),
+        e => format!("{url}: {e}"),
+    })
 }
 
 /// "Claude Opus 4.5" -> ["claude", "opus", "4", "5"]: its lowercase alphanumeric runs.
@@ -422,22 +590,6 @@ fn words(s: &str) -> Vec<String> {
 /// release: "Gemini 2.5 Pro (Jun 2025)" is not `gemini-2-5-pro`.
 // ponytail: the sitemap misses some pages, so those models get no link rather than a guessed one.
 fn aa_pages(models: &mut [Model], sitemap: &str) {
-    const SKIP: &[&str] = &["instruct", "hosted", "amazon", "cohere"];
-    let key = |slug: &str| {
-        // "qwen3" is "qwen 3", as AA writes it both ways.
-        let mut k: Vec<String> = words(slug)
-            .iter()
-            .flat_map(|w| match w.find(|c: char| c.is_ascii_digit()) {
-                Some(i) if i > 0 && w[..i].bytes().all(|b| b.is_ascii_alphabetic()) => {
-                    vec![w[..i].to_string(), w[i..].to_string()]
-                }
-                _ => vec![w.clone()],
-            })
-            .filter(|w| !SKIP.contains(&w.as_str()))
-            .collect();
-        k.sort();
-        k
-    };
     let pages: HashSet<&str> = sitemap
         .split("<loc>https://artificialanalysis.ai/models/")
         .skip(1)
@@ -446,16 +598,47 @@ fn aa_pages(models: &mut [Model], sitemap: &str) {
         .collect();
     let mut by_key: HashMap<Vec<String>, &str> = HashMap::new();
     for &p in &pages {
-        let e = by_key.entry(key(p)).or_insert(p);
+        let e = by_key.entry(aa_words(p, false)).or_insert(p);
         if (p.len(), p) < (e.len(), *e) {
             *e = p;
         }
     }
-    for m in models {
+    // The API's own page for a model it scored stands.
+    for m in models.iter_mut().filter(|m| m.aa.is_none()) {
         let slug = words(&m.name).join("-");
-        let page = pages.get(slug.as_str()).or_else(|| by_key.get(&key(&slug)));
+        let page = pages.get(slug.as_str()).or_else(|| by_key.get(&aa_words(&slug, false)));
         m.aa = page.map(|p| p.to_string());
     }
+}
+
+/// A name's words as Artificial Analysis's pages are matched: sorted, "qwen3" as "qwen 3", the
+/// vendor and "instruct" left out. `effort` leaves out the reasoning setting too, as the API
+/// lists "claude-opus-5-5-high" and "-non-reasoning" apart from "claude-opus-5-5": only at the
+/// end of a name with a version, as "Magistral Medium" is a model and not a setting of Magistral.
+// ponytail: a setting before a date ("…-reasoning-04-2025") stays, so that release is its own model.
+fn aa_words(slug: &str, effort: bool) -> Vec<String> {
+    const SKIP: &[&str] = &["instruct", "hosted", "amazon", "cohere"];
+    const EFFORT: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "reasoning", "non", "thinking", "adaptive"];
+    let mut w = words(slug);
+    while effort
+        && w.last().is_some_and(|l| EFFORT.contains(&l.as_str()))
+        && w[..w.len() - 1].iter().any(|x| x.bytes().any(|b| b.is_ascii_digit()))
+    {
+        w.pop();
+    }
+    let mut k: Vec<String> = w
+        .iter()
+        .flat_map(|w| match w.find(|c: char| c.is_ascii_digit()) {
+            // "qwen3" is "qwen 3", as AA writes it both ways.
+            Some(i) if i > 0 && w[..i].bytes().all(|b| b.is_ascii_alphabetic()) => {
+                vec![w[..i].to_string(), w[i..].to_string()]
+            }
+            _ => vec![w.clone()],
+        })
+        .filter(|w| !SKIP.contains(&w.as_str()))
+        .collect();
+    k.sort();
+    k
 }
 
 /// Lowercase alphanumerics only: "Claude Opus 4.5" == "claude-opus-4-5" == "claude_opus_4.5".
@@ -615,20 +798,29 @@ struct MdCost {
 
 // ---------- Epoch ----------
 
-/// (display name, eci, bench -> score)
+/// (display name, overall index, bench -> score)
 type Group = (String, Option<f64>, BTreeMap<String, f64>);
 type CsvRow = HashMap<String, String>;
 
+/// A benchmark source's models, as `merge` joins them to models.dev's.
 #[derive(Default, Debug)]
-struct Epoch {
-    /// Keyed by norm(name). Ordered so that merge results are deterministic.
+struct Scores {
+    source: Source,
+    /// Keyed by norm(name) for Epoch, `aa_words` for Artificial Analysis. Ordered so that merge
+    /// results are deterministic.
     groups: BTreeMap<String, Group>,
     /// "Gemini 2.5 Pro (Jun 2025)" is reachable as "gemini25pro"; newest dated version wins.
     alias: HashMap<String, String>,
-    /// norm(group) -> organization.
+    /// group -> organization.
     org: HashMap<String, String>,
     /// Benchmark -> Epoch's fit of it.
     benches: HashMap<String, crate::fit::Bench>,
+    /// group -> task -> percentile.
+    fit: HashMap<String, BTreeMap<String, f64>>,
+    /// group -> its page on artificialanalysis.ai.
+    page: HashMap<String, String>,
+    /// group -> (tokens/s, time to first token) of that page's setting.
+    speed: HashMap<String, (Option<f64>, Option<f64>)>,
 }
 
 /// Short developer names, the same whichever source named them.
@@ -795,10 +987,24 @@ fn csv_rows(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<Vec<
     Some(rows)
 }
 
-fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
+impl Scores {
+    /// The group a models.dev key joins: its own, or the one it is an alias of.
+    fn group(&self, key: &str) -> Option<&String> {
+        self.groups.get_key_value(key).map(|(k, _)| k).or_else(|| self.alias.get(key))
+    }
+}
+
+/// Epoch's page for each model it has one for, when the scores are Artificial Analysis's.
+fn epoch_pages(models: &mut [Model], ep: &Scores) {
+    for m in models {
+        m.epoch = ep.group(&m.key).map(|k| ep.groups[k].0.clone());
+    }
+}
+
+fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("epoch zip: {e}"))?;
     let meta = csv_rows(&mut zip, "model_metadata.csv").ok_or("epoch zip: missing model_metadata.csv")?;
-    let mut ep = Epoch::default();
+    let mut ep = Scores::default();
     let mut dates: HashMap<String, String> = HashMap::new();
     let mut version_group: HashMap<String, String> = HashMap::new();
     for r in &meta {
@@ -879,18 +1085,73 @@ fn parse_epoch(bytes: &[u8]) -> Result<Epoch, String> {
     if ep.groups.values().all(|(_, eci, scores)| eci.is_none() && scores.is_empty()) {
         return Err("epoch zip: no benchmark data found".into());
     }
+    // Unscored groups would sit in every pool at the mean, skewing everyone's percentile.
+    let scored = ep.groups.iter().filter(|(_, (_, eci, s))| eci.is_some() || !s.is_empty());
+    ep.fit = crate::fit::percentiles(scored.map(|(k, (_, eci, s))| (k.as_str(), *eci, s)), &ep.benches);
     Ok(ep)
+}
+
+// ---------- Artificial Analysis ----------
+
+/// The API's models, the reasoning settings of one model folded into one group with the best
+/// score of each (`aa_words`), as Epoch's are. Scores are 0..1, as Epoch's: indices are /100.
+fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("artificial analysis: {e}"))?;
+    let list = v["data"].as_array().or(v.as_array()).ok_or("artificial analysis: no model list")?;
+    let fields = crate::fit::aa_fields();
+    let mut sc = Scores { source: Source::Aa, ..Default::default() };
+    // group -> index of the setting its speed is from.
+    let mut speed_of: HashMap<String, f64> = HashMap::new();
+    for m in list {
+        let (Some(slug), Some(name)) = (m["slug"].as_str(), m["name"].as_str()) else { continue };
+        let num = |f: &str| m["evaluations"][f].as_f64().filter(|x| x.is_finite());
+        let key = aa_words(slug, true).join("-");
+        if key.is_empty() {
+            continue;
+        }
+        let g = sc.groups.entry(key.clone()).or_insert_with(|| (clean_name(name), None, BTreeMap::new()));
+        if let Some(i) = num(crate::fit::AA_INDEX) {
+            g.1 = Some(g.1.map_or(i, |b: f64| b.max(i)));
+        }
+        for f in &fields {
+            if let Some(x) = num(f) {
+                // Indices are 0..100 and single benchmarks 0..1, though one above 1 is a percentage.
+                let x = if f.ends_with("_index") || x > 1.0 { x / 100.0 } else { x };
+                let best = g.2.entry(f.to_string()).or_insert(0.0);
+                *best = best.max(x);
+            }
+        }
+        // The setting-less slug is the model's page; else the shortest.
+        let page = sc.page.entry(key.clone()).or_insert_with(|| slug.to_string());
+        if (slug.len(), slug) < (page.len(), page.as_str()) {
+            *page = slug.to_string();
+        }
+        // The speed of the setting with the best index, which the row's scores mostly are: a
+        // thinking model is not as quick as its non-reasoning setting.
+        let top = |f: &str| m[f].as_f64().filter(|x| x.is_finite() && *x > 0.0);
+        let speed = (top("median_output_tokens_per_second"), top("median_time_to_first_token_seconds"));
+        let rank = num(crate::fit::AA_INDEX).unwrap_or(f64::NEG_INFINITY);
+        if speed != (None, None) && speed_of.get(&key).is_none_or(|&r| rank > r) {
+            speed_of.insert(key.clone(), rank);
+            sc.speed.insert(key.clone(), speed);
+        }
+        if let Some(o) = m["model_creator"]["name"].as_str() {
+            sc.org.entry(key).or_insert_with(|| o.to_string());
+        }
+    }
+    sc.groups.retain(|_, (_, i, s)| i.is_some() || !s.is_empty());
+    if sc.groups.is_empty() {
+        return Err("artificial analysis: no benchmark data found".into());
+    }
+    sc.fit = crate::fit::aa_percentiles(sc.groups.iter().map(|(k, (_, i, s))| (k.as_str(), *i, s)));
+    Ok(sc)
 }
 
 // ---------- merge ----------
 
-fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
+fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
     let providers: HashMap<String, MdProvider> =
         serde_json::from_slice(models_json).map_err(|e| format!("models.dev: {e}"))?;
-    let ep = parse_epoch(epoch_zip)?;
-    // Unscored groups would sit in every pool at the mean, skewing everyone's percentile.
-    let scored = ep.groups.iter().filter(|(_, (_, eci, s))| eci.is_some() || !s.is_empty());
-    let pct = crate::fit::percentiles(scored.map(|(k, (_, eci, s))| (k.as_str(), *eci, s)), &ep.benches);
     let mut by_key: HashMap<String, Model> = HashMap::new();
     let mut openrouter: HashMap<String, String> = HashMap::new();
     // OpenRouter ids by their last part: "llama-4-maverick" -> "meta-llama/llama-4-maverick".
@@ -994,26 +1255,33 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
             || format!("https://openrouter.ai/models?q={}", m.name.replace(' ', "+")),
             |id| format!("https://openrouter.ai/{id}"),
         );
-        let gk = if ep.groups.contains_key(&m.key) {
-            Some(m.key.as_str())
-        } else {
-            ep.alias.get(&m.key).map(String::as_str)
-        };
+        // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
+        let aa = (ep.source == Source::Aa).then(|| aa_words(&m.name, true).join("-"));
+        let gk = ep.group(&m.key).or(aa.as_ref().filter(|k| ep.groups.contains_key(*k))).map(String::as_str);
         if let Some(k) = gk
             && let Some((gname, eci, scores)) = ep.groups.get(k)
         {
-            m.epoch = Some(gname.clone());
+            match ep.source {
+                Source::Epoch => m.epoch = Some(gname.clone()),
+                Source::Aa => {
+                    m.aa = ep.page.get(k).cloned();
+                    (m.tps, m.ttft) = ep.speed.get(k).copied().unwrap_or_default();
+                }
+            }
             // Scored on no task, Epoch's page is all it adds; its name for the model may be a bare id.
             if eci.is_none() && scores.is_empty() {
                 continue;
             }
-            m.name = gname.clone();
+            // Epoch's names are the cleaner; Artificial Analysis's put the version first.
+            if ep.source == Source::Epoch {
+                m.name = gname.clone();
+            }
             if let Some(o) = ep.org.get(k) {
                 m.developer = short_org(o);
             }
             m.eci = *eci;
             m.scores = scores.clone();
-            if let Some(f) = pct.get(k) {
+            if let Some(f) = ep.fit.get(k) {
                 m.fit = f.clone();
             }
         }
@@ -1021,7 +1289,7 @@ fn merge(models_json: &[u8], epoch_zip: &[u8]) -> Result<Data, String> {
     unify_developers(&mut models);
     crate::fit::add_value(&mut models);
     models.sort_by(|a, b| b.eci.unwrap_or(0.0).total_cmp(&a.eci.unwrap_or(0.0)).then(b.release.cmp(&a.release)));
-    let benches = crate::fit::task_benches().into_iter().map(String::from).collect();
+    let benches = ep.source.benches().into_iter().map(String::from).collect();
     Ok(Data { format: FORMAT, fetched: now(), harness: BTreeMap::new(), benches, latest: String::new(), models })
 }
 
@@ -1307,6 +1575,45 @@ mod tests {
         assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("u", None));
         let m = Model { offers: vec![unknown, free], ..Default::default() };
         assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("f", Some(0.0)), "a free offer is priced");
+    }
+
+    #[test]
+    fn epoch_pages_link_by_group_or_alias() {
+        let mut ep = Scores::default();
+        ep.groups.insert("gemini25pro062025".into(), ("Gemini 2.5 Pro (Jun 2025)".into(), None, BTreeMap::new()));
+        ep.alias.insert("gemini25pro".into(), "gemini25pro062025".into());
+        let mut ms = [Model { key: "gemini25pro".into(), ..Default::default() }, Model::default()];
+        ms[1].epoch = Some("stale".into());
+        epoch_pages(&mut ms, &ep);
+        assert_eq!(ms[0].epoch.as_deref(), Some("Gemini 2.5 Pro (Jun 2025)"));
+        assert_eq!(ms[1].epoch, None, "no group, no link");
+    }
+
+    #[test]
+    fn aa_folds_reasoning_settings_into_one_model() {
+        let json = br#"{"status":200,"data":[
+            {"slug":"claude-4-5-sonnet","name":"Claude 4.5 Sonnet (Non-reasoning)","model_creator":{"name":"Anthropic"},
+             "median_output_tokens_per_second":80.5,"median_time_to_first_token_seconds":1.2,
+             "evaluations":{"artificial_analysis_intelligence_index":50,"artificial_analysis_coding_index":40,"gpqa":0.7}},
+            {"slug":"claude-4-5-sonnet-thinking","name":"Claude 4.5 Sonnet (Reasoning)","model_creator":{"name":"Anthropic"},
+             "median_output_tokens_per_second":40.0,"median_time_to_first_token_seconds":9.0,
+             "evaluations":{"artificial_analysis_intelligence_index":60,"artificial_analysis_coding_index":null,"gpqa":0.8}},
+            {"slug":"unscored","name":"Unscored","evaluations":{}}
+        ]}"#;
+        let sc = parse_aa(json).unwrap();
+        let key = aa_words("Claude Sonnet 4.5", true).join("-");
+        let (name, index, scores) = &sc.groups[&key];
+        assert_eq!((name.as_str(), *index), ("Claude 4.5 Sonnet", Some(60.0)), "the best setting's index");
+        assert_eq!(scores["artificial_analysis_coding_index"], 0.4, "an index is /100, a null is no score");
+        assert_eq!(scores["gpqa"], 0.8);
+        assert_eq!((sc.page[&key].as_str(), sc.org[&key].as_str()), ("claude-4-5-sonnet", "Anthropic"));
+        assert_eq!(sc.speed[&key], (Some(40.0), Some(9.0)), "the speed of the setting whose index it shows");
+        assert_eq!(sc.groups.len(), 1, "a model with no scores is left out");
+        assert!(parse_aa(br#"{"data":[]}"#).is_err());
+        let w = |s| aa_words(s, true);
+        assert_eq!(w("gpt-5-mini-high"), w("gpt-5-mini"), "a setting is folded");
+        assert_eq!(w("grok-4-non-reasoning"), w("grok-4"));
+        assert_ne!(w("magistral-medium"), w("magistral"), "a tier is not a setting");
     }
 
     #[test]

@@ -570,9 +570,19 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
             Some(store.favorite_for(&m.key).join(", ")).filter(|s| !s.is_empty()).unwrap_or("-".into())
         ),
         String::new(),
-        format!("  ECI {}", score(m.eci)),
+        format!("  {} {}", crate::data::source().index().0, score(m.eci)),
         "  task fit (percentile vs all evaluated models):".into(),
     ];
+    if m.tps.is_some() || m.ttft.is_some() {
+        let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
+        let speed = format!(
+            "  speed:      {} tokens/s, first token in {} (median across providers)",
+            n(m.tps, |v| format!("{v:.0}")),
+            n(m.ttft, |v| format!("{v:.1}s"))
+        );
+        // Under context: what the model costs in time, next to what it holds.
+        v.insert(4, speed);
+    }
     for t in TASKS {
         if let Some(s) = fit::fit(m, t) {
             v.push(format!("    {:<13}{:>4.0}  {}", t.name, s, t.about));
@@ -580,7 +590,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     }
     if !m.scores.is_empty() {
         v.push(String::new());
-        v.push("  benchmarks (Epoch AI, best effort setting):".into());
+        v.push(format!("  benchmarks ({}, best effort setting):", crate::data::source().label()));
         for (b, s) in &m.scores {
             v.push(format!("    {:<36}{:>5.1}%", b, s * 100.0));
         }
@@ -638,8 +648,17 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
         row("$ cached in / 1M", price(|o| o.cache_read.unwrap_or(o.input)), money, false),
         row("$ out / 1M", price(|o| o.output), money, false),
         row("context", models.iter().map(|m| Some(m.context as f64)).collect(), |c| ctx(c as u64), true),
-        Row { section: "scores", ..row("ECI", models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true) },
+        Row {
+            section: "scores",
+            ..row(crate::data::source().index().0, models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true)
+        },
     ];
+    // Under context, before the scores' rule: the ECI row is the last so far.
+    if models.iter().any(|m| m.tps.is_some() || m.ttft.is_some()) {
+        let at = rows.len() - 1;
+        rows.insert(at, row("first token", models.iter().map(|m| m.ttft).collect(), |v| format!("{v:.1}s"), false));
+        rows.insert(at, row("tokens/s", models.iter().map(|m| m.tps).collect(), |v| format!("{v:.0}"), true));
+    }
     for t in TASKS.iter().filter(|t| t.name != "overall") {
         let vals: Vec<Option<f64>> = models.iter().map(|m| fit::fit(m, t)).collect();
         if vals.iter().any(Option::is_some) {

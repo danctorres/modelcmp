@@ -1,4 +1,4 @@
-//! Marks, exclusions, notes, per-task favorites and the theme, keyed by model key. ~/.config/modelcmp/user.json
+//! Marks, exclusions, notes, per-task favorites, the theme and the benchmark source, keyed by model key. ~/.config/modelcmp/user.json
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,6 +28,9 @@ pub struct Store {
     /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub theme: String,
+    /// A `data::Source` id, picked with `B`; empty is Epoch AI, never picked: the TUI asks.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source: String,
 }
 
 /// The `favorite` key of a task, or of one `--tier` of it: `coding`, `coding:low`.
@@ -53,9 +56,26 @@ pub fn path() -> PathBuf {
 /// Write through a per-process temp file and rename, so neither a crash nor a concurrent
 /// writer (TUI and an agent script at once) leaves a half-written file behind.
 pub fn write_atomic(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_mode(p, bytes, 0o666)
+}
+
+/// `write_atomic`, readable by you alone: for a secret.
+pub fn write_private(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_mode(p, bytes, 0o600)
+}
+
+fn write_mode(p: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")))?;
     let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
+    // `mode` applies only to a new file, so not to one a crash left behind.
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    std::io::Write::write_all(&mut opts.open(&tmp)?, bytes)?;
     std::fs::rename(tmp, p)
 }
 
@@ -198,6 +218,17 @@ mod tests {
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("modelcmp-test-{}-{name}", std::process::id())).join("user.json")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_file_is_yours_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = tmp("private").with_file_name("key");
+        write_private(&p, b"one").unwrap();
+        write_private(&p, b"two").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"two");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

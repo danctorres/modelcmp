@@ -1,6 +1,6 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
-use crate::app::{COLS, model_id};
+use crate::app::{COLS, Col, TEXT, hidden, model_id};
 use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
@@ -87,10 +87,18 @@ struct ModelOut<'a> {
     /// Site -> the model's page there: models.dev, epoch.ai, artificialanalysis.ai, openrouter.ai
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<BTreeMap<&'static str, String>>,
-    /// Epoch Capabilities Index
+    /// The overall index of `source`: Epoch Capabilities Index, or Artificial Analysis Intelligence Index
     eci: Option<f64>,
-    /// Task -> 0..100 capability percentile among Epoch-evaluated models
+    /// Where `eci`, `tasks` and `benchmarks` come from: "epoch" or "aa"
+    source: &'static str,
+    /// Task -> 0..100 capability percentile among the models the source evaluated
     tasks: BTreeMap<&'static str, f64>,
+    /// Output tokens per second, median across providers; Artificial Analysis only
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens_per_second: Option<f64>,
+    /// Seconds to the first token, median across providers; Artificial Analysis only
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttft_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,7 +128,10 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         url: &m.url,
         pages: full.then(|| m.links().into_iter().collect()),
         eci: m.eci,
+        source: crate::data::source().id(),
         tasks: TASKS.iter().filter_map(|t| Some((t.name, (fit::fit(m, t)? * 10.0).round() / 10.0))).collect(),
+        tokens_per_second: m.tps,
+        ttft_seconds: m.ttft,
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
     }
@@ -131,12 +142,14 @@ fn print_json<T: Serialize>(v: &T) -> Result {
     Ok(())
 }
 
-/// The TUI's columns, so both show the same thing: Model, Dev, every numeric column, Via.
+/// The TUI's columns, so both show the same thing: Model, Dev, every numeric column the
+/// source measures, Via.
 fn table(models: &[&Model], store: &Store, show_avail: bool) {
+    let cols: Vec<&Col> = COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT)).map(|(_, c)| c).collect();
     let cells: Vec<Vec<String>> =
-        models.iter().map(|m| COLS.iter().map(|c| (c.get)(m).map_or("-".into(), c.show)).collect()).collect();
-    let widths: Vec<usize> = (0..COLS.len())
-        .map(|i| cells.iter().map(|r| r[i].chars().count()).chain([COLS[i].name.len()]).max().unwrap_or(0))
+        models.iter().map(|m| cols.iter().map(|c| (c.get)(m).map_or("-".into(), c.show)).collect()).collect();
+    let widths: Vec<usize> = (0..cols.len())
+        .map(|i| cells.iter().map(|r| r[i].chars().count()).chain([cols[i].head().len()]).max().unwrap_or(0))
         .collect();
     let width = |f: fn(&Model) -> String, head: &str, max: usize| {
         models.iter().map(|m| f(m).chars().count()).chain([head.len()]).max().unwrap_or(0).min(max)
@@ -146,7 +159,7 @@ fn table(models: &[&Model], store: &Store, show_avail: bool) {
         let nums: String = nums.zip(&widths).map(|(v, &w)| format!(" {v:>w$}")).collect();
         println!("{mark} {:<nw$} {:<dw$}{nums}  {via}", truncate(name, nw), truncate(dev, dw));
     };
-    line("  ", "Model", "Dev", &mut COLS.iter().map(|c| c.name), "Via");
+    line("  ", "Model", "Dev", &mut cols.iter().map(|c| c.head()), "Via");
     for (m, row) in models.iter().zip(&cells) {
         let mark = if store.is_excluded(&m.key) {
             "✗ "
@@ -512,6 +525,7 @@ mod tests {
             "reasoning",
             "release",
             "selected",
+            "source",
             "tasks",
             "tool_call",
             "url",

@@ -8,7 +8,7 @@
 
 use crate::app::{
     App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about,
-    col_name, has_menu, menu_rows,
+    col_name, has_menu, hidden, menu_rows,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -35,18 +35,33 @@ use std::time::Duration;
 
 type Refresh = Receiver<Result<Data, String>>;
 
-pub fn run(force: bool) -> Result<(), String> {
+/// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
+/// no data until one is picked.
+pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     // Start from the cache however old, and refresh behind the table (`--refresh` too, so a
     // failure shows in the frame); only a first run, with no cache, waits for the download.
-    let (data, fresh) = match data::load_cache() {
-        Some(d) => (d, false),
+    let (data, fresh, failed) = match (!ask).then(data::load_cache) {
+        None => (Data::default(), true, None),
+        Some(Some(d)) => (d, false, None),
         // No cache, so no stale copy to fall back on and no warning to lose.
-        None => {
-            eprintln!("downloading model data (models.dev + Epoch AI)…");
-            (data::load(true)?.0, true)
+        Some(None) => {
+            eprintln!("downloading model data (models.dev + {})…", data::source().label());
+            match data::load(true) {
+                Ok((d, _)) => (d, true, None),
+                // A wrong or missing key: open anyway, so `B` can fix it or go back to Epoch.
+                Err(e) if data::source() == data::Source::Aa => (Data::default(), true, Some(e)),
+                Err(e) => return Err(e),
+            }
         }
     };
-    let mut app = App::new(data, Store::load());
+    let mut app = App::new(data, store);
+    if ask {
+        app.first_start = true;
+        app.ask_source();
+    }
+    if let Some(e) = failed {
+        app.refreshed(Err(e));
+    }
     let mut rx = None;
     if !fresh && (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
@@ -135,6 +150,13 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                                 Err(format!("could not open a terminal for {line}: {e}{hint}"))
                             }
                         });
+                    }
+                    Some(Effect::Source(_)) => {
+                        if let Err(e) = app.store.save() {
+                            app.report(Err(format!("could not save: {e}")));
+                        }
+                        // A refresh under way is for the other source: drop it, or it lands here.
+                        rx = app.switched(data::load_cache()).then(spawn_refresh);
                     }
                     // The app applies its own chooser items before they get here.
                     Some(Effect::Fav(..) | Effect::Theme(_)) | None => {}
@@ -600,7 +622,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     let body = Rect { height: area.height - 1, ..area };
     let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
     // The refresh state is always in view: under way, failed, or how old the data is.
-    let age = format!("data {} old ", age(app.data.age()));
+    let age = format!("{} ", data_age(&app.data));
     let (state, color) = match (app.refreshing, app.refresh_failed, app.data.stale()) {
         (true, ..) => ("⟳ refreshing ".to_string(), Color::Yellow),
         (_, true, _) => (format!("refresh failed · {age}"), BAD),
@@ -622,8 +644,11 @@ fn draw(app: &mut App, f: &mut Frame) {
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         })
         .title_bottom(
-            Line::from(vec![Span::styled(" models.dev + Epoch AI · ", fg(MUTED)), Span::styled(state, fg(color))])
-                .right_aligned(),
+            Line::from(vec![
+                Span::styled(format!(" models.dev + {} · ", data::source().label()), fg(MUTED)),
+                Span::styled(state, fg(color)),
+            ])
+            .right_aligned(),
         );
     let inner = frame.inner(body);
     app.page = inner.height.saturating_sub(2);
@@ -737,7 +762,7 @@ fn layout(width: u16, app: &App) -> Layout {
     // Headers need room for the sort arrow, and a dropdown's for its " ▾".
     let widths: [u16; COLS.len()] = std::array::from_fn(|i| {
         let c = &COLS[i];
-        let head = c.name.chars().count() + 1 + if has_menu(i + 2) { 2 } else { 0 };
+        let head = c.head().chars().count() + 1 + if has_menu(i + 2) { 2 } else { 0 };
         head.max(app.widths[i]) as u16
     });
     let dev_w = ms.iter().map(|m| m.developer.chars().count()).max().unwrap_or(0).clamp(6, 12) as u16;
@@ -755,27 +780,37 @@ fn layout(width: u16, app: &App) -> Layout {
     // A column starting a group has a `│` in its gap, one cell wider; the first shown always
     // has one, parting it from Dev.
     let sep = |k: usize| u16::from(GROUPS.contains(&(k + 2)));
-    let fixed: u16 = ws.iter().enumerate().map(|(k, w)| w + GAP + sep(k)).sum::<u16>() + dev_w + GAP;
+    // A column the source does not measure takes no room at all.
+    let ws: Vec<u16> = ws.into_iter().enumerate().map(|(k, w)| if hidden(k + 2) { 0 } else { w }).collect();
+    let span = |k: usize| if ws[k] == 0 { 0 } else { ws[k] + GAP + sep(k) };
+    let fixed: u16 = (0..ws.len()).map(span).sum::<u16>() + dev_w + GAP;
     let name_w = width.saturating_sub(name_x + fixed).clamp(NAME_MIN, longest.max(NAME_MIN));
     let mut x = name_x + name_w + GAP + dev_w + GAP + 1;
     let room = width.saturating_sub(x) + GAP;
     let first = match app.col.checked_sub(2) {
         Some(s) => {
+            // Each column brought in on the left costs its width and gap, and the one it
+            // displaces as first its `│`; hidden ones cost nothing and are never first.
             let (mut lo, mut used) = (s, ws[s] + GAP);
-            while lo > 0 && used + ws[lo - 1] + GAP + sep(lo) <= room {
-                lo -= 1;
-                used += ws[lo] + GAP + sep(lo + 1);
+            for k in (0..s).rev().filter(|&k| ws[k] > 0) {
+                let cost = ws[k] + GAP + sep(lo);
+                if used + cost > room {
+                    break;
+                }
+                (lo, used) = (k, used + cost);
             }
             app.hscroll.clamp(lo, s)
         }
         None => 0,
     };
     let (mut cols, mut tail, mut more, mut seps) = (Vec::with_capacity(COLS.len()), [None; 2], false, vec![]);
-    for (k, &w) in ws.iter().enumerate().skip(first) {
-        let part = k == first || sep(k) == 1;
-        if k > first {
+    let mut started = false;
+    for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
+        let part = !started || sep(k) == 1;
+        if started {
             x += sep(k);
         }
+        started = true;
         if x + w > width {
             more = true;
             break;
@@ -829,7 +864,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         buf.set_stringn(dev_x + dev_w, y, "‹", 1, fg(ACCENT).add_modifier(BOLD));
     }
     for &(i, x, w) in &cols {
-        let text = format!("{}{}{}", arrow(i + 2), COLS[i].name, if has_menu(i + 2) { " ▾" } else { "" });
+        let text = format!("{}{}{}", arrow(i + 2), COLS[i].head(), if has_menu(i + 2) { " ▾" } else { "" });
         buf.set_stringn(area.x + x, y, format!("{text:>w$}", w = w as usize), w as usize, header(i + 2));
     }
     if let Some((x, w)) = via {
@@ -1075,7 +1110,7 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     let part = |s: String, c: Color| Line::styled(s, fg(c));
     let mut parts = vec![part(format!("{} {scope}", app.rows.len()), Color::Reset)];
     if stale(app) {
-        parts.push(part(format!("data {} old", age(app.data.age())), BAD));
+        parts.push(part(data_age(&app.data), BAD));
     }
     if app.any_marked() {
         let n = app.store.marked.len();
@@ -1126,11 +1161,17 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     parts
 }
 
+/// "data 3h old", or "no data" before a new source's first download.
+fn data_age(d: &Data) -> String {
+    if d.fetched == 0 { "no data".into() } else { format!("data {} old", age(d.age())) }
+}
+
 /// The mode pill's label and colour.
 fn mode(app: &App) -> (&'static str, Color) {
     match (&app.input, &app.view) {
         (Input::Search { .. }, _) => ("SEARCH", Color::Blue),
         (Input::Note { .. }, _) => ("NOTE", Color::Blue),
+        (Input::Key { .. }, _) => ("KEY", Color::Blue),
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
@@ -1139,6 +1180,9 @@ fn mode(app: &App) -> (&'static str, Color) {
         }
         (Input::Choose { .. }, _) if app.choosing_favs() => ("FAV", Color::Green),
         (Input::Choose { .. }, _) if app.theme_preview().is_some() => ("THEME", Color::Green),
+        (Input::Choose { items, .. }, _) if matches!(items.first(), Some((_, Effect::Source(_)))) => {
+            ("SOURCE", Color::Green)
+        }
         (Input::Choose { .. }, _) => ("OPEN", Color::Green),
         (Input::None, View::Table) if app.selecting() => ("HIGHLIGHT", Color::Yellow),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
@@ -1159,12 +1203,20 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         return None;
     }
     // The prompt's label, the text being typed and the cursor's byte offset in it.
+    let masked;
     let prompt = match &app.input {
         Input::Search { cur, .. } => {
             let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
             Some(("/".to_string(), q, *cur))
         }
         Input::Note { text, cur } => Some(("note: ".to_string(), text, *cur)),
+        // Hidden from anyone looking at the screen; one `*` per byte keeps `cur` in place.
+        Input::Key { text, cur, wrong } => {
+            masked = "*".repeat(text.len());
+            let ask =
+                if *wrong { "Artificial Analysis rejected the key; another" } else { "Artificial Analysis API key" };
+            Some((format!("{ask} (or set {}): ", data::AA_KEY_ENV), &masked, *cur))
+        }
         Input::Bound { col, min, text, cur } => {
             Some((format!("{} {} ", col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
         }
@@ -1301,6 +1353,7 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
     let hint = match items.first() {
         Some((_, Effect::Fav(..))) => " j k move · / search · space toggle · enter toggle and close · esc close",
         Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc t close",
+        Some((_, Effect::Source(_))) => " j k move · / search · enter picks · esc close",
         _ => " j k move · / search · enter opens",
     };
     lines.push(Line::from(hint).style(fg(MUTED)));
@@ -1356,7 +1409,7 @@ fn help(query: &str) -> Vec<Line<'static>> {
         v.push(Line::default());
     }
     v.push(heading("Columns: green the best shown, red the worst"));
-    for c in 0..NCOLS {
+    for c in (0..NCOLS).filter(|&c| !hidden(c)) {
         v.push(Line::from(vec![Span::styled(format!("{:<11}", col_name(c)), fg(KEY)), Span::raw(col_about(c))]));
     }
     v.push(Line::default());

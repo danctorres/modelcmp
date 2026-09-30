@@ -1,7 +1,7 @@
 //! TUI state and key handling. No I/O here: side effects come back to the shell as `Effect`s,
 //! so every key is unit-testable.
 
-use crate::data::{Data, Model};
+use crate::data::{Data, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::{Store, slot, slots};
 use crate::view::{
@@ -14,26 +14,45 @@ use std::collections::BTreeMap;
 
 /// A numeric column. The text columns (model name, developer) come first and are not listed here.
 pub struct Col {
-    pub name: &'static str,
+    /// Read through `head`, which names the index column by the source.
+    name: &'static str,
     /// The column's name on the command line: `--sort`, `--min`, `--max`.
     pub id: &'static str,
-    /// What the column means, for the top border and `?`.
-    pub about: &'static str,
+    /// What the column means, for the top border and `?`; read through `about`.
+    about: &'static str,
     pub lower_better: bool,
     pub get: fn(&Model) -> Option<f64>,
     pub show: fn(f64) -> String,
+    /// Only Artificial Analysis measures it: hidden with any other source (`hidden`).
+    pub aa_only: bool,
+}
+
+impl Col {
+    /// Its name and meaning; the index column's are the benchmark source's.
+    fn text(&self) -> (&'static str, &'static str) {
+        if self.id == "eci" { crate::data::source().index() } else { (self.name, self.about) }
+    }
+
+    pub fn head(&self) -> &'static str {
+        self.text().0
+    }
+
+    pub fn about(&self) -> &'static str {
+        self.text().1
+    }
 }
 
 const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(&Model) -> Option<f64>) -> Col {
-    Col { name, id, about, lower_better: false, get, show: |v| score(Some(v)) }
+    Col { name, id, about, lower_better: false, get, show: |v| score(Some(v)), aa_only: false }
 }
 
 fn positive(x: f64) -> Option<f64> {
     (x > 0.0).then_some(x)
 }
 
-/// Prices from the offer you'd pay, then the Epoch index, the task percentiles and Code/$.
-pub const COLS: [Col; 10] = [
+/// Prices from the offer you'd pay, then the source's overall index, the task percentiles and
+/// Code/$, then speed when Artificial Analysis measures it.
+pub const COLS: [Col; 12] = [
     Col {
         lower_better: true,
         show: money,
@@ -62,28 +81,60 @@ pub const COLS: [Col; 10] = [
         show: |v| ctx((v * 1000.0) as u64),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    col("ECI", "eci", "Epoch AI's overall capability index", |m| m.eci),
+    // Named by the source in use: `Col::text`.
+    col("", "eci", "", |m| m.eci),
     col("Coding", "coding", "capability percentile, coding benchmarks", |m| task_score(m, "coding")),
     col("Agentic", "agentic", "capability percentile, agentic benchmarks", |m| task_score(m, "agentic")),
     col("Reason", "reasoning", "capability percentile, reasoning benchmarks", |m| task_score(m, "reasoning")),
     col("Code/$", "value", "Coding ÷ Price, as a percentile", |m| m.fit.get("value").copied()),
+    Col {
+        aa_only: true,
+        show: |v| format!("{v:.0}"),
+        ..col("Tok/s", "tps", "output tokens per second, median across providers", |m| m.tps)
+    },
+    Col {
+        aa_only: true,
+        lower_better: true,
+        show: |v| format!("{v:.1}s"),
+        ..col("TTFT", "ttft", "seconds to the first token, median across providers", |m| m.ttft)
+    },
 ];
 
 /// Text columns before the numbers: 0 is the model name, 1 its developer. `VIA` follows them.
-const TEXT: usize = 2;
+pub const TEXT: usize = 2;
 /// Column index of the blended price, the default sort and the frontier's.
 pub const PRICE: usize = TEXT;
 /// The sort the table starts with, and that `c` and leaving a task go back to: priciest first.
 const DEFAULT_SORT: (usize, bool) = (PRICE, true);
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 5;
-/// First column of each group: names, price and context, benchmarks, your own.
-pub const GROUPS: [usize; 4] = [0, PRICE, ECI, VIA];
+/// Column index of Tok/s.
+pub const SPEED: usize = TEXT + 10;
+/// First column of each group: names, price and context, benchmarks, speed, your own.
+pub const GROUPS: [usize; 5] = [0, PRICE, ECI, SPEED, VIA];
 /// Column index of where you have access.
 pub const VIA: usize = TEXT + COLS.len();
 /// Column index of your note, the last one.
 pub const NOTES: usize = VIA + 1;
 pub const NCOLS: usize = NOTES + 1;
+
+/// Whether the column at cursor index `col` is left out: one the source in use does not measure.
+pub fn hidden(col: usize) -> bool {
+    numeric(col).is_some_and(|c| c.aa_only && crate::data::source() != Source::Aa)
+}
+
+/// Cursor index `col` moved `n` shown columns right, or left when negative, wrapping.
+fn step_col(mut col: usize, n: isize) -> usize {
+    for _ in 0..n.unsigned_abs() {
+        loop {
+            col = if n < 0 { (col + NCOLS - 1) % NCOLS } else { (col + 1) % NCOLS };
+            if !hidden(col) {
+                break;
+            }
+        }
+    }
+    col
+}
 
 /// The numeric column at cursor index `col`, if it is one.
 pub fn numeric(col: usize) -> Option<&'static Col> {
@@ -97,7 +148,7 @@ pub fn col_name(col: usize) -> &'static str {
         1 => "Dev",
         VIA => "Via",
         NOTES => "Notes",
-        _ => numeric(col).map_or("", |c| c.name),
+        _ => numeric(col).map_or("", Col::head),
     }
 }
 
@@ -114,7 +165,7 @@ pub fn col_about(col: usize) -> String {
         VIA => "harnesses listing it, env if API key set".into(),
         NOTES => "your own note on the model".into(),
         PRICE => format!("{}, {:.0}% of the input cached", COLS[PRICE - TEXT].about, crate::data::cached() * 100.0),
-        _ => numeric(col).map_or("", |c| c.about).into(),
+        _ => numeric(col).map_or("", Col::about).into(),
     }
 }
 
@@ -126,6 +177,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: overlay, highlight, filter, M, F, E, task"),
             ("q", "quit; asks first"),
             ("r", "refresh data now (auto every 24h)"),
+            ("B", "benchmarks from Epoch AI or Artificial Analysis"),
         ],
     ),
     (
@@ -212,6 +264,13 @@ pub enum Input {
     Note {
         text: String,
         cur: usize,
+    },
+    /// Typing Artificial Analysis's API key: after picking it with `B` with none saved, or when
+    /// it turned the saved one down (`wrong`).
+    Key {
+        text: String,
+        cur: usize,
+        wrong: bool,
     },
     /// Typing a minimum (`>`) or maximum (`<`) for column `col`.
     Bound {
@@ -362,6 +421,8 @@ pub enum Effect {
     Fav(&'static str, Option<&'static str>),
     /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
+    /// The `B` chooser's items; out of it, the source was switched and its data must be loaded.
+    Source(crate::data::Source),
 }
 
 /// A mouse action, already mapped to the table by the shell.
@@ -486,6 +547,9 @@ pub struct App {
     pub cache_on: f64,
     /// The `%` hint while no input is cached, naming `cache_on`.
     pub cache_hint: &'static str,
+    /// The TUI opened on the `B` chooser, with no data, as no source was ever picked: closing it
+    /// picks the default. Not so with `--source`, which picked one for the run.
+    pub first_start: bool,
 }
 
 impl App {
@@ -531,6 +595,7 @@ impl App {
             refresh_failed: false,
             cache_on: 0.0,
             cache_hint: "",
+            first_start: false,
         };
         let start = crate::data::cached();
         app.cache_on = if start > 0.0 { start } else { crate::data::AGENT_CACHED };
@@ -805,6 +870,21 @@ impl App {
                 self.status = "data refreshed".into();
                 self.set_data(d);
             }
+            // One from the environment is yours to change there, as a saved one would not replace it.
+            Err(e) if e.contains(crate::data::AA_REJECTED) && crate::data::aa_key_env().is_some() => {
+                self.report(Err(format!("{e} in {}", crate::data::AA_KEY_ENV)));
+            }
+            // No key, or the saved one was turned down: ask for one, unless you are typing or
+            // choosing something else, which the prompt would throw away; `B` asks then.
+            Err(e) if e.contains(crate::data::AA_REJECTED) || e.contains(crate::data::AA_MISSING) => {
+                let wrong = e.contains(crate::data::AA_REJECTED);
+                if self.input == Input::None {
+                    self.report(Err(e));
+                    self.input = Input::Key { text: String::new(), cur: 0, wrong };
+                } else {
+                    self.report(Err(format!("{e}; B then Artificial Analysis to enter one")));
+                }
+            }
             Err(e) => self.report(Err(format!("refresh failed: {e}"))),
         }
     }
@@ -813,6 +893,46 @@ impl App {
     pub fn report(&mut self, res: Result<String, String>) {
         self.failed = res.is_err();
         self.status = res.unwrap_or_else(|e| e);
+    }
+
+    /// The `B` chooser, each source saying what it takes; the TUI opens with it until one is picked.
+    pub fn ask_source(&mut self) {
+        let items =
+            Source::ALL.iter().map(|s| (format!("{:<20} {}", s.label(), s.about()), Effect::Source(*s))).collect();
+        let sel = Source::ALL.iter().position(|s| *s == crate::data::source()).unwrap_or(0);
+        let title = if self.first_start { "benchmarks? B changes it later" } else { "benchmarks?" };
+        self.input = Input::choose(title, items, sel);
+    }
+
+    /// Use benchmarks from `src` from now on; the shell loads its data (`switched`). The first
+    /// pick loads it even when it is the default, as the TUI opened with none.
+    fn switch(&mut self, src: Source) -> Option<Effect> {
+        if src == crate::data::source() && !self.first_start {
+            return None;
+        }
+        self.first_start = false;
+        crate::data::set_source(src);
+        self.store.source = src.id().to_string();
+        self.status = format!("benchmarks from {} · B to change", src.label());
+        Some(Effect::Source(src))
+    }
+
+    /// After a switch of source: that source's cached data, or none. True when it must be
+    /// downloaded, which replaces any refresh under way for the other source. Until then the
+    /// table is empty rather than showing the other source's scores under this one's name.
+    pub fn switched(&mut self, cached: Option<Data>) -> bool {
+        // Off a column this source does not have: the cursor, the sort and any bound on it.
+        if hidden(self.col) {
+            self.col = PRICE;
+        }
+        if hidden(self.sort_col) {
+            (self.sort_col, self.descending) = DEFAULT_SORT;
+        }
+        self.bounds.retain(|b| !hidden(b.0));
+        let fetch = cached.as_ref().is_none_or(Data::stale);
+        self.set_data(cached.unwrap_or_default());
+        (self.refreshing, self.refresh_failed) = (fetch, false);
+        fetch
     }
 
     /// The frame's `⟳ refreshing` says it is under way, so the message is cleared.
@@ -1196,8 +1316,8 @@ impl App {
             _ => None,
         };
         match code {
-            KeyCode::Char('h') | KeyCode::Left if table => self.col = (self.col + NCOLS - n as usize % NCOLS) % NCOLS,
-            KeyCode::Char('l') | KeyCode::Right if table => self.col = (self.col + n as usize) % NCOLS,
+            KeyCode::Char('h') | KeyCode::Left if table => self.col = step_col(self.col, -n),
+            KeyCode::Char('l') | KeyCode::Right if table => self.col = step_col(self.col, n),
             KeyCode::Char('h') | KeyCode::Left if across.is_some() => {
                 let (len, sel) = (across?, self.across_sel());
                 *sel = step((*sel).min(len.saturating_sub(1)), -n, len);
@@ -1213,12 +1333,12 @@ impl App {
             KeyCode::Char('w') if table => {
                 for _ in 0..n {
                     let end = if self.col == NCOLS - 1 { 0 } else { NCOLS - 1 };
-                    self.col = GROUPS.into_iter().find(|&g| g > self.col).unwrap_or(end);
+                    self.col = GROUPS.into_iter().find(|&g| g > self.col && !hidden(g)).unwrap_or(end);
                 }
             }
             KeyCode::Char('b') if table => {
                 for _ in 0..n {
-                    self.col = GROUPS.into_iter().rev().find(|&g| g < self.col).unwrap_or(VIA);
+                    self.col = GROUPS.into_iter().rev().find(|&g| g < self.col && !hidden(g)).unwrap_or(VIA);
                 }
             }
             KeyCode::Char('s') if table => {
@@ -1386,6 +1506,7 @@ impl App {
                 let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
                 self.input = Input::choose("theme?", items, crate::view::theme(&self.store.theme));
             }
+            KeyCode::Char('B') => self.ask_source(),
             KeyCode::Enter if self.view == View::Recommend => {
                 let t = &TASKS[self.task_cur];
                 self.task = Some(t);
@@ -1454,6 +1575,28 @@ impl App {
                     self.rebuild();
                 }
             }
+            Input::Key { text, cur, .. } => match code {
+                KeyCode::Enter if !text.trim().is_empty() => {
+                    let res = crate::data::save_aa_key(text);
+                    self.input = Input::None;
+                    return match res {
+                        // A refresh under way has the old key: start over, the shell drops it.
+                        Ok(()) if crate::data::source() == Source::Aa => {
+                            self.refreshing = false;
+                            self.refresh()
+                        }
+                        Ok(()) => self.switch(Source::Aa),
+                        Err(e) => {
+                            self.report(Err(format!("could not save the key: {e}")));
+                            None
+                        }
+                    };
+                }
+                // On the first start, back to the choice: there is no data to go back to.
+                KeyCode::Esc if self.first_start => self.ask_source(),
+                KeyCode::Esc => self.input = Input::None,
+                _ => drop(edit(text, cur, code, mods, |_| true)),
+            },
             Input::Note { text, cur } => match code {
                 KeyCode::Enter => {
                     let text = std::mem::take(text);
@@ -1563,12 +1706,28 @@ impl App {
                             self.status = format!("theme {name}");
                             return Some(Effect::Save);
                         }
+                        // Asked once: a key it turns down is asked for again (`refreshed`), and
+                        // picking it again when it is the source changes a saved key.
+                        Effect::Source(Source::Aa)
+                            if crate::data::aa_key().is_none()
+                                || (crate::data::source() == Source::Aa
+                                    && !self.first_start
+                                    && crate::data::aa_key_env().is_none()) =>
+                        {
+                            self.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+                        }
+                        Effect::Source(src) => return self.switch(src),
                         effect => return Some(effect),
                     }
                 }
                 // The first match, so that enter picks it.
                 _ if *typing && edit(query, cur, code, mods, |_| true) => *sel = 0,
                 KeyCode::Char('/') => *typing = true,
+                // Closing the first start's choice picks the default.
+                KeyCode::Esc if self.first_start && matches!(items.first(), Some((_, Effect::Source(_)))) => {
+                    self.input = Input::None;
+                    return self.switch(Source::default());
+                }
                 // The key that opens the theme list also closes it.
                 KeyCode::Char('t') if self.theme_preview().is_some() => self.input = Input::None,
                 KeyCode::Esc => self.input = Input::None,
@@ -1698,6 +1857,61 @@ mod tests {
         assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Help, ""), "esc clears the filter first");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table);
+    }
+
+    #[test]
+    fn b_picks_the_benchmark_source() {
+        let mut a = app();
+        // `--source aa` with none ever picked: closing the chooser keeps it.
+        crate::data::set_source(Source::Aa);
+        press(&mut a, "B");
+        assert!(code(&mut a, KeyCode::Esc).is_none() && a.input == Input::None);
+        assert_eq!((a.store.source.as_str(), crate::data::source()), ("", Source::Aa));
+        crate::data::set_source(Source::Epoch);
+        a.first_start = true;
+        a.ask_source();
+        let label = |a: &App, i: usize| match &a.input {
+            Input::Choose { items, .. } => items[i].0.clone(),
+            _ => String::new(),
+        };
+        assert!(label(&a, 0).contains("no API key") && label(&a, 1).contains("needs an API key"));
+        press(&mut a, "j");
+        code(&mut a, KeyCode::Enter);
+        assert!(matches!(a.input, Input::Key { .. }), "Artificial Analysis asks for its key");
+        code(&mut a, KeyCode::Esc);
+        assert!(matches!(a.input, Input::Choose { .. }), "on the first start, esc goes back to the choice");
+        // Closing the first start's choice picks the default, and loads it.
+        assert!(matches!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch))));
+        assert_eq!((a.store.source.as_str(), crate::data::source()), ("epoch", Source::Epoch));
+        press(&mut a, "B");
+        assert!(code(&mut a, KeyCode::Enter).is_none(), "picked before: nothing to switch");
+        // A source never downloaded shows nothing until it is, not the other one's scores.
+        assert!(a.switched(None) && a.data.models.is_empty() && a.refreshing);
+    }
+
+    #[test]
+    fn a_rejected_key_is_asked_for_again() {
+        let rejected = format!("could not download model data: {}", crate::data::AA_REJECTED);
+        let mut a = app();
+        a.refreshed(Err(rejected.clone()));
+        assert!(matches!(a.input, Input::Key { wrong: true, .. }));
+        // A new key while the old one's refresh is under way starts another.
+        crate::data::set_source(Source::Aa);
+        a.refreshing = true;
+        press(&mut a, "new");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Refresh));
+        assert_eq!(crate::data::aa_key().as_deref(), Some("new"));
+        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = Some("env".into()));
+        let mut e = app();
+        e.refreshed(Err(rejected));
+        assert!(e.input == Input::None && e.status.contains(crate::data::AA_KEY_ENV), "fixed where it is set");
+        let mut b = app();
+        b.refreshed(Err("offline".into()));
+        assert_eq!(b.input, Input::None, "any other failure is only reported");
+        let mut c = app();
+        c.input = Input::Note { text: "half".into(), cur: 4 };
+        c.refreshed(Err(crate::data::AA_MISSING.into()));
+        assert!(matches!(c.input, Input::Note { .. }), "a note being typed is kept");
     }
 
     fn press(app: &mut App, keys: &str) -> Option<Effect> {
@@ -1991,7 +2205,7 @@ mod tests {
     fn every_column_says_what_it_means() {
         assert!(col_about(0).contains("Via"));
         assert!(col_about(1).contains("trained"));
-        assert!(COLS.iter().all(|c| !c.about.is_empty()));
+        assert!(COLS.iter().all(|c| !c.about().is_empty()));
     }
 
     #[test]
@@ -2014,8 +2228,13 @@ mod tests {
         assert_eq!(a.current().unwrap().key, "mini");
         ctrl(&mut a, 'u');
         assert_eq!(a.current().unwrap().key, "gpt55");
+        let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
+        assert!(shown < NCOLS, "Epoch has no speed columns");
+        press(&mut a, &format!("{shown}l"));
+        assert_eq!(a.col, PRICE, "counted column moves wrap around, over the shown ones");
+        crate::data::set_source(Source::Aa);
         press(&mut a, &format!("{NCOLS}l"));
-        assert_eq!(a.col, PRICE, "counted column moves wrap around");
+        assert_eq!(a.col, PRICE, "Artificial Analysis shows them all");
     }
 
     #[test]

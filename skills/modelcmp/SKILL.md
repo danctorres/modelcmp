@@ -30,7 +30,7 @@ opencode -m "$(modelcmp list --task coding --tier mid --id)"
 ## Reading the numbers
 
 - `price` is $ per 1M tokens. `null` means unknown, not free.
-- `score` is a 0-100 percentile, except for `overall` and `vision`, where it is the Epoch Capabilities Index.
+- `score` is a 0-100 percentile, except for `overall` and `vision`, where it is the overall index of the model's `source`: Epoch Capabilities Index (`epoch`) or Artificial Analysis Intelligence Index (`aa`). Scores from different sources do not compare.
 - `"recommended": false` marks a favorite that sits on the frontier only because the user chose it. Still use it.
 - Models the user excluded never appear in `recommend` or `--task`.
 

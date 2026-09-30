@@ -15,12 +15,15 @@ fn tasks() -> PossibleValuesParser {
     PossibleValuesParser::new(fit::task_names())
 }
 
-/// Pick the right LLM: prices (models.dev) + benchmarks (Epoch AI), filtered to the
+/// Pick the right LLM: prices (models.dev) + benchmarks (Epoch AI, or Artificial Analysis), filtered to the
 /// models you can already use: the ones your harnesses list (opencode models; claude,
 /// codex and gemini give their own provider's), plus providers you have API keys for.
 /// The VIA column says which. Run without a command for the interactive TUI.
 #[derive(Parser)]
-#[command(version, after_help = "Data: models.dev (prices), Epoch AI (benchmarks, CC-BY). Cached for 24h.")]
+#[command(
+    version,
+    after_help = "Data: models.dev (prices), Epoch AI (benchmarks, CC-BY) or Artificial Analysis (benchmarks, https://artificialanalysis.ai/). Cached for 24h."
+)]
 struct Args {
     /// Re-download data now instead of using the cache
     #[arg(long, global = true)]
@@ -28,6 +31,9 @@ struct Args {
     /// Percent of input tokens read from the prompt cache in Price: 90 fits an agent session, 0 a one-off prompt (`%` in the TUI)
     #[arg(long, global = true, value_name = "PERCENT", default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
     cache: u8,
+    /// Benchmarks from: epoch (Epoch AI, the default) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY); overrides `B` in the TUI for this run
+    #[arg(long, global = true, value_parser = PossibleValuesParser::new(data::Source::ALL.map(|s| s.id())))]
+    source: Option<String>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -154,8 +160,13 @@ fn bound(s: &str) -> Result<(usize, f64), String> {
 fn main() {
     let args = Args::parse();
     data::set_cached(f64::from(args.cache) / 100.0);
+    let store = Store::load();
+    data::set_source(data::Source::parse(args.source.as_deref().unwrap_or(&store.source)).unwrap_or_default());
     let result = match args.cmd {
-        None => tui::run(args.refresh).map_err(Exit::from),
+        None => {
+            let ask = args.source.is_none() && store.source.is_empty();
+            tui::run(store, args.refresh, ask).map_err(Exit::from)
+        }
         Some(cmd) => {
             // Die quietly when a pipe closes early, as in `modelcmp list | head`, instead of
             // panicking in println. Not in the TUI: it writes to clipboard tools that may exit.
@@ -182,17 +193,27 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     if !data.models.iter().any(|m| m.available) {
         eprintln!("note: no harness models or provider API keys found, showing all models");
     }
+    // Loaded after the download, which can take a minute: what the TUI or an agent saved meanwhile is kept.
     let mut store = Store::load();
     // clap has already validated task names against fit::TASKS.
     let task = |t: Option<String>| t.and_then(|t| fit::task(&t));
     match cmd {
         Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id } => {
+            let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
+            // Epoch has no speed: a bound on it would drop every model, a sort do nothing.
+            if let Some(c) =
+                sort.into_iter().chain(min.iter().chain(&max).map(|b| b.0)).find(|&c| app::hidden(c + app::TEXT))
+            {
+                return Err(Exit::from(format!(
+                    "{} needs --source aa: only Artificial Analysis measures it",
+                    app::COLS[c].id
+                )));
+            }
             let bounds = min
                 .into_iter()
                 .map(|(c, v)| (c, v, f64::INFINITY))
                 .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
                 .collect();
-            let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
             let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, selected, dev, via, limit, json, id };
             cli::list(&data, &store, &opts)
         }

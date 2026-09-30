@@ -12,6 +12,7 @@ commands and JSON.
 | `esc` | back: closes an overlay, drops the highlight, clears the `/` filter, leaves `M`, then `F`, then `E`, then a task picked in recommend back to recommend |
 | `qq` | quit; the first `q` asks |
 | `r` | refresh data now |
+| `B` | benchmarks from Epoch AI (the default, no API key needed) or Artificial Analysis (needs an API key); the TUI's first start asks, and `esc` there picks Epoch AI. Artificial Analysis asks for its API key when none is saved or `ARTIFICIAL_ANALYSIS_API_KEY` is not set, and again if it rejects the key; picking it again while it is the source changes the saved key, which is kept in `~/.config/modelcmp/aa_key`, readable by you alone. Each source has its own cache, so switching back needs no download |
 
 ## Move
 

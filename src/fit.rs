@@ -35,8 +35,13 @@ pub struct Task {
     /// When a model high on this task is the right pick.
     pub when: &'static str,
     pub benches: &'static [&'static str],
+    /// The same for Artificial Analysis: its API's `evaluations` fields.
+    pub aa: &'static [&'static str],
     pub need: Need,
 }
+
+/// Artificial Analysis's overall index, its ECI.
+pub const AA_INDEX: &str = "artificial_analysis_intelligence_index";
 
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
 /// not be about code. Math and factual-recall benchmarks stay out.
@@ -45,9 +50,10 @@ pub struct Task {
 pub const TASKS: &[Task] = &[
     Task {
         name: "overall",
-        about: "Epoch Capabilities Index",
+        about: "overall index: ECI or AAII",
         when: "a tiebreaker, or work that fits no other task",
         need: Need::None,
+        aa: &[],
         benches: &[],
     },
     Task {
@@ -55,6 +61,7 @@ pub const TASKS: &[Task] = &[
         about: "writing and fixing code",
         when: "fixing a bug, adding a feature to an existing repo, refactors",
         need: Need::None,
+        aa: &["artificial_analysis_coding_index"],
         benches: &[
             "DeepSWE",
             "FrontierCode",
@@ -71,6 +78,7 @@ pub const TASKS: &[Task] = &[
         about: "coding per dollar, among models ≥50th percentile on coding",
         when: "routine coding that needs no top reasoning",
         need: Need::Coder,
+        aa: &[],
         benches: &[],
     },
     Task {
@@ -78,6 +86,7 @@ pub const TASKS: &[Task] = &[
         about: "multi-step tool use, long autonomous tasks",
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         need: Need::Tools,
+        aa: &["terminalbench_hard", "terminal_bench"],
         benches: &[
             "APEX-Agents",
             "Remote Labor Index",
@@ -94,6 +103,7 @@ pub const TASKS: &[Task] = &[
         about: "hard science questions, puzzles, abstraction",
         when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
         need: Need::None,
+        aa: &["gpqa", "hle"],
         benches: &[
             "GPQA diamond",
             "HLE",
@@ -109,6 +119,7 @@ pub const TASKS: &[Task] = &[
         about: "image input (ranked by overall capability)",
         when: "screenshots, UI mockups, diagrams as input",
         need: Need::Vision,
+        aa: &[],
         benches: &[],
     },
 ];
@@ -120,6 +131,14 @@ pub fn task(name: &str) -> Option<&'static Task> {
 /// Every benchmark a task uses, sorted; the others are not even parsed.
 pub fn task_benches() -> Vec<&'static str> {
     let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.benches.iter().copied()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Every Artificial Analysis field a task uses, sorted.
+pub fn aa_fields() -> Vec<&'static str> {
+    let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.aa.iter().copied()).collect();
     v.sort();
     v.dedup();
     v
@@ -231,6 +250,35 @@ pub fn percentiles<'a>(
     out
 }
 
+/// Per Artificial Analysis group `(key, index, field -> score)`: key -> task -> percentile. A
+/// task is the mean of its fields' percentiles among the models scored on each; overall and
+/// vision the index's, as with ECI. Epoch's fit needs Epoch's benchmark difficulties, so not here.
+pub fn aa_percentiles<'a>(
+    groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)>,
+) -> HashMap<String, BTreeMap<String, f64>> {
+    let groups: Vec<_> = groups.collect();
+    let index: Vec<f64> = groups.iter().filter_map(|g| g.1).collect();
+    let fields: HashMap<&str, Vec<f64>> =
+        aa_fields().into_iter().map(|f| (f, groups.iter().filter_map(|g| g.2.get(f).copied()).collect())).collect();
+    let mut out = HashMap::new();
+    for (key, i, scores) in &groups {
+        let mut fit = BTreeMap::new();
+        if let Some(i) = i {
+            for t in ECI_TASKS {
+                fit.insert(t.to_string(), pct_rank(*i, &index));
+            }
+        }
+        for t in TASKS.iter().filter(|t| !t.aa.is_empty()) {
+            let p: Vec<f64> = t.aa.iter().filter_map(|f| Some(pct_rank(*scores.get(*f)?, &fields[f]))).collect();
+            if !p.is_empty() {
+                fit.insert(t.name.to_string(), p.iter().sum::<f64>() / p.len() as f64);
+            }
+        }
+        out.insert(key.to_string(), fit);
+    }
+    out
+}
+
 /// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
 /// model with both. The task only counts models at or above `VALUE_FLOOR` (see `Need::Coder`).
 pub fn add_value(models: &mut [Model]) {
@@ -335,6 +383,17 @@ mod tests {
         let p = percentiles(groups.iter().copied(), &e);
         assert_eq!(p["a"]["coding"], p["a"]["overall"]);
         assert!(!p["b"].contains_key("coding"));
+    }
+
+    #[test]
+    fn aa_ranks_by_task() {
+        let a = scores(&[("artificial_analysis_coding_index", 0.6), ("gpqa", 0.9)]);
+        let b = scores(&[("artificial_analysis_coding_index", 0.4), ("gpqa", 0.7), ("hle", 0.3)]);
+        let p = aa_percentiles([("a", Some(60.0), &a), ("b", None, &b)].into_iter());
+        assert!(p["a"]["coding"] > p["b"]["coding"]);
+        assert!(p["a"]["reasoning"] > p["b"]["reasoning"], "hle only b has: its gpqa alone ranks a first");
+        assert!(p["a"].contains_key("overall") && !p["b"].contains_key("overall"), "no index, no overall");
+        assert!(!p["a"].contains_key("agentic"), "no agentic field, no agentic score");
     }
 
     #[test]

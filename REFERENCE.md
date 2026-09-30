@@ -8,8 +8,13 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
-Code/$, Via, Note. Task columns are percentiles (0-100) of the model's capability on
-the task's benchmarks, ranked against every model Epoch has evaluated:
+Code/$, Via, Note. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
+its Intelligence Index, and each task column is the mean percentile of its fields: Coding the
+Coding Index, Agentic Terminal-Bench, Reason GPQA and HLE; two more columns show speed,
+Tok/s (output tokens per second) and TTFT (seconds to the first token), medians across
+providers. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
+columns are percentiles (0-100) of the model's capability on the task's benchmarks, ranked
+against every model Epoch has evaluated:
 
 - Coding: DeepSWE, FrontierCode, SWE-Bench verified, Terminal Bench, WeirdML, MirrorCode, GSO-Bench, Aider polyglot
 - Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, OSWorld, METR Time Horizons, The Agent Company, DeepResearch Bench, Terminal Bench
@@ -47,14 +52,14 @@ modelcmp recommend --cache 0                   # priced as one-off prompts: no i
 
 Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`. For a large prompt, bound the context instead: `--min ctx=200`.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
-tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$). `--task` and
+tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$), and with Artificial Analysis `tps` and `ttft`. `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, your selection `✓` and available models `●`. `--tier` picks one
 model from the task's list: `low` the cheapest scoring 50+, `mid` the cheapest 75+, `high`
 the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
 tier's pick. Every favorite of the task sits on the task's list marked `★` whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. Scores are percentiles among the models
 Epoch benchmarked. `--all`
-includes models you have no access to. `--refresh` on any command re-downloads first, and `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache.
+includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
 `list` prints every match unless `-n` limits it, and then says how many it left out.
 
 Model names match by substring, among the models you have first; the shortest match wins
@@ -80,7 +85,7 @@ modelcmp list --task coding --tier mid --json  # the one model to use: the user'
 
 Each JSON model carries `key`, `selected` (on your shortlist), `excluded`, `favorite_for` (the tasks it is the user's favorite
 for, and `task:tier` for a tier's), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
-`eci`, per-task `tasks` percentiles. `show` and
+`eci` (the overall index of `source`, `epoch` or `aa`), per-task `tasks` percentiles, and with `aa` `tokens_per_second` and `ttft_seconds`. `show` and
 `compare` add every benchmark score and every provider's price. `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
 ECI for overall and vision, the percentile for the others. A favorite that is on the line only as
