@@ -223,7 +223,7 @@ impl Store {
     pub fn is_favorite(&self, task: Option<&crate::fit::Task>, key: &str) -> bool {
         match task {
             Some(t) => self.task_favorites(t.name).contains(&key),
-            None => !self.favorite_for(key).is_empty(),
+            None => self.favorite.values().any(|k| k == key),
         }
     }
 

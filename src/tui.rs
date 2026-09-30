@@ -67,6 +67,12 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
         rx = Some(spawn_refresh());
     }
     let mut terminal = ratatui::init();
+    // ratatui's panic hook restores the terminal but leaves mouse reporting on.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = if ask { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
         .and_then(|()| event_loop(&mut app, &mut terminal, rx));
@@ -121,8 +127,10 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         if !fits {
             return Ok(());
         }
-        if event::poll(Duration::from_millis(if t == end { 600 } else { 15 }))? {
-            event::read()?;
+        // A key skips it; a pointer move or a resize does not.
+        if event::poll(Duration::from_millis(if t == end { 600 } else { 15 }))?
+            && matches!(event::read()?, Event::Key(k) if k.kind == KeyEventKind::Press)
+        {
             return Ok(());
         }
     }
@@ -156,20 +164,29 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
         // Handle every queued event before the next draw, so a held key never falls behind.
         let mut wait = timeout;
         while event::poll(wait).map_err(|e| e.to_string())? {
+            // Woken by input: draw only if some of it changes the screen.
+            if wait > Duration::ZERO {
+                dirty = false;
+            }
             wait = Duration::ZERO;
+            let size = terminal.size().map_err(|e| e.to_string())?;
+            let input = match event::read().map_err(|e| e.to_string())? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => Some(Ok(k)),
+                Event::Mouse(m) => hit(app, Rect::new(0, 0, size.width, size.height), m).map(Err),
+                // A resize redraws; a key release, a pointer move and the like do nothing.
+                Event::Resize(..) => None,
+                _ => continue,
+            };
             // Held until the key's change is saved, so an agent's write cannot land in between.
             let _lock = crate::store::lock(&crate::store::path());
             // An agent may have marked or noted a model meanwhile: act on its file, not a stale copy.
             if app.store.reload_if_changed() {
                 app.rebuild_in_place();
             }
-            let effect = match event::read().map_err(|e| e.to_string())? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
-                Event::Mouse(m) => {
-                    let size = terminal.size().map_err(|e| e.to_string())?;
-                    hit(app, Rect::new(0, 0, size.width, size.height), m).and_then(|m| app.mouse(m))
-                }
-                _ => None,
+            let effect = match input {
+                Some(Ok(k)) => app.key(k),
+                Some(Err(m)) => app.mouse(m),
+                None => None,
             };
             {
                 match effect {
@@ -260,19 +277,19 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let list = match &app.input {
         Input::Menu { col, items, sel, query, .. } => {
             let rows = menu_rows(items, query);
-            menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, *sel, rows.len()))
+            // The bar's line in view, as the dropdown scrolls: its inside is two rows shorter.
+            menu_box(inner, menu_x(inner, &l, *col), items, rows.len())
+                .map(|(b, _)| (b, sel.saturating_sub(usize::from(b.height.saturating_sub(3))), rows.len()))
         }
         Input::Choose { title, items, sel, query, .. } => {
-            let rows = choice_rows(items, query).len();
-            Some((
-                overlay_rect(Rect { height: area.height - 1, ..area }, title, &choice_lines(items, *sel, query)),
-                *sel,
-                rows,
-            ))
+            let (rows, lines) = (choice_rows(items, query).len(), choice_lines(items, *sel, query));
+            let rect = overlay_rect(Rect { height: area.height - 1, ..area }, title, &lines);
+            let top = choice_top(*sel, rows, lines.len(), rect.height.saturating_sub(2));
+            Some((rect, top, rows))
         }
         _ => None,
     };
-    if let Some((rect, sel, len)) = list {
+    if let Some((rect, top, len)) = list {
         if extend {
             return None;
         }
@@ -283,7 +300,6 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         if !inner.contains(pos) {
             return None;
         }
-        let top = sel.saturating_sub(inner.height as usize - 1);
         let k = top + (m.row - inner.y) as usize;
         return (k < len).then_some(Mouse::Item(k));
     }
@@ -782,7 +798,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         // Scrolled as the mouse maps it, so the bar stays in view when the list is taller than the screen.
         let lines = choice_lines(items, *sel, query);
         let rect = overlay_rect(body, title, &lines);
-        let mut scroll = (*sel as u16).saturating_sub(rect.height.saturating_sub(2).max(1) - 1);
+        let rows = choice_rows(items, query).len();
+        let mut scroll = choice_top(*sel, rows, lines.len(), rect.height.saturating_sub(2)) as u16;
         overlay(buf, body, title, lines, &mut scroll);
         if !choice_rows(items, query).is_empty() {
             // The bar runs through the box's border, as in the table.
@@ -1049,10 +1066,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         }
         // What the search matched, underlined in bold; Notes may be scrolled off.
         // ponytail: a char is taken as one cell; wide chars would shift the underline.
-        // Via is drawn as its harnesses joined by ", ", so the hits line up.
+        // Via is drawn as its harnesses joined by ", ", so the hits line up; out of reach, it is not.
         if let Some(hits) = hits(&app.query, [&m.name, &m.developer, &m.via.join(", "), note], app.typos) {
             let style = tint(MATCH).add_modifier(BOLD | Modifier::UNDERLINED);
-            let [via, note] = [via, notes].map(|c| c.map(|(x, w)| (area.x + x, w as usize)));
+            let [via, note] = [via.filter(|_| reach), notes].map(|c| c.map(|(x, w)| (area.x + x, w as usize)));
             for (field, ranges) in [Some((name_x, nw)), Some((dev_x, dw)), via, note].into_iter().zip(hits) {
                 let Some((x, w)) = field else { continue };
                 for r in ranges.into_iter().map(|r| r.start.min(w)..r.end.min(w)) {
@@ -1309,7 +1326,6 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             Input::Bound { col, .. } if crate::app::numeric(col).is_some_and(|c| c.id == "ctx") => "k",
             _ => "",
         };
-        let text = format!("{label}{typed}{unit}");
         let (menu, typing) = match app.input {
             Input::Menu { typing, .. } => (true, typing),
             Input::Choose { .. } => (true, true),
@@ -1320,11 +1336,19 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             (true, true) => "↓ ↑ move  enter pick  esc clear",
             _ => "enter apply  esc cancel",
         };
-        let hx = area.right().saturating_sub(hint.len() as u16 + 1);
-        buf.set_stringn(x, area.y, &text, hx.saturating_sub(x) as usize, Style::new());
-        buf.set_stringn(hx, area.y, hint, hint.len(), fg(MUTED));
-        let cx = x + (label.chars().count() + typed[..cur].chars().count()) as u16;
-        return typing.then_some(cx.min(area.right().saturating_sub(1)));
+        let width = |s: &str| Span::raw(s).width();
+        let hx = area.right().saturating_sub(width(hint) as u16 + 1);
+        // Text too long for the room scrolls sideways, so the cursor stays in view.
+        let room = usize::from(hx.saturating_sub(x));
+        let mut start = 0;
+        while start < cur && width(&label) + width(&typed[start..cur]) >= room {
+            start += typed[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        let text = format!("{label}{}{unit}", &typed[start..]);
+        buf.set_stringn(x, area.y, &text, room, Style::new());
+        buf.set_stringn(hx, area.y, hint, width(hint), fg(MUTED));
+        let cx = x + (width(&label) + width(&typed[start..cur])) as u16;
+        return typing.then_some(cx.min(hx.saturating_sub(1)));
     }
     let parts = parts(app);
     // Key hints fill what the left side leaves free; whole hints drop from the front on
@@ -1435,6 +1459,13 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
     lines.push(Line::from(hint).style(fg(MUTED)));
     lines
 }
+/// The first line a choice list shows, `shown` lines of `lines` in view: the bar's, and at
+/// the last of its `rows` entries every line to the end, so the key hint below them shows too.
+fn choice_top(sel: usize, rows: usize, lines: usize, shown: u16) -> usize {
+    let shown = usize::from(shown.max(1));
+    if sel + 1 >= rows { lines.saturating_sub(shown) } else { sel.saturating_sub(shown - 1) }
+}
+
 /// Where an overlay with these lines sits: centred, as wide as its widest line or title.
 fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
@@ -2384,6 +2415,23 @@ mod tests {
         let buf = term.backend().buffer();
         let text: String = (0..8).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(text.contains(THEMES[THEMES.len() - 1].0) && text.contains('▲'), "{text}");
+        assert!(text.contains("enter saves") && !text.contains('▼'), "at the last theme, the hint below it: {text}");
+    }
+
+    #[test]
+    fn a_long_prompt_scrolls_and_keeps_its_cursor_off_the_hint() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
+        let mut a = app();
+        a.key(KeyCode::Char('n').into());
+        for c in "🔥 a note far longer than the room it has".chars() {
+            a.key(KeyCode::Char(c).into());
+        }
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let hint = 60 - "enter apply  esc cancel".len() as u16 - 1;
+        let pos = term.get_cursor_position().unwrap();
+        let buf = term.backend().buffer();
+        let line: String = (0..60).map(|x| buf[(x, pos.y)].symbol()).collect();
+        assert!(pos.x < hint && line.contains("room it has"), "cursor at {} on {line:?}", pos.x);
     }
 
     #[test]
