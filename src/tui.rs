@@ -1406,7 +1406,7 @@ fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line
             let (label, effect) = &items[k];
             // f's tasks in their colours, harnesses and sites in theirs.
             let color = match effect {
-                Effect::Fav(t, _) => task_color(t),
+                Effect::Fav(_, t, _) => task_color(t),
                 _ => dev_color(label.split(' ').next().unwrap_or_default()),
             };
             let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(color) };

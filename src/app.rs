@@ -362,7 +362,7 @@ pub fn edit(
     // Start of the word before the cursor, and end of the word after it.
     let word_start = {
         let end = text[..*cur].trim_end().len();
-        text[..end].rfind(char::is_whitespace).map_or(0, |i| i + 1)
+        text[..end].char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8())
     };
     let word_end = {
         let rest = &text[*cur..];
@@ -426,7 +426,7 @@ pub enum Effect {
     Launch(Vec<String>),
     /// Favorite the current model for the task, or for one tier of it; the `f` chooser's items,
     /// applied by `App` itself.
-    Fav(&'static str, Option<&'static str>),
+    Fav(String, &'static str, Option<&'static str>),
     /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
     /// The `B` chooser's items; out of it, the source was switched and its data must be loaded.
@@ -633,6 +633,17 @@ impl App {
             self.vals.iter().filter_map(|v| v[c]).map(|v| (COLS[c].show)(v).chars().count()).max().unwrap_or(0)
         });
         self.any_available = data.any_available();
+        // The rows index the old data: point them at the same models in the new, so `rebuild`
+        // keeps the bar and the highlight on them; a model gone points nowhere. Data taken out
+        // to change in place (`reprice`) comes back in its order.
+        if !self.data.models.is_empty() {
+            let at: std::collections::HashMap<&str, usize> =
+                data.models.iter().enumerate().map(|(i, m)| (m.key.as_str(), i)).collect();
+            let old = &self.data.models;
+            for r in &mut self.rows {
+                *r = old.get(*r).and_then(|m| at.get(m.key.as_str())).copied().unwrap_or(usize::MAX);
+            }
+        }
         self.data = data;
         self.compare_sel = self.compare_sel.min(self.marked_models().len().saturating_sub(1));
         self.rebuild();
@@ -786,20 +797,21 @@ impl App {
         }
     }
 
-    /// `f`'s list: every task and each of its tiers, ticked where the current model is the favorite.
-    fn fav_items(&self) -> Option<Vec<(String, Effect)>> {
-        let m = self.current()?;
+    /// `f`'s list for the model `key`: every task and each of its tiers, ticked where it is the
+    /// favorite. The key, not the current model, since a tick can move the rows under the list.
+    fn fav_items(&self, key: &str) -> Vec<(String, Effect)> {
         let name = |k: &str| self.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
         let item = |s: String| match self.store.favorite(&s) {
-            Some(k) if k == m.key => format!("✓ {s}"),
+            Some(k) if k == key => format!("✓ {s}"),
             Some(k) => format!("☐ {s}  (now {})", name(k)),
             None => format!("☐ {s}"),
         };
-        Some(slots().map(|(t, x)| (item(slot(t, x)), Effect::Fav(t, x))).collect())
+        slots().map(|(t, x)| (item(slot(t, x)), Effect::Fav(key.to_string(), t, x))).collect()
     }
 
-    /// Models passing every filter but the frontier, ignoring the ones on column `skip`, so a
-    /// dropdown can count what each of its entries would show.
+    /// Models passing every filter but the frontier, ignoring the ones on column `skip` except a
+    /// minimum (the Price dropdown only replaces the maximum), so a dropdown can count what each
+    /// of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
         // A selected model shows even out of reach, so it can be compared.
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
@@ -820,7 +832,7 @@ impl App {
                 && self
                     .bounds
                     .iter()
-                    .filter(|b| b.0 != skip)
+                    .filter(|b| b.0 != skip || b.1.is_finite())
                     .all(|&(c, lo, hi)| self.val(i, c).is_some_and(|v| v >= lo && v <= hi))
         })
     }
@@ -1035,24 +1047,23 @@ impl App {
         self.store.is_favorite(self.task_at_hand(), key)
     }
 
-    /// `f`: favorite the current model for the task or one tier of it, or unfavorite it when it
+    /// `f`: favorite the model `key` for the task or one tier of it, or unfavorite it when it
     /// already is.
-    fn fav(&mut self, task: &'static str, tier: Option<&'static str>) -> Option<Effect> {
-        let m = self.current()?;
-        let (key, name) = (m.key.clone(), m.name.clone());
+    fn fav(&mut self, key: &str, task: &'static str, tier: Option<&'static str>) -> Option<Effect> {
+        let name = self.data.models.iter().find(|m| m.key == key)?.name.clone();
         let task = &slot(task, tier);
-        self.store.toggle_favorite(task, &key);
-        self.status = match self.store.favorite(task) == Some(key.as_str()) {
+        self.store.toggle_favorite(task, key);
+        self.status = match self.store.favorite(task) == Some(key) {
             true => format!("★ {name} favorite for {task}"),
             false => format!("{name} no longer the favorite for {task}"),
         };
         // With the list still open (m), its boxes follow.
         if self.choosing_favs()
-            && let (Some(fresh), Input::Choose { items, .. }) = (self.fav_items(), &mut self.input)
+            && let (fresh, Input::Choose { items, .. }) = (self.fav_items(key), &mut self.input)
         {
             *items = fresh;
         }
-        self.rebuild();
+        self.rebuild_in_place();
         Some(Effect::Save)
     }
 
@@ -1494,7 +1505,7 @@ impl App {
             }
             KeyCode::Char('f') if row => {
                 // Starting on the task at hand, so f enter toggles it.
-                let items = self.fav_items()?;
+                let items = self.fav_items(&self.current()?.key);
                 let sel = self.task_at_hand().and_then(|t| slots().position(|s| s == (t.name, None))).unwrap_or(0);
                 self.input = Input::choose("favorite for which tasks?", items, sel);
             }
@@ -1663,6 +1674,8 @@ impl App {
                     self.input = Input::None;
                     let key = self.current()?.key.clone();
                     self.store.set_note(&key, &text);
+                    // Search and the Notes sort read notes.
+                    self.rebuild_in_place();
                     return Some(Effect::Save);
                 }
                 KeyCode::Esc => self.input = Input::None,
@@ -1746,8 +1759,9 @@ impl App {
                 // While searching, space is typed.
                 KeyCode::Char(' ') if !*typing => {
                     let i = *choice_rows(items, query).get(*sel)?;
-                    if let Some(&(_, Effect::Fav(task, tier))) = items.get(i) {
-                        return self.fav(task, tier);
+                    if let Some((_, Effect::Fav(key, task, tier))) = items.get(i) {
+                        let (key, task, tier) = (key.clone(), *task, *tier);
+                        return self.fav(&key, task, tier);
                     }
                 }
                 // Esc while searching drops the search but keeps the entry under the bar.
@@ -1760,7 +1774,7 @@ impl App {
                     let (_, effect) = items.swap_remove(i);
                     self.input = Input::None;
                     match effect {
-                        Effect::Fav(task, tier) => return self.fav(task, tier),
+                        Effect::Fav(key, task, tier) => return self.fav(&key, task, tier),
                         Effect::Theme(name) => {
                             self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
                             self.status = format!("theme {name}");
@@ -3068,5 +3082,52 @@ mod tests {
         assert_eq!((press(&mut a, "y"), &a.input), (None, &Input::None), "only q confirms");
         assert_eq!(press(&mut a, "qq"), Some(Effect::Quit));
         assert_eq!(ctrl(&mut a, 'c'), Some(Effect::Quit), "ctrl-c quits at once");
+    }
+
+    #[test]
+    fn ctrl_w_takes_a_word_after_a_wide_space() {
+        let mut a = app();
+        a.input = Input::Note { text: "a\u{3000}b".into(), cur: 5 };
+        ctrl(&mut a, 'w');
+        assert_eq!(a.input, Input::Note { text: "a\u{3000}".into(), cur: 4 });
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_bar_and_highlight_on_their_models() {
+        let mut a = app();
+        press(&mut a, "Gv");
+        let key = a.current().unwrap().key.clone();
+        let mut models = a.data.models.clone();
+        models.reverse();
+        a.refreshed(Ok(Data { fetched: 0, models, ..Default::default() }));
+        assert_eq!(a.current().unwrap().key, key);
+        assert_eq!(a.targets(), [key.as_str()]);
+    }
+
+    #[test]
+    fn a_new_note_refilters_the_table() {
+        let mut a = app();
+        a.store.set_note("mini", "speedy");
+        press(&mut a, "/speedy");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(keys(&a), ["mini"]);
+        press(&mut a, "n");
+        ctrl(&mut a, 'u');
+        press(&mut a, "slow");
+        code(&mut a, KeyCode::Enter);
+        assert!(keys(&a).is_empty());
+    }
+
+    #[test]
+    fn the_fav_list_keeps_its_model_when_the_rows_move() {
+        let mut a = app();
+        a.store.toggle_favorite("coding", "opus5");
+        a.task = Some(&TASKS[1]);
+        a.rebuild();
+        let i = a.rows.iter().position(|&r| a.data.models[r].key == "opus5").unwrap();
+        a.select(i);
+        // Unfavorited, opus5 leaves the task's line; the second tick is still for it.
+        press(&mut a, "f  ");
+        assert_eq!(a.store.favorite("coding"), Some("opus5"));
     }
 }
