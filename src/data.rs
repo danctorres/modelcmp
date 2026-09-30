@@ -20,8 +20,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
-/// 6: `Model::shown`. 7: `Data::harness` from pi.
-const FORMAT: u32 = 7;
+/// 6: `Model::shown`.
+const FORMAT: u32 = 6;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -205,6 +205,30 @@ const HARNESSES: &[(&str, Probe)] = &[
     ("codex", Probe::Provider("openai")),
     ("gemini", Probe::Provider("google")),
 ];
+
+/// pi's names for providers models.dev names otherwise, paired by the model ids they share.
+const PI_PROVIDERS: &[(&str, &str)] = &[
+    ("azure-openai-responses", "azure"),
+    ("fireworks", "fireworks-ai"),
+    ("kimi-coding", "kimi-code-plan-global"),
+    ("openai-codex", "openai"),
+    ("qwen-token-plan", "alibaba-token-plan"),
+    ("qwen-token-plan-cn", "alibaba-token-plan-cn"),
+    ("qwen-token-plan-individual", "alibaba-token-plan"),
+    ("together", "togetherai"),
+    ("vercel-ai-gateway", "vercel"),
+    ("zai-coding-cn", "zhipuai-coding-plan"),
+];
+
+/// A `provider/model` id `harness` listed, with the provider as models.dev names it.
+pub fn canonical(harness: &str, id: &str) -> String {
+    match id.split_once('/') {
+        Some((p, rest)) if harness == "pi" => {
+            format!("{}/{rest}", PI_PROVIDERS.iter().find(|a| a.0 == p).map_or(p, |a| a.1))
+        }
+        _ => id.to_string(),
+    }
+}
 
 /// Every name the Via column can show: the harnesses, then "env".
 pub fn vias() -> impl Iterator<Item = &'static str> {
@@ -398,8 +422,8 @@ impl Data {
     /// Mark offers the user can use, and where: listed by an installed harness, or the
     /// provider's API key is set.
     pub fn apply_available(&mut self) {
-        let harness: Vec<(&str, HashSet<&str>)> =
-            self.harness.iter().map(|(h, ids)| (h.as_str(), ids.iter().map(String::as_str).collect())).collect();
+        let harness: Vec<(&str, HashSet<String>)> =
+            self.harness.iter().map(|(h, ids)| (h.as_str(), ids.iter().map(|i| canonical(h, i)).collect())).collect();
         // ponytail: "any env var set" – providers needing several vars (bedrock) may false-positive.
         let mut env: HashMap<&str, bool> = HashMap::new();
         for m in &mut self.models {
@@ -498,19 +522,15 @@ fn harness_models() -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
-/// The `provider/model` ids of a table under a header row that starts with `provider`, as
-/// `pi --list-models` prints; `None` without that header.
+/// The `provider/model` ids of a table under a `provider model ...` header, as `pi --list-models`
+/// prints; `None` without that header. Only lines with as many columns as the header are rows.
 fn table_ids(out: &str) -> Option<Vec<String>> {
-    let mut lines = out.lines().skip_while(|l| !l.starts_with("provider"));
-    lines.next()?;
-    Some(
-        lines
-            .filter_map(|l| {
-                let mut f = l.split_whitespace();
-                Some(format!("{}/{}", f.next()?, f.next()?))
-            })
-            .collect(),
-    )
+    let mut lines = out
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .skip_while(|f| !f.starts_with(&["provider", "model"]));
+    let cols = lines.next()?.len();
+    Some(lines.filter(|f| f.len() == cols).map(|f| format!("{}/{}", f[0], f[1])).collect())
 }
 
 /// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit`.
@@ -1354,8 +1374,9 @@ mod tests {
 
     #[test]
     fn table_ids_start_after_the_header() {
-        let out = "update available\nprovider  model  context\nanthropic  claude-x  1M\n\nopenrouter  a/b:free  8K\n";
-        assert_eq!(table_ids(out).unwrap(), ["anthropic/claude-x", "openrouter/a/b:free"]);
+        let out = "provider x: token expired\nprovider  model  context\nanthropic  claude-x  1M\n\n\
+                   openrouter  a/b:free  8K\npi 1.0 is out: run pi update\n";
+        assert_eq!(table_ids(out).unwrap(), ["anthropic/claude-x", "openrouter/a/b:free"], "only the table's rows");
         assert_eq!(table_ids("no models\n"), None, "no header, no ids");
     }
 
@@ -1580,11 +1601,13 @@ mod tests {
             harness: BTreeMap::from([
                 ("opencode".into(), vec!["anthropic/claude-opus-5".into()]),
                 ("claude".into(), vec!["anthropic/*".into()]),
+                ("pi".into(), vec!["openai-codex/gpt-5".into()]),
             ]),
             models: vec![
                 m(vec![o("anthropic", "claude-opus-5"), o("openrouter", "claude-opus-5")]),
                 m(vec![o("anthropic", "claude-haiku-4-5")]),
                 m(vec![o("openai", "gpt-5")]),
+                m(vec![o("openai", "gpt-4")]),
             ],
             ..Default::default()
         };
@@ -1592,7 +1615,8 @@ mod tests {
         assert!(d.models[0].available && d.models[0].offers[0].available && !d.models[0].offers[1].available);
         assert_eq!(d.models[0].via, ["claude", "opencode"]);
         assert_eq!(d.models[1].via, ["claude"], "a provider-wide harness covers every model of it");
-        assert!(!d.models[2].available && d.models[2].via.is_empty());
+        assert_eq!(d.models[2].via, ["pi"], "pi's openai-codex is models.dev's openai");
+        assert!(!d.models[3].available && d.models[3].via.is_empty());
     }
 
     #[test]

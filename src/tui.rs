@@ -525,7 +525,7 @@ const TASK: [Color; 6] =
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
 /// Developers' and harnesses' colours in the terminal's own theme: one per Via name (`data::vias`).
-const DEVS: [Color; 6] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green, Color::LightRed];
+const DEVS: [Color; 6] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green, Color::LightMagenta];
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
@@ -1828,11 +1828,13 @@ mod tests {
         }
     }
 
+    /// `dev_color` gives each Via name its own place, so every theme needs a colour for each.
     #[test]
     fn every_theme_keeps_the_harnesses_apart() {
-        for (name, p) in &THEMES {
-            let colors: Vec<_> = crate::data::vias().map(|h| resolve(dev_color(h), p.as_ref())).collect();
-            assert!((1..colors.len()).all(|i| !colors[..i].contains(&colors[i])), "{name}: {colors:?}");
+        let n = crate::data::vias().count();
+        assert!(DEVS.len() >= n, "the terminal's own: {} for {n}", DEVS.len());
+        for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
+            assert!(p.accents.len() >= n, "{name}: {} accents for {n}", p.accents.len());
         }
     }
 

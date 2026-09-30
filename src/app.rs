@@ -480,10 +480,17 @@ pub fn model_id(m: &Model) -> String {
 }
 
 /// The command that starts `harness` on `m`, if the harness has it: opencode and pi take
-/// `provider/model`, the single-provider CLIs (claude, codex, gemini) the bare model id.
-pub fn launch_cmd(m: &Model, harness: &str) -> Option<Vec<String>> {
+/// `provider/model` as they listed it (`listed`, pi's `openai-codex/...` for models.dev's `openai/...`),
+/// the single-provider CLIs (claude, codex, gemini) the bare model id.
+pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
     let o = m.offers.iter().find(|o| o.via.iter().any(|v| v == harness) && harness != "env")?;
-    let id = if matches!(harness, "opencode" | "pi") { format!("{}/{}", o.provider, o.id) } else { o.id.clone() };
+    let id = if matches!(harness, "opencode" | "pi") {
+        let id = format!("{}/{}", o.provider, o.id);
+        let own = listed.get(harness).and_then(|ids| ids.iter().find(|i| crate::data::canonical(harness, i) == id));
+        own.cloned().unwrap_or(id)
+    } else {
+        o.id.clone()
+    };
     Some(vec![harness.into(), "--model".into(), id])
 }
 
@@ -1513,8 +1520,12 @@ impl App {
             }
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
-                let mut items: Vec<_> =
-                    m.via.iter().filter_map(|h| launch_cmd(m, h)).map(|c| (c.join(" "), Effect::Launch(c))).collect();
+                let mut items: Vec<_> = m
+                    .via
+                    .iter()
+                    .filter_map(|h| launch_cmd(m, h, &self.data.harness))
+                    .map(|c| (c.join(" "), Effect::Launch(c)))
+                    .collect();
                 match items.len() {
                     0 => self.status = format!("no harness has {}; Via shows where you have access", m.name),
                     1 => return items.pop().map(|(_, e)| e),
@@ -2051,6 +2062,20 @@ mod tests {
         press(&mut a, "/not");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["llama4"]);
+    }
+
+    #[test]
+    fn pi_launches_with_the_provider_it_listed() {
+        let o = crate::data::Offer {
+            provider: "openai".into(),
+            id: "gpt55".into(),
+            via: vec!["pi".into()],
+            ..Default::default()
+        };
+        let m = Model { offers: vec![o], ..Default::default() };
+        let listed = BTreeMap::from([("pi".to_string(), vec!["openai-codex/gpt55".to_string()])]);
+        assert_eq!(launch_cmd(&m, "pi", &listed).unwrap(), ["pi", "--model", "openai-codex/gpt55"]);
+        assert_eq!(launch_cmd(&m, "pi", &BTreeMap::new()).unwrap()[2], "openai/gpt55", "unlisted: models.dev's own");
     }
 
     #[test]
