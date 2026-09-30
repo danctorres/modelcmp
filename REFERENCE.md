@@ -8,7 +8,7 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 
 One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
-Code/$, Via, Note. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
+Code/$, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
 its Intelligence Index, and each task column is one benchmark's score (0-100): Coding the
 Coding Index, Agentic Terminal-Bench Hard, Reason HLE; two more columns show speed,
 Tok/s (output tokens per second) and TTFT (seconds to the first token), medians across
@@ -45,15 +45,15 @@ modelcmp select sonnet-5                       # shortlist it, list --selected s
 modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosing; without text shows it, --rm deletes it
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
-modelcmp fav coding flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
+modelcmp fav coding 3.7-flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
 modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
 ```
 
 Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`. For a large prompt, bound the context instead: `--min ctx=200`.
-Columns for `--sort`, `--min` and `--max`: `price`, `in`, `out`, `ctx` (thousands of
+Columns for `--sort`, `--min` and `--max`: `price`, `in`, `cache`, `out`, `ctx` (thousands of
 tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$), and with Artificial Analysis `tps` and `ttft`. `--task` and
-`recommend` leave excluded models out; plain `list` shows them marked `✗`, your selection `✓` and available models `●`. `--tier` picks one
+`recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
 model from the task's list: `low` the cheapest in the top half of the models the source
 evaluated, `mid` the cheapest in the top quarter, `high` the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
 tier's pick. Every favorite of the task sits on the task's list marked `★` whether or not it is on the frontier or has a score for
@@ -83,9 +83,9 @@ modelcmp list --task coding --tier mid --json  # the one model to use: the user'
 ```
 
 Each JSON model carries `key`, `selected` (on your shortlist), `excluded`, `favorite_for` (the tasks it is the user's favorite
-for, and `task:tier` for a tier's), `price` (with the provider's model `id`, the string a harness takes, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
+for, and `task:tier` for a tier's), `price` (with the provider's model `id`, which opencode takes after `provider/`, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
 `eci` (the overall index of `source`, `epoch` or `aa`), per-task `tasks` (each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile), and with `aa` `tokens_per_second` and `ttft_seconds`. `show` and
-`compare` add every benchmark score and every provider's price. `recommend` prints each
+`compare` add `benchmarks` (every score, as a fraction: 0.545 is 54.5%), `providers` (every provider's price) and `pages` (site to URL). `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
 same as `tasks`. A favorite that is on the line only as
 the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, and the user's `note` when the model has one.

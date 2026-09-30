@@ -10,20 +10,20 @@ commands and JSON.
 |-----|--------|
 | `?` | help; `/` keeps the lines that match |
 | `esc` | back: closes an overlay, drops the highlight, clears the `/` filter, leaves `M`, then `F`, then `E`, then a task picked in recommend back to recommend |
-| `qq` | quit; the first `q` asks |
+| `qq` `^c` | quit; the first `q` asks, `^c` does not |
 | `r` | refresh data now |
-| `B` | benchmarks from Epoch AI (the default, no API key needed) or Artificial Analysis (needs an API key); the TUI's first start asks, and `esc` there picks Epoch AI. Artificial Analysis asks for its API key when none is saved or `ARTIFICIAL_ANALYSIS_API_KEY` is not set, and again if it rejects the key; picking it again while it is the source changes the saved key, which is kept in `~/.config/modelcmp/aa_key`, readable by you alone. Each source has its own cache, so switching back needs no download |
+| `B` | benchmarks from Epoch AI (the default, no API key needed) or Artificial Analysis (needs an API key); the TUI's first start asks, and `esc` there picks Epoch AI. Artificial Analysis asks for its API key when none is saved and `ARTIFICIAL_ANALYSIS_API_KEY` is not set, and again if it rejects the key; picking it again while it is the source changes the saved key, which is kept in `aa_key` next to `user.json`, readable by you alone. Each source has its own cache, so switching back needs no download |
 
 ## Move
 
 | Key | Action |
 |-----|--------|
-| `j` `k` | move; a count repeats, as in `3j`; past the last row back to the first |
-| `h` `l` | pick a column, scrolling the ones right of Dev; `‹` `›` mark columns off screen, `▲` `▼` on the left border rows above or below; in compare and recommend, pick a model for `o` `x` `y` `f` `e` `n`, with the same marks for models off screen |
-| `0` `_` `$` `w` `b` | first / last column; next / previous group: prices, benchmarks, Via; in compare and recommend, `0` `_` `$` pick the first / last model |
+| `j` `k` | move; a count repeats, as in `3j`; past the last row back to the first. The arrow keys work as `h` `j` `k` `l`, `PgDn` `PgUp` move a page, `Home` `End` go to the top / bottom |
+| `h` `l` | pick a column, scrolling the ones right of Dev; `‹` `›` mark columns off screen, `▲` `▼` on the left border rows above or below; in compare and recommend, pick a model for `space` `o` `x` `y` `f` `e` `n`, with the same marks for models off screen |
+| `0` `_` `$` `w` `b` | first / last column; next / previous group: names, prices, benchmarks, speed (Artificial Analysis), Via; in compare and recommend, `0` `_` `$` pick the first / last model |
 | `gg` `G` `3gg` | top / bottom / row 3; a number before `gg` goes to that row, as `12gg` to row 12, in dropdowns and lists too |
 | `(` `)` `^d` `^u` | half a page up / down; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
-| `v` | highlight a range of rows: move to extend it, then `space` `e` or `C` act on all of it; `esc` cancels |
+| `v` | highlight a range of rows: move to extend it, then `space` `e` or `C` act on all of it (`C` compares just the range); `esc` cancels |
 
 ## Filter and sort
 
@@ -60,8 +60,8 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 |-----|--------|
 | `n` | note for the model; `recommend --json` gives it to agents, who use it to choose between models |
 | `y` `Y` | copy the model id (`provider/model`) / the model name |
-| `o` | open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai; asks which |
-| `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`); asks which when several have it |
+| `o` | open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai; asks which when it has several |
+| `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`, else `x-terminal-emulator`); asks which when several have it |
 
 ## Panels
 
@@ -70,7 +70,7 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 | `enter` | details: every benchmark, price per provider |
 | `C` | compare 2+ selected models: cheapest, best coder, most coding per $; `h` `l` pick a model, and the table's bar follows it; `C` again or `esc` closes it |
 | `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`, and the table's bar follows it, so `esc` lands on it; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
-| `t` | theme panel: `j` `k` preview, `/` searches, `enter` saves, `esc` or `t` closes. `terminal` (its own colours, the default), then the dark `gruvbox`, `nord`, `catppuccin`, `dracula`, `tokyonight`, `kanagawa`, `monokai`, `rose-pine`, `github`, `solarized`, `synthwave` and `cyberpunk`, the light `github-light`, `gruvbox-light`, `paper` and `sepia`, and the retro `amber`, `phosphor`, `c64` and `gameboy`; saved with your selection. A theme sets the 16 terminal colours, the text colour and 5 to 14 colours for developers, each of which has to read on that theme's background and stay apart from the others. Every theme paints its own background, so a dark one stays dark on a light terminal; only `terminal` keeps a transparent background |
+| `t` | theme panel: `j` `k` preview, `/` searches, `enter` saves, `esc` or `t` closes. `terminal` (its own colours, the default), then the dark `gruvbox`, `nord`, `catppuccin`, `dracula`, `tokyonight`, `kanagawa`, `monokai`, `rose-pine`, `github`, `solarized`, `synthwave` and `cyberpunk`, the light `github-light`, `gruvbox-light`, `paper` and `sepia`, and the retro `amber`, `phosphor`, `c64` and `gameboy`; saved in `user.json`. A theme sets the 16 terminal colours, the text colour and 6 to 14 colours for developers, each of which has to read on that theme's background and stay apart from the others. Every theme paints its own background, so a dark one stays dark on a light terminal; only `terminal` keeps a transparent background |
 
 ## Input and mouse
 

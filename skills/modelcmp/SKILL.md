@@ -19,7 +19,7 @@ Done when you hold one model `key` and can say which task and frontier entry it 
 
 ## One id for a harness
 
-`--tier` applies the same rules and prints the provider/model string a harness takes:
+`--tier` applies the same rules; `--id` prints the provider/model string opencode takes (for claude, codex and gemini use the JSON `price.id`):
 
 ```sh
 opencode -m "$(modelcmp list --task coding --tier mid --id)"

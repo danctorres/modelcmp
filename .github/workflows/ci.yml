@@ -18,8 +18,8 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
   # Daily: fails when an upstream (models.dev, Epoch AI) changes format and the data thins
-  # out, before a user sees it. Floors sit well under today's 1418 models, 159 with ECI,
-  # 143 with a coding score and 1330 priced.
+  # out, before a user sees it. Floors sit well under today's 1388 models, 157 with ECI,
+  # 143 with a coding score and 1302 priced.
   data:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

@@ -31,7 +31,7 @@ struct Args {
     /// Percent of input tokens read from the prompt cache in Price: 90 fits an agent session, 0 a one-off prompt (`%` in the TUI)
     #[arg(long, global = true, value_name = "PERCENT", default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
     cache: u8,
-    /// Benchmarks from: epoch (Epoch AI, the default) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY); overrides `B` in the TUI for this run
+    /// Benchmarks from: epoch (Epoch AI, the default) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY or a key saved with `B`); overrides `B` in the TUI for this run
     #[arg(long, global = true, value_parser = PossibleValuesParser::new(data::Source::ALL.map(|s| s.id())))]
     source: Option<String>,
     #[command(subcommand)]

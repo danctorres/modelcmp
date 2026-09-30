@@ -55,11 +55,13 @@ modelcmp fav coding sonnet-5                # your model for coding: recommend a
 
 ```
 $ modelcmp recommend
+best per price: the top model at each price level, cheapest first, as name [key] $/1M tokens (the task's column), plus ★ your favorite, marked not recommended when it is not one
+
+...
 coding  writing and fixing code  (modelcmp list --task coding)
+  use for:         fixing a bug, adding a feature to an existing repo, refactors
   best per price:  Gemini 3.1 Flash-Lite [gemini31flashlite] $0.41 (145) · Gemini 3.7 Flash [gemini37flash] $1.0 (158) · Claude Sonnet 5.5 [claudesonnet55] $2.8 (164) · Claude Opus 5.5 [claudeopus55] $5.4 (168)
 
-agentic  multi-step tool use, long autonomous tasks  (modelcmp list --task agentic)
-  best per price:  Gemini 3.1 Flash-Lite [gemini31flashlite] $0.41 (144) · Gemini 3.7 Flash [gemini37flash] $1.0 (158) · Claude Sonnet 5.5 [claudesonnet55] $2.8 (165) · Claude Opus 5.5 [claudeopus55] $5.4 (167)
 ...
 ```
 
@@ -79,7 +81,7 @@ clears one. Your choice beats the computed pick: `recommend` marks it `★` and 
 first.
 
 A favorite can also cover one tier of a task, so easy work goes to a cheaper model than hard
-work: `modelcmp fav coding flash --tier low` makes `--tier low` return Flash while the other
+work: `modelcmp fav coding 3.7-flash --tier low` makes `--tier low` return Gemini 3.7 Flash while the other
 tiers keep your coding favorite. In the TUI, `f` lists each task's tiers under it.
 
 ## For agents
@@ -113,8 +115,11 @@ skills can take its body in `AGENTS.md`.
   and `gemini` binaries on `PATH` (each counts as its own provider), and providers whose API key
   is set in the environment. The Via column says which.
 
-Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/`. Your selection,
-exclusions, notes and per-task favorites live in `~/.config/modelcmp/user.json`.
+Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/` on Linux
+(`~/Library/Caches/modelcmp/` on macOS). Your selection, exclusions, notes and per-task
+favorites live in `~/.config/modelcmp/user.json` (`~/Library/Application Support/modelcmp/`
+on macOS); the `?` help shows the path. Each refresh also asks GitHub for the latest release,
+to say when a new version is out.
 
 Benchmarks are proxies: a score says how a model did on that test, not how it will do in
 your harness.
