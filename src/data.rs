@@ -671,6 +671,16 @@ fn clean_name(s: &str) -> String {
     }
 }
 
+/// The row an offer goes under: its cleaned name, else its id's. A "contributor" id is Meta's
+/// tier that trains on your data, its own model, though OpenCode names one "Muse Spark 1.3 Free".
+fn offer_name(id: &str, name: &str) -> String {
+    let n = clean_name(if name.is_empty() { id } else { name });
+    match id.to_ascii_lowercase().contains("contributor") && !n.to_ascii_lowercase().contains("contributor") {
+        true => format!("{n} Contributor"),
+        false => n,
+    }
+}
+
 /// Rows whose offers mostly use the same model id are one model under several names:
 /// Cloudflare's "Granite 4.0 H Micro" and OpenRouter's "granite-4.0-micro" are both
 /// `granite-4.0-h-micro`. Only each row's most common id counts, as providers mislabel models
@@ -1167,7 +1177,7 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
         .flat_map(|pid| providers[pid].models.iter().map(move |(mid, md)| (pid, mid, md)))
         // Text generation models only: skip image/video/embedding endpoints.
         .filter(|(_, _, md)| md.modalities.output.is_empty() || md.modalities.output.iter().any(|o| o == "text"))
-        .map(|(pid, mid, md)| (pid, mid, md, clean_name(if md.name.is_empty() { mid } else { &md.name })))
+        .map(|(pid, mid, md)| (pid, mid, md, offer_name(mid, &md.name)))
         .filter(|e| !norm(&e.3).is_empty())
         .collect();
     let keys: HashSet<String> = entries.iter().map(|e| norm(&e.3)).collect();
@@ -1318,6 +1328,12 @@ mod tests {
         }
         assert_eq!(clean_name("Free"), "Free", "a name is never cut to nothing");
         assert_ne!(norm("GPT-5.5"), norm("GPT-5.5 Pro"));
+        assert_eq!(offer_name("muse-spark-1.3-contributor-free", "Muse Spark 1.3 Free"), "Muse Spark 1.3 Contributor");
+        assert_eq!(
+            offer_name("meta/muse-spark-1.3-contributor", "Meta: Muse Spark 1.3 Contributor"),
+            "Muse Spark 1.3 Contributor"
+        );
+        assert_eq!(offer_name("muse-spark-1.3", "Muse Spark 1.3"), "Muse Spark 1.3");
     }
 
     #[test]
