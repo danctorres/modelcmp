@@ -44,4 +44,4 @@ modelcmp compare <a> <b> --json       # side by side
 modelcmp list --min coding=155 --sort price --json  # everything good enough, cheapest first
 ```
 
-A model name matches by substring. Exit code 2 means it matched several; stderr lists the candidates with their keys, and a key always matches exactly. `modelcmp --help` has every flag.
+A model name matches by substring. Exit code 3 means it matched several; stderr lists the candidates with their keys, and a key always matches exactly. `modelcmp --help` has every flag.
