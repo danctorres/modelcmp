@@ -450,6 +450,8 @@ impl Data {
             }
             m.available = !m.via.is_empty();
         }
+        // Code/$ ranks the price you would pay, which availability picks.
+        crate::fit::add_value(&mut self.models);
     }
 
     /// Resolve a user-typed model name. Err = list of candidates (empty if none). A partial
@@ -495,8 +497,7 @@ fn cache_path(src: Source) -> PathBuf {
 pub fn load_cache() -> Option<Data> {
     let bytes = std::fs::read(cache_path(source())).ok()?;
     let mut d: Data = serde_json::from_slice(&bytes).ok()?;
-    // Derived from cached fields, so a change to the formula applies without a re-download.
-    crate::fit::add_value(&mut d.models);
+    // Code/$ is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
 }
@@ -1362,7 +1363,6 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
         }
     }
     unify_developers(&mut models);
-    crate::fit::add_value(&mut models);
     models.sort_by(|a, b| b.eci.unwrap_or(0.0).total_cmp(&a.eci.unwrap_or(0.0)).then(b.release.cmp(&a.release)));
     let benches = ep.source.benches().into_iter().map(String::from).collect();
     Ok(Data { format: FORMAT, fetched: now(), harness: BTreeMap::new(), benches, latest: String::new(), models })
