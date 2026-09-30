@@ -84,29 +84,35 @@ const LOGO: [&str; 6] = [
     "╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝ ╚═════╝╚═╝     ╚═╝╚═╝     ",
 ];
 
-/// The first launch's intro: the wordmark dim, a bright band sweeping across it, then all of
-/// it lit. Any key skips it, and is not passed on; a terminal too small for it skips it too.
+/// The first launch's intro: the wordmark dim, then a rainbow rolling across it on a diagonal,
+/// each cell running red to blue before it settles on the accent. Any key skips it, and is not
+/// passed on; a terminal too small for it skips it too.
 fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
-    const BAND: usize = 8;
-    let w = LOGO[0].chars().count();
+    // The hue wheel up to the accent, so the last step into magenta is a small one.
+    const RAINBOW: [Color; 5] = [Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue];
+    /// Frames each colour lasts in a cell, so the bands are this many columns wide.
+    const STEP: usize = 3;
+    let (w, rows) = (LOGO[0].chars().count(), LOGO.len());
     let palette = THEMES[crate::view::theme(&app.store.theme)].1.as_ref();
-    // One frame per column the band moves, then the whole wordmark lit.
-    for t in 0..=w + BAND {
-        let done = t == w + BAND;
+    // The wave reaches a cell `c + 2 * (rows - 1 - r)` frames in, the bottom row first as cells are
+    // twice as tall as wide, and the last cell settles `RAINBOW.len() * STEP` frames after that.
+    let end = w + 2 * (rows - 1) + RAINBOW.len() * STEP;
+    for t in 0..=end {
         let mut fits = true;
         terminal.draw(|f| {
             let a = f.area();
-            let h = LOGO.len() as u16;
-            if usize::from(a.width) < w || a.height < h {
+            if usize::from(a.width) < w || usize::from(a.height) < rows {
                 fits = false;
                 return;
             }
-            let (x, y) = (a.x + (a.width - w as u16) / 2, a.y + (a.height - h) / 2);
+            let (x, y) = (a.x + (a.width - w as u16) / 2, a.y + (a.height - rows as u16) / 2);
             let buf = f.buffer_mut();
             for (r, row) in LOGO.iter().enumerate() {
                 for (c, ch) in row.chars().enumerate() {
-                    let lit = done || (t.saturating_sub(BAND)..t).contains(&c);
-                    let style = if lit { fg(ACCENT).add_modifier(Modifier::BOLD) } else { fg(MUTED) };
+                    let style = match t.checked_sub(c + 2 * (rows - 1 - r)) {
+                        None => fg(MUTED),
+                        Some(k) => fg(RAINBOW.get(k / STEP).copied().unwrap_or(ACCENT)).add_modifier(Modifier::BOLD),
+                    };
                     buf[(x + c as u16, y + r as u16)].set_char(ch).set_style(style);
                 }
             }
@@ -115,7 +121,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         if !fits {
             return Ok(());
         }
-        if event::poll(Duration::from_millis(if done { 600 } else { 15 }))? {
+        if event::poll(Duration::from_millis(if t == end { 600 } else { 15 }))? {
             event::read()?;
             return Ok(());
         }
