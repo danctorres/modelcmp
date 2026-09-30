@@ -63,7 +63,7 @@ includes models you have no access to. `--refresh` on any command re-downloads f
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name
-is ambiguous: it exits with code 2 and lists the candidates. An unknown `--dev` or `--via` is an error rather
+is ambiguous: it exits with code 3 and lists the candidates. An unknown `--dev` or `--via` is an error rather
 than an empty list.
 
 ## Data age

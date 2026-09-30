@@ -12,7 +12,8 @@ use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// An error with the process exit code it deserves: 2 for an ambiguous model name, 1 otherwise.
+/// An error with the process exit code it deserves: 3 for an ambiguous model name, 1 otherwise
+/// (clap takes 2, for a usage error).
 pub struct Exit {
     pub code: i32,
     pub msg: String,
@@ -192,7 +193,7 @@ fn resolve<'a>(data: &'a Data, q: &str) -> Result<&'a Model> {
         [] => Exit { code: 1, msg: format!("no model matches '{q}'") },
         c => {
             let names: Vec<String> = c.iter().take(15).map(|m| format!("  {} ({})", m.name, m.key)).collect();
-            Exit { code: 2, msg: format!("'{q}' is ambiguous, candidates:\n{}", names.join("\n")) }
+            Exit { code: 3, msg: format!("'{q}' is ambiguous, candidates:\n{}", names.join("\n")) }
         }
     })
 }
@@ -234,6 +235,8 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     if let Some(t) = o.task {
         let favs = store.task_favorites(t.name);
         let fav: Vec<&Model> = models.iter().copied().filter(|m| favs.contains(&m.key.as_str())).collect();
+        // The tier picks on merit: a favorite appended to the line is neither best nor good enough.
+        let merit = task_frontier(models.iter().copied(), t, &[]);
         let front = task_frontier(models.into_iter(), t, &fav);
         models = match &o.tier {
             // Your favorite for the tier, else for the task, beats the tier's pick; one the
@@ -241,7 +244,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             Some(tier) => store
                 .tier_favorites(t.name, tier)
                 .find_map(|k| front.iter().find(|(m, _)| m.key == k))
-                .or_else(|| pick(&front, tier))
+                .or_else(|| pick(&merit, tier))
                 .map(|e| e.0)
                 .into_iter()
                 .collect(),
@@ -452,9 +455,11 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                     e
                 })
                 .collect();
+            // An excluded favorite is off the line, so agents are not pointed at it either.
+            let fav = |s: &str| store.favorite(s).filter(|k| !store.is_excluded(k));
             let tier_favs: BTreeMap<&str, &str> =
-                TIERS.iter().filter_map(|x| Some((x.0, store.favorite(&slot(t.name, Some(x.0)))?))).collect();
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": store.favorite(t.name), "tier_favorites": tier_favs, "frontier": front})
+                TIERS.iter().filter_map(|x| Some((x.0, fav(&slot(t.name, Some(x.0)))?))).collect();
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": fav(t.name), "tier_favorites": tier_favs, "frontier": front})
         })
         .collect()
 }
@@ -598,6 +603,8 @@ mod tests {
         store.toggle_favorite("coding:low", "mini");
         assert_eq!(coding(&recommend_json(&data, &store))["tier_favorites"], serde_json::json!({"low": "mini"}));
         store.toggle_excluded("mini");
-        assert_eq!(names(&coding(&recommend_json(&data, &store))), ["gpt55"]);
+        let t = coding(&recommend_json(&data, &store));
+        assert_eq!(names(&t), ["gpt55"]);
+        assert_eq!(t["tier_favorites"], serde_json::json!({}), "nor as a favorite");
     }
 }

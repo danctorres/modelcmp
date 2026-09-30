@@ -1572,9 +1572,11 @@ impl App {
                 self.view = View::Table;
                 self.rebuild();
                 self.select(0);
-                // An unscored favorite is on the line but neither best nor cheapest.
+                // An unscored favorite is on the line but neither best nor cheapest, and a
+                // scored one may cost more than the best.
                 let front: Vec<_> = self.task_frontier(t).into_iter().filter(|(_, s)| !s.is_nan()).collect();
-                self.status = match (front.last(), front.first()) {
+                let best = front.iter().max_by(|a, b| a.1.total_cmp(&b.1));
+                self.status = match (best, front.first()) {
                     (Some(a), Some(b)) => format!("{} best, {} cheapest", a.0.name, b.0.name),
                     _ => format!("no model has data for {}", t.name),
                 };
