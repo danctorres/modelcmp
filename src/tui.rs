@@ -8,7 +8,7 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about,
+    App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, SPEED, VIA, View, choice_rows, col_about,
     col_name, has_menu, hidden, menu_rows,
 };
 use crate::data::{self, Data, Model};
@@ -431,6 +431,19 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             Mouse::Exclude(n)
         } else if pick {
             Mouse::Pick(n)
+        } else if let Some(j) = harness_at(app, &l, n, x) {
+            Mouse::Harness(n, j)
+        } else if (l.name_x..l.name_x + l.name_w + GAP + l.dev_w).contains(&x) {
+            Mouse::Name(n)
+        } else if let Some(&(i, ..)) = l.cols.iter().find(|&&(_, cx, w)| (cx..cx + w).contains(&x)) {
+            // The groups of `GROUPS` and where each comes from: prices and context, benchmarks,
+            // then speed, which only Artificial Analysis measures.
+            let site = match i + 2 {
+                PRICE..ECI => "models.dev",
+                ECI..SPEED if data::source() == data::Source::Epoch => "epoch.ai",
+                _ => "artificialanalysis.ai",
+            };
+            Mouse::Site(n, site)
         } else {
             Mouse::Row(n)
         });
@@ -465,6 +478,17 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // The ▾ ends a left-aligned text header ("Dev▼ ▾") and is the last cell of a numeric one.
     let arrow = if col == 1 || col == VIA { cx + 4 + u16::from(app.sort_col == col) } else { cx + w - 1 };
     Some(if has_menu(col) && x >= arrow { Mouse::Menu(col) } else { Mouse::Header(col) })
+}
+
+/// Which of row `n`'s harnesses column `x` is on, as `draw` lays Via out: the names joined by ", ".
+fn harness_at(app: &App, l: &Layout, n: usize, x: u16) -> Option<usize> {
+    let (mut end, _) = l.via.filter(|&(vx, w)| (vx..vx + w).contains(&x))?;
+    let m = app.data.models.get(*app.rows.get(n)?).filter(|m| app.accessible(m))?;
+    m.via.iter().position(|h| {
+        let start = end;
+        end += h.len() as u16 + 2;
+        (start..end - 2).contains(&x)
+    })
 }
 
 /// Start `cmd` in a new terminal window here, without waiting: Windows Terminal under WSL,
@@ -2398,7 +2422,8 @@ mod tests {
             row: y,
             modifiers: KeyModifiers::NONE,
         };
-        assert_eq!(hit(&a, area, click(12, 4)), Some(Mouse::Row(1)));
+        assert_eq!(hit(&a, area, click(12, 4)), Some(Mouse::Name(1)));
+        assert_eq!(hit(&a, area, click(col("Dev"), 4)), Some(Mouse::Name(1)), "the developer, as the name");
         assert_eq!(hit(&a, area, click(3, 4)), Some(Mouse::Box(1)), "a click on the checkbox cycles it");
         assert_eq!(hit(&a, area, click(5, 4)), Some(Mouse::Star(1)), "and on the ☆ picks tasks");
         assert_eq!(hit(&a, area, click(7, 4)), Some(Mouse::Exclude(1)), "and on the ✗ box excludes the model");
@@ -2426,8 +2451,25 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(8)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
+        let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.find("opencode")?))).unwrap();
+        let (x, y) = (lines[k][..via].chars().count() as u16 + 1, k as u16 + 1);
+        assert_eq!(
+            hit(&a, area, click(x + 7, y)),
+            Some(Mouse::Harness(k - 2, 0)),
+            "a harness in Via: a second click opens it"
+        );
+        assert_eq!(hit(&a, area, click(x + 8, y)), Some(Mouse::Row(k - 2)), "past its name: the row");
+        assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
+        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Site(1, "epoch.ai")), "a benchmark score");
+        assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Site(1, "models.dev")), "a price");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
         assert_eq!(hit(&a, area, wheel(MouseEventKind::ScrollLeft)), Some(Mouse::Cols(-1)));
+        data::set_source(data::Source::Aa);
+        let (_, aa) = render(&mut a, w - 2, h - 3);
+        let tps = aa[0][..aa[0].find("Tok/s").unwrap()].chars().count() as u16 + 1;
+        let site = Some(Mouse::Site(1, "artificialanalysis.ai"));
+        assert_eq!(hit(&a, area, click(tps, 4)), site, "speed is Artificial Analysis's");
+        data::set_source(data::Source::Epoch);
         a.mouse(Mouse::Menu(1));
         let (_, lines) = render(&mut a, w - 2, h - 3);
         let any = lines[2][..lines[2].find("any").unwrap()].chars().count() as u16 + 1;

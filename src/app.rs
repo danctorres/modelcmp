@@ -247,7 +247,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Input and mouse",
         &[
             ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
-            ("mouse", "click highlights, again details; right click selects"),
+            ("mouse", "click highlights, again on name or dev details; right click selects"),
         ],
     ),
 ];
@@ -439,8 +439,10 @@ pub enum Effect {
 pub enum Mouse {
     /// Wheel: rows to move, negative is up.
     Scroll(isize),
-    /// Click on row `n` of the table (an index into `rows`).
+    /// Click on row `n` of the table (an index into `rows`): highlight it.
     Row(usize),
+    /// A click on row `n`'s model name or developer: highlight the row, and again open its details.
+    Name(usize),
     /// Right click on row `n`: mark it, as space does, without moving; a selection becomes marks.
     Mark(usize),
     /// A click on row `n`'s checkbox: toggle its mark, as space does.
@@ -449,6 +451,12 @@ pub enum Mouse {
     Star(usize),
     /// A click on row `n`'s ✗ box: exclude it or take the exclusion off, that row alone.
     Exclude(usize),
+    /// A click on harness `j` of row `n`'s Via: highlight the row, and again open the harness on
+    /// the model, as `x` and picking it does.
+    Harness(usize, usize),
+    /// A click on a number of row `n` that comes from this site: highlight the row, and again
+    /// open the model's page there in the browser.
+    Site(usize, &'static str),
     /// Ctrl click on row `n`: toggle it in the selection on its own, keeping the rest.
     Pick(usize),
     /// Shift click or left drag to row `n`: extend the selection to it as a visual range.
@@ -1234,7 +1242,9 @@ impl App {
     }
 
     /// The wheel scrolls whatever `j k` move and sideways moves the column cursor; a click
-    /// selects a row, and again opens its details; a click on a header sorts by it, as `s`
+    /// selects a row, and again on its name or developer opens its details, on a harness in its Via that
+    /// harness, as `x` does, and on a number the model's page on the site it comes from; a
+    /// click on a header sorts by it, as `s`
     /// does, and on its ▾ opens the dropdown. A click on an entry does what enter does: in a
     /// dropdown and `f`'s tasks it toggles the entry and the list stays open until a click
     /// outside; in the other choice lists it picks the entry.
@@ -1279,16 +1289,10 @@ impl App {
         }
         match m {
             Mouse::Cols(n) => return self.table_key(KeyCode::Char(if n < 0 { 'h' } else { 'l' }), n.abs()),
+            // A plain click replaces the selection, as in a file manager.
             Mouse::Row(n) if n < self.rows.len() => {
-                // A plain click replaces the selection, as in a file manager.
-                if self.selecting() {
-                    self.deselect();
-                    self.select(n);
-                } else if n == self.selected() {
-                    return self.table_key(KeyCode::Enter, 1);
-                } else {
-                    self.select(n);
-                }
+                self.deselect();
+                self.select(n);
             }
             Mouse::Mark(n) if n < self.rows.len() => {
                 let inside = self.is_selected(n);
@@ -1326,6 +1330,26 @@ impl App {
                 self.store.toggle_excluded(&key);
                 self.rebuild_in_place();
                 return Some(Effect::Save);
+            }
+            // These cells act on a second click, the first highlighting the row as any click does:
+            // the name or the developer opens the details, a harness itself (`env` opens nothing), and a number the
+            // model's page on the site it comes from, or the site when the model has no page there.
+            Mouse::Name(n) | Mouse::Harness(n, _) | Mouse::Site(n, _) if n < self.rows.len() => {
+                if self.selecting() || n != self.selected() {
+                    self.deselect();
+                    self.select(n);
+                    return None;
+                }
+                let model = self.current()?;
+                let site = match m {
+                    Mouse::Site(_, site) => site,
+                    Mouse::Harness(_, j) => {
+                        return launch_cmd(model, model.via.get(j)?, &self.data.harness).map(Effect::Launch);
+                    }
+                    _ => return self.table_key(KeyCode::Enter, 1),
+                };
+                let page = model.links().into_iter().find(|l| l.0 == site).map(|l| l.1);
+                return Some(Effect::Open(page.unwrap_or_else(|| format!("https://{site}"))));
             }
             Mouse::Pick(n) if n < self.rows.len() => {
                 // The range, if any, becomes picked rows, then the clicked row toggles.
@@ -2117,6 +2141,10 @@ mod tests {
         assert_eq!(press(&mut a, "jj"), None, "j stops at the last");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.input, Input::None, "esc cancels");
+        press(&mut a, "j");
+        assert_eq!(a.mouse(Mouse::Harness(0, 1)), None, "a click on a harness in Via highlights its row");
+        assert_eq!((a.selected(), &a.input), (0, &Input::None));
+        assert_eq!(a.mouse(Mouse::Harness(0, 1)), cmd("opencode", "p/gpt55"), "and a second opens it");
         press(&mut a, "xj");
         assert_eq!(code(&mut a, KeyCode::Enter), cmd("opencode", "p/gpt55"), "opencode takes provider/model");
         assert_eq!(a.input, Input::None);
@@ -3000,7 +3028,12 @@ mod tests {
         assert_eq!(a.mouse(Mouse::Row(2)), None);
         assert_eq!(a.selected(), 2);
         assert_eq!(a.mouse(Mouse::Row(2)), None);
-        assert_eq!(a.view, View::Detail);
+        assert_eq!(a.view, View::Table, "details open from the name or developer only");
+        a.mouse(Mouse::Row(1));
+        assert_eq!(a.mouse(Mouse::Name(2)), None);
+        assert_eq!((a.selected(), &a.view), (2, &View::Table), "a click on the name highlights");
+        assert_eq!(a.mouse(Mouse::Name(2)), None);
+        assert_eq!(a.view, View::Detail, "and a second opens the details");
         assert_eq!(a.mouse(Mouse::Scroll(3)), None);
         assert_eq!(a.scroll, 3);
         assert_eq!(a.mouse(Mouse::Row(0)), None, "clicks do nothing behind an overlay");
@@ -3010,6 +3043,13 @@ mod tests {
         assert_eq!(a.selected(), 1);
         assert_eq!(a.mouse(Mouse::Row(9)), None, "past the end is ignored");
         assert_eq!(a.selected(), 1);
+        assert_eq!(a.mouse(Mouse::Site(0, "epoch.ai")), None, "a click on a benchmark score highlights its row");
+        assert_eq!((a.selected(), &a.view), (0, &View::Table));
+        let page = format!("https://epoch.ai/models/{}", a.current().unwrap().key);
+        assert_eq!(a.mouse(Mouse::Site(0, "epoch.ai")), Some(Effect::Open(page)), "and a second opens its Epoch page");
+        let open = Some(Effect::Open("https://models.dev".into()));
+        assert_eq!(a.mouse(Mouse::Site(0, "models.dev")), open, "a price: models.dev, where the model has no page");
+        a.mouse(Mouse::Row(1));
         a.mouse(Mouse::Mark(2));
         assert_eq!((a.selected(), a.store.marked.len()), (2, 1), "right click marks and stays");
         a.mouse(Mouse::Mark(2));
