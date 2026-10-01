@@ -1125,9 +1125,14 @@ impl App {
             for l in labels.filter(|l| !l.is_empty()) {
                 *counts.entry(l).or_default() += 1;
             }
-            // Most models first; the stable sort keeps ties A-Z.
+            // Developers A-Z whatever their case, so xAI comes before Z.ai; harnesses with the
+            // most models first, where the stable sort keeps ties A-Z.
             let mut names: Vec<(String, usize)> = counts.into_iter().map(|(d, n)| (d.to_string(), n)).collect();
-            names.sort_by_key(|&(_, n)| Reverse(n));
+            if by_dev {
+                names.sort_by_key(|(d, _)| d.to_lowercase());
+            } else {
+                names.sort_by_key(|&(_, n)| Reverse(n));
+            }
             let current = if self.col == 1 { &self.dev } else { &self.via };
             let picked = current.first().and_then(|d| names.iter().position(|(x, _)| x == d));
             (names, picked)
@@ -2019,15 +2024,15 @@ mod tests {
         );
         a.col = 0;
         press(&mut a, "ld");
-        assert_eq!(menu(&a), [("any", 3), ("openai", 2), ("anthropic", 1)]);
+        assert_eq!(menu(&a), [("any", 3), ("anthropic", 1), ("openai", 2)], "developers A-Z, not by count");
         press(&mut a, "G");
         assert!(matches!(a.input, Input::Menu { sel: 2, .. }), "G to the last entry");
         press(&mut a, "gg");
         assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "gg to the first");
-        press(&mut a, "2gg");
-        assert!(matches!(a.input, Input::Menu { sel: 1, .. }), "a count picks the entry");
+        press(&mut a, "3gg");
+        assert!(matches!(a.input, Input::Menu { sel: 2, .. }), "a count picks the entry");
         code(&mut a, KeyCode::Enter);
-        assert!(matches!(a.input, Input::Menu { sel: 1, .. }), "enter toggles as space does: the dropdown stays open");
+        assert!(matches!(a.input, Input::Menu { sel: 2, .. }), "enter toggles as space does: the dropdown stays open");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
@@ -2139,7 +2144,7 @@ mod tests {
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
         assert!(
-            matches!(&a.input, Input::Menu { query, sel: 2, typing: false, .. } if query.is_empty()),
+            matches!(&a.input, Input::Menu { query, sel: 1, typing: false, .. } if query.is_empty()),
             "esc drops the search, the cursor stays on anthropic"
         );
         press(&mut a, "/zzz");
@@ -2228,14 +2233,14 @@ mod tests {
     fn m_toggles_several_dropdown_entries() {
         let mut a = app();
         a.col = 1;
-        press(&mut a, "djm");
+        press(&mut a, "djjm");
         assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "m does nothing");
         press(&mut a, " ");
         assert!(matches!(a.input, Input::Menu { .. }), "the dropdown stays open");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
-        press(&mut a, "j ");
-        assert_eq!(keys(&a), ["gpt55", "mini", "opus5"], "both developers show");
         press(&mut a, "k ");
+        assert_eq!(keys(&a), ["gpt55", "mini", "opus5"], "both developers show");
+        press(&mut a, "j ");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
         press(&mut a, "/open ");
         assert_eq!(a.dev, ["anthropic"], "while searching, space is typed");
@@ -2243,9 +2248,9 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, " ");
         assert_eq!(a.dev, ["anthropic", "openai"], "esc ends the search on the match, space toggles it");
-        press(&mut a, "k ");
+        press(&mut a, "kk ");
         assert!(a.dev.is_empty(), "space on any drops them all");
-        press(&mut a, "jj");
+        press(&mut a, "j");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.dev, ["anthropic"], "enter toggles one");
         code(&mut a, KeyCode::Enter);
@@ -3064,12 +3069,12 @@ mod tests {
         a.mouse(Mouse::Menu(1));
         assert_eq!(a.mouse(Mouse::Item(9)), None);
         assert!(matches!(a.input, Input::Menu { .. }), "past the end is ignored");
-        a.mouse(Mouse::Item(2));
+        a.mouse(Mouse::Item(1));
         assert!(matches!(a.input, Input::Menu { .. }), "a click keeps a multi-choice dropdown open");
         assert_eq!(a.dev, ["anthropic"]);
-        a.mouse(Mouse::Item(1));
-        assert_eq!(a.dev, ["anthropic", "openai"]);
         a.mouse(Mouse::Item(2));
+        assert_eq!(a.dev, ["anthropic", "openai"]);
+        a.mouse(Mouse::Item(1));
         assert_eq!(a.dev, ["openai"]);
         a.mouse(Mouse::Row(0));
         assert_eq!((a.input == Input::None, a.dev.as_slice()), (true, &["openai".to_string()][..]));
