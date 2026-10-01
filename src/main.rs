@@ -98,9 +98,10 @@ enum Cmd {
     /// Open the model's web page (`o` in the TUI)
     Open {
         model: String,
-        /// The site: models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai; a prefix will do
-        #[arg(long, default_value = "openrouter")]
-        on: String,
+        /// The site: models.dev, epoch.ai, artificialanalysis.ai (or aa) or openrouter.ai, a prefix
+        /// will do; the first of them to have the model when left out
+        #[arg(long)]
+        on: Option<String>,
     },
     /// Select a model, to shortlist it until the TUI closes: `list --selected` shows them (space in the TUI)
     #[command(alias = "mark")]
@@ -228,7 +229,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
-        Cmd::Open { model, on } => cli::open(&data, &model, &on),
+        Cmd::Open { model, on } => cli::open(&data, &model, on.as_deref()),
         Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),

@@ -9,8 +9,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
-/// Epoch's scores; with Artificial Analysis's, only its model pages, to link a model there.
+/// Epoch's scores; with Artificial Analysis's, only its names, to link a model there.
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
+/// Epoch's model pages, as it has none for some models it scored and some for models it did not.
+// ponytail: the first sitemap file only, which holds them all; read its index once Epoch splits it.
+const EPOCH_PAGES_URL: &str = "https://epoch.ai/sitemap-models-0.xml";
 /// Artificial Analysis's page names, to link a model there that its API did not name one for.
 const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 /// Artificial Analysis's scores, with an API key (`aa_key`).
@@ -23,7 +26,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
 /// 6: `Model::shown`. 7: no deprecated offers, no fine-tunes folded into their base.
 /// 8: with Artificial Analysis, a row naming a reasoning setting has that setting's scores.
-const FORMAT: u32 = 8;
+/// 9: `Model::md` and `Model::openrouter` for `Model::url`, and `Model::epoch` a page name.
+const FORMAT: u32 = 9;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -336,7 +340,12 @@ pub struct Model {
     pub open_weights: bool,
     pub release: String,
     pub knowledge: String,
-    pub url: String,
+    /// The model's page name on models.dev, `zhipuai/glm-5.3`: the one most of its offers name.
+    #[serde(default)]
+    pub md: Option<String>,
+    /// Its id on OpenRouter, `anthropic/claude-opus-5.5`, when OpenRouter lists it.
+    #[serde(default)]
+    pub openrouter: Option<String>,
     pub offers: Vec<Offer>,
     /// Epoch Capabilities Index: overall capability, roughly 100..170.
     pub eci: Option<f64>,
@@ -352,8 +361,8 @@ pub struct Model {
     /// The model's page name on artificialanalysis.ai, when it has one (`aa_pages`).
     #[serde(default)]
     pub aa: Option<String>,
-    /// Epoch AI's name for the model, when Epoch has benchmark results for it: its page there,
-    /// though no task uses those benchmarks.
+    /// The model's page name on epoch.ai, when it has one (`epoch_listed`), though no task uses
+    /// the benchmarks Epoch ran it on.
     #[serde(default)]
     pub epoch: Option<String>,
     /// Output tokens per second and seconds to the first token, medians across providers:
@@ -408,35 +417,34 @@ impl Model {
         self.priced_offer().map(Offer::blended)
     }
 
-    /// The model's page on models.dev if `o` is its developer's offer, as models.dev has model
-    /// pages only under the lab (`openai/gpt-5.5`, not a reseller's).
-    fn lab_page(&self, o: &Offer) -> Option<String> {
-        is_lab(&o.provider, &self.developer).then(|| format!("https://models.dev/models/{}/{}/", o.provider, o.id))
+    /// The model's page on models.dev, which lists every provider's price for it.
+    fn md_page(&self) -> Option<String> {
+        self.md.as_ref().map(|id| format!("https://models.dev/models/{id}/"))
     }
 
-    /// Where models.dev shows the price you'd pay: the model's page when its developer is who
-    /// you'd pay, else the provider's, which lists its models with their prices.
+    /// Where models.dev shows the price you'd pay: the model's page, else the provider's, which
+    /// lists its models with their prices.
     pub fn price_page(&self) -> Option<String> {
         let o = self.price()?;
-        self.lab_page(o).or_else(|| Some(format!("https://models.dev/providers/{}/", o.provider)))
+        self.md_page().or_else(|| Some(format!("https://models.dev/providers/{}/", o.provider)))
     }
 
-    /// The model's page on a benchmark source: Epoch AI when it has benchmarked the model
-    /// (`epoch`), Artificial Analysis when it has a page for it (`aa`).
+    /// The model's page on a benchmark source, when it has one there (`epoch`, `aa`).
     pub fn page(&self, s: Source) -> Option<String> {
         let id = match s {
-            Source::Epoch => words(self.epoch.as_ref()?).join("-"),
-            Source::Aa => self.aa.clone()?,
+            Source::Epoch => self.epoch.as_ref()?,
+            Source::Aa => self.aa.as_ref()?,
         };
         Some(format!("https://{}/models/{id}", s.site()))
     }
 
-    /// The model's pages, (site, url): models.dev when its developer offers it (`lab_page`), the
-    /// benchmark sources that have one (`page`), and OpenRouter always, `url`.
+    /// The model's pages, (site, url), of the sites that have one: models.dev, the benchmark
+    /// sources, then OpenRouter. None is a guess: a model no site has a page for has no link.
     pub fn links(&self) -> Vec<(&'static str, String)> {
-        let md = self.offers.iter().find_map(|o| self.lab_page(o)).map(|url| ("models.dev", url));
+        let md = self.md_page().map(|url| ("models.dev", url));
         let sources = Source::ALL.into_iter().filter_map(|s| Some((s.site(), self.page(s)?)));
-        md.into_iter().chain(sources).chain([("openrouter.ai", self.url.clone())]).collect()
+        let or = self.openrouter.as_ref().map(|id| ("openrouter.ai", format!("https://openrouter.ai/{id}")));
+        md.into_iter().chain(sources).chain(or).collect()
     }
 
     /// `cost`, but never 0, for dividing by.
@@ -687,11 +695,17 @@ pub fn refresh() -> Result<Data, Failure> {
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
     let listed = harness.join().unwrap_or_default();
-    let (mut data, aa, release) = res?;
-    // Only links hang on it, so without it the refresh still succeeds, with no AA links.
-    if let Ok(xml) = aa {
-        aa_pages(&mut data.models, &String::from_utf8_lossy(&xml));
-    }
+    let (mut data, [aa, epoch], release) = res?;
+    // Only links hang on them, so without one the refresh still succeeds, and says so.
+    let text = |xml: Result<Vec<u8>, Failure>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
+    let (aa, epoch) = (text(aa), text(epoch));
+    let (aa, epoch) = (sitemap(&aa, Source::Aa), sitemap(&epoch, Source::Epoch));
+    aa_pages(&mut data.models, &aa);
+    epoch_listed(&mut data.models, &epoch);
+    let unpaged = |pages: &HashSet<&str>, s: Source| {
+        pages.is_empty().then(|| format!("{} did not list its pages: links to it may be missing", s.site()))
+    };
+    let unpaged = [unpaged(&aa, Source::Aa), unpaged(&epoch, Source::Epoch)];
     let silent;
     (data.harness, silent) =
         keep_listed(listed, || cached_harness(&std::fs::read(cache_path(src)).unwrap_or_default()));
@@ -713,14 +727,15 @@ pub fn refresh() -> Result<Data, Failure> {
         (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
     };
     let warnings = [unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
-    data.warning = Some(warnings.into_iter().flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
+    let warnings = warnings.into_iter().chain(unpaged);
+    data.warning = Some(warnings.flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
 
-/// What `download` gives: the merged data, then Artificial Analysis's sitemap and modelcmp's
-/// newest release, which a refresh can do without.
-type Downloaded = (Data, Result<Vec<u8>, Failure>, Result<Vec<u8>, Failure>);
+/// What `download` gives: the merged data, then Artificial Analysis's and Epoch's sitemaps and
+/// modelcmp's newest release, which a refresh can do without.
+type Downloaded = (Data, [Result<Vec<u8>, Failure>; 2], Result<Vec<u8>, Failure>);
 
 /// How long the downloads a refresh can do without are waited for once it has the others.
 const GRACE: Duration = Duration::from_secs(10);
@@ -730,7 +745,7 @@ const GRACE: Duration = Duration::from_secs(10);
 /// their own: none is waited for once the refresh cannot finish, and the links and the newest
 /// release no longer than `GRACE` once it can.
 fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
-    const URLS: [&str; 5] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, RELEASE_URL];
+    const URLS: [&str; 6] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, EPOCH_PAGES_URL, RELEASE_URL];
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
     let (tx, rx) = std::sync::mpsc::channel();
     for (i, url) in URLS.into_iter().enumerate() {
@@ -743,7 +758,7 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
         std::thread::spawn(move || tx.send((i, fetch(url, key.as_deref()))));
     }
     drop(tx);
-    let mut got: [Result<Vec<u8>, Failure>; 5] = URLS.map(|url| Err(format!("{url}: no reply").into()));
+    let mut got: [Result<Vec<u8>, Failure>; 6] = URLS.map(|url| Err(format!("{url}: no reply").into()));
     // Once the first three that were asked for are in, the rest get `GRACE` and no more. Epoch's
     // is among them under Artificial Analysis too, though not needed: its names decide which
     // key a merged row keeps, and your favorites and notes hang on the key.
@@ -765,21 +780,26 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
         }
         got[i] = res;
     }
-    let [models, epoch, api, aa, release] = got;
+    let [models, epoch, api, aa, epoch_pages, release] = got;
     let data = match src {
-        Source::Epoch => merge(&models?, &parse_epoch(&epoch?)?, None)?,
+        Source::Epoch => {
+            let ep = parse_epoch(&epoch?)?;
+            let mut data = merge(&models?, &ep, None)?;
+            epoch_named(&mut data.models, &ep);
+            data
+        }
         Source::Aa => {
-            // Without it the refresh still succeeds, with no epoch.ai links and Artificial
+            // Without it the refresh still succeeds, with fewer epoch.ai links and Artificial
             // Analysis's names deciding the keys.
             let ep = epoch.ok().and_then(|z| parse_epoch(&z).ok());
             let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref())?;
             if let Some(ep) = &ep {
-                epoch_pages(&mut data.models, ep);
+                epoch_named(&mut data.models, ep);
             }
             data
         }
     };
-    Ok((data, aa, release))
+    Ok((data, [aa, epoch_pages], release))
 }
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
@@ -825,31 +845,91 @@ fn words(s: &str) -> Vec<String> {
     s.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_ascii_lowercase).collect()
 }
 
-/// Set each model's `aa` from the page names in Artificial Analysis's sitemap: the page named
-/// as Epoch or models.dev names the model, else the one with the same words in any order,
-/// leaving out the vendor and "instruct": "Claude Sonnet 4.5" is `claude-4-5-sonnet`, "Llama
-/// 3.3 70B" `llama-3-3-instruct-70b`. Dates, "preview" and "exp" count, as they name another
-/// release: "Gemini 2.5 Pro (Jun 2025)" is not `gemini-2-5-pro`.
-// ponytail: the sitemap misses some pages, so those models get no link rather than a guessed one.
-fn aa_pages(models: &mut [Model], sitemap: &str) {
-    let pages: HashSet<&str> = sitemap
-        .split("<loc>https://artificialanalysis.ai/models/")
+/// The model pages a site's sitemap lists, by name: `claude-opus-5-5`. None when it is not one.
+fn sitemap(xml: &str, site: Source) -> HashSet<&str> {
+    xml.split(&format!("<loc>https://{}/models/", site.site()))
         .skip(1)
         .filter_map(|s| s.split_once('<').map(|(p, _)| p))
         .filter(|p| !p.is_empty() && !p.contains('/'))
-        .collect();
+        .collect()
+}
+
+/// The keys of the models that cannot reason. A row naming a reasoning setting of one is a
+/// model of its own: "Phi-4-reasoning" is not Phi-4 set to reason.
+fn plain(models: &[Model]) -> HashSet<String> {
+    models.iter().filter(|m| !m.reasoning).map(|m| m.key.clone()).collect()
+}
+
+/// Whether `name` ends in a reasoning setting of a model in `plain`.
+fn own_reasoner(name: &str, plain: &HashSet<String>) -> bool {
+    let w = words(name);
+    let n = setting_at(&w);
+    setting(&w[n..]).0 == Some(true) && plain.contains(&w[..n].concat())
+}
+
+/// Set each model's `aa` from Artificial Analysis's `pages`: the page named as Epoch or
+/// models.dev names the model, else the one with the same words in any order, leaving out the
+/// vendor and "instruct": "Claude Sonnet 4.5" is `claude-4-5-sonnet`, "Llama 3.3 70B"
+/// `llama-3-3-instruct-70b`. Dates, "preview" and "exp" count, as they name another release:
+/// "Gemini 2.5 Pro (Jun 2025)" is not `gemini-2-5-pro`. A reasoning setting need not match:
+/// "Claude Haiku 4.5 Thinking" is `claude-4-5-haiku-reasoning`, the page that reasons as the
+/// name says, else the model's shortest: "o4 Mini High" is `o4-mini`.
+// ponytail: the sitemap misses some pages, so those models get no link rather than a guessed one.
+fn aa_pages(models: &mut [Model], pages: &HashSet<&str>) {
     let mut by_key: HashMap<Vec<String>, &str> = HashMap::new();
-    for &p in &pages {
+    // Each model's pages, whatever their setting, the shortest first.
+    let mut by_model: HashMap<Vec<String>, Vec<&str>> = HashMap::new();
+    for &p in pages {
         let e = by_key.entry(aa_words(p, false)).or_insert(p);
         if (p.len(), p) < (e.len(), *e) {
             *e = p;
         }
+        by_model.entry(aa_words(p, true)).or_default().push(p);
     }
+    by_model.values_mut().for_each(|ps| ps.sort_by_key(|p| (p.len(), *p)));
+    // Whether a name says it reasons. An effort alone does not: "-low" is a page beside the model's.
+    let reasons = |s: &str| {
+        let w = words(s);
+        let said = |list: &[&str]| w[setting_at(&w)..].iter().any(|x| list.contains(&x.as_str()));
+        if said(&["non"]) { Some(false) } else { said(&["reasoning", "thinking", "adaptive"]).then_some(true) }
+    };
+    let plain = plain(models);
     // The API's own page for a model it scored stands.
     for m in models.iter_mut().filter(|m| m.aa.is_none()) {
         let slug = words(&m.name).join("-");
-        let page = pages.get(slug.as_str()).or_else(|| by_key.get(&aa_words(&slug, false)));
-        m.aa = page.map(|p| p.to_string());
+        let any_setting = || {
+            let of_model = by_model.get(&aa_words(&slug, true))?;
+            let asked = reasons(&slug);
+            let said = of_model.iter().find(|p| asked.is_some() && reasons(p) == asked);
+            said.or(of_model.first().filter(|_| !own_reasoner(&m.name, &plain))).copied()
+        };
+        let page = pages.get(slug.as_str()).or_else(|| by_key.get(&aa_words(&slug, false))).copied();
+        m.aa = page.or_else(any_setting).map(String::from);
+    }
+}
+
+/// A name as Epoch's pages spell it: "Claude Opus 4.5" is `claude-opus-4-5`, and "Command R+"
+/// `command-r`, as Epoch drops a "+", a bracket and a letter that is not ASCII.
+fn epoch_slug(name: &str) -> String {
+    words(&name.chars().filter(|c| c.is_ascii_alphanumeric() || " ._-/".contains(*c)).collect::<String>()).join("-")
+}
+
+/// Keep each model's `epoch` only when it is one of Epoch's `pages`, as Epoch has none for
+/// some models it scored, and sends a few of those names to another model's page. A model
+/// Epoch did not score has the page that is named as it, unless that names another model too:
+/// `command-a` is "Command A+", and could be Command A. Without `pages`, the names stand unchecked.
+fn epoch_listed(models: &mut [Model], pages: &HashSet<&str>) {
+    if pages.is_empty() {
+        return;
+    }
+    let mut rows: HashMap<String, usize> = HashMap::new();
+    for m in models.iter_mut() {
+        m.epoch = m.epoch.take().filter(|p| pages.contains(p.as_str()));
+        *rows.entry(m.epoch.clone().unwrap_or_else(|| epoch_slug(&m.name))).or_default() += 1;
+    }
+    for m in models.iter_mut().filter(|m| m.epoch.is_none()) {
+        let slug = epoch_slug(&m.name);
+        m.epoch = (pages.contains(slug.as_str()) && rows[&slug] == 1).then_some(slug);
     }
 }
 
@@ -860,7 +940,7 @@ fn aa_pages(models: &mut [Model], sitemap: &str) {
 /// end of a name with a version, as "Magistral Medium" is a model and not a setting of Magistral.
 // ponytail: a setting before a date ("…-reasoning-04-2025") stays, so that release is its own model.
 fn aa_words(slug: &str, effort: bool) -> Vec<String> {
-    const SKIP: &[&str] = &["instruct", "hosted", "amazon", "cohere"];
+    const SKIP: &[&str] = &["instruct", "hosted", "amazon", "cohere", "nvidia", "anthropic", "google"];
     let mut w = words(slug);
     if effort {
         w.truncate(setting_at(&w));
@@ -919,9 +999,11 @@ fn aa_setting(slug: &str, name: &str) -> Setting {
 
 /// The entries among `all`, one model's, that are the setting `name` ends in, as one
 /// (`aa_fold`): "Grok 4.20 Non-Reasoning" is not scored as Grok 4.20 reasoning. `None` when the
-/// name ends in no setting, `Some(None)` when it ends in one the API did not measure. An entry
-/// that does not say counts when none says it, as a model with one setting is listed bare.
-fn aa_named(name: &str, all: &[AaEntry]) -> Option<Option<AaEntry>> {
+/// name ends in no setting. One the API did not measure has no scores, and the page of the
+/// entries that reason as it does, whatever their effort: "Thinking Low" is not on the
+/// non-reasoning page. An entry that does not say counts when none says it, as a model with
+/// one setting is listed bare.
+fn aa_named(name: &str, all: &[AaEntry]) -> Option<AaEntry> {
     let w = words(name);
     let asked = setting(&w[setting_at(&w)..]);
     if asked == (None, None) {
@@ -936,7 +1018,9 @@ fn aa_named(name: &str, all: &[AaEntry]) -> Option<Option<AaEntry>> {
     }
     let says = |e: &AaEntry| Some(part(&asked.0, &e.setting.0)? + part(&asked.1, &e.setting.1)?);
     let most = all.iter().filter_map(says).max();
-    Some(aa_fold(all.iter().filter(|e| most.is_some() && says(e) == most)))
+    let measured = aa_fold(all.iter().filter(|e| most.is_some() && says(e) == most));
+    let page = || aa_fold(all.iter().filter(|e| e.setting.0 == asked.0)).map(|e| e.slug).unwrap_or_default();
+    Some(measured.unwrap_or_else(|| AaEntry { slug: page(), ..Default::default() }))
 }
 
 /// The settings of one model as one: the best score of each, the page of the setting-less slug,
@@ -1022,13 +1106,7 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
             *counts.entry(slug(&o.id)).or_default() += 1;
         }
         // A clear winner only: a row of several ids, one offer each, has no main id.
-        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
-        ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
-        let main = match ranked.as_slice() {
-            [(m, _)] => m.clone(),
-            [(m, a), (_, b), ..] if a > b => m.clone(),
-            _ => continue,
-        };
+        let Some(main) = winner(counts) else { continue };
         if !main.bytes().any(|b| b.is_ascii_digit()) {
             continue;
         }
@@ -1050,6 +1128,14 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
         }
     }
     moved
+}
+
+/// The entry with more votes than any other: none on a tie for the most.
+fn winner<T>(votes: impl IntoIterator<Item = (T, usize)>) -> Option<T> {
+    let mut ranked: Vec<(T, usize)> = votes.into_iter().collect();
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
+    let tie = ranked.len() > 1 && ranked[0].1 == ranked[1].1;
+    ranked.into_iter().next().filter(|_| !tie).map(|r| r.0)
 }
 
 /// "meta-llama/Llama-4-Maverick" -> "llama-4-maverick": a model id without its vendor.
@@ -1110,6 +1196,8 @@ struct MdModel {
     cost: Option<MdCost>,
     /// "deprecated" for a retired endpoint, whose id no longer works.
     status: String,
+    /// The model's page on models.dev, "zhipuai/glm-5.3", whichever provider offers it.
+    canonical_model_id: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1197,13 +1285,13 @@ fn short_org(s: &str) -> String {
         "meta" | "meta-llama" | "meta ai" => "Meta".into(),
         "mistral" | "mistralai" | "mistral ai" => "Mistral".into(),
         "deepseek" => "DeepSeek".into(),
-        "xai" | "x-ai" => "xAI".into(),
+        "xai" | "x-ai" | "spacexai" => "xAI".into(),
         "z-ai" | "zhipuai" | "thudm" => "Z.ai".into(),
         "bytedance" | "bytedance-seed" => "ByteDance".into(),
         "ibm" | "ibm-granite" => "IBM".into(),
         "xiaomimimo" => "Xiaomi".into(),
         "inclusionai" => "inclusionAI".into(),
-        "moonshot" | "moonshotai" => "Moonshot".into(),
+        "moonshot" | "moonshotai" | "kimi" => "Moonshot".into(),
         "minimax" => "MiniMax".into(),
         "nvidia" => "NVIDIA".into(),
         _ => {
@@ -1355,10 +1443,11 @@ impl Scores {
     }
 }
 
-/// Epoch's page for each model it has one for, when the scores are Artificial Analysis's.
-fn epoch_pages(models: &mut [Model], ep: &Scores) {
+/// The page Epoch would have for each model it knows, whichever source scores it; `epoch_listed`
+/// keeps the ones it has.
+fn epoch_named(models: &mut [Model], ep: &Scores) {
     for m in models {
-        m.epoch = ep.group(&m.key).map(|k| ep.groups[k].0.clone());
+        m.epoch = ep.group(&m.key).map(|k| epoch_slug(&ep.groups[k].0));
     }
 }
 
@@ -1368,10 +1457,15 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let mut ep = Scores::default();
     let mut dates: HashMap<String, String> = HashMap::new();
     let mut version_group: HashMap<String, String> = HashMap::new();
+    // The groups Epoch files the bare id under: `gemini-2.5-flash` is "Gemini 2.5 Flash (Jun 2025)".
+    let mut bare: HashSet<String> = HashSet::new();
     for r in &meta {
         let (version, group) = (col(r, "model_version")?, col(r, "model_group")?);
         if version.is_empty() || group.is_empty() {
             continue;
+        }
+        if norm(&slug(version)) == norm(&clean_name(group)) {
+            bare.insert(norm(group));
         }
         dates.insert(norm(group), col(r, "date")?.to_string());
         version_group.insert(version.to_string(), group.to_string());
@@ -1406,7 +1500,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             let (Some(v), Some(s)) = (r.get("Model version"), r.get(score_col)) else { continue };
             let Some(s) = s.trim_end_matches('%').parse::<f64>().ok().filter(|s| s.is_finite()) else { continue };
             let g = group_of(v);
-            // Any benchmark result gives the model a page on Epoch; only a task's scores it.
+            // Any benchmark result may give the model a page on Epoch; only a task's scores it.
             let e = ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new()));
             if !task {
                 continue;
@@ -1436,11 +1530,13 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             ep.benches.insert(name.clone(), crate::fit::Bench { edi, slope, floor, ceiling });
         }
     }
-    let mut newest: HashMap<String, (bool, &str)> = HashMap::new();
+    let mut newest: HashMap<String, (bool, bool, bool, &str)> = HashMap::new();
     for (k, (name, eci, scores)) in &ep.groups {
         let short = norm(&clean_name(name));
-        let rank = (eci.is_some() || !scores.is_empty(), dates.get(k).map_or("", String::as_str));
-        // Scored beats unscored, then strictly newer wins; on ties the first in key order keeps it.
+        let date = dates.get(k).map_or("", String::as_str);
+        let rank = (eci.is_some(), bare.contains(k), !scores.is_empty(), date);
+        // One with an index wins, then the one filed under the bare id, then a scored one, then
+        // the strictly newer; on ties the first in key order keeps it.
         if short != *k && newest.get(&short).is_none_or(|r| rank > *r) {
             newest.insert(short.clone(), rank);
             ep.alias.insert(short, k.clone());
@@ -1529,6 +1625,9 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     // own listing (Kilo's "stealth" previews, Azure's later launch), so the first or earliest
     // is not it.
     let mut dates: HashMap<String, Vec<(&str, &str)>> = HashMap::new();
+    // models.dev's page per model, one vote per offer that names one: a reseller's alias and a
+    // router's many models are outvoted.
+    let mut page_votes: HashMap<String, HashMap<&str, usize>> = HashMap::new();
 
     let entries: Vec<(&String, &String, &MdModel, String)> = providers
         .iter()
@@ -1556,7 +1655,10 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         let key = fold_vendor(&raw, &keys, &orgs);
         if pid == "openrouter" {
             openrouter.entry(key.clone()).or_insert_with(|| mid.clone());
-            or_slug.entry(slug(mid)).or_insert_with(|| mid.clone());
+            // Its routers ("openrouter/auto") are no model's page.
+            if !mid.starts_with("openrouter/") {
+                or_slug.entry(slug(mid)).or_insert_with(|| mid.clone());
+            }
         }
         let m = by_key.entry(key.clone()).or_insert_with(|| Model {
             key: key.clone(),
@@ -1578,6 +1680,9 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         m.vision |= md.modalities.input.iter().any(|i| i == "image");
         if !md.release_date.is_empty() {
             dates.entry(key.clone()).or_default().push((pid, &md.release_date));
+        }
+        if !md.canonical_model_id.is_empty() {
+            *page_votes.entry(key.clone()).or_default().entry(&md.canonical_model_id).or_default() += 1;
         }
         if m.knowledge.is_empty() {
             m.knowledge = md.knowledge.clone();
@@ -1610,9 +1715,13 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         }
         let moved = dates.remove(&from).unwrap_or_default();
         dates.entry(to.clone()).or_default().extend(moved);
+        for (page, n) in page_votes.remove(&from).unwrap_or_default() {
+            *page_votes.entry(to.clone()).or_default().entry(page).or_default() += n;
+        }
     }
 
     let mut models: Vec<Model> = by_key.into_values().collect();
+    let plain = plain(&models);
     for m in &mut models {
         // The family in the name is surest; else what most offers' ids say.
         m.developer = match developer_from_name(&m.name) {
@@ -1627,48 +1736,55 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         let own = dates.iter().filter(|(p, _)| is_lab(p, &m.developer)).map(|(_, d)| *d).min();
         let most = || dates.iter().map(|(_, d)| *d).max_by_key(|d| (votes(d), std::cmp::Reverse(*d)));
         m.release = own.or_else(most).unwrap_or_default().to_string();
-        // The model's OpenRouter page, or a search there when OpenRouter does not list it.
-        // Else an offer with the same id as an OpenRouter model: Helicone's "llama-4-maverick"
-        // is OpenRouter's, under whatever name Helicone gives it.
-        // ponytail: ids without a digit ("auto", "free") are routers, not models, and never match.
+        m.md = page_votes.remove(&m.key).and_then(winner).map(String::from);
+        // The model's OpenRouter page. Else that of an id its offers go by, when OpenRouter has
+        // it: Helicone's "llama-4-maverick" is OpenRouter's, under whatever name Helicone gives
+        // it. Not of any id, as one mislabelled offer is not the model.
         let or_id = openrouter.get(&m.key).or_else(|| {
-            m.offers
-                .iter()
-                .map(|o| slug(&o.id))
-                .filter(|s| s.bytes().any(|b| b.is_ascii_digit()))
-                .find_map(|s| or_slug.get(&s))
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for o in &m.offers {
+                *counts.entry(slug(&o.id)).or_default() += 1;
+            }
+            let most = counts.values().copied().max();
+            let top: Vec<&String> = counts.iter().filter(|(_, n)| Some(**n) == most).map(|(s, _)| s).collect();
+            // The commonest id, or one that is it with more or less at its end: a date, a size.
+            let near = |s: &str| top.iter().any(|t| s.starts_with(t.as_str()) || t.starts_with(s));
+            let listed = counts.iter().filter(|(s, _)| near(s)).filter_map(|(s, n)| Some((*n, or_slug.get(s)?)));
+            listed.max_by_key(|(n, id)| (*n, std::cmp::Reverse(*id))).map(|(_, id)| id)
         });
-        m.url = or_id.map_or_else(
-            || format!("https://openrouter.ai/models?q={}", m.name.replace(' ', "+")),
-            |id| format!("https://openrouter.ai/{id}"),
-        );
+        // The standard page rather than the free tier's, when OpenRouter has both.
+        let standard = |id: &String| {
+            let base = id.strip_suffix(":free")?;
+            or_slug.get(&slug(base)).filter(|s| *s == base)
+        };
+        m.openrouter = or_id.map(|id| standard(id).unwrap_or(id).clone());
         // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
         let aa = (ep.source == Source::Aa).then(|| aa_words(&m.name, true).join("-"));
         let gk = ep.group(&m.key).or(aa.as_ref().filter(|k| ep.groups.contains_key(*k))).map(String::as_str);
+        // A reasoning model of its own is not the model it is named after, unless Artificial
+        // Analysis lists it as that model's reasoning setting.
+        let reasons = |k: &&str| ep.settings.get(*k).is_some_and(|all| all.iter().any(|e| e.setting.0 == Some(true)));
+        let gk = gk.filter(|k| ep.source != Source::Aa || !own_reasoner(&m.name, &plain) || reasons(k));
         if let Some(k) = gk
             && let Some((gname, eci, scores)) = ep.groups.get(k)
         {
             let (mut eci, mut scores) = (*eci, scores.clone());
             let mut fit = (ep.fit.0.get(k).cloned().unwrap_or_default(), ep.fit.1.get(k).cloned().unwrap_or_default());
-            match ep.source {
-                Source::Epoch => m.epoch = Some(gname.clone()),
-                Source::Aa => {
-                    m.aa = ep.page.get(k).cloned();
-                    (m.tps, m.ttft) = ep.speed.get(k).copied().unwrap_or_default();
-                    // A row naming a reasoning setting is that setting, not the best of them
-                    // all; one the API did not measure has the model's page and no scores.
-                    if let Some(own) = ep.settings.get(k).and_then(|all| aa_named(&m.name, all)) {
-                        let own = own.unwrap_or_default();
-                        fit = crate::fit::aa_fit(own.index, &own.scores, &ep.pools);
-                        (m.tps, m.ttft) = own.speed;
-                        (eci, scores) = (own.index, own.scores);
-                        if !own.slug.is_empty() {
-                            m.aa = Some(own.slug);
-                        }
+            if ep.source == Source::Aa {
+                m.aa = ep.page.get(k).cloned();
+                (m.tps, m.ttft) = ep.speed.get(k).copied().unwrap_or_default();
+                // A row naming a reasoning setting is that setting, not the best of them
+                // all; one the API did not measure has the model's page and no scores.
+                if let Some(own) = ep.settings.get(k).and_then(|all| aa_named(&m.name, all)) {
+                    fit = crate::fit::aa_fit(own.index, &own.scores, &ep.pools);
+                    (m.tps, m.ttft) = own.speed;
+                    (eci, scores) = (own.index, own.scores);
+                    if !own.slug.is_empty() {
+                        m.aa = Some(own.slug);
                     }
                 }
             }
-            // Scored on no task, Epoch's page is all it adds; its name for the model may be a bare id.
+            // Scored on no task, a page is all the source adds; its name for the model may be a bare id.
             if eci.is_none() && scores.is_empty() {
                 continue;
             }
@@ -1842,18 +1958,11 @@ mod tests {
 
     #[test]
     fn links_to_each_site_that_has_the_model() {
-        let offer = |p: &str, id: &str| Offer { provider: p.into(), id: id.into(), ..Default::default() };
-        let mut m = Model {
-            name: "Claude Opus 5.5".into(),
-            developer: "Anthropic".into(),
-            url: "https://openrouter.ai/anthropic/claude-opus-5.5".into(),
-            offers: vec![offer("openrouter", "anthropic/claude-opus-5.5"), offer("anthropic", "claude-opus-5-5")],
-            ..Default::default()
-        };
+        let mut m = Model { openrouter: Some("anthropic/claude-opus-5.5".into()), ..Default::default() };
         let sites = |m: &Model| m.links().into_iter().map(|(s, _)| s).collect::<Vec<_>>();
-        m.offers.push(offer("302ai", "claude-opus-5-5"));
-        assert_eq!(sites(&m), ["models.dev", "openrouter.ai"], "no Epoch page without its benchmarks");
-        m.epoch = Some("Claude Opus 5.5".into());
+        assert_eq!(sites(&m), ["openrouter.ai"], "only the sites that have it");
+        m.md = Some("anthropic/claude-opus-5-5".into());
+        m.epoch = Some("claude-opus-5-5".into());
         m.aa = Some("claude-opus-5-5".into());
         assert_eq!(
             m.links(),
@@ -1861,23 +1970,64 @@ mod tests {
                 ("models.dev", "https://models.dev/models/anthropic/claude-opus-5-5/".into()),
                 ("epoch.ai", "https://epoch.ai/models/claude-opus-5-5".into()),
                 ("artificialanalysis.ai", "https://artificialanalysis.ai/models/claude-opus-5-5".into()),
-                ("openrouter.ai", m.url.clone()),
+                ("openrouter.ai", "https://openrouter.ai/anthropic/claude-opus-5.5".into()),
             ]
         );
-        m.offers.remove(1);
-        assert_eq!(
-            sites(&m),
-            ["epoch.ai", "artificialanalysis.ai", "openrouter.ai"],
-            "models.dev has pages only under the developer"
-        );
-        let paid =
-            |p: &str, id: &str, price: f64| Offer { available: true, input: price, output: price, ..offer(p, id) };
-        m.offers = vec![paid("anthropic", "claude-opus-5-5", 5.0), paid("302ai", "claude-opus-5-5", 9.0)];
+        m.openrouter = None;
+        assert_eq!(sites(&m).len(), 3, "no search on OpenRouter for a model it does not list");
+        assert!(Model::default().links().is_empty(), "no site has it: no link");
+        let paid = |p: &str, price: f64| Offer {
+            provider: p.into(),
+            available: true,
+            input: price,
+            output: price,
+            ..Default::default()
+        };
+        m.offers = vec![paid("anthropic", 5.0), paid("302ai", 1.0)];
         let page = "https://models.dev/models/anthropic/claude-opus-5-5/";
-        assert_eq!(m.price_page().as_deref(), Some(page), "the developer's price: the model's page");
-        m.offers[1].input = 1.0;
+        assert_eq!(m.price_page().as_deref(), Some(page), "the model's page lists every provider's price");
+        m.md = None;
         let page = "https://models.dev/providers/302ai/";
-        assert_eq!(m.price_page().as_deref(), Some(page), "a reseller's: its page, where its prices are");
+        assert_eq!(m.price_page().as_deref(), Some(page), "without one, the page of the provider you'd pay");
+    }
+
+    #[test]
+    fn links_are_what_most_offers_name() {
+        let json = br#"{
+            "zai": {"models": {"glm-5.3": {"name": "GLM-5.3", "canonical_model_id": "zhipuai/glm-5.3"}}},
+            "a": {"models": {
+                "z/glm-5.3": {"name": "GLM-5.3", "canonical_model_id": "zhipuai/glm-5.3"},
+                "auto": {"name": "Auto", "canonical_model_id": "x/one"},
+                "qwen3.8-max": {"name": "Qwen 3.8 Max"},
+                "gemma-4-it": {"name": "Gemma 4"},
+                "sonar": {"name": "Sonar"},
+                "llama-9-fp8": {"name": "Llama 9 FP8"}
+            }},
+            "b": {"models": {
+                "glm-latest": {"name": "GLM-5.3", "canonical_model_id": "zai/glm-latest"},
+                "auto": {"name": "Auto", "canonical_model_id": "x/two"},
+                "qwen3.8-max": {"name": "Qwen 3.8 Max"},
+                "llama-9-fp8": {"name": "Llama 9 FP8"}
+            }},
+            "c": {"models": {"Qwen/Qwen3.8-2.4T": {"name": "Qwen 3.8 Max"}, "llama-9": {"name": "Llama 9 FP8"}}},
+            "openrouter": {"models": {
+                "qwen/qwen3.8-2.4t": {"name": "Qwen3.8 2.4T"},
+                "google/gemma-4-it:free": {"name": "Gemma 4 (free)"},
+                "google/gemma-4-it": {"name": "Gemma 4 IT"},
+                "perplexity/sonar": {"name": "Perplexity Sonar"},
+                "meta-llama/llama-9": {"name": "Llama 9"},
+                "openrouter/auto": {"name": "Auto Router"}
+            }}
+        }"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        let row = |k: &str| d.models.iter().find(|m| m.key == k).unwrap();
+        assert_eq!(row("glm53").md.as_deref(), Some("zhipuai/glm-5.3"), "the page, not provider/id nor an alias");
+        assert_eq!(row("auto").md, None, "a router's offers name a page each: none is its");
+        assert_eq!(row("auto").openrouter, None, "nor is OpenRouter's router another provider's");
+        assert_eq!(row("qwen38max").openrouter, None, "one mislabelled offer of three is not the model");
+        assert_eq!(row("llama9fp8").openrouter.as_deref(), Some("meta-llama/llama-9"), "but the id cut short is");
+        assert_eq!(row("gemma4").openrouter.as_deref(), Some("google/gemma-4-it"), "the standard page over :free");
+        assert_eq!(row("sonar").openrouter.as_deref(), Some("perplexity/sonar"), "an id with no digit is one too");
     }
 
     #[test]
@@ -1892,35 +2042,49 @@ mod tests {
             "qwen3-8-max",
             "qwen3-8-max-0803",
             "deepseek-v3-2",
+            "claude-4-5-haiku",
+            "claude-4-5-haiku-reasoning",
+            "grok-3-mini-reasoning",
+            "o4-mini",
+            "phi-4",
+            "nvidia-nemotron-3-nano-30b",
+            "gpt-5",
+            "gpt-5-low",
         ];
-        let sitemap: String =
+        let xml: String =
             pages.iter().map(|p| format!("<url><loc>https://artificialanalysis.ai/models/{p}</loc></url>")).collect();
+        let other =
+            "<url><loc>https://artificialanalysis.ai/models/comparisons/a-vs-b</loc></url><loc>https://x/y</loc>";
+        let xml = xml + other;
+        let pages = sitemap(&xml, Source::Aa);
+        assert_eq!(pages.len(), 17, "the model pages alone");
+        assert!(sitemap("<html>not found</html>", Source::Aa).is_empty());
         let names = [
-            "Claude Sonnet 4.5",
-            "Claude Opus 4.5",
-            "Llama 3.3 70B",
-            "Gemini 2.5 Pro (Jun 2025)",
-            "Qwen 3.8 Max",
-            "Qwen 3.8 Max 0803",
-            "DeepSeek V3.2 Exp",
-            "Claude Sonnet 4",
+            ("Claude Sonnet 4.5", Some("claude-4-5-sonnet")),
+            ("Claude Opus 4.5", Some("claude-opus-4-5")),
+            ("Llama 3.3 70B", Some("llama-3-3-instruct-70b")),
+            ("Gemini 2.5 Pro (Jun 2025)", None),
+            ("Qwen 3.8 Max", Some("qwen3-8-max")),
+            ("Qwen 3.8 Max 0803", Some("qwen3-8-max-0803")),
+            ("DeepSeek V3.2 Exp", None),
+            ("Claude Sonnet 4", None),
+            ("Claude Haiku 4.5 Thinking", Some("claude-4-5-haiku-reasoning")),
+            ("Claude Sonnet 4.5 Thinking", Some("claude-4-5-sonnet-thinking")),
+            ("Grok-3 mini", Some("grok-3-mini-reasoning")),
+            ("o4 Mini High", Some("o4-mini")),
+            ("Nemotron 3 Nano 30B", Some("nvidia-nemotron-3-nano-30b")),
+            ("Phi-4", Some("phi-4")),
+            ("Phi-4-reasoning", None),
+            ("GPT-5 Thinking", Some("gpt-5")),
         ];
-        let mut models: Vec<Model> = names.map(|n| Model { name: n.into(), ..Default::default() }).into();
-        aa_pages(&mut models, &sitemap);
-        let pages: Vec<Option<&str>> = models.iter().map(|m| m.aa.as_deref()).collect();
+        let mut models: Vec<Model> =
+            names.map(|(n, _)| Model { key: norm(n), name: n.into(), ..Default::default() }).into();
+        aa_pages(&mut models, &pages);
         assert_eq!(
-            pages,
-            [
-                Some("claude-4-5-sonnet"),
-                Some("claude-opus-4-5"),
-                Some("llama-3-3-instruct-70b"),
-                None,
-                Some("qwen3-8-max"),
-                Some("qwen3-8-max-0803"),
-                None,
-                None,
-            ],
-            "the page with the same words, dates and all; none rather than another release's"
+            models.iter().map(|m| m.aa.as_deref()).collect::<Vec<_>>(),
+            names.map(|(_, page)| page),
+            "the page with the same words, dates and all, at the setting named, else the model's; \
+             none rather than another release's or, for a reasoning model of its own, its base's"
         );
     }
 
@@ -1981,6 +2145,11 @@ mod tests {
         assert_eq!(short_org("Thinking Machines"), "Thinking Machines");
         assert_eq!(short_org("Z.ai (Zhipu AI),Tsinghua University"), "Z.ai");
         assert_eq!(short_org("~anthropic"), "Anthropic");
+        assert_eq!(
+            (short_org("SpaceXAI"), short_org("Kimi")),
+            ("xAI".into(), "Moonshot".into()),
+            "as either source says"
+        );
         assert_eq!(developer_from_name("Nemotron 3 Ultra Free"), "NVIDIA");
         assert_eq!(developer_from_name("Space Bunny Free"), "");
     }
@@ -2074,13 +2243,30 @@ mod tests {
     #[test]
     fn epoch_pages_link_by_group_or_alias() {
         let mut ep = Scores::default();
-        ep.groups.insert("gemini25pro062025".into(), ("Gemini 2.5 Pro (Jun 2025)".into(), None, BTreeMap::new()));
+        for (k, name) in [
+            ("gemini25pro062025", "Gemini 2.5 Pro (Jun 2025)"),
+            ("commandrplus", "Command R+"),
+            ("gpt5codex", "GPT-5-Codex"),
+        ] {
+            ep.groups.insert(k.into(), (name.into(), None, BTreeMap::new()));
+        }
         ep.alias.insert("gemini25pro".into(), "gemini25pro062025".into());
-        let mut ms = [Model { key: "gemini25pro".into(), ..Default::default() }, Model::default()];
-        ms[1].epoch = Some("stale".into());
-        epoch_pages(&mut ms, &ep);
-        assert_eq!(ms[0].epoch.as_deref(), Some("Gemini 2.5 Pro (Jun 2025)"));
-        assert_eq!(ms[1].epoch, None, "no group, no link");
+        let names = ["Gemini 2.5 Pro", "Command R+", "GPT-5-Codex", "Command R", "Devstral Small 2", "A+", "A", ""];
+        let mut ms = names.map(|n| Model { key: norm(n), name: n.into(), ..Default::default() });
+        ms[7].epoch = Some("stale".into());
+        let pages = |ms: &[Model]| ms.iter().map(|m| m.epoch.clone().unwrap_or_default()).collect::<Vec<_>>();
+        epoch_named(&mut ms, &ep);
+        let named = ["gemini-2-5-pro-jun-2025", "command-r", "gpt-5-codex", "", "", "", "", ""];
+        assert_eq!(pages(&ms), named, "as Epoch spells its group, a + dropped; no group, no page");
+        epoch_listed(&mut ms, &HashSet::new());
+        assert_eq!(pages(&ms), named, "unchecked when Epoch's list of pages did not come");
+        epoch_listed(&mut ms, &["gemini-2-5-pro-jun-2025", "command-r", "devstral-small-2", "a"].into());
+        assert_eq!(
+            pages(&ms),
+            ["gemini-2-5-pro-jun-2025", "command-r", "", "", "devstral-small-2", "", "", ""],
+            "only the pages Epoch has, one it did not score by its name, and none that two rows could be"
+        );
+        assert_eq!(epoch_slug("Tulu 3 (T\u{fc}lu 3) 70B"), "tulu-3-tlu-3-70b");
     }
 
     #[test]
@@ -2122,7 +2308,8 @@ mod tests {
             {"slug":"claude-opus-4-6","name":"Claude Opus 4.6 (Non-reasoning, High Effort)",
              "evaluations":{"artificial_analysis_intelligence_index":26}},
             {"slug":"gpt-5-3-codex","name":"GPT-5.3 Codex (Xhigh)","evaluations":{"artificial_analysis_intelligence_index":33}},
-            {"slug":"minimax-m3","name":"MiniMax-M3","evaluations":{"artificial_analysis_intelligence_index":29}}
+            {"slug":"minimax-m3","name":"MiniMax-M3","evaluations":{"artificial_analysis_intelligence_index":29}},
+            {"slug":"phi-4","name":"Phi-4","evaluations":{"artificial_analysis_intelligence_index":6}}
         ]}"#;
         let names = [
             "Grok 4.20",
@@ -2134,6 +2321,8 @@ mod tests {
             "GPT-5.3 Codex XHigh",
             "GPT-5.3 Codex Low",
             "MiniMax M3 Thinking",
+            "Phi-4",
+            "Phi-4-reasoning",
         ];
         let models: String = names.iter().map(|n| format!(r#""{n}": {{"name": "{n}"}},"#)).collect();
         let json = format!(r#"{{"p": {{"models": {{{}}}}}}}"#, models.trim_end_matches(','));
@@ -2148,11 +2337,14 @@ mod tests {
         assert!(off.fit["overall"] < row("Grok 4.20").fit["overall"], "ranked on its own index");
         assert_eq!((index("Claude Opus 4.6"), index("Claude 4.6 Opus Thinking")), (Some(32.0), Some(32.0)));
         let low = row("Claude 4.6 Opus Thinking Low");
-        assert_eq!((low.eci, low.aa.as_deref()), (None, Some("claude-opus-4-6")), "a setting not measured: no score");
+        let page = Some("claude-opus-4-6-adaptive");
+        assert_eq!((low.eci, low.aa.as_deref()), (None, page), "an effort not measured: no score, the reasoning page");
         assert!(low.fit.is_empty() && low.scores.is_empty());
         assert_eq!(index("GPT-5.3 Codex XHigh"), Some(33.0), "the setting is in the entry's name alone");
         assert_eq!(index("GPT-5.3 Codex Low"), None);
         assert_eq!(index("MiniMax M3 Thinking"), Some(29.0), "an entry saying no setting is the model's only one");
+        let own = row("Phi-4-reasoning");
+        assert_eq!((index("Phi-4"), own.eci, own.aa.as_deref()), (Some(6.0), None, None), "not one that cannot reason");
     }
 
     #[test]
@@ -2181,6 +2373,31 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_name_is_the_dated_release_filed_under_it() {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let mut file = |name: &str, body: &[u8]| {
+                z.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                std::io::Write::write_all(&mut z, body).unwrap();
+            };
+            file(
+                "model_metadata.csv",
+                b"model_version,model_group,date\ngoogle/flash-9,Flash 9 (Jun 2025),2025-06-17\n\
+                  flash-9-preview-09,Flash 9 (Sep 2025),2025-09-25\nchat-4o-03,GPT-4o (Mar 2025),2025-03-27\n\
+                  gpt-4o-11,GPT-4o (Nov 2024),2024-11-20\n",
+            );
+            file("benchmark_metadata.csv", b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\n");
+            file("ocr.csv", b"Model version,score\ngoogle/flash-9,0.5\nflash-9-preview-09,0.6\nchat-4o-03,0.5\n");
+            file("epoch_capabilities_index/eci_scores.csv", b"Model,eci\nGPT-4o (Nov 2024),128\n");
+            z.finish().unwrap();
+        }
+        let ep = parse_epoch(buf.get_ref()).unwrap();
+        assert_eq!(ep.alias["flash9"], "flash9jun2025", "the release filed under the bare id, not the newest");
+        assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
+    }
+
+    #[test]
     fn epoch_links_models_benchmarked_on_no_task() {
         let mut buf = Cursor::new(Vec::new());
         {
@@ -2200,7 +2417,7 @@ mod tests {
         }
         let ep = parse_epoch(buf.get_ref()).unwrap();
         assert!(!ep.groups.contains_key("new"), "listed without results: Epoch has no page for it");
-        assert_eq!(ep.groups["other"], ("Other".into(), None, BTreeMap::new()), "a page, though no task scores");
+        assert_eq!(ep.groups["other"], ("Other".into(), None, BTreeMap::new()), "known, though no task scores");
         assert_eq!(ep.groups["old"].1, Some(150.0));
     }
 }

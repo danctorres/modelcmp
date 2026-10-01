@@ -1578,14 +1578,17 @@ impl App {
                 self.val(self.rows[n], col)?;
                 let m = self.current()?;
                 // The groups of `GROUPS` and where each comes from: prices and context, benchmarks,
-                // then speed, which only Artificial Analysis measures. With no page for the model,
-                // the site itself.
-                return Some(Effect::Open(if col < ECI {
-                    m.price_page().unwrap_or_else(|| "https://models.dev".into())
+                // then speed, which only Artificial Analysis measures.
+                let (site, page) = if col < ECI {
+                    ("models.dev", m.price_page())
                 } else {
                     let src = if col < SPEED { crate::data::source() } else { Source::Aa };
-                    m.page(src).unwrap_or_else(|| format!("https://{}", src.site()))
-                }));
+                    (src.site(), m.page(src))
+                };
+                if page.is_none() {
+                    self.status = format!("{} has no page on {site}", m.name);
+                }
+                return page.map(Effect::Open);
             }
             Mouse::Pick(n) if n < self.rows.len() => {
                 // The range, if any, becomes picked rows, then the clicked row toggles.
@@ -1802,12 +1805,14 @@ impl App {
                 self.input = Input::Note { key: m.key.clone(), cur: text.len(), text };
             }
             KeyCode::Char('o') if row => {
+                let m = self.current()?;
                 let mut items: Vec<_> =
-                    self.current()?.links().into_iter().map(|(site, url)| (site.into(), Effect::Open(url))).collect();
-                if items.len() == 1 {
-                    return items.pop().map(|(_, e)| e);
+                    m.links().into_iter().map(|(site, url)| (site.into(), Effect::Open(url))).collect();
+                match items.len() {
+                    0 => self.status = format!("no site has a page for {}", m.name),
+                    1 => return items.pop().map(|(_, e)| e),
+                    _ => self.input = Input::choose("open on which site?", Kind::Open, items, 0),
                 }
-                self.input = Input::choose("open on which site?", Kind::Open, items, 0);
             }
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
@@ -2088,7 +2093,7 @@ mod tests {
             key: key.into(),
             name: key.into(),
             available,
-            url: format!("https://x/{key}"),
+            openrouter: Some(format!("x/{key}")),
             eci: coding.map(|c| c + 100.0),
             epoch: coding.map(|_| key.into()),
             offers: vec![Offer {
@@ -3099,7 +3104,7 @@ mod tests {
         press(&mut a, "oG");
         assert_eq!(
             code(&mut a, KeyCode::Enter),
-            Some(Effect::Open(a.current().unwrap().url.clone())),
+            Some(Effect::Open("https://openrouter.ai/x/gpt55".into())),
             "o opens the picked model"
         );
         assert!(matches!(press(&mut a, "y"), Some(Effect::Copy(id)) if id.contains("gpt55")));
@@ -3165,7 +3170,7 @@ mod tests {
         assert_eq!(a.compare_sel, 1, "$ picks the last model");
         assert_eq!(
             press(&mut a, "o"),
-            Some(Effect::Open("https://x/opus5".into())),
+            Some(Effect::Open("https://openrouter.ai/x/opus5".into())),
             "o opens the selected model, at once when only OpenRouter has it"
         );
         press(&mut a, "/eci");
@@ -3380,11 +3385,17 @@ mod tests {
         assert_eq!(press(&mut a, "o"), None, "o asks which site");
         assert!(
             matches!(&a.input, Input::Choose { items, .. } if items.len() == 2),
-            "epoch.ai, openrouter.ai: no models.dev page, as the developer does not offer it, nor an AA one"
+            "epoch.ai, openrouter.ai: neither models.dev nor Artificial Analysis has a page for it"
         );
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));
         press(&mut a, "oG");
-        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://x/gpt55".into())), "openrouter.ai last");
+        let last = Some(Effect::Open("https://openrouter.ai/x/gpt55".into()));
+        assert_eq!(code(&mut a, KeyCode::Enter), last, "openrouter.ai last");
+        a.data.models[0].openrouter = None;
+        assert_eq!(press(&mut a, "o"), Some(Effect::Open("https://epoch.ai/models/gpt55".into())), "one page: at once");
+        a.data.models[0].epoch = None;
+        assert_eq!((press(&mut a, "o"), a.status.as_str()), (None, "no site has a page for gpt55"), "none: it says so");
+        a.data.models[0].epoch = Some("gpt55".into());
         assert_eq!(press(&mut a, "y"), Some(Effect::Copy("p/gpt55".into())));
         a.data.models[0].name = "GPT 5.5".into();
         assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("GPT 5.5".into())));
@@ -3452,6 +3463,9 @@ mod tests {
         assert_eq!((a.selected(), &a.view), (0, &View::Table), "its row highlighted");
         let provider = open("https://models.dev/providers/p/");
         assert_eq!(a.mouse(Mouse::Cell(0, PRICE)), provider, "a price: the page of the provider you'd pay");
+        a.data.models[0].epoch = None;
+        let said = (a.mouse(Mouse::Cell(0, ECI)), a.status.as_str());
+        assert_eq!(said, (None, "gpt55 has no page on epoch.ai"), "a score Epoch has no page for says so");
         assert_eq!(a.mouse(Mouse::Cell(2, ECI)), None, "an empty cell opens nothing");
         assert_eq!(a.mouse(Mouse::Cell(2, NOTES)), None, "nor do the notes");
         a.mouse(Mouse::Row(1));

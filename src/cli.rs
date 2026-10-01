@@ -83,8 +83,10 @@ struct ModelOut<'a> {
     open_weights: bool,
     release: &'a str,
     knowledge: &'a str,
-    url: &'a str,
-    /// Site -> the model's page there: models.dev, epoch.ai, artificialanalysis.ai, openrouter.ai
+    /// The model's page, the one `open` opens: the first site of `pages` to have one, null when none has
+    url: Option<String>,
+    /// Site -> the model's page there, for each of models.dev, epoch.ai, artificialanalysis.ai
+    /// and openrouter.ai that has one
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<BTreeMap<&'static str, String>>,
     /// The overall index of `source`: Epoch Capabilities Index, or Artificial Analysis Intelligence Index
@@ -126,7 +128,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         open_weights: m.open_weights,
         release: &m.release,
         knowledge: &m.knowledge,
-        url: &m.url,
+        url: m.links().into_iter().next().map(|(_, url)| url),
         pages: full.then(|| m.links().into_iter().collect()),
         eci: m.eci,
         source: crate::data::source().id(),
@@ -323,15 +325,26 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
     Ok(())
 }
 
-pub fn open(data: &Data, q: &str, on: &str) -> Result {
-    let m = resolve(data, q)?;
+/// The page `open --on` asks for: the first, as `o` then `enter` in the TUI, when it names no
+/// site, else that of the site `on` starts the name of, in any case; "aa" is Artificial
+/// Analysis, as in `--source`. Err says which sites have the model.
+fn page(m: &Model, on: Option<&str>) -> std::result::Result<String, String> {
     let links = m.links();
-    let Some((_, url)) = links.iter().find(|(site, _)| site.starts_with(on)) else {
-        let sites: Vec<_> = links.iter().map(|(s, _)| *s).collect();
-        return Err(Exit { code: 1, msg: format!("{} has no page on {on}; it has {}", m.name, sites.join(", ")) });
+    let Some(on) = on else {
+        return links.into_iter().next().map(|(_, url)| url).ok_or(format!("no site has a page for {}", m.name));
     };
-    open::that_detached(url).map_err(|e| format!("could not open {url}: {e}"))?;
+    let site = Some(on.to_lowercase()).filter(|s| s != "aa").unwrap_or("artificialanalysis".into());
+    let sites = links.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", ");
+    let found = links.into_iter().find(|(s, _)| !site.is_empty() && s.starts_with(&site));
+    let has = if sites.is_empty() { "no site has one".into() } else { format!("it has {sites}") };
+    found.map(|(_, url)| url).ok_or(format!("{} has no page on {on}; {has}", m.name))
+}
+
+pub fn open(data: &Data, q: &str, on: Option<&str>) -> Result {
+    let url = page(resolve(data, q)?, on)?;
+    // Printed first, so that it is there to copy when nothing opens it.
     println!("{url}");
+    open::that_detached(&url).map_err(|e| format!("could not open {url}: {e}"))?;
     Ok(())
 }
 
@@ -568,6 +581,25 @@ mod tests {
         m.offers[0].unpriced = true;
         let unpriced = serde_json::to_value(out(&m, &store, false)).unwrap();
         assert_eq!(unpriced["price"]["input_per_mtok"], Value::Null, "an unknown price is not free");
+    }
+
+    #[test]
+    fn open_picks_the_first_page_or_the_site_named() {
+        let mut m = model("gpt55", 90.0, 10.0);
+        assert_eq!(page(&m, None), Err("no site has a page for gpt55".into()));
+        assert_eq!(page(&m, Some("epoch")), Err("gpt55 has no page on epoch; no site has one".into()));
+        (m.epoch, m.aa, m.openrouter) = (Some("gpt-5-5".into()), Some("gpt-5-5".into()), Some("openai/gpt-5.5".into()));
+        let (epoch, aa) = ("https://epoch.ai/models/gpt-5-5", "https://artificialanalysis.ai/models/gpt-5-5");
+        assert_eq!(page(&m, None).as_deref(), Ok(epoch), "the first, as o then enter");
+        assert_eq!(page(&m, Some("openrouter")).as_deref(), Ok("https://openrouter.ai/openai/gpt-5.5"));
+        for site in ["aa", "AA", "Artificial", "artificialanalysis.ai"] {
+            assert_eq!(page(&m, Some(site)).as_deref(), Ok(aa), "{site}");
+        }
+        let none = "gpt55 has no page on models; it has epoch.ai, artificialanalysis.ai, openrouter.ai";
+        assert_eq!(page(&m, Some("models")), Err(none.into()));
+        assert!(page(&m, Some("")).is_err(), "no site is not every site");
+        let json = serde_json::to_value(out(&m, &Store::default(), true)).unwrap();
+        assert_eq!((&json["url"], &json["pages"]["epoch.ai"]), (&Value::from(epoch), &Value::from(epoch)));
     }
 
     #[test]

@@ -418,7 +418,7 @@ fn event_loop(
                         // Not Homebrew's nor cargo's to replace: the release's page has the binaries.
                         let url = format!("{REPO}/releases/latest");
                         app.report(match open::that_detached(&url) {
-                            Ok(()) => Ok(format!("installed by hand: opened {url}")),
+                            Ok(()) => Ok(format!("installed by hand: opening {url}")),
                             Err(e) => Err(format!("could not open {url}: {e}")),
                         });
                     }
@@ -428,7 +428,8 @@ fn event_loop(
                         }
                     }
                     Some(Effect::Open(url)) => app.report(match open::that_detached(&url) {
-                        Ok(()) => Ok(format!("opened {url}")),
+                        // A browser is only asked to: what it does with the page is not known here.
+                        Ok(()) => Ok(format!("opening {url}")),
                         Err(e) => Err(format!("could not open {url}: {e}")),
                     }),
                     Some(Effect::Copy(text)) => app.report(if copy(&text) {
@@ -1877,7 +1878,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
         Kind::Fav => " j k move · / search · space enter toggle · esc close",
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
         Kind::Source => " j k move · / search · enter picks · esc close",
-        Kind::Open | Kind::Launch => " j k move · / search · enter opens",
+        Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
     };
     lines.push(Line::from(hint).style(fg(MUTED)));
     lines

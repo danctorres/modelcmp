@@ -41,7 +41,7 @@ modelcmp list --min coding=155 --sort price    # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet-5                         # everything about one model
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
-modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, artificialanalysis or openrouter (default)
+modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, aa or openrouter; without --on, the first to have one
 modelcmp select sonnet-5                       # shortlist it, list --selected shows them: --rm to deselect
 modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosing; without text shows it, --rm deletes it
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
@@ -86,7 +86,7 @@ modelcmp list --task coding --tier mid --json  # the one model to use: the user'
 Each JSON model carries `key`, `selected` (on your shortlist), `excluded`, `favorite_for` (the tasks it is the user's favorite
 for, and `task:tier` for a tier's), `price` (with the provider's model `id`, which opencode takes after `provider/`, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when the provider lists no price, which the tables show as `-`, not `free`), `context`,
 `eci` (the overall index of `source`, `epoch` or `aa`), per-task `tasks` (each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile), and with `aa` `tokens_per_second` and `ttft_seconds`. `show` and
-`compare` add `benchmarks` (every score, as a fraction: 0.545 is 54.5%), `providers` (every provider's price) and `pages` (site to URL). `recommend` prints each
+`compare` add `benchmarks` (every score, as a fraction: 0.545 is 54.5%), `providers` (every provider's price) and `pages` (site to URL, for the sites that have a page for it; `url` is the first of them, null when none has). `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
 same as `tasks`. A favorite that is on the line only as
 the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, and the user's `note` when the model has one.

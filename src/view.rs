@@ -555,6 +555,7 @@ pub fn visible<'a>(
 /// Everything about one model, one line per entry.
 pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     let yes = |b: bool| if b { "yes" } else { "no" };
+    let mut pages = m.links().into_iter().map(|(_, url)| url);
     let mut v = vec![
         format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.developer)),
@@ -568,7 +569,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
             yes(m.open_weights)
         ),
         format!("  released:   {}   knowledge: {}", or_dash(&m.release), or_dash(&m.knowledge)),
-        format!("  pages:      {}", m.links().into_iter().map(|(_, u)| u).collect::<Vec<_>>().join("  ")),
+        format!("  pages:      {}", pages.next().unwrap_or("-".into())),
         format!("  note:       {}", store.note(&m.key).unwrap_or("-")),
         format!(
             "  favorite:   {}",
@@ -578,6 +579,8 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         format!("  {} {}", crate::data::source().index().0, score(m.eci)),
         format!("  task fit ({}, value a percentile):", crate::data::source().scale()),
     ];
+    // A page per line, as the details panel cuts a line at its width.
+    v.splice(7..7, pages.map(|url| format!("              {url}")));
     if m.tps.is_some() || m.ttft.is_some() {
         let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
         let speed = format!(

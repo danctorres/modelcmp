@@ -112,7 +112,7 @@ skills can take its body in `AGENTS.md`.
   and each model's speed (output tokens per second, time to first token).
   Needs a free API key: the TUI's first start asks which source to use, then for the key
   if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,
-  only its sitemap is read, to link models that have a page there (`o`).
+  only its sitemap is read, to link models that have a page there (`o`), as Epoch AI's is.
 - What you have: the models `opencode models` and `pi --list-models` list, the `claude`, `codex`
   and `gemini` binaries on `PATH` (each counts as its own provider), and providers whose API key
   is set in the environment. The Via column says which. A harness that fails to list its models
