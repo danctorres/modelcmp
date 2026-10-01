@@ -261,34 +261,48 @@ pub fn percentiles<'a>(
     (out, shown)
 }
 
-/// Per Artificial Analysis group `(key, index, field -> score)`: each task's percentile among the
-/// models scored on its field, and that score as 0..100; overall and vision the index's, as with
-/// ECI. Epoch's fit needs Epoch's benchmark difficulties, so not here.
-pub fn aa_percentiles<'a>(groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)>) -> Fit {
+/// What Artificial Analysis's models scored, each `(index, field -> score)`: the index, and
+/// every field a task uses. One model's scores are ranked among them (`aa_fit`).
+#[derive(Default, Debug)]
+pub struct AaPools {
+    index: Vec<f64>,
+    fields: HashMap<&'static str, Vec<f64>>,
+}
+
+pub fn aa_pools<'a>(groups: impl Iterator<Item = (Option<f64>, &'a BTreeMap<String, f64>)>) -> AaPools {
     let groups: Vec<_> = groups.collect();
-    let index: Vec<f64> = groups.iter().filter_map(|g| g.1).collect();
-    let fields: HashMap<&str, Vec<f64>> =
-        aa_fields().into_iter().map(|f| (f, groups.iter().filter_map(|g| g.2.get(f).copied()).collect())).collect();
-    let (mut out, mut shown) = (HashMap::new(), HashMap::new());
-    for (key, i, scores) in &groups {
-        let (mut fit, mut show) = (BTreeMap::new(), BTreeMap::new());
-        if let Some(i) = i {
-            for t in ECI_TASKS {
-                fit.insert(t.to_string(), pct_rank(*i, &index));
-            }
-        }
-        for t in TASKS {
-            if let Some(f) = t.aa
-                && let Some(&x) = scores.get(f)
-            {
-                fit.insert(t.name.to_string(), pct_rank(x, &fields[f]));
-                show.insert(t.name.to_string(), x * 100.0);
-            }
-        }
-        out.insert(key.to_string(), fit);
-        shown.insert(key.to_string(), show);
+    AaPools {
+        index: groups.iter().filter_map(|g| g.0).collect(),
+        fields: aa_fields()
+            .into_iter()
+            .map(|f| (f, groups.iter().filter_map(|g| g.1.get(f).copied()).collect()))
+            .collect(),
     }
-    (out, shown)
+}
+
+/// An Artificial Analysis model's fit, `index` and `field -> score`: each task's percentile among
+/// the models scored on its field, and that score as 0..100; overall and vision the index's, as
+/// with ECI. Epoch's fit needs Epoch's benchmark difficulties, so not here.
+pub fn aa_fit(
+    index: Option<f64>,
+    scores: &BTreeMap<String, f64>,
+    pools: &AaPools,
+) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
+    let (mut fit, mut show) = (BTreeMap::new(), BTreeMap::new());
+    if let Some(i) = index {
+        for t in ECI_TASKS {
+            fit.insert(t.to_string(), pct_rank(i, &pools.index));
+        }
+    }
+    for t in TASKS {
+        if let Some(f) = t.aa
+            && let (Some(&x), Some(pool)) = (scores.get(f), pools.fields.get(f))
+        {
+            fit.insert(t.name.to_string(), pct_rank(x, pool));
+            show.insert(t.name.to_string(), x * 100.0);
+        }
+    }
+    (fit, show)
 }
 
 /// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
@@ -403,12 +417,16 @@ mod tests {
     fn aa_ranks_by_task() {
         let a = scores(&[("artificial_analysis_coding_index", 0.6), ("hle", 0.4)]);
         let b = scores(&[("artificial_analysis_coding_index", 0.4), ("hle", 0.3)]);
-        let (p, shown) = aa_percentiles([("a", Some(60.0), &a), ("b", None, &b)].into_iter());
-        assert!(p["a"]["coding"] > p["b"]["coding"]);
-        assert!(p["a"]["reasoning"] > p["b"]["reasoning"]);
-        assert_eq!((shown["a"]["coding"], shown["b"]["reasoning"]), (60.0, 30.0), "shown as the score, 0..100");
-        assert!(p["a"].contains_key("overall") && !p["b"].contains_key("overall"), "no index, no overall");
-        assert!(!p["a"].contains_key("agentic"), "no agentic field, no agentic score");
+        let pools = aa_pools([(Some(60.0), &a), (None, &b)].into_iter());
+        let ((pa, shown_a), (pb, shown_b)) = (aa_fit(Some(60.0), &a, &pools), aa_fit(None, &b, &pools));
+        assert!(pa["coding"] > pb["coding"]);
+        assert!(pa["reasoning"] > pb["reasoning"]);
+        assert_eq!((shown_a["coding"], shown_b["reasoning"]), (60.0, 30.0), "shown as the score, 0..100");
+        assert!(pa.contains_key("overall") && !pb.contains_key("overall"), "no index, no overall");
+        assert!(!pa.contains_key("agentic"), "no agentic field, no agentic score");
+        // A setting of a model is ranked among the models, though it is none of them.
+        let low = aa_fit(Some(10.0), &scores(&[("hle", 0.1)]), &pools).0;
+        assert_eq!((low["overall"], low["reasoning"]), (0.0, 0.0), "below every model");
     }
 
     #[test]

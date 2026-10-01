@@ -363,33 +363,56 @@ pub fn frontier<'m, T: Copy>(
 /// cheap alone is not one. The `favorites` join the line whether or not they earn a place
 /// on it, and are ranked only if they are among `models`; with no score for the task, a
 /// favorite's score is NaN, which `priced` shows as `-` and no tier floor reaches.
+/// With the line come the keys on it only for being favorites.
 pub fn task_frontier<'a>(
     models: impl Iterator<Item = &'a Model>,
     t: &fit::Task,
     favorites: &[&'a Model],
-) -> Vec<(&'a Model, f64)> {
+) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
     let ranked = fit::rank(models, t);
     let ranked: Vec<_> = ranked.into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
     let mut v = frontier(&ranked, |(m, _)| m, |m| task_score(m, t.name));
-    let by_cost = |v: &mut Vec<(&Model, f64)>| {
-        v.sort_by(|a, b| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal));
-    };
-    // Dearest first so dedup keeps the best of each level, then back to cheapest first.
-    by_cost(&mut v);
+    let fav = |m: &Model| favorites.iter().any(|f| f.key == m.key);
+    let dearest =
+        |a: &(&Model, f64), b: &(&Model, f64)| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal);
+    // Dearest first so dedup keeps the best of each level, a favorite ahead of the models it
+    // ties, as on the frontier the same price is the same score; then back to cheapest first.
+    v.sort_by(|a, b| dearest(a, b).then_with(|| fav(b.0).cmp(&fav(a.0))));
     v.dedup_by_key(|(m, _)| level(m.cost().unwrap_or(0.0)));
+    let mut off = Vec::new();
     for &f in favorites {
         if !v.iter().any(|(m, _)| m.key == f.key) {
             v.push((f, fit::fit(f, t).unwrap_or(f64::NAN)));
+            off.push(f.key.as_str());
         }
     }
-    by_cost(&mut v);
+    v.sort_by(dearest);
     v.reverse();
-    v
+    (v, off)
 }
 
-/// Whether `key` is on the task's frontier among `models` on its merits, not only as the favorite.
-pub fn recommended<'a>(models: impl Iterator<Item = &'a Model>, t: &fit::Task, key: &str) -> bool {
-    task_frontier(models, t, &[]).iter().any(|(m, _)| m.key == key)
+/// `task_frontier` with the favorites `store` has for the task: the ones among `pool`.
+pub fn task_line<'a>(
+    models: impl Iterator<Item = &'a Model>,
+    pool: impl Iterator<Item = &'a Model>,
+    store: &Store,
+    t: &fit::Task,
+) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
+    let favs = store.task_favorites(t.name);
+    let fav: Vec<&Model> = pool.filter(|m| favs.contains(&m.key.as_str())).collect();
+    task_frontier(models, t, &fav)
+}
+
+/// Two values of a column in order, the highest first with `desc`: blanks last either way.
+pub fn by_value(x: Option<f64>, y: Option<f64>, desc: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match (x, y) {
+        (Some(x), Some(y)) if desc => y.total_cmp(&x),
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (Some(_), None) => Less,
+        (None, Some(_)) => Greater,
+        (None, None) => Equal,
+    }
 }
 
 /// `--tier` names and their score floors. A tier picks the cheapest frontier entry at or
@@ -708,6 +731,25 @@ mod tests {
         assert_eq!(key("high"), Some("opus"));
         assert_eq!(pick(&front[..2], "mid").map(|e| e.0), Some("mini"), "none reaches it: the best");
         assert_eq!(pick::<&str>(&[], "low"), None);
+    }
+
+    #[test]
+    fn a_favorite_takes_the_place_of_a_model_it_ties() {
+        let model = |key: &str, coding: f64, price: f64| Model {
+            key: key.into(),
+            fit: [("coding".to_string(), coding)].into(),
+            offers: vec![Offer { input: price, output: price, ..Default::default() }],
+            ..Default::default()
+        };
+        let ms = [model("a", 60.4, 1.0), model("b", 59.8, 1.0), model("weak", 55.0, 1.5), model("top", 90.0, 10.0)];
+        fn keys<'a>(ms: &'a [Model], fav: &[&'a Model]) -> (Vec<&'a str>, Vec<&'a str>) {
+            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), fav);
+            (line.iter().map(|(m, _)| m.key.as_str()).collect(), off)
+        }
+        let line = |fav: &[usize]| keys(&ms, &fav.iter().map(|&i| &ms[i]).collect::<Vec<_>>());
+        assert_eq!(line(&[]), (vec!["a", "top"], vec![]));
+        assert_eq!(line(&[1]), (vec!["b", "top"], vec![]), "the same price and shown score: recommended");
+        assert_eq!(line(&[2]), (vec!["a", "weak", "top"], vec!["weak"]), "beaten: there only as the favorite");
     }
 
     #[test]

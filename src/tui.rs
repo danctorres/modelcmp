@@ -29,6 +29,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::{DefaultTerminal, Frame};
+use std::io::IsTerminal;
 use std::ops::Range;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -39,19 +40,29 @@ type Refresh = Receiver<Result<Data, String>>;
 /// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
 /// no data until one is picked.
 pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
+    // Run by an agent or a script there is no terminal to draw on: say so before any download or
+    // harness is started, not after.
+    if !std::io::stdout().is_terminal() {
+        return Err("the TUI needs a terminal; see modelcmp --help".into());
+    }
     // Asked first, before a download keys may be typed during: reading the reply takes whatever
     // else is queued with it, and here that is nothing.
     let term_bg = cfg!(unix).then(terminal_bg).flatten();
     // Start from the cache however old, and refresh behind the table (`--refresh` too, so a
     // failure shows in the frame); only a first run, with no cache, waits for the download.
+    let mut warning = None;
     let (data, fresh, failed) = match (!ask).then(data::load_cache) {
         None => (Data::default(), true, None),
         Some(Some(d)) => (d, false, None),
-        // No cache, so no stale copy to fall back on and no warning to lose.
+        // No cache, so no stale copy to fall back on.
         Some(None) => {
             eprintln!("downloading model data (models.dev + {})…", data::source().label());
             match data::load(true) {
-                Ok((d, _)) => (d, true, None),
+                // The warning is of a cache that cannot be written: every start downloads.
+                Ok((d, w)) => {
+                    warning = w;
+                    (d, true, None)
+                }
                 // A wrong or missing key: open anyway, so `B` can fix it or go back to Epoch.
                 Err(e) if data::source() == data::Source::Aa => (Data::default(), true, Some(e)),
                 Err(e) => return Err(e),
@@ -67,14 +78,14 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     if let Some(e) = failed {
         app.refreshed(Err(e));
     }
-    if let Some(w) = app.store.warning.take() {
+    // The store's last: it is your marks and notes that are at stake.
+    for w in [warning, app.store.warning.take()].into_iter().flatten() {
         app.report(Err(w));
     }
     let mut rx = None;
     if !fresh && (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
-    // Run by an agent or a script there is no terminal to draw on: say so rather than abort.
     let mut terminal =
         ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}); see modelcmp --help"))?;
     // ratatui's panic hook restores the terminal but leaves mouse reporting on.
@@ -247,8 +258,9 @@ fn spawn_refresh() -> Refresh {
 
 fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refresh>) -> Result<(), String> {
     let mut dirty = true;
-    // The last press on a cell, which a second one makes a double click (`double`).
-    let mut click = None;
+    // The last press on a cell, which a second one makes a double click (`double`), and the
+    // screen row of the last press on a table row, which a drag extends from (`dragged`).
+    let (mut click, mut press) = (None, None);
     loop {
         if dirty {
             terminal
@@ -276,10 +288,13 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                     click = None;
                     Some(Ok(k))
                 }
-                Event::Mouse(m) => match hit(app, Rect::new(0, 0, size.width, size.height), m) {
-                    Some(m) => Some(Err(double(&mut click, m, Instant::now()))),
-                    None => continue,
-                },
+                Event::Mouse(e) => {
+                    let m = hit(app, Rect::new(0, 0, size.width, size.height), e);
+                    match dragged(&mut press, e, m) {
+                        Some(m) => Some(Err(double(&mut click, m, Instant::now()))),
+                        None => continue,
+                    }
+                }
                 // A resize redraws; a key release, a pointer move and the like do nothing.
                 Event::Resize(..) => None,
                 _ => continue,
@@ -498,6 +513,30 @@ fn harness_at(app: &App, n: usize, x: u16) -> Option<usize> {
         end += h.len() as u16 + 2;
         (start..end - 2).contains(&x)
     })
+}
+
+/// `m`, what the mouse event `e` landed on, unless it is a drag that selects nothing: one not
+/// begun on a table row, as off a header, or still on the row it began on, where a click that
+/// slips a cell sideways is a click. `press` is the screen row of the last press on a table row,
+/// until the pointer leaves it; from then on the drag extends to any row, that one too.
+fn dragged(press: &mut Option<u16>, e: MouseEvent, m: Option<Mouse>) -> Option<Mouse> {
+    match e.kind {
+        MouseEventKind::Down(_) => {
+            let row = matches!(
+                m,
+                Some(Mouse::Row(_) | Mouse::Cell(..) | Mouse::Harness(..) | Mouse::Pick(_) | Mouse::Extend(_))
+            );
+            *press = row.then_some(e.row);
+        }
+        MouseEventKind::Drag(_) => {
+            if press.is_none_or(|row| row == e.row) {
+                return None;
+            }
+            *press = Some(u16::MAX);
+        }
+        _ => {}
+    }
+    m
 }
 
 /// How far apart the two presses of a double click may be.
@@ -942,7 +981,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Recommend => {
             Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(130))))
         }
-        View::Detail => app.current().map(|m| (detail_lines(m, &app.store).swap_remove(0), detail(m, &app.store))),
+        View::Detail => app.current().map(|m| detail(m, &app.store)),
         View::Compare if app.marked_models().len() < 2 => {
             let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
             let n = app.marked_models().len();
@@ -1905,12 +1944,13 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
         .collect()
 }
 
-/// Every detail line, with `key:` labels and section headings coloured.
-fn detail(m: &Model, store: &Store) -> Vec<Line<'static>> {
+/// The model's name, the title, then every detail line, with `key:` labels and section headings
+/// coloured.
+fn detail(m: &Model, store: &Store) -> (String, Vec<Line<'static>>) {
     let is_label = |k: &str| k.len() < 16 && k.trim().chars().all(|c| c.is_alphabetic() || c == ' ');
-    detail_lines(m, store)
-        .into_iter()
-        .skip(1) // the name is the title
+    let mut lines = detail_lines(m, store).into_iter();
+    let title = lines.next().unwrap_or_default();
+    let lines = lines
         .map(|s| match s.split_once(':') {
             Some((k, v)) if s.starts_with("  ") && is_label(k) => {
                 Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(v.to_string())])
@@ -1918,7 +1958,8 @@ fn detail(m: &Model, store: &Store) -> Vec<Line<'static>> {
             _ if s.ends_with(':') => heading(&s),
             _ => Line::from(s),
         })
-        .collect()
+        .collect();
+    (title, lines)
 }
 
 /// The verdict, then the marked models side by side with the best value of each row in green
@@ -2492,6 +2533,28 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_selects_once_it_leaves_the_row_it_began_on() {
+        let at = |kind, row| MouseEvent { kind, column: 9, row, modifiers: KeyModifiers::NONE };
+        let (down, drag) = (MouseEventKind::Down(MouseButton::Left), MouseEventKind::Drag(MouseButton::Left));
+        let (cell, to) = (Some(Mouse::Cell(1, PRICE)), |n| Some(Mouse::Extend(n)));
+        let mut press = None;
+        assert_eq!(dragged(&mut press, at(down, 4), cell), cell, "a press is itself");
+        assert_eq!(dragged(&mut press, at(drag, 4), to(1)), None, "a slip along the row is no drag");
+        assert_eq!(dragged(&mut press, at(drag, 5), to(2)), to(2), "off the row it extends");
+        assert_eq!(dragged(&mut press, at(drag, 4), to(1)), to(1), "and back onto it too");
+        assert_eq!(dragged(&mut press, at(down, 4), cell), cell);
+        assert_eq!(
+            dragged(&mut press, at(MouseEventKind::ScrollDown, 4), Some(Mouse::Scroll(3))),
+            Some(Mouse::Scroll(3))
+        );
+        assert_eq!(dragged(&mut press, at(drag, 4), to(1)), None, "a new press starts over, whatever the wheel did");
+        assert_eq!(dragged(&mut press, at(down, 1), Some(Mouse::Header(2))), Some(Mouse::Header(2)));
+        assert_eq!(dragged(&mut press, at(drag, 5), to(2)), None, "a drag off a header selects nothing");
+        assert_eq!(dragged(&mut press, at(down, 0), None), None);
+        assert_eq!(dragged(&mut press, at(drag, 5), to(2)), None, "nor one off the frame");
+    }
+
+    #[test]
     fn clicks_land_on_rows_headers_and_dropdown_entries() {
         use ratatui::crossterm::event::KeyModifiers;
         let mut a = app();
@@ -2635,8 +2698,8 @@ mod tests {
         // A favorite off the frontier, flash under the low tier's floor, is grey and says so.
         let mut data = std::mem::take(&mut a.data);
         data.models.iter_mut().find(|m| m.key == "flash").unwrap().fit.insert("coding".into(), 40.0);
-        a.set_data(data);
         a.store.toggle_favorite("coding", "flash");
+        a.set_data(data);
         let lines = recommend(&a, 200);
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
@@ -2985,7 +3048,7 @@ mod tests {
         overlay(&mut buf, area, "keys", help(""), &mut scroll);
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         let a = app();
-        let text: Vec<String> = detail(&a.data.models[0], &a.store).iter().map(ToString::to_string).collect();
+        let text: Vec<String> = detail(&a.data.models[0], &a.store).1.iter().map(ToString::to_string).collect();
         assert!(text.iter().any(|l| l.starts_with("  developer:  anthropic")), "{text:?}");
         let rows = compare(&a.marked_models(), 0, 0, 200, "", |_| false).0;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");

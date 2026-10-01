@@ -5,11 +5,10 @@ use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
-    TIERS, compare_rows, detail_lines, frontier_legend, pick, priced, recommended, shown_via, task_frontier, truncate,
+    TIERS, by_value, compare_rows, detail_lines, frontier_legend, pick, priced, shown_via, task_line, truncate,
     verdict, visible,
 };
 use serde::Serialize;
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An error with the process exit code it deserves: 3 for an ambiguous model name, 1 otherwise
@@ -233,11 +232,9 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         })
         .collect();
     if let Some(t) = o.task {
-        let favs = store.task_favorites(t.name);
-        let fav: Vec<&Model> = models.iter().copied().filter(|m| favs.contains(&m.key.as_str())).collect();
+        let (front, off) = task_line(models.iter().copied(), models.iter().copied(), store, t);
         // The tier picks on merit: a favorite appended to the line is neither best nor good enough.
-        let merit = task_frontier(models.iter().copied(), t, &[]);
-        let front = task_frontier(models.into_iter(), t, &fav);
+        let merit: Vec<_> = front.iter().copied().filter(|(m, _)| !off.contains(&m.key.as_str())).collect();
         models = match &o.tier {
             // Your favorite for the tier, else for the task, beats the tier's pick; one the
             // filters hide gives way to the next.
@@ -251,17 +248,8 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             None => front.into_iter().map(|(m, _)| m).collect(),
         };
     } else if let Some(c) = o.sort.map(|c| &COLS[c]) {
-        // Best first, blanks last, names breaking ties.
-        models.sort_by(|a, b| {
-            let order = match ((c.get)(a), (c.get)(b)) {
-                (Some(x), Some(y)) if c.lower_better => x.total_cmp(&y),
-                (Some(x), Some(y)) => y.total_cmp(&x),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            };
-            order.then_with(|| a.name.cmp(&b.name))
-        });
+        // Best first, names breaking ties.
+        models.sort_by(|a, b| by_value((c.get)(a), (c.get)(b), !c.lower_better).then_with(|| a.name.cmp(&b.name)));
     }
     let total = models.len();
     if o.limit > 0 {
@@ -276,7 +264,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             return Err("no models match".to_string().into());
         }
         for m in &models {
-            println!("{}", model_id(m));
+            println!("{}", model_id(m, &data.harness));
         }
         return Ok(());
     }
@@ -430,23 +418,11 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
     Ok(())
 }
 
-/// The models you have and can use.
-fn usable<'a>(data: &'a Data, store: &'a Store) -> Vec<&'a Model> {
-    visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)).collect()
-}
-
-/// The frontier among the models you have and can use, as `list --task` gives it.
-fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<(&'a Model, f64)> {
-    let models = usable(data, store);
-    let favs = store.task_favorites(t.name);
-    let fav: Vec<&Model> = models.iter().copied().filter(|m| favs.contains(&m.key.as_str())).collect();
-    task_frontier(models.into_iter(), t, &fav)
-}
-
-/// The task's favorites that are on the line only for being favorites.
-fn unrecommended<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<&'a str> {
-    let models = usable(data, store);
-    store.task_favorites(t.name).into_iter().filter(|k| !recommended(models.iter().copied(), t, k)).collect()
+/// The frontier among the models you have and can use, as `list --task` gives it, and the
+/// favorites on it only for being favorites.
+fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
+    let usable = || visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key));
+    task_line(usable(), usable(), store, t)
 }
 
 /// `recommend --json`: what agents read to choose a task and its model.
@@ -454,8 +430,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
     TASKS
         .iter()
         .map(|t| {
-            let off = unrecommended(data, store, t);
-            let line = front(data, store, t);
+            let (line, off) = front(data, store, t);
             let front: Vec<_> = line
                 .iter()
                 .map(|&(m, s)| {
@@ -484,8 +459,8 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     for t in TASKS {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
-        let off = unrecommended(data, store, t);
-        let front: Vec<String> = front(data, store, t)
+        let (line, off) = front(data, store, t);
+        let front: Vec<String> = line
             .iter()
             .map(|(m, s)| {
                 let p = priced(m, fit::shown(m, t, *s), true, store.is_favorite(Some(t), &m.key));

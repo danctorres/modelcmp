@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,7 +22,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
 /// 6: `Model::shown`. 7: no deprecated offers, no fine-tunes folded into their base.
-const FORMAT: u32 = 7;
+/// 8: with Artificial Analysis, a row naming a reasoning setting has that setting's scores.
+const FORMAT: u32 = 8;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -296,7 +298,8 @@ pub struct Model {
     pub offers: Vec<Offer>,
     /// Epoch Capabilities Index: overall capability, roughly 100..170.
     pub eci: Option<f64>,
-    /// Benchmark name -> best score (0..1) across reasoning-effort settings.
+    /// Benchmark name -> best score (0..1) across reasoning-effort settings, or of the one
+    /// the name states (`aa_named`).
     pub scores: BTreeMap<String, f64>,
     /// Task name -> 0..100 percentile (see fit.rs), which ranks it.
     pub fit: BTreeMap<String, f64>,
@@ -560,9 +563,14 @@ fn table_ids(out: &str) -> Option<Vec<String>> {
     Some(lines.filter(|f| f.len() == cols).map(|f| format!("{}/{}", f[0], f[1])).collect())
 }
 
-/// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit` or on `stop`.
+/// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit` or on `stop`,
+/// which also keeps it from starting.
 fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<String> {
     use std::process::{Command, Stdio};
+    use std::sync::mpsc::RecvTimeoutError::Timeout;
+    if stop.load(Relaxed) {
+        return None;
+    }
     let mut child =
         Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     // Read while it runs: output larger than the pipe holds would otherwise block it.
@@ -585,8 +593,15 @@ fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<S
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
-    // A process it left running may hold the pipe open: wait for the rest no longer than the limit.
-    rx.recv_timeout(limit.saturating_sub(start.elapsed())).ok()?.ok()
+    // A process it left running may hold the pipe open: wait for the rest no longer than the
+    // limit, nor past `stop`.
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(text) => return text.ok(),
+            Err(Timeout) if start.elapsed() < limit && !stop.load(Relaxed) => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache.
@@ -598,31 +613,16 @@ pub fn refresh() -> Result<Data, String> {
             Some(aa_key().ok_or_else(|| format!("{AA_MISSING}: set {AA_KEY_ENV}, or pick it with B in the TUI"))?)
         }
     };
-    let stop = AtomicBool::new(false);
-    let (models, epoch, api, aa, harness, release) = std::thread::scope(|s| {
-        let a = s.spawn(|| fetch(MODELS_URL, None));
-        let b = s.spawn(|| fetch(EPOCH_URL, None));
-        let c = s.spawn(|| key.as_deref().map(|k| fetch(AA_API_URL, Some(k))));
-        let d = s.spawn(|| fetch(AA_URL, None));
-        let e = s.spawn(|| harness_models(&stop));
-        let f = s.spawn(|| fetch(RELEASE_URL, None));
-        let (a, b, c) = (a.join().unwrap(), b.join().unwrap(), c.join().unwrap());
-        // Without a download the refresh cannot do without, the harnesses are killed, not waited for.
-        stop.store(a.is_err() || c.as_ref().map_or(b.is_err(), |c| c.is_err()), Relaxed);
-        (a, b, c, d.join().unwrap(), e.join().unwrap(), f.join().unwrap())
-    });
-    let mut data = match api {
-        None => merge(&models?, &parse_epoch(&epoch?)?, None)?,
-        Some(api) => {
-            // Only links hang on it, so without it the refresh still succeeds, with no epoch.ai links.
-            let ep = epoch.and_then(|z| parse_epoch(&z)).ok();
-            let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref())?;
-            if let Some(ep) = &ep {
-                epoch_pages(&mut data.models, ep);
-            }
-            data
-        }
+    let stop = Arc::new(AtomicBool::new(false));
+    let harness = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || harness_models(&stop))
     };
+    let res = download(src, key.as_deref());
+    // A refresh that cannot finish kills the harnesses rather than wait for them.
+    stop.store(res.is_err(), Relaxed);
+    let harness = harness.join().unwrap_or_default();
+    let (mut data, aa, release) = res?;
     // Only links hang on it, so without it the refresh still succeeds, with no AA links.
     if let Ok(xml) = aa {
         aa_pages(&mut data.models, &String::from_utf8_lossy(&xml));
@@ -642,6 +642,50 @@ pub fn refresh() -> Result<Data, String> {
         .map(|e| format!("could not cache the data in {}: {e}", cache_path(src).display()));
     data.apply_available();
     Ok(data)
+}
+
+/// What `download` gives: the merged data, then Artificial Analysis's sitemap and modelcmp's
+/// newest release, which a refresh can do without.
+type Downloaded = (Data, Result<Vec<u8>, String>, Result<Vec<u8>, String>);
+
+/// The sources, downloaded in parallel and merged. It returns at the first failure of a download
+/// it cannot do without, models.dev's and the source's scores, leaving the others to end on
+/// their own: none is waited for once the refresh cannot finish.
+fn download(src: Source, key: Option<&str>) -> Result<Downloaded, String> {
+    const URLS: [&str; 5] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, RELEASE_URL];
+    let needed = [0, if src == Source::Aa { 2 } else { 1 }];
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, url) in URLS.into_iter().enumerate() {
+        // Artificial Analysis's scores are asked for only with its key.
+        let key = if i == 2 { key.map(String::from) } else { None };
+        if i == 2 && key.is_none() {
+            continue;
+        }
+        let tx = tx.clone();
+        std::thread::spawn(move || tx.send((i, fetch(url, key.as_deref()))));
+    }
+    drop(tx);
+    let mut got: [Result<Vec<u8>, String>; 5] = URLS.map(|url| Err(format!("{url}: no reply")));
+    for (i, res) in rx {
+        if needed.contains(&i) {
+            res.as_ref().map_err(String::clone)?;
+        }
+        got[i] = res;
+    }
+    let [models, epoch, api, aa, release] = got;
+    let data = match src {
+        Source::Epoch => merge(&models?, &parse_epoch(&epoch?)?, None)?,
+        Source::Aa => {
+            // Only links hang on it, so without it the refresh still succeeds, with no epoch.ai links.
+            let ep = epoch.and_then(|z| parse_epoch(&z)).ok();
+            let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref())?;
+            if let Some(ep) = &ep {
+                epoch_pages(&mut data.models, ep);
+            }
+            data
+        }
+    };
+    Ok((data, aa, release))
 }
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
@@ -720,13 +764,9 @@ fn aa_pages(models: &mut [Model], sitemap: &str) {
 // ponytail: a setting before a date ("…-reasoning-04-2025") stays, so that release is its own model.
 fn aa_words(slug: &str, effort: bool) -> Vec<String> {
     const SKIP: &[&str] = &["instruct", "hosted", "amazon", "cohere"];
-    const EFFORT: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "reasoning", "non", "thinking", "adaptive"];
     let mut w = words(slug);
-    while effort
-        && w.last().is_some_and(|l| EFFORT.contains(&l.as_str()))
-        && w[..w.len() - 1].iter().any(|x| x.bytes().any(|b| b.is_ascii_digit()))
-    {
-        w.pop();
+    if effort {
+        w.truncate(setting_at(&w));
     }
     let mut k: Vec<String> = w
         .iter()
@@ -744,6 +784,86 @@ fn aa_words(slug: &str, effort: bool) -> Vec<String> {
     let names = k.iter().take_while(|w| !w.starts_with(|c: char| c.is_ascii_digit())).count();
     k[..names].sort();
     k
+}
+
+/// Where the reasoning setting a name ends in starts among its words: their count when it ends
+/// in none.
+fn setting_at(w: &[String]) -> usize {
+    const EFFORT: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "reasoning", "non", "thinking", "adaptive"];
+    let digit = |x: &String| x.bytes().any(|b| b.is_ascii_digit());
+    let mut n = w.len();
+    while n > 0 && EFFORT.contains(&w[n - 1].as_str()) && w[..n - 1].iter().any(digit) {
+        n -= 1;
+    }
+    n
+}
+
+/// A reasoning setting as a name spells it: whether the model reasons, and at which effort.
+/// `None` is unsaid.
+type Setting = (Option<bool>, Option<String>);
+
+/// The setting `words` spell: "non" is no reasoning, and an effort without it is reasoning.
+fn setting(words: &[String]) -> Setting {
+    let said = |list: &[&str]| words.iter().find(|w| list.contains(&w.as_str())).cloned();
+    let effort = said(&["minimal", "low", "medium", "high", "xhigh", "max"]);
+    let on = effort.is_some() || said(&["reasoning", "thinking", "adaptive"]).is_some();
+    (if said(&["non"]).is_some() { Some(false) } else { on.then_some(true) }, effort)
+}
+
+/// The setting of one of the API's entries: what its name says in brackets, "Claude Opus 4.6
+/// (Non-reasoning, High Effort)", then what its slug and its name end in.
+fn aa_setting(slug: &str, name: &str) -> Setting {
+    let mut said = words(name.split_once('(').map_or("", |(_, brackets)| brackets));
+    for w in [words(slug), words(&clean_name(name))] {
+        said.extend_from_slice(&w[setting_at(&w)..]);
+    }
+    setting(&said)
+}
+
+/// The entries among `all`, one model's, that are the setting `name` ends in, as one
+/// (`aa_fold`): "Grok 4.20 Non-Reasoning" is not scored as Grok 4.20 reasoning. `None` when the
+/// name ends in no setting, `Some(None)` when it ends in one the API did not measure. An entry
+/// that does not say counts when none says it, as a model with one setting is listed bare.
+fn aa_named(name: &str, all: &[AaEntry]) -> Option<Option<AaEntry>> {
+    let w = words(name);
+    let asked = setting(&w[setting_at(&w)..]);
+    if asked == (None, None) {
+        return None;
+    }
+    // 1 when the entry says what is asked, 0 when it does not say, none when it says otherwise.
+    fn part<T: PartialEq>(asked: &Option<T>, said: &Option<T>) -> Option<usize> {
+        match (asked, said) {
+            (Some(a), Some(s)) => (a == s).then_some(1),
+            _ => Some(0),
+        }
+    }
+    let says = |e: &AaEntry| Some(part(&asked.0, &e.setting.0)? + part(&asked.1, &e.setting.1)?);
+    let most = all.iter().filter_map(says).max();
+    Some(aa_fold(all.iter().filter(|e| most.is_some() && says(e) == most)))
+}
+
+/// The settings of one model as one: the best score of each, the page of the setting-less slug,
+/// else the shortest, and the speed of the setting with the best index, which the scores mostly
+/// are: a thinking model is not as quick as its non-reasoning setting.
+fn aa_fold<'a>(entries: impl IntoIterator<Item = &'a AaEntry>) -> Option<AaEntry> {
+    let mut entries = entries.into_iter();
+    let mut all = entries.next()?.clone();
+    let rank = |e: &AaEntry| (e.speed != (None, None)).then(|| e.index.unwrap_or(f64::NEG_INFINITY));
+    let mut fastest = rank(&all);
+    for e in entries {
+        if let Some(r) = rank(e).filter(|r| fastest.is_none_or(|f| *r > f)) {
+            (fastest, all.speed) = (Some(r), e.speed);
+        }
+        all.index = [all.index, e.index].into_iter().flatten().reduce(f64::max);
+        for (f, x) in &e.scores {
+            let best = all.scores.entry(f.clone()).or_insert(0.0);
+            *best = best.max(*x);
+        }
+        if (e.slug.len(), &e.slug) < (all.slug.len(), &all.slug) {
+            all.slug.clone_from(&e.slug);
+        }
+    }
+    Some(all)
 }
 
 /// Lowercase alphanumerics only: "Claude Opus 4.5" == "claude-opus-4-5" == "claude_opus_4.5".
@@ -945,6 +1065,23 @@ struct Scores {
     page: HashMap<String, String>,
     /// group -> (tokens/s, time to first token) of that page's setting.
     speed: HashMap<String, (Option<f64>, Option<f64>)>,
+    /// group -> each of its reasoning settings, which Artificial Analysis lists apart.
+    settings: HashMap<String, Vec<AaEntry>>,
+    /// What a setting's scores are ranked among: the groups'.
+    pools: crate::fit::AaPools,
+}
+
+/// One entry of Artificial Analysis's API: a model at one reasoning setting.
+#[derive(Clone, Default, Debug)]
+struct AaEntry {
+    /// Its page on artificialanalysis.ai.
+    slug: String,
+    setting: Setting,
+    index: Option<f64>,
+    /// Field -> score, 0..1.
+    scores: BTreeMap<String, f64>,
+    /// (tokens/s, time to first token).
+    speed: (Option<f64>, Option<f64>),
 }
 
 /// Short developer names, the same whichever source named them.
@@ -1221,14 +1358,13 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
 // ---------- Artificial Analysis ----------
 
 /// The API's models, the reasoning settings of one model folded into one group with the best
-/// score of each (`aa_words`), as Epoch's are. Scores are 0..1, as Epoch's: indices are /100.
+/// score of each (`aa_words`, `aa_fold`), as Epoch's are, and kept apart in `settings` for the
+/// rows that name one. Scores are 0..1, as Epoch's: indices are /100.
 fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("artificial analysis: {e}"))?;
     let list = v["data"].as_array().or(v.as_array()).ok_or("artificial analysis: no model list")?;
     let fields = crate::fit::aa_fields();
     let mut sc = Scores { source: Source::Aa, ..Default::default() };
-    // group -> index of the setting its speed is from.
-    let mut speed_of: HashMap<String, f64> = HashMap::new();
     for m in list {
         let (Some(slug), Some(name)) = (m["slug"].as_str(), m["name"].as_str()) else { continue };
         let num = |f: &str| m["evaluations"][f].as_f64().filter(|x| x.is_finite());
@@ -1236,41 +1372,41 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
         if key.is_empty() {
             continue;
         }
-        let g = sc.groups.entry(key.clone()).or_insert_with(|| (clean_name(name), None, BTreeMap::new()));
-        if let Some(i) = num(crate::fit::AA_INDEX) {
-            g.1 = Some(g.1.map_or(i, |b: f64| b.max(i)));
-        }
-        for f in &fields {
-            if let Some(x) = num(f) {
-                // Indices are 0..100 and single benchmarks 0..1, though one above 1 is a percentage.
-                let x = if f.ends_with("_index") || x > 1.0 { x / 100.0 } else { x };
-                let best = g.2.entry(f.to_string()).or_insert(0.0);
-                *best = best.max(x);
-            }
-        }
-        // The setting-less slug is the model's page; else the shortest.
-        let page = sc.page.entry(key.clone()).or_insert_with(|| slug.to_string());
-        if (slug.len(), slug) < (page.len(), page.as_str()) {
-            *page = slug.to_string();
-        }
-        // The speed of the setting with the best index, which the row's scores mostly are: a
-        // thinking model is not as quick as its non-reasoning setting.
+        sc.groups.entry(key.clone()).or_insert_with(|| (clean_name(name), None, BTreeMap::new()));
+        // Indices are 0..100 and single benchmarks 0..1, though one above 1 is a percentage.
+        let score = |f: &&str| {
+            Some((f.to_string(), num(f).map(|x| if f.ends_with("_index") || x > 1.0 { x / 100.0 } else { x })?))
+        };
         let top = |f: &str| m[f].as_f64().filter(|x| x.is_finite() && *x > 0.0);
-        let speed = (top("median_output_tokens_per_second"), top("median_time_to_first_token_seconds"));
-        let rank = num(crate::fit::AA_INDEX).unwrap_or(f64::NEG_INFINITY);
-        if speed != (None, None) && speed_of.get(&key).is_none_or(|&r| rank > r) {
-            speed_of.insert(key.clone(), rank);
-            sc.speed.insert(key.clone(), speed);
-        }
+        sc.settings.entry(key.clone()).or_default().push(AaEntry {
+            slug: slug.to_string(),
+            setting: aa_setting(slug, name),
+            index: num(crate::fit::AA_INDEX),
+            scores: fields.iter().filter_map(score).collect(),
+            speed: (top("median_output_tokens_per_second"), top("median_time_to_first_token_seconds")),
+        });
         if let Some(o) = m["model_creator"]["name"].as_str() {
             sc.org.entry(key).or_insert_with(|| o.to_string());
+        }
+    }
+    for (key, g) in &mut sc.groups {
+        let Some(all) = sc.settings.get(key).and_then(aa_fold) else { continue };
+        (g.1, g.2) = (all.index, all.scores);
+        sc.page.insert(key.clone(), all.slug);
+        if all.speed != (None, None) {
+            sc.speed.insert(key.clone(), all.speed);
         }
     }
     sc.groups.retain(|_, (_, i, s)| i.is_some() || !s.is_empty());
     if sc.groups.is_empty() {
         return Err("artificial analysis: no benchmark data found".into());
     }
-    sc.fit = crate::fit::aa_percentiles(sc.groups.iter().map(|(k, (_, i, s))| (k.as_str(), *i, s)));
+    sc.pools = crate::fit::aa_pools(sc.groups.values().map(|(_, i, s)| (*i, s)));
+    for (key, (_, i, s)) in &sc.groups {
+        let (fit, shown) = crate::fit::aa_fit(*i, s, &sc.pools);
+        sc.fit.0.insert(key.clone(), fit);
+        sc.fit.1.insert(key.clone(), shown);
+    }
     Ok(sc)
 }
 
@@ -1399,11 +1535,24 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         if let Some(k) = gk
             && let Some((gname, eci, scores)) = ep.groups.get(k)
         {
+            let (mut eci, mut scores) = (*eci, scores.clone());
+            let mut fit = (ep.fit.0.get(k).cloned().unwrap_or_default(), ep.fit.1.get(k).cloned().unwrap_or_default());
             match ep.source {
                 Source::Epoch => m.epoch = Some(gname.clone()),
                 Source::Aa => {
                     m.aa = ep.page.get(k).cloned();
                     (m.tps, m.ttft) = ep.speed.get(k).copied().unwrap_or_default();
+                    // A row naming a reasoning setting is that setting, not the best of them
+                    // all; one the API did not measure has the model's page and no scores.
+                    if let Some(own) = ep.settings.get(k).and_then(|all| aa_named(&m.name, all)) {
+                        let own = own.unwrap_or_default();
+                        fit = crate::fit::aa_fit(own.index, &own.scores, &ep.pools);
+                        (m.tps, m.ttft) = own.speed;
+                        (eci, scores) = (own.index, own.scores);
+                        if !own.slug.is_empty() {
+                            m.aa = Some(own.slug);
+                        }
+                    }
                 }
             }
             // Scored on no task, Epoch's page is all it adds; its name for the model may be a bare id.
@@ -1417,14 +1566,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             if let Some(o) = ep.org.get(k) {
                 m.developer = short_org(o);
             }
-            m.eci = *eci;
-            m.scores = scores.clone();
-            if let Some(f) = ep.fit.0.get(k) {
-                m.fit = f.clone();
-            }
-            if let Some(f) = ep.fit.1.get(k) {
-                m.shown = f.clone();
-            }
+            (m.eci, m.scores) = (eci, scores);
+            (m.fit, m.shown) = fit;
         }
     }
     unify_developers(&mut models);
@@ -1462,6 +1605,8 @@ mod tests {
         let t = Instant::now();
         assert_eq!(run("sleep", &["10"], Duration::from_millis(200), go), None, "a hang is killed");
         assert_eq!(run("sleep", &["10"], Duration::from_secs(10), &AtomicBool::new(true)), None, "so is a stopped one");
+        let left = run("sh", &["-c", "sleep 10 &"], Duration::from_millis(200), go);
+        assert_eq!(left, None, "nor is a pipe it left open waited for past the limit");
         assert!(t.elapsed() < Duration::from_secs(5));
     }
 
@@ -1805,6 +1950,51 @@ mod tests {
         assert_eq!(w("gpt-5-mini-high"), w("gpt-5-mini"), "a setting is folded");
         assert_eq!(w("grok-4-non-reasoning"), w("grok-4"));
         assert_ne!(w("magistral-medium"), w("magistral"), "a tier is not a setting");
+    }
+
+    #[test]
+    fn a_row_naming_a_setting_has_that_settings_scores() {
+        let api = br#"{"data":[
+            {"slug":"grok-4-20","name":"Grok 4.20 (Reasoning)","median_output_tokens_per_second":40.0,
+             "evaluations":{"artificial_analysis_intelligence_index":26,"hle":0.3}},
+            {"slug":"grok-4-20-non-reasoning","name":"Grok 4.20 (Non-reasoning)","median_output_tokens_per_second":90.0,
+             "evaluations":{"artificial_analysis_intelligence_index":14,"hle":0.1}},
+            {"slug":"claude-opus-4-6-adaptive","name":"Claude Opus 4.6 (Adaptive Reasoning, Max Effort)",
+             "evaluations":{"artificial_analysis_intelligence_index":32}},
+            {"slug":"claude-opus-4-6","name":"Claude Opus 4.6 (Non-reasoning, High Effort)",
+             "evaluations":{"artificial_analysis_intelligence_index":26}},
+            {"slug":"gpt-5-3-codex","name":"GPT-5.3 Codex (Xhigh)","evaluations":{"artificial_analysis_intelligence_index":33}},
+            {"slug":"minimax-m3","name":"MiniMax-M3","evaluations":{"artificial_analysis_intelligence_index":29}}
+        ]}"#;
+        let names = [
+            "Grok 4.20",
+            "Grok 4.20 Reasoning",
+            "Grok 4.20 Non-Reasoning",
+            "Claude Opus 4.6",
+            "Claude 4.6 Opus Thinking",
+            "Claude 4.6 Opus Thinking Low",
+            "GPT-5.3 Codex XHigh",
+            "GPT-5.3 Codex Low",
+            "MiniMax M3 Thinking",
+        ];
+        let models: String = names.iter().map(|n| format!(r#""{n}": {{"name": "{n}"}},"#)).collect();
+        let json = format!(r#"{{"p": {{"models": {{{}}}}}}}"#, models.trim_end_matches(','));
+        let d = merge(json.as_bytes(), &parse_aa(api).unwrap(), None).unwrap();
+        let row = |n: &str| d.models.iter().find(|m| m.name == n).unwrap();
+        let index = |n: &str| row(n).eci;
+        assert_eq!(index("Grok 4.20"), Some(26.0), "a row naming no setting has the best of them");
+        assert_eq!((index("Grok 4.20 Reasoning"), index("Grok 4.20 Non-Reasoning")), (Some(26.0), Some(14.0)));
+        let off = row("Grok 4.20 Non-Reasoning");
+        assert_eq!((off.scores["hle"], off.shown["reasoning"], off.tps), (0.1, 10.0, Some(90.0)), "all of it its own");
+        assert_eq!(off.aa.as_deref(), Some("grok-4-20-non-reasoning"), "and its own page");
+        assert!(off.fit["overall"] < row("Grok 4.20").fit["overall"], "ranked on its own index");
+        assert_eq!((index("Claude Opus 4.6"), index("Claude 4.6 Opus Thinking")), (Some(32.0), Some(32.0)));
+        let low = row("Claude 4.6 Opus Thinking Low");
+        assert_eq!((low.eci, low.aa.as_deref()), (None, Some("claude-opus-4-6")), "a setting not measured: no score");
+        assert!(low.fit.is_empty() && low.scores.is_empty());
+        assert_eq!(index("GPT-5.3 Codex XHigh"), Some(33.0), "the setting is in the entry's name alone");
+        assert_eq!(index("GPT-5.3 Codex Low"), None);
+        assert_eq!(index("MiniMax M3 Thinking"), Some(29.0), "an entry saying no setting is the model's only one");
     }
 
     #[test]

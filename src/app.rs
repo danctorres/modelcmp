@@ -5,11 +5,11 @@ use crate::data::{Data, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::{Store, slot, slots};
 use crate::view::{
-    LEVELS, THEMES, ctx, hits, in_reach, level_label, money, recommended, score, shown_via, task_frontier, task_score,
+    LEVELS, THEMES, by_value, ctx, hits, in_reach, level_label, money, score, shown_via, task_line, task_score,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
-use std::cmp::{Ordering, Reverse};
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 /// A numeric column. The text columns (model name, developer) come first and are not listed here.
@@ -486,9 +486,11 @@ pub enum Mouse {
     Key(KeyCode),
 }
 
-/// `provider/model` of the offer you'd pay, as harnesses name it.
-pub fn model_id(m: &Model) -> String {
-    m.price().map_or_else(|| m.key.clone(), |o| format!("{}/{}", o.provider, o.id))
+/// `provider/model` as opencode takes it, else pi, when either has the model (`launch_cmd`):
+/// the offer you'd pay may be one only another harness reaches. With neither, that offer's.
+pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
+    let harness = ["opencode", "pi"].iter().find_map(|h| launch_cmd(m, h, listed)?.pop());
+    harness.unwrap_or_else(|| m.price().map_or_else(|| m.key.clone(), |o| format!("{}/{}", o.provider, o.id)))
 }
 
 /// The command that starts `harness` on `m`, if the harness has it: opencode and pi take
@@ -505,6 +507,10 @@ pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String
     };
     Some(vec![harness.into(), "--model".into(), id])
 }
+
+/// A task's line as (index into `Data::models`, score), and the models on it only for being
+/// favorites (`view::task_line`).
+type Front = (Vec<(usize, f64)>, Vec<usize>);
 
 pub struct App {
     pub data: Data,
@@ -541,6 +547,9 @@ pub struct App {
     pub typos: bool,
     /// Indices into `data.models`, in display order.
     pub rows: Vec<usize>,
+    /// Per task of `TASKS`. Set by `rebuild`, as each is a pass over every model and recommend
+    /// draws them all.
+    fronts: Vec<Front>,
     pub table: TableState,
     pub only_marked: bool,
     pub only_fav: bool,
@@ -609,6 +618,7 @@ impl App {
             query: String::new(),
             typos: false,
             rows: vec![],
+            fronts: vec![],
             table: TableState::default().with_selected(0),
             only_marked: false,
             only_fav: false,
@@ -882,24 +892,18 @@ impl App {
             self.typos = true;
             rows = matching(self);
         }
+        self.fronts = TASKS.iter().map(|t| self.front(t)).collect();
         let ms = &self.data.models;
         if let Some(t) = self.task {
             // The same line the recommend panel and `list --task` show.
-            let front: Vec<&str> = self.task_frontier(t).iter().map(|(m, _)| m.key.as_str()).collect();
-            rows.retain(|&i| front.contains(&ms[i].key.as_str()));
+            let front = &self.fronts[TASKS.iter().position(|x| x.name == t.name).unwrap_or(0)].0;
+            rows.retain(|i| front.iter().any(|(k, _)| k == i));
         }
         if numeric(self.sort_col).is_some() {
-            let desc = self.descending;
-            // Blanks last either way, names breaking ties.
+            // Names breaking ties.
             rows.sort_by(|&a, &b| {
-                let order = match (self.val(a, self.sort_col), self.val(b, self.sort_col)) {
-                    (Some(x), Some(y)) if desc => y.total_cmp(&x),
-                    (Some(x), Some(y)) => x.total_cmp(&y),
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                };
-                order.then_with(|| ms[a].name.cmp(&ms[b].name))
+                by_value(self.val(a, self.sort_col), self.val(b, self.sort_col), self.descending)
+                    .then_with(|| ms[a].name.cmp(&ms[b].name))
             });
         } else {
             // By name, or by developer or access with names breaking ties.
@@ -1030,13 +1034,24 @@ impl App {
 
     /// The task's price frontier among the models the filters let through, plus the task's
     /// favorite whatever the filters, excluded ones left out: cheapest first, the best model last.
+    /// As of the last `rebuild`.
     pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
+        self.cached(t).map(|f| f.0.iter().map(|&(i, s)| (&self.data.models[i], s)).collect()).unwrap_or_default()
+    }
+
+    fn cached(&self, t: &Task) -> Option<&Front> {
+        self.fronts.get(TASKS.iter().position(|x| x.name == t.name)?)
+    }
+
+    /// `task_frontier` and the favorites on it only for being favorites, computed.
+    fn front(&self, t: &Task) -> Front {
         let usable = |m: &&Model| self.usable(m);
         // Ranked only when the filters show them, so a hidden favorite drops no shown model.
-        let favs = self.store.task_favorites(t.name);
-        let fav: Vec<&Model> =
-            self.data.models.iter().filter(|m| usable(m) && favs.contains(&m.key.as_str())).collect();
-        task_frontier(self.filtered(usize::MAX).map(|(_, m)| m).filter(usable), t, &fav)
+        let shown = self.filtered(usize::MAX).map(|(_, m)| m).filter(usable);
+        let (line, off) = task_line(shown, self.data.models.iter().filter(usable), &self.store, t);
+        let at = |m: &Model| self.data.models.iter().position(|x| std::ptr::eq(x, m)).unwrap_or(0);
+        let off = line.iter().filter(|(m, _)| off.contains(&m.key.as_str())).map(|&(m, _)| at(m)).collect();
+        (line.into_iter().map(|(m, s)| (at(m), s)).collect(), off)
     }
 
     /// Whether the user has access to `m` whatever `a`, as its Via shows.
@@ -1067,8 +1082,7 @@ impl App {
 
     /// Whether `key`, a favorite of the task, is on its line only for being a favorite.
     pub fn favorite_unrecommended(&self, t: &Task, key: &str) -> bool {
-        let usable = self.filtered(usize::MAX).map(|(_, m)| m).filter(|m| self.usable(m));
-        self.store.is_favorite(Some(t), key) && !recommended(usable, t, key)
+        self.cached(t).is_some_and(|f| f.1.iter().any(|&i| self.data.models[i].key == key))
     }
 
     /// The task `f` and the ★ mark refer to: the one under the cursor in recommend, else the
@@ -1617,7 +1631,7 @@ impl App {
                     _ => self.input = Input::choose("open in which harness?", items, 0),
                 }
             }
-            KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?))),
+            KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?, &self.data.harness))),
             KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
             KeyCode::Char(' ') if table && self.selecting() => {
                 return self.flag(Store::is_marked, Store::toggle_marked, ["selected", "deselected"]);
@@ -2208,6 +2222,29 @@ mod tests {
     }
 
     #[test]
+    fn the_id_is_the_one_opencode_takes() {
+        let offer = |provider: &str, id: &str, via: &str| crate::data::Offer {
+            provider: provider.into(),
+            id: id.into(),
+            via: vec![via.into()],
+            available: true,
+            input: 3.0,
+            output: 15.0,
+            ..Default::default()
+        };
+        let offers = vec![
+            offer("anthropic", "claude-sonnet-5-5", "claude"),
+            offer("openrouter", "anthropic/claude-sonnet-5.5", "opencode"),
+        ];
+        let mut m = Model { key: "sonnet".into(), offers, ..Default::default() };
+        let listed = BTreeMap::new();
+        assert_eq!(m.price().unwrap().provider, "anthropic", "at the same price, the first is the one you'd pay");
+        assert_eq!(model_id(&m, &listed), "openrouter/anthropic/claude-sonnet-5.5", "opencode has OpenRouter's");
+        m.offers.truncate(1);
+        assert_eq!(model_id(&m, &listed), "anthropic/claude-sonnet-5-5", "with neither, the one you'd pay");
+    }
+
+    #[test]
     fn x_launches_the_only_harness_or_asks_which() {
         let mut a = app();
         for m in &mut a.data.models {
@@ -2572,8 +2609,10 @@ mod tests {
     #[test]
     fn a_task_starts_at_the_low_tier() {
         let mut a = app();
-        a.data.models.push(model("weak", true, Some(30.0), 0.01));
-        a.data.models.push(model("edge", true, Some(49.6), 0.05));
+        let mut data = std::mem::take(&mut a.data);
+        data.models.push(model("weak", true, Some(30.0), 0.01));
+        data.models.push(model("edge", true, Some(49.6), 0.05));
+        a.set_data(data);
         let front: Vec<&str> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
         assert_eq!(front, ["edge", "mini", "gpt55"], "cheap alone is no recommendation; 49.6 shows as 50");
@@ -2582,12 +2621,12 @@ mod tests {
     #[test]
     fn a_task_keeps_the_best_of_each_price_level() {
         let mut a = app();
-        a.data.models.push(model("flash", true, Some(70.0), 1.5));
+        let mut data = std::mem::take(&mut a.data);
+        data.models.push(model("flash", true, Some(70.0), 1.5));
+        a.set_data(data);
         let front: Vec<&str> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
         assert_eq!(front, ["flash", "gpt55"], "flash beats mini at about the same price");
-        let data = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
-        a.set_data(data);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["gpt55", "flash"], "enter shows the same line as the panel");
@@ -2608,6 +2647,7 @@ mod tests {
         assert_eq!(keys(&a), ["mini"], "nor does the table");
         press(&mut a, "c");
         a.store.toggle_excluded("gpt55");
+        a.rebuild();
         assert_eq!(front(&a), ["mini", "gpt55"], "e again brings it back");
     }
 
@@ -2692,6 +2732,7 @@ mod tests {
         data.models.pop();
         a.set_data(data);
         a.store.toggle_excluded("mini");
+        a.rebuild();
         assert_eq!(front(&a), ["gpt55"], "an excluded favorite still leaves");
         // opus5 has no coding score: it joins the line all the same, its score shown as `-`.
         a.store.toggle_favorite("coding", "opus5");
@@ -2705,9 +2746,11 @@ mod tests {
         // A tier's favorite joins the line too, beside the task's.
         a.store.toggle_favorite("coding:low", "mini");
         a.store.toggle_excluded("mini");
+        a.rebuild();
         assert_eq!(front(&a), ["mini", "opus5", "gpt55"]);
         assert!(!a.favorite_unrecommended(coding, "mini"), "on the frontier on its own");
         a.store.toggle_favorite("coding", "gpt55");
+        a.rebuild();
         assert!(!a.favorite_unrecommended(coding, "gpt55"), "the best model is recommended on its own");
     }
 
