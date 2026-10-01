@@ -27,7 +27,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 6: `Model::shown`. 7: no deprecated offers, no fine-tunes folded into their base.
 /// 8: with Artificial Analysis, a row naming a reasoning setting has that setting's scores.
 /// 9: `Model::md` and `Model::openrouter` for `Model::url`, and `Model::epoch` a page name.
-const FORMAT: u32 = 9;
+/// 10: Artificial Analysis's agentic score is Terminal-Bench 4.0, where it was Hard.
+const FORMAT: u32 = 10;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.

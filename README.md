@@ -108,7 +108,7 @@ skills can take its body in `AGENTS.md`.
 - [Epoch AI Benchmarking Hub](https://epoch.ai/benchmarks) (CC-BY): ECI and
   per-benchmark scores.
 - [Artificial Analysis](https://artificialanalysis.ai), instead of Epoch AI when picked with
-  `B` or `--source aa`: its Intelligence Index, Coding Index, Terminal-Bench Hard and HLE,
+  `B` or `--source aa`: its Intelligence Index, Coding Index, Terminal-Bench 4.0 and HLE,
   and each model's speed (output tokens per second, time to first token).
   Needs a free API key: the TUI's first start asks which source to use, then for the key
   if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,

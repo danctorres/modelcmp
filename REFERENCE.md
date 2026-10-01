@@ -10,16 +10,16 @@ One row per model. Columns: Model, Dev, Price ($/1M tokens, blended 3:1 input:ou
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, Released (year and month), ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Code/$, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
 its Intelligence Index, and each task column is one benchmark's score (0-100): Coding the
-Coding Index, Agentic Terminal-Bench Hard, Reason HLE; two more columns show speed,
+Coding Index, Agentic Terminal-Bench 4.0, Reason HLE; two more columns show speed,
 Tok/s (output tokens per second) and TTFT (seconds to the first token), medians across
 providers. A model's scores there are its best reasoning setting's; a row that names a setting
 ("Grok 4.20 Non-Reasoning") has that setting's, or `-` when Artificial Analysis did not measure it. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
 columns are the model's capability on the task's benchmarks, in ECI points, fitted from its
 ECI and its scores (a model with few scores stays near its ECI):
 
-- Coding: DeepSWE, FrontierCode, SWE-Bench verified, Terminal Bench, WeirdML, MirrorCode, GSO-Bench, Aider polyglot
-- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, OSWorld, METR Time Horizons, The Agent Company, DeepResearch Bench, Terminal Bench
-- Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles
+- Coding: DeepSWE, FrontierCode, FrontierSWE, SWE-Bench verified, Terminal Bench, WeirdML, MirrorCode, GSO-Bench
+- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, DeepResearch Bench, Terminal Bench
+- Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles, LMCA, DTBench
 
 The capability starts at the model's ECI and moves toward what its scores on those benchmarks
 say, using Epoch's difficulty and slope for each benchmark, with guessing counted as 0. One score

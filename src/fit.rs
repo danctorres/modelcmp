@@ -65,12 +65,12 @@ pub const TASKS: &[Task] = &[
         benches: &[
             "DeepSWE",
             "FrontierCode",
+            "FrontierSWE",
             "SWE-Bench verified",
             "Terminal Bench",
             "WeirdML",
             "MirrorCode",
             "GSO-Bench",
-            "Aider polyglot",
         ],
     },
     Task {
@@ -86,17 +86,8 @@ pub const TASKS: &[Task] = &[
         about: "multi-step tool use, long autonomous tasks",
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         need: Need::Tools,
-        aa: Some("terminalbench_hard"),
-        benches: &[
-            "APEX-Agents",
-            "Remote Labor Index",
-            "OSWorld 2.0",
-            "OSWorld",
-            "METR Time Horizons",
-            "The Agent Company",
-            "DeepResearch Bench",
-            "Terminal Bench",
-        ],
+        aa: Some("terminalbench_v4_0"),
+        benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0", "DeepResearch Bench", "Terminal Bench"],
     },
     Task {
         name: "reasoning",
@@ -112,6 +103,8 @@ pub const TASKS: &[Task] = &[
             "SimpleBench",
             "Mystery Game Puzzles",
             "Chess Puzzles",
+            "LMCA",
+            "DTBench",
         ],
     },
     Task {
@@ -354,9 +347,9 @@ mod tests {
 
     #[test]
     fn ranks_by_task() {
-        let a = scores(&[("METR Time Horizons", 0.9), ("DeepSWE", 0.2)]);
-        let b = scores(&[("METR Time Horizons", 0.5), ("DeepSWE", 0.7)]);
-        let e = benches(&[("METR Time Horizons", bench(140.0, 0.1, 0.0)), ("DeepSWE", bench(140.0, 0.1, 0.0))]);
+        let a = scores(&[("APEX-Agents", 0.9), ("DeepSWE", 0.2)]);
+        let b = scores(&[("APEX-Agents", 0.5), ("DeepSWE", 0.7)]);
+        let e = benches(&[("APEX-Agents", bench(140.0, 0.1, 0.0)), ("DeepSWE", bench(140.0, 0.1, 0.0))]);
         let groups = [("a", Some(145.0), &a), ("b", Some(145.0), &b)];
         let (p, _) = percentiles(groups.iter().copied(), &e);
         assert!(p["a"]["agentic"] > p["b"]["agentic"]);

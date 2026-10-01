@@ -38,7 +38,7 @@ impl Col {
         let about = match (self.id, crate::data::source()) {
             ("eci", s) => return s.index(),
             ("coding", Source::Aa) => "Artificial Analysis Coding Index",
-            ("agentic", Source::Aa) => "Terminal-Bench Hard score (0-100)",
+            ("agentic", Source::Aa) => "Terminal-Bench 4.0 score (0-100)",
             ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
             _ => self.about,
         };
