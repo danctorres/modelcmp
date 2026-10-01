@@ -634,6 +634,26 @@ fn cached_harness(cache: &[u8]) -> BTreeMap<String, Vec<String>> {
     listed.harness
 }
 
+/// The pages linked at the last refresh, Artificial Analysis's then Epoch's, from its cache: the
+/// sites have those, so they stand for a site's list when that did not come, as one bad
+/// download is not a day without its links. None from a cache in another format, whose Epoch
+/// names were not checked.
+fn cached_pages(cache: &[u8]) -> [Vec<String>; 2] {
+    #[derive(Deserialize)]
+    struct Linked {
+        format: u32,
+        models: Vec<Pages>,
+    }
+    #[derive(Deserialize)]
+    struct Pages {
+        aa: Option<String>,
+        epoch: Option<String>,
+    }
+    let before = serde_json::from_slice::<Linked>(cache).ok().filter(|d| d.format == FORMAT);
+    let (aa, epoch): (Vec<_>, Vec<_>) = before.into_iter().flat_map(|d| d.models).map(|m| (m.aa, m.epoch)).unzip();
+    [aa, epoch].map(|pages| pages.into_iter().flatten().collect())
+}
+
 /// The `provider/model` ids of a table under a `provider model ...` header, as `pi --list-models`
 /// prints; `None` without that header. Only lines with as many columns as the header are rows.
 fn table_ids(out: &str) -> Option<Vec<String>> {
@@ -706,18 +726,23 @@ pub fn refresh() -> Result<Data, Failure> {
     // Only links hang on them, so without one the refresh still succeeds, and says so.
     let text = |xml: Result<Vec<u8>, Failure>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
     let (aa, epoch) = (text(aa), text(epoch));
-    let (aa, epoch) = (sitemap(&aa, Source::Aa), sitemap(&epoch, Source::Epoch));
+    let (mut aa, mut epoch) = (sitemap(&aa, Source::Aa), sitemap(&epoch, Source::Epoch));
+    // Read once, and only by a refresh that a list of pages or a harness's models did not reach.
+    let cache = std::cell::LazyCell::new(|| std::fs::read(cache_path(src)).unwrap_or_default());
+    // Only a page a site lists is linked; without its list, only one linked at the last refresh.
+    let before = if aa.is_empty() || epoch.is_empty() { cached_pages(&cache) } else { Default::default() };
+    let mut unpaged = [None, None];
+    for (i, (pages, s)) in [(&mut aa, Source::Aa), (&mut epoch, Source::Epoch)].into_iter().enumerate() {
+        if pages.is_empty() {
+            let so = if before[i].is_empty() { "may be missing" } else { "are kept from the last refresh" };
+            unpaged[i] = Some(format!("{} did not list its pages: links to it {so}", s.site()));
+            pages.extend(before[i].iter().map(String::as_str));
+        }
+    }
     aa_pages(&mut data.models, &aa);
     epoch_listed(&mut data.models, &epoch);
-    // Artificial Analysis's links are found in its list, and Epoch's only checked against it.
-    let unpaged = |pages: &HashSet<&str>, s: Source, so: &str| {
-        pages.is_empty().then(|| format!("{} did not list its pages: links to it {so}", s.site()))
-    };
-    let unpaged =
-        [unpaged(&aa, Source::Aa, "may be missing"), unpaged(&epoch, Source::Epoch, "are unchecked and may be dead")];
     let silent;
-    (data.harness, silent) =
-        keep_listed(listed, || cached_harness(&std::fs::read(cache_path(src)).unwrap_or_default()));
+    (data.harness, silent) = keep_listed(listed, || cached_harness(&cache));
     let lost;
     (data.kept, lost) = silent.into_iter().partition(|h| data.harness.contains_key(h));
     // Only the update notice hangs on it, so without it the refresh still succeeds.
@@ -942,11 +967,9 @@ fn epoch_slug(name: &str) -> String {
 /// Keep each model's `epoch` only when it is one of Epoch's `pages`, as Epoch has none for
 /// some models it scored, and sends a few of those names to another model's page. A model
 /// Epoch did not score has the page that is named as it, unless that names another model too:
-/// `command-a` is "Command A+", and could be Command A. Without `pages`, the names stand unchecked.
+/// `command-a` is "Command A+", and could be Command A. Without `pages` none is kept, as a
+/// name alone may be a page Epoch does not have: `refresh` then gives the last refresh's.
 fn epoch_listed(models: &mut [Model], pages: &HashSet<&str>) {
-    if pages.is_empty() {
-        return;
-    }
     let mut rows: HashMap<String, usize> = HashMap::new();
     for m in models.iter_mut() {
         m.epoch = m.epoch.take().filter(|p| pages.contains(p.as_str()));
@@ -1570,7 +1593,8 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         let date = dates.get(k).map_or("", String::as_str);
         let rank = (eci.is_some(), !scores.is_empty(), bare.contains(k), date);
         // One with an index wins, then one scored on a task, then the one filed under the bare
-        // id, then the strictly newer; on ties the first in key order keeps it.
+        // id, then the strictly newer; on ties the first in key order keeps it. A newer one with
+        // no index yet is scored on little, and would leave the row out of what is recommended.
         if short != *k && newest.get(&short).is_none_or(|r| rank > *r) {
             newest.insert(short.clone(), rank);
             ep.alias.insert(short, k.clone());
@@ -1792,7 +1816,12 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
                 return None;
             }
             let near = |s: &str| s == main || end(s, main) || end(main, s);
-            let listed = counts.iter().filter(|(s, _)| near(s)).filter_map(|(s, n)| Some((*n, or_slug.get(s)?)));
+            // An id without a version is not a row's whose name has one: "mistral-large" is
+            // whichever release OpenRouter files under it, not "Mistral Large 2411".
+            let digit = |s: &str| s.bytes().any(|b| b.is_ascii_digit());
+            let versioned = |s: &str| digit(s) || !digit(&m.name);
+            let listed = counts.iter().filter(|(s, _)| near(s) && versioned(s));
+            let listed = listed.filter_map(|(s, n)| Some((*n, or_slug.get(s)?)));
             listed.max_by_key(|(n, id)| (*n, std::cmp::Reverse(*id))).map(|(_, id)| id)
         });
         // The standard page rather than the free tier's, when OpenRouter has both.
@@ -2044,6 +2073,7 @@ mod tests {
                 "qwen3.8-max": {"name": "Qwen 3.8 Max"},
                 "gemma-4-it": {"name": "Gemma 4"},
                 "sonar": {"name": "Sonar"},
+                "bigstral-large": {"name": "Bigstral Large 2411"},
                 "llama-9-fp8": {"name": "Llama 9 FP8"},
                 "phi-9-31b": {"name": "Phi 9"},
                 "mini-7.5": {"name": "Mini 7.5"}
@@ -2072,6 +2102,7 @@ mod tests {
                 "google/gemma-4-it:free": {"name": "Gemma 4 (free)"},
                 "google/gemma-4-it": {"name": "Gemma 4 IT"},
                 "perplexity/sonar": {"name": "Perplexity Sonar"},
+                "x/bigstral-large": {"name": "Bigstral Large"},
                 "meta-llama/llama-9": {"name": "Llama 9"},
                 "openrouter/auto": {"name": "Auto Router"}
             }}
@@ -2088,6 +2119,7 @@ mod tests {
         assert_eq!(row("mini75").openrouter, None, "cut inside a version, it is another model");
         assert_eq!(row("gemma4").openrouter.as_deref(), Some("google/gemma-4-it"), "the standard page over :free");
         assert_eq!(row("sonar").openrouter.as_deref(), Some("perplexity/sonar"), "an id with no digit is one too");
+        assert_eq!(row("bigstrallarge2411").openrouter, None, "but not a row's whose name has a version");
     }
 
     #[test]
@@ -2327,14 +2359,25 @@ mod tests {
         epoch_named(&mut ms, &ep);
         let named = ["gemini-2-5-pro-jun-2025", "command-r", "gpt-5-codex", "", "", "", "", ""];
         assert_eq!(pages(&ms), named, "as Epoch spells its group, a + dropped; no group, no page");
-        epoch_listed(&mut ms, &HashSet::new());
-        assert_eq!(pages(&ms), named, "unchecked when Epoch's list of pages did not come");
         epoch_listed(&mut ms, &["gemini-2-5-pro-jun-2025", "command-r", "devstral-small-2", "a"].into());
         assert_eq!(
             pages(&ms),
             ["gemini-2-5-pro-jun-2025", "command-r", "", "", "devstral-small-2", "", "", ""],
             "only the pages Epoch has, one it did not score by its name, and none that two rows could be"
         );
+        ms[0].aa = Some("gemini-2-5-pro".into());
+        let cache = |format| serde_json::to_vec(&Data { format, models: ms.to_vec(), ..Default::default() }).unwrap();
+        let [aa, mut kept] = cached_pages(&cache(FORMAT));
+        kept.sort();
+        assert_eq!(aa, ["gemini-2-5-pro"], "the last refresh's pages, of each site");
+        assert_eq!(kept, ["command-r", "devstral-small-2", "gemini-2-5-pro-jun-2025"]);
+        assert_eq!(
+            cached_pages(&cache(FORMAT - 1)),
+            [vec![], Vec::<String>::new()],
+            "but none unchecked, of an older format"
+        );
+        epoch_listed(&mut ms, &HashSet::new());
+        assert_eq!(pages(&ms), [""; 8], "none when Epoch's list of pages did not come");
         assert_eq!(epoch_slug("Tulu 3 (T\u{fc}lu 3) 70B"), "tulu-3-tlu-3-70b");
     }
 
@@ -2455,7 +2498,8 @@ mod tests {
                 b"model_version,model_group,date\ngoogle/flash-9,Flash 9 (Jun 2025),2025-06-17\n\
                   flash-9-preview-09,Flash 9 (Sep 2025),2025-09-25\nchat-4o-03,GPT-4o (Mar 2025),2025-03-27\n\
                   gpt-4o-11,GPT-4o (Nov 2024),2024-11-20\nfoo-2,Foo 2 (Jun 2025),2025-06-01\n\
-                  foo-2-09,Foo 2 (Sep 2025),2025-09-01\n",
+                  foo-2-09,Foo 2 (Sep 2025),2025-09-01\nbar-3-07,Bar 3 (Jul 2025),2025-07-01\n\
+                  bar-3-09,Bar 3 (Sep 2025),2025-09-01\n",
             );
             file(
                 "benchmark_metadata.csv",
@@ -2465,14 +2509,18 @@ mod tests {
                 "ocr.csv",
                 b"Model version,score\ngoogle/flash-9,0.5\nflash-9-preview-09,0.6\nchat-4o-03,0.5\nfoo-2,0.5\n",
             );
-            file("swe.csv", b"Model version,score\nfoo-2-09,0.5\n");
-            file("epoch_capabilities_index/eci_scores.csv", b"Model,eci\nGPT-4o (Nov 2024),128\n");
+            file("swe.csv", b"Model version,score\nfoo-2-09,0.5\nbar-3-09,0.5\n");
+            file(
+                "epoch_capabilities_index/eci_scores.csv",
+                b"Model,eci\nGPT-4o (Nov 2024),128\nBar 3 (Jul 2025),140\n",
+            );
             z.finish().unwrap();
         }
         let ep = parse_epoch(buf.get_ref()).unwrap();
         assert_eq!(ep.alias["flash9"], "flash9jun2025", "the release filed under the bare id, not the newest");
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
         assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
+        assert_eq!(ep.alias["bar3"], "bar3jul2025", "and before a newer one scored on a task");
     }
 
     #[test]
