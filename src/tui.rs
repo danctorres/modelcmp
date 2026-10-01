@@ -1148,9 +1148,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         // The cursor, or the visual range, is a faint fill through the frame's border, which
         // becomes its two bars; the row keeps its colours on it.
         let on = k == sel || app.is_selected(k);
-        // A model excluded or out of reach has its row muted: the text and the developer, harness
-        // and price level colours go grey, as every row has those, while the ✓, ★, ✗, best and
-        // worst keep theirs, as a column would else lose its extremes.
+        // A model excluded or out of reach has its row muted: the text and the developer, harness,
+        // price level, best and worst colours go grey, while the ✓, ★ and ✗ keep theirs. The
+        // extremes are those of the other rows (`App::ext`), so a column does not lose them.
         let (excluded, reach) = (app.store.is_excluded(&m.key), app.accessible(m));
         let dim = excluded || !reach;
         // A marked row off the cursor is filled through the border too, in the mark's colour.
@@ -1204,8 +1204,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             let style = match ext[i] {
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
                 _ if i + 2 == PRICE => soft(LEVEL[level(v)]),
-                Some((best, _)) if v == best => tint(GOOD).add_modifier(BOLD),
-                Some((_, worst)) if v == worst => tint(BAD),
+                Some((best, _)) if !dim && v == best => tint(GOOD).add_modifier(BOLD),
+                Some((_, worst)) if !dim && v == worst => tint(BAD),
                 _ => text,
             };
             let w = w as usize;
@@ -1853,8 +1853,8 @@ fn detail(m: &Model, store: &Store) -> Vec<Line<'static>> {
 }
 
 /// The verdict, then the marked models side by side with the best value of each row in green
-/// and the one under the cursor filled between its two bars; a `muted` model's column is grey but for its
-/// bests, as its row in the table. When they do not all fit in `avail` cells, the view starts at
+/// and the one under the cursor filled between its two bars; a `muted` model's column is grey, its
+/// bests too, as its row in the table. When they do not all fit in `avail` cells, the view starts at
 /// model `first`, moved only as far as it takes to show the selection, and the `first` in effect
 /// comes back for `App::compare_x`.
 fn compare(
@@ -1932,10 +1932,10 @@ fn compare(
         // bar on the next, blank off it, so a model's cells stay where they are.
         let bar = |on: bool, bar: &'static str| if on { Span::styled(bar, EDGE) } else { Span::raw(" ") };
         for (i, c) in r.cells.into_iter().enumerate().skip(first).take(shown) {
-            let style = if r.best == Some(i) {
-                fg(GOOD).add_modifier(BOLD)
-            } else if muted[i] {
+            let style = if muted[i] {
                 fg(MUTED)
+            } else if r.best == Some(i) {
+                fg(GOOD).add_modifier(BOLD)
             } else {
                 Style::new()
             };
@@ -2197,6 +2197,7 @@ mod tests {
         assert_eq!(at("opus"), MUTED, "{lines:?}");
         assert_eq!(at("anthropic"), MUTED, "the developer's colour gives way");
         assert_eq!(at("5.0"), MUTED, "and so does the price level's");
+        assert_eq!(at("150"), MUTED, "and the best's: the extremes are of the models to use");
         // Marked as well, a favorite and excluded: filled all the same. With the terminal's own
         // colours the fill is solid, so the ★ and the ✗ are black too.
         a.store.marked.push("opus".into());

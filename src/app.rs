@@ -893,8 +893,9 @@ impl App {
                 rows.reverse();
             }
         }
+        // Among the models to use: a muted row is grey throughout, so it holds no extreme.
         self.ext = std::array::from_fn(|c| {
-            let mut it = rows.iter().filter_map(|&r| self.vals[r][c]);
+            let mut it = rows.iter().filter(|&&r| !self.muted(&ms[r])).filter_map(|&r| self.vals[r][c]);
             let first = it.next()?;
             let (lo, hi) = it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
             (lo != hi).then_some(if COLS[c].lower_better { (lo, hi) } else { (hi, lo) })
