@@ -39,6 +39,9 @@ type Refresh = Receiver<Result<Data, String>>;
 /// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
 /// no data until one is picked.
 pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
+    // Asked first, before a download keys may be typed during: reading the reply takes whatever
+    // else is queued with it, and here that is nothing.
+    let term_bg = cfg!(unix).then(terminal_bg).flatten();
     // Start from the cache however old, and refresh behind the table (`--refresh` too, so a
     // failure shows in the frame); only a first run, with no cache, waits for the download.
     let (data, fresh, failed) = match (!ask).then(data::load_cache) {
@@ -56,6 +59,7 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
         }
     };
     let mut app = App::new(data, store);
+    app.term_bg = term_bg;
     if ask {
         app.first_start = true;
         app.ask_source();
@@ -68,8 +72,6 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
         rx = Some(spawn_refresh());
     }
     let mut terminal = ratatui::init();
-    // Before the mouse reports, so none of them mixes into the reply.
-    app.term_bg = cfg!(unix).then(terminal_bg).flatten();
     // ratatui's panic hook restores the terminal but leaves mouse reporting on.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -88,20 +90,41 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
 /// colours. It is asked for with OSC 11, then for the cursor position, which every terminal
 /// answers: replies come in the order asked, so once the position is in, the colour's either is
 /// queued or is not coming, with no wait to guess at and no late reply read as keys. crossterm
-/// knows no OSC reply, so it comes through as the keys that spell it.
+/// knows no OSC reply, so it comes through as the keys that spell it. The fill is a 24-bit
+/// colour, which the 16 never were, so a terminal that does not say it draws those is not asked:
+/// one may answer here and still garble them. It says so in `COLORTERM`, or, as `ssh` and `sudo`
+/// drop that, with a `TERM` only a terminal that draws them sets.
+/// ponytail: one that never answers the position costs crossterm's 2 s at each start, and a reply
+/// later than that is read as keys; read the tty here with a wait of our own if one turns up.
 fn terminal_bg() -> Option<u32> {
+    use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use std::io::Write;
+    let term = std::env::var("TERM").unwrap_or_default();
+    if !matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor" | "24bit"))
+        && !["kitty", "alacritty", "ghostty", "foot", "wezterm", "direct"].iter().any(|t| term.contains(t))
+    {
+        return None;
+    }
+    // Raw, so the reply is not echoed.
+    enable_raw_mode().ok()?;
     let mut out = std::io::stdout();
-    out.write_all(b"\x1b]11;?\x07").and_then(|()| out.flush()).ok()?;
-    ratatui::crossterm::cursor::position().ok()?;
     let mut reply = String::new();
-    while event::poll(Duration::ZERO).ok()? {
-        if let Event::Key(k) = event::read().ok()?
-            && let KeyCode::Char(c) = k.code
-        {
-            reply.push(c);
+    if out.write_all(b"\x1b]11;?\x07").and_then(|()| out.flush()).is_ok() {
+        // With no position in, what did come is still read, or it is left for the table as keys.
+        let _ = ratatui::crossterm::cursor::position();
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            match event::read() {
+                Ok(Event::Key(k)) => {
+                    if let KeyCode::Char(c) = k.code {
+                        reply.push(c);
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
         }
     }
+    let _ = disable_raw_mode();
     parse_bg(&reply)
 }
 
@@ -139,7 +162,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     /// Frames the glide takes at most: it ends as soon as the wordmark rounds into place.
     const SLIDE: usize = 20;
     let (w, rows, tw) = (LOGO[0].chars().count(), LOGO.len(), TAGLINE.len());
-    let palette = THEMES[crate::view::theme(&app.store.theme)].1.as_ref();
+    let theme = palette(app);
     // The wave reaches a cell `SLIDE + (c + 2 * (rows - 1 - r)) / SPEED` frames in, the bottom row
     // first as cells are twice as tall as wide, and the last cell settles `RAINBOW.len() * STEP`
     // frames after that.
@@ -183,7 +206,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                 let typed = &TAGLINE[..((t - SLIDE) * SPEED + 4).saturating_sub((w - tw) / 2).min(tw)];
                 buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows as u16 + 1, typed, fg(Color::Reset));
             }
-            recolor(buf, palette, app.term_bg);
+            recolor(buf, theme, app.term_bg);
         })?;
         if !fits {
             return Ok(());
@@ -348,7 +371,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let list = match &app.input {
         Input::Menu { col, items, sel, query, .. } => {
             let rows = menu_rows(items, query);
-            // The bar's line in view, as the dropdown scrolls: its inside is two rows shorter.
+            // The cursor's line in view, as the dropdown scrolls: its inside is two rows shorter.
             menu_box(inner, menu_x(inner, &l, *col), items, rows.len())
                 .map(|(b, _)| (b, sel.saturating_sub(usize::from(b.height.saturating_sub(3))), rows.len()))
         }
@@ -651,7 +674,7 @@ fn stale(app: &App) -> bool {
     !app.refreshing && app.data.age() > data::MAX_AGE
 }
 
-/// The theme in effect: the one under the bar in the theme panel, else the saved one.
+/// The theme in effect: the one under the cursor in the theme panel, else the saved one.
 fn palette(app: &App) -> Option<&'static Palette> {
     THEMES[crate::view::theme(app.theme_preview().unwrap_or(&app.store.theme))].1.as_ref()
 }
@@ -683,6 +706,7 @@ const BOLD: Modifier = Modifier::BOLD;
 /// as a marked row's fill, so what is under the cursor keeps its colours, between two bars of
 /// the accent that say where it is (`cursor_ends`, `cursor`).
 const CURSOR: Color = ACCENT;
+const FILL: Style = Style::new().bg(CURSOR);
 /// The bars at the cursor's two ends.
 const EDGE: Style = Style::new().fg(ACCENT).bg(CURSOR).add_modifier(BOLD);
 /// The share of the mark colour in a marked row's fill, and of the accent in the cursor's, in
@@ -877,7 +901,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 Line::from(format!("compare needs 2 or more selected models, {n} now")),
                 Line::from(""),
                 Line::from(vec![key("esc"), Span::raw(" back to the table, then")]),
-                Line::from(vec![key("space"), Span::raw(" selects the model under the bar, or")]),
+                Line::from(vec![key("space"), Span::raw(" selects the model under the cursor, or")]),
                 Line::from(vec![key("v"), Span::raw(" / shift+click highlights a range, and")]),
                 Line::from(vec![key("C"), Span::raw(" compares them")]),
             ];
@@ -915,17 +939,19 @@ fn draw(app: &mut App, f: &mut Frame) {
         overlay(buf, body, "quit?", lines, &mut 0);
     }
     if let Input::Choose { title, items, sel, query, .. } = &app.input {
-        // Scrolled as the mouse maps it, so the bar stays in view when the list is taller than the screen.
+        // Scrolled as the mouse maps it, so the cursor stays in view when the list is taller than the screen.
         let lines = choice_lines(items, query);
         let rect = overlay_rect(body, title, &lines);
         let rows = choice_rows(items, query).len();
         let mut scroll = choice_top(*sel, rows, lines.len(), rect.height.saturating_sub(2)) as u16;
-        overlay(buf, body, title, lines, &mut scroll);
-        if !choice_rows(items, query).is_empty() {
-            // The cursor runs through the box's border, as in the table.
+        let (above, below) = overlay(buf, body, title, lines, &mut scroll);
+        if rows > 0 {
+            // The cursor runs through the box's border, as in the table, and the marks go over
+            // its bar, as there.
             let y = (rect.y + 1 + *sel as u16 - scroll).min(rect.bottom() - 1);
-            buf.set_style(Rect::new(rect.x, y, rect.width, 1), Style::new().bg(CURSOR));
             cursor_ends(buf, rect.x, rect.right() - 1, y);
+            let inner = rect.inner(Margin::new(1, 1));
+            vmarks(buf, rect.x, inner.y, inner.bottom() - 1, above, below);
         }
     }
     if let Some(x) = cursor {
@@ -1118,7 +1144,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         // A model excluded or out of reach has its row muted: the text and the developer, harness
         // and price level colours go grey, as every row has those, while the ✓, ★, ✗, best and
         // worst keep theirs, as a column would else lose its extremes.
-        let dim = app.muted(m);
+        let (excluded, reach) = (app.store.is_excluded(&m.key), app.accessible(m));
+        let dim = excluded || !reach;
         // A marked row off the cursor is filled through the border too, in the mark's colour.
         // The fill is faint (`WASH`), so the row keeps its colours on it. The terminal's own 16
         // have no faint one, so with them it takes a terminal that told its background; else
@@ -1128,7 +1155,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         let fill = !on && marked;
         let solid = fill && !faint;
         let base = match (on, fill) {
-            (true, _) => Style::new().bg(CURSOR),
+            (true, _) => FILL,
             (_, true) if solid => fg(Color::Black).bg(MARK),
             (_, true) => Style::new().bg(MARK),
             _ => Style::new(),
@@ -1159,7 +1186,6 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         }
         // A marked model's name is bold, as the ✓, and takes no colour: the fill says the row is
         // marked, and under the cursor the ✓ and the bold do. Out of reach, its Via says so.
-        let reach = app.accessible(m);
         let name = if marked { text.add_modifier(BOLD) } else { text };
         buf.set_stringn(name_x, y, &m.name, nw, name);
         buf.set_stringn(dev_x, y, &m.developer, dw, soft(dev_color(&m.developer)));
@@ -1195,7 +1221,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         if let Some((x, w)) = notes {
             buf.set_stringn(area.x + x, y, note, w as usize, text.add_modifier(Modifier::ITALIC));
         }
-        if app.store.is_excluded(&m.key) {
+        if excluded {
             buf.set_stringn(ex_x, y, "✗ ", gap(ex_x), tint(BAD).add_modifier(BOLD));
         } else {
             buf.set_stringn(ex_x, y, "·", 1, tint(MUTED));
@@ -1289,7 +1315,6 @@ fn dropdown(
         };
         // The cursor runs through the box's border, as in the table.
         if k == sel {
-            buf.set_style(Rect { y, height: 1, ..rect }, Style::new().bg(CURSOR));
             cursor_ends(buf, rect.x, rect.right() - 1, y);
         }
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
@@ -1311,9 +1336,10 @@ fn dropdown(
     vmarks(buf, rect.x, inner.y, inner.bottom() - 1, top > 0, top + shown < rows.len());
 }
 
-/// The cursor's two bars on row `y`, at the columns `left` and `right` its fill runs to: the
-/// borders of the frame or the box, which the bars take the place of.
+/// The cursor on row `y`: its fill from the column `left` to `right`, and its two bars at those,
+/// the borders of the frame or the box, which the bars take the place of.
 fn cursor_ends(buf: &mut Buffer, left: u16, right: u16, y: u16) {
+    buf.set_style(Rect::new(left, y, right - left + 1, 1), FILL);
     for (x, bar) in [(left, "▌"), (right, "▐")] {
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_symbol(bar).set_style(EDGE);
@@ -1327,7 +1353,7 @@ fn cursor(on: bool, spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     if !on {
         return [Span::raw(" ")].into_iter().chain(spans).chain([Span::raw(" ")]).collect();
     }
-    let fill = spans.into_iter().map(|s| s.patch_style(Style::new().bg(CURSOR)));
+    let fill = spans.into_iter().map(|s| s.patch_style(FILL));
     [Span::styled("▌", EDGE)].into_iter().chain(fill).chain([Span::styled("▐", EDGE)]).collect()
 }
 
@@ -1456,7 +1482,8 @@ fn mode(app: &App) -> (&'static str, Color) {
 fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let width = area.width as usize;
     let (mode, color) = mode(app);
-    let mut x = pill(buf, area.x, area.y, mode, color, area.width) + 1;
+    let end = pill(buf, area.x, area.y, mode, color, area.width);
+    let mut x = end + 1;
     if matches!(app.input, Input::Quit | Input::Choose { typing: false, .. }) {
         // The question is in a box in the middle of the screen.
         return None;
@@ -1544,6 +1571,10 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             x = buf.set_stringn(x, area.y, "  ", width, Style::new()).0;
         }
     }
+    // The last hint stays however narrow the bar: where it ran over the pill, the pill wins.
+    if area.x + start < end {
+        pill(buf, area.x, area.y, mode, color, area.width);
+    }
     None
 }
 
@@ -1621,11 +1652,12 @@ fn choice_lines(items: &[(String, Effect)], query: &str) -> Vec<Line<'static>> {
     lines.push(Line::from(hint).style(fg(MUTED)));
     lines
 }
-/// The first line a choice list shows, `shown` lines of `lines` in view: the bar's, and at
-/// the last of its `rows` entries every line to the end, so the key hint below them shows too.
+/// The first line a choice list shows, `shown` lines of `lines` in view: the cursor's, and at
+/// the last of its `rows` entries every line to the end, so the key hint below them shows too,
+/// unless that would scroll the cursor's line off.
 fn choice_top(sel: usize, rows: usize, lines: usize, shown: u16) -> usize {
     let shown = usize::from(shown.max(1));
-    if sel + 1 >= rows { lines.saturating_sub(shown) } else { sel.saturating_sub(shown - 1) }
+    if sel + 1 >= rows { lines.saturating_sub(shown).min(sel) } else { sel.saturating_sub(shown - 1) }
 }
 
 /// Where an overlay with these lines sits: centred, as wide as its widest line or title.
@@ -1637,7 +1669,8 @@ fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
 }
 
 /// A centred rounded box showing `lines` from `scroll` on, which is clamped to the content.
-fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>, scroll: &mut u16) {
+/// Returns whether lines are scrolled off above and below.
+fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>, scroll: &mut u16) -> (bool, bool) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
     let shown = h.saturating_sub(2) as usize;
@@ -1661,6 +1694,7 @@ fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>,
         line.render(Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 }, buf);
     }
     vmarks(buf, rect.x, inner.y, inner.bottom() - 1, above, below);
+    (above, below)
 }
 
 fn heading(text: &str) -> Line<'static> {
@@ -2642,11 +2676,20 @@ mod tests {
     }
 
     #[test]
-    fn theme_list_scrolls_to_the_bar() {
+    fn theme_list_scrolls_to_the_cursor() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
         let mut a = app();
         a.key(KeyCode::Char('t').into());
-        for _ in 1..THEMES.len() {
+        // Mid-list the cursor is on the last row shown, where the ▼ is: it shows in place of the
+        // left bar, on the cursor's fill, as in the table.
+        for _ in 0..8 {
+            a.key(KeyCode::Char('j').into());
+        }
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let buf = term.backend().buffer();
+        let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.bg == CURSOR);
+        assert_eq!(below.map(|c| c.fg), Some(ACCENT), "themes below the cursor");
+        for _ in 9..THEMES.len() {
             a.key(KeyCode::Char('j').into());
         }
         term.draw(|f| draw(&mut a, f)).unwrap();
@@ -2654,6 +2697,13 @@ mod tests {
         let text: String = (0..8).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(text.contains(THEMES[THEMES.len() - 1].0) && text.contains('▲'), "{text}");
         assert!(text.contains("enter saves") && !text.contains('▼'), "at the last theme, the hint below it: {text}");
+        // With one row to show, it is the cursor's and not the hint, so the cursor is off the border.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 4)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let buf = term.backend().buffer();
+        let row = |y: u16| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert!(row(0).contains('╭') && row(0).contains('╮'), "{}", row(0));
+        assert!(row(1).contains(THEMES[THEMES.len() - 1].0) && row(1).contains('▐'), "{}", row(1));
     }
 
     #[test]
@@ -2673,7 +2723,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_bar_runs_through_the_frame() {
+    fn cursor_runs_through_the_frame() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
         let mut a = app();
         let on = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
@@ -2708,14 +2758,27 @@ mod tests {
 
     #[test]
     fn every_view_draws_at_any_size() {
-        for (w, h) in [(120, 30), (60, 10), (20, 5), (4, 4), (3, 3)] {
+        // Each with the solid fill and the faint one.
+        for (w, h, term_bg) in [(120, 30), (60, 10), (20, 5), (4, 4), (3, 3)]
+            .into_iter()
+            .flat_map(|(w, h)| [(w, h, None), (w, h, Some(0))])
+        {
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
             for view in [View::Table, View::Help, View::Detail, View::Compare, View::Recommend] {
                 let mut a = app();
                 a.store.marked = vec!["opus".into(), "flash".into()];
-                a.view = view;
+                (a.view, a.term_bg) = (view, term_bg);
                 a.task_cur = 3;
                 term.draw(|f| draw(&mut a, f)).unwrap();
+                // What `recolor` and `vmarks` tell a cell by: a colour behind text that is not
+                // black is the cursor's fill or a selected row's, and nothing else.
+                let odd = term
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .find(|c| c.fg != Color::Black && ![Color::Reset, CURSOR, MARK].contains(&c.bg));
+                assert_eq!(odd, None, "{:?} at {w}x{h}", a.view);
             }
         }
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();

@@ -300,7 +300,7 @@ pub enum Input {
     },
     /// `q` asks before quitting.
     Quit,
-    /// A choice of what to do, `sel` under the bar: `x` on a model several harnesses have
+    /// A choice of what to do, `sel` under the cursor: `x` on a model several harnesses have
     /// launches one, `o` opens one of the model's pages. Each item is its label and effect.
     Choose {
         title: &'static str,
@@ -314,7 +314,7 @@ pub enum Input {
 }
 
 impl Input {
-    /// A choice list (`f`, `o`, `x`, `t`) with the bar on `sel` and nothing searched yet.
+    /// A choice list (`f`, `o`, `x`, `t`) with the cursor on `sel` and nothing searched yet.
     fn choose(title: &'static str, items: Vec<(String, Effect)>, sel: usize) -> Self {
         Self::Choose { title, items, sel, query: String::new(), cur: 0, typing: false }
     }
@@ -638,7 +638,7 @@ impl App {
         });
         self.any_available = data.any_available();
         // The rows index the old data: point them at the same models in the new, so `rebuild`
-        // keeps the bar and the highlight on them; a model gone points nowhere. Data taken out
+        // keeps the cursor and the highlight on them; a model gone points nowhere. Data taken out
         // to change in place (`reprice`) comes back in its order.
         if !self.data.models.is_empty() {
             let at: std::collections::HashMap<&str, usize> =
@@ -907,7 +907,7 @@ impl App {
     }
 
     /// Rebuild after a selection or flag changes: a row that drops out, under `M` or for being
-    /// out of reach, leaves the bar where it was, as selecting never moves it.
+    /// out of reach, leaves the cursor where it was, as selecting never moves it.
     pub fn rebuild_in_place(&mut self) {
         let (at, row) = (self.selected(), self.rows.get(self.selected()).copied());
         self.rebuild();
@@ -1161,8 +1161,8 @@ impl App {
         effect
     }
 
-    /// The table's bar follows the model picked in compare and recommend, so after esc you are
-    /// on it. A selection in progress keeps the bar, which is its end.
+    /// The table's cursor follows the model picked in compare and recommend, so after esc you are
+    /// on it. A selection in progress keeps the cursor, which is its end.
     fn follow(&mut self) {
         if !matches!(self.view, View::Compare | View::Recommend) || self.selecting() {
             return;
@@ -1429,28 +1429,28 @@ impl App {
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
             KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => {
-                self.status = "no selected models: space selects the one under the bar".into();
+                self.status = "no selected models: space selects the one under the cursor".into();
             }
             KeyCode::Char('M') if table => {
                 self.only_marked = !self.only_marked;
                 self.rebuild();
             }
             KeyCode::Char('F') if table && !self.only_fav && !self.any_fav() => {
-                self.status = "no favorites: f favorites the one under the bar".into();
+                self.status = "no favorites: f favorites the one under the cursor".into();
             }
             KeyCode::Char('F') if table => {
                 self.only_fav = !self.only_fav;
                 self.rebuild();
             }
             KeyCode::Char('E') if table && !self.only_excluded && self.store.excluded.is_empty() => {
-                self.status = "no excluded models: e excludes the one under the bar".into();
+                self.status = "no excluded models: e excludes the one under the cursor".into();
             }
             KeyCode::Char('E') if table => {
                 self.only_excluded = !self.only_excluded;
                 self.rebuild();
             }
             KeyCode::Char('U') if table && self.store.marked.is_empty() => {
-                self.status = "no selected models: space selects the one under the bar".into();
+                self.status = "no selected models: space selects the one under the cursor".into();
             }
             KeyCode::Char('U') if table => {
                 let n = std::mem::take(&mut self.store.marked).len();
@@ -1746,7 +1746,7 @@ impl App {
                         }
                         self.rebuild();
                     }
-                    // Esc while searching drops the search but keeps the entry under the bar.
+                    // Esc while searching drops the search but keeps the entry under the cursor.
                     KeyCode::Esc if *typing => {
                         (*sel, *typing, *cur) = (rows[*sel], false, 0);
                         query.clear();
@@ -1761,7 +1761,7 @@ impl App {
                 }
             }
             Input::Choose { items, sel, query, cur, typing, .. } => match code {
-                // While searching, ↓ ↑ move the bar, as in a dropdown.
+                // While searching, ↓ ↑ move the cursor, as in a dropdown.
                 KeyCode::Down if *typing => *sel = (*sel + 1).min(choice_rows(items, query).len().saturating_sub(1)),
                 KeyCode::Up if *typing => *sel = sel.saturating_sub(1),
                 // Space ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns.
@@ -1773,7 +1773,7 @@ impl App {
                         return self.fav(&key, task, tier);
                     }
                 }
-                // Esc while searching drops the search but keeps the entry under the bar.
+                // Esc while searching drops the search but keeps the entry under the cursor.
                 KeyCode::Esc if *typing => {
                     (*sel, *typing, *cur) = (*choice_rows(items, query).get(*sel).unwrap_or(&0), false, 0);
                     query.clear();
@@ -1889,7 +1889,7 @@ mod tests {
         // 3 × (0.9 × 0.5 + 0.1 × 10) + 10, over 4.
         assert_eq!(a.val(gpt, PRICE), Some(3.5875));
         press(&mut a, "%");
-        assert_eq!((a.val(gpt, PRICE), sel(&a)), (Some(10.0), was), "full input price, the bar stays");
+        assert_eq!((a.val(gpt, PRICE), sel(&a)), (Some(10.0), was), "full input price, the cursor stays");
         assert!(col_about(PRICE).contains(" 0% of the input cached") && a.status.contains("one-off"));
         press(&mut a, "%");
         assert_eq!(a.val(gpt, PRICE), Some(3.5875), "again: back to an agent's 90%");
@@ -1923,9 +1923,9 @@ mod tests {
     fn slash_searches_a_choice_list_and_the_help() {
         let mut a = app();
         press(&mut a, "t/nor");
-        assert_eq!(a.theme_preview(), Some("nord"), "/ keeps the matching themes, the bar on the first");
+        assert_eq!(a.theme_preview(), Some("nord"), "/ keeps the matching themes, the cursor on the first");
         code(&mut a, KeyCode::Esc);
-        assert_eq!(a.theme_preview(), Some("nord"), "esc drops the search, keeping the theme under the bar");
+        assert_eq!(a.theme_preview(), Some("nord"), "esc drops the search, keeping the theme under the cursor");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.theme, "nord");
         press(&mut a, "t/zzz");
@@ -2141,7 +2141,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert!(
             matches!(&a.input, Input::Menu { query, sel: 2, typing: false, .. } if query.is_empty()),
-            "esc drops the search, the bar stays on anthropic"
+            "esc drops the search, the cursor stays on anthropic"
         );
         press(&mut a, "/zzz");
         assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "no match leaves only any");
@@ -2506,7 +2506,7 @@ mod tests {
         a.set_data(data);
         assert!(shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
         assert!(!front(&a).contains(&"llama4".into()), "{:?}", front(&a));
-        // Deselecting drops its row at once, and the bar stays where it was.
+        // Deselecting drops its row at once, and the cursor stays where it was.
         let at = shown(&a).iter().position(|k| k == "llama4").unwrap();
         a.select(at);
         a.key(KeyCode::Char(' ').into());
@@ -2694,7 +2694,7 @@ mod tests {
     }
 
     #[test]
-    fn the_table_bar_follows_the_model_picked_in_an_overlay() {
+    fn the_table_cursor_follows_the_model_picked_in_an_overlay() {
         let mut a = app();
         let row = |a: &App, key: &str| a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
         press(&mut a, "Rjl");
@@ -2780,7 +2780,7 @@ mod tests {
             "unmarking every marked model leaves M for every model"
         );
         press(&mut a, "U");
-        assert_eq!(a.status, "no selected models: space selects the one under the bar");
+        assert_eq!(a.status, "no selected models: space selects the one under the cursor");
         press(&mut a, "gg j M");
         assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
         assert_eq!((a.store.marked.len(), a.only_marked, a.rows.len()), (0, false, 3), "U unmarks all and leaves M");
@@ -2792,7 +2792,7 @@ mod tests {
         press(&mut a, "M");
         assert_eq!(
             (a.only_marked, a.status.as_str()),
-            (false, "no selected models: space selects the one under the bar")
+            (false, "no selected models: space selects the one under the cursor")
         );
         press(&mut a, " M/x");
         code(&mut a, KeyCode::Enter);
@@ -2802,7 +2802,7 @@ mod tests {
         assert_eq!((a.only_marked, a.rows.len()), (false, 3), "then leaves M");
         assert_eq!(a.store.marked, ["gpt55"], "without touching the marks");
         press(&mut a, "F");
-        assert_eq!((a.only_fav, a.status.as_str()), (false, "no favorites: f favorites the one under the bar"));
+        assert_eq!((a.only_fav, a.status.as_str()), (false, "no favorites: f favorites the one under the cursor"));
         a.store.toggle_favorite("coding", "opus5");
         press(&mut a, "F");
         assert_eq!(keys(&a), ["opus5"], "F shows the favorites only");
@@ -2836,7 +2836,7 @@ mod tests {
         a.mouse(Mouse::OnlyExcluded);
         assert_eq!(
             (a.only_excluded, a.status.as_str()),
-            (false, "no excluded models: e excludes the one under the bar")
+            (false, "no excluded models: e excludes the one under the cursor")
         );
         a.store.toggle_excluded("mini");
         a.mouse(Mouse::OnlyExcluded);
@@ -2887,7 +2887,7 @@ mod tests {
     fn box_click_toggles_the_mark_and_star_click_picks_tasks() {
         let mut a = app();
         assert_eq!(a.mouse(Mouse::Box(1)), Some(Effect::Save));
-        assert_eq!((a.selected(), a.store.is_marked("opus5")), (1, true), "☐ → ✓, and the bar goes there");
+        assert_eq!((a.selected(), a.store.is_marked("opus5")), (1, true), "☐ → ✓, and the cursor goes there");
         a.mouse(Mouse::Box(1));
         assert!(!a.store.is_marked("opus5"), "✓ → ☐");
         assert_eq!(a.mouse(Mouse::Star(2)), None);
@@ -2913,7 +2913,7 @@ mod tests {
         a.mouse(Mouse::Box(1));
         a.mouse(Mouse::Exclude(1));
         assert!(a.store.is_excluded(&k) && !a.store.is_excluded(&key(&a, 0)), "on a mark, not every mark as e does");
-        // Under E a click that drops the row leaves the bar where it was, as e does.
+        // Under E a click that drops the row leaves the cursor where it was, as e does.
         for n in 0..3 {
             if !a.store.is_excluded(&key(&a, n)) {
                 a.mouse(Mouse::Exclude(n));
@@ -3019,7 +3019,7 @@ mod tests {
         assert_eq!(press(&mut a, "C"), Some(Effect::Save));
         assert_eq!((&a.view, a.store.marked.len(), a.selecting()), (&View::Compare, 3, false), "C compares the picks");
         code(&mut a, KeyCode::Esc);
-        assert_eq!(a.selected(), 0, "the bar stays on the model compare had picked");
+        assert_eq!(a.selected(), 0, "the cursor stays on the model compare had picked");
         a.store.marked.clear();
         press(&mut a, "j");
         a.mouse(Mouse::Row(0));
@@ -3102,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_keeps_the_bar_and_highlight_on_their_models() {
+    fn a_refresh_keeps_the_cursor_and_highlight_on_their_models() {
         let mut a = app();
         press(&mut a, "Gv");
         let key = a.current().unwrap().key.clone();
