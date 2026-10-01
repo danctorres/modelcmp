@@ -731,7 +731,8 @@ const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
 /// A marked row's fill and its ✓, the ✓ of a ticked entry in a list and the count in the
 /// status bar. Light blue, and nothing else is drawn in it, so a palette's slot 12 is free to
-/// be whatever parts from the muted ☐ (`the_mark_parts_from_an_empty_box`).
+/// be whatever parts from the muted ☐ (`the_mark_parts_from_an_empty_box`) and parts its fill
+/// from the cursor's (`roles_are_told_apart`).
 const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
 const STAR: Color = Color::Yellow;
@@ -2137,10 +2138,6 @@ mod tests {
             0.2126 * f(16) + 0.7152 * f(8) + 0.0722 * f(0)
         };
         let ratio = |a: u32, b: u32| (lum(a).max(lum(b)) + 0.05) / (lum(a).min(lum(b)) + 0.05);
-        let hex = |c: Color| match c {
-            Color::Rgb(r, g, b) => u32::from_be_bytes([0, r, g, b]),
-            c => panic!("not a theme colour: {c:?}"),
-        };
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
             // A marked row's fill, or the cursor's when that leaves a colour harder to read.
             let fills = [MARK, CURSOR].map(|c| hex(wash(resolve(c, Some(p)), p.bg)));
@@ -2206,6 +2203,38 @@ mod tests {
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
             let d = apart(p.ansi[12], p.ansi[8]);
             assert!(d >= 130.0, "{name}: ✓ {:06x} and ☐ {:06x} look alike, {d:.0}", p.ansi[12], p.ansi[8]);
+        }
+    }
+
+    fn hex(c: Color) -> u32 {
+        match c {
+            Color::Rgb(r, g, b) => u32::from_be_bytes([0, r, g, b]),
+            c => panic!("not a theme colour: {c:?}"),
+        }
+    }
+
+    /// What a row says by colour has to hold in every theme: a best, a worst, a plain and a
+    /// muted value are four colours, a task's ★ is its own and not the muted ☆'s, no developer
+    /// is in the grey of a model out of reach, and the cursor's fill is not a marked row's.
+    #[test]
+    fn roles_are_told_apart() {
+        for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
+            let of = |c: Color| hex(resolve(c, Some(p)));
+            let far = |what: &str, x: u32, y: u32, min: f64| {
+                assert!(apart(x, y) >= min, "{name}: {what} {x:06x} and {y:06x} look alike, {:.0}", apart(x, y));
+            };
+            let values = [of(GOOD), of(BAD), p.text, of(MUTED)];
+            for (i, &x) in values.iter().enumerate() {
+                values[i + 1..].iter().for_each(|&y| far("values", x, y, 100.0));
+            }
+            let tasks = TASK.map(of);
+            for (i, &x) in tasks.iter().enumerate() {
+                tasks[i + 1..].iter().for_each(|&y| far("tasks", x, y, 60.0));
+                far("a task and muted", x, of(MUTED), 60.0);
+            }
+            p.accents.iter().for_each(|&x| far("a developer and muted", x, of(MUTED), 60.0));
+            let [mark, cursor] = [MARK, CURSOR].map(|c| hex(wash(resolve(c, Some(p)), p.bg)));
+            far("the fills", mark, cursor, 14.0);
         }
     }
 
