@@ -271,6 +271,10 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         return print_json(&models.iter().map(|m| out(m, store, false)).collect::<Vec<_>>());
     }
     if o.id {
+        // An empty substitution would start the harness on no model at all.
+        if models.is_empty() {
+            return Err("no models match".to_string().into());
+        }
         for m in &models {
             println!("{}", model_id(m));
         }
@@ -311,15 +315,18 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
         println!("  {q:<w0$}  {win:<w1$}  {margin}");
     }
     println!();
+    let table = compare_rows(&models);
+    // Artificial Analysis names its benchmarks at length.
+    let lw = table.iter().map(|r| r.label.chars().count() + 1).max().unwrap_or(0).max(22);
     let mut section = "";
-    for row in compare_rows(&models) {
+    for row in table {
         // A rule naming each topic above its first row, as in the TUI.
         if row.section != section {
             section = row.section;
             let name = format!("── {section} ");
-            println!("{name}{}", "─".repeat((22 + 18 * models.len()).saturating_sub(name.chars().count())));
+            println!("{name}{}", "─".repeat((lw + 18 * models.len()).saturating_sub(name.chars().count())));
         }
-        print!("{:<22}", row.label);
+        print!("{:<lw$}", row.label);
         for c in &row.cells {
             print!("{:>18}", truncate(c, 17));
         }
@@ -423,19 +430,22 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
     Ok(())
 }
 
+/// The models you have and can use.
+fn usable<'a>(data: &'a Data, store: &'a Store) -> Vec<&'a Model> {
+    visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)).collect()
+}
+
 /// The frontier among the models you have and can use, as `list --task` gives it.
 fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<(&'a Model, f64)> {
-    let models: Vec<&Model> =
-        visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)).collect();
+    let models = usable(data, store);
     let favs = store.task_favorites(t.name);
     let fav: Vec<&Model> = models.iter().copied().filter(|m| favs.contains(&m.key.as_str())).collect();
     task_frontier(models.into_iter(), t, &fav)
 }
 
 /// The task's favorites that are on the line only for being favorites.
-fn unrecommended<'a>(data: &Data, store: &'a Store, t: &Task) -> Vec<&'a str> {
-    let models: Vec<&Model> =
-        visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key)).collect();
+fn unrecommended<'a>(data: &'a Data, store: &'a Store, t: &Task) -> Vec<&'a str> {
+    let models = usable(data, store);
     store.task_favorites(t.name).into_iter().filter(|k| !recommended(models.iter().copied(), t, k)).collect()
 }
 
@@ -445,9 +455,10 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
         .iter()
         .map(|t| {
             let off = unrecommended(data, store, t);
-            let front: Vec<_> = front(data, store, t)
-                .into_iter()
-                .map(|(m, s)| {
+            let line = front(data, store, t);
+            let front: Vec<_> = line
+                .iter()
+                .map(|&(m, s)| {
                     let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (fit::shown(m, t, s) * 10.0).round() / 10.0, "recommended": !off.contains(&m.key.as_str())});
                     if let Some(n) = store.note(&m.key) {
                         e["note"] = n.into();
@@ -455,8 +466,8 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                     e
                 })
                 .collect();
-            // An excluded favorite is off the line, so agents are not pointed at it either.
-            let fav = |s: &str| store.favorite(s).filter(|k| !store.is_excluded(k));
+            // A favorite excluded or out of reach is off the line, so agents are not pointed at it either.
+            let fav = |s: &str| store.favorite(s).filter(|k| line.iter().any(|(m, _)| m.key == *k));
             let tier_favs: BTreeMap<&str, &str> =
                 TIERS.iter().filter_map(|x| Some((x.0, fav(&slot(t.name, Some(x.0)))?))).collect();
             serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": fav(t.name), "tier_favorites": tier_favs, "frontier": front})
@@ -606,5 +617,7 @@ mod tests {
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(names(&t), ["gpt55"]);
         assert_eq!(t["tier_favorites"], serde_json::json!({}), "nor as a favorite");
+        store.toggle_favorite("coding", "gone");
+        assert_eq!(coding(&recommend_json(&data, &store))["favorite"], Value::Null, "nor one you do not have");
     }
 }

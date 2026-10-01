@@ -419,6 +419,9 @@ pub struct Data {
     #[serde(default)]
     pub latest: String,
     pub models: Vec<Model>,
+    /// What went wrong in a refresh that still gave data, for the caller to show.
+    #[serde(skip)]
+    pub warning: Option<String>,
 }
 
 impl Data {
@@ -518,7 +521,8 @@ fn cache_path(src: Source) -> PathBuf {
 
 pub fn load_cache() -> Option<Data> {
     let bytes = std::fs::read(cache_path(source())).ok()?;
-    let mut d: Data = serde_json::from_slice(&bytes).ok()?;
+    // One written in another format reads wrong here (a missing price as free), so it is no fallback.
+    let mut d = serde_json::from_slice::<Data>(&bytes).ok().filter(|d| d.format == FORMAT)?;
     // Code/$ is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
@@ -605,12 +609,13 @@ pub fn refresh() -> Result<Data, String> {
         (a, b, c, d.join().unwrap(), e.join().unwrap(), f.join().unwrap())
     });
     let mut data = match api {
-        None => merge(&models?, &parse_epoch(&epoch?)?)?,
+        None => merge(&models?, &parse_epoch(&epoch?)?, None)?,
         Some(api) => {
-            let mut data = merge(&models?, &parse_aa(&api?)?)?;
             // Only links hang on it, so without it the refresh still succeeds, with no epoch.ai links.
-            if let Ok(ep) = epoch.and_then(|z| parse_epoch(&z)) {
-                epoch_pages(&mut data.models, &ep);
+            let ep = epoch.and_then(|z| parse_epoch(&z)).ok();
+            let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref())?;
+            if let Some(ep) = &ep {
+                epoch_pages(&mut data.models, ep);
             }
             data
         }
@@ -628,7 +633,10 @@ pub fn refresh() -> Result<Data, String> {
         .unwrap_or_default();
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
     // Its own source's file, though a switch may have happened meanwhile.
-    crate::store::write_atomic(&cache_path(src), &json).map_err(|e| format!("cache: {e}"))?;
+    // An unwritable cache costs the next start a download, not this one its data.
+    data.warning = crate::store::write_atomic(&cache_path(src), &json)
+        .err()
+        .map(|e| format!("could not cache the data in {}: {e}", cache_path(src).display()));
     data.apply_available();
     Ok(data)
 }
@@ -638,7 +646,10 @@ pub fn load(force: bool) -> Result<(Data, Option<String>), String> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
         cached => match refresh() {
-            Ok(d) => Ok((d, None)),
+            Ok(mut d) => {
+                let w = d.warning.take();
+                Ok((d, w))
+            }
             Err(e) => match cached {
                 Some(d) => {
                     let w = format!("refresh failed ({e}); using data {} old", crate::view::age(d.age()));
@@ -663,8 +674,10 @@ fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, String> {
     })
 }
 
-/// "Claude Opus 4.5" -> ["claude", "opus", "4", "5"]: its lowercase alphanumeric runs.
+/// "Claude Opus 4.5" -> ["claude", "opus", "4", "5"]: its lowercase alphanumeric runs, a "+"
+/// being "plus" as in `norm`.
 fn words(s: &str) -> Vec<String> {
+    let s = s.replace('+', " plus ");
     s.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_ascii_lowercase).collect()
 }
 
@@ -696,7 +709,8 @@ fn aa_pages(models: &mut [Model], sitemap: &str) {
     }
 }
 
-/// A name's words as Artificial Analysis's pages are matched: sorted, "qwen3" as "qwen 3", the
+/// A name's words as Artificial Analysis's pages are matched: names sorted, then the numbers in
+/// the order written, "qwen3" as "qwen 3", the
 /// vendor and "instruct" left out. `effort` leaves out the reasoning setting too, as the API
 /// lists "claude-opus-5-5-high" and "-non-reasoning" apart from "claude-opus-5-5": only at the
 /// end of a name with a version, as "Magistral Medium" is a model and not a setting of Magistral.
@@ -722,13 +736,17 @@ fn aa_words(slug: &str, effort: bool) -> Vec<String> {
         })
         .filter(|w| !SKIP.contains(&w.as_str()))
         .collect();
-    k.sort();
+    // Names first, sorted; numbers keep their order, as "gpt-4-5" is not "gpt-5-4".
+    k.sort_by_key(|w| w.starts_with(|c: char| c.is_ascii_digit()));
+    let names = k.iter().take_while(|w| !w.starts_with(|c: char| c.is_ascii_digit())).count();
+    k[..names].sort();
     k
 }
 
 /// Lowercase alphanumerics only: "Claude Opus 4.5" == "claude-opus-4-5" == "claude_opus_4.5".
+/// A "+" is "plus": "Command R+" == "command-r-plus", and is not Command R.
 pub fn norm(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+    s.replace('+', "plus").chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
 }
 
 /// "Anthropic: Claude Opus 4.5 (latest)" -> "Claude Opus 4.5". A trailing "Free" goes too, as
@@ -855,10 +873,9 @@ struct MdProvider {
     name: String,
     #[serde(default)]
     env: Vec<String>,
+    /// Ordered, as `merge` keeps the first id and the last name it meets.
     #[serde(default)]
-    doc: String,
-    #[serde(default)]
-    models: HashMap<String, MdModel>,
+    models: BTreeMap<String, MdModel>,
 }
 
 #[derive(Deserialize, Default)]
@@ -934,7 +951,7 @@ fn short_org(s: &str) -> String {
     let s = s.split('(').next().unwrap_or_default().trim().trim_start_matches('~');
     match s.to_lowercase().as_str() {
         "" => String::new(),
-        "openai" | "~openai" => "OpenAI".into(),
+        "openai" => "OpenAI".into(),
         "google" | "google deepmind" => "Google".into(),
         "qwen" | "alibaba" => "Alibaba".into(),
         "meta" | "meta-llama" | "meta ai" => "Meta".into(),
@@ -1080,7 +1097,7 @@ fn col<'a>(r: &'a CsvRow, name: &str) -> Result<&'a str, String> {
 /// None if the file is missing or unreadable.
 fn csv_rows(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<Vec<CsvRow>> {
     let mut buf = Vec::new();
-    zip.by_name(name).ok()?.read_to_end(&mut buf).ok()?;
+    zip.by_name(name).ok()?.take(200 << 20).read_to_end(&mut buf).ok()?;
     let mut rdr = csv::Reader::from_reader(buf.as_slice());
     let headers = rdr.headers().ok()?.clone();
     let rows = rdr
@@ -1135,8 +1152,11 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         if file.is_empty() || score_col.is_empty() {
             continue;
         }
-        let scale: f64 = col(b, "scale")?.parse().unwrap_or(1.0);
-        let num = |c: &str, or: f64| b.get(c).and_then(|v| v.parse().ok()).unwrap_or(or);
+        // "nan" and "inf" parse as numbers, and are none.
+        let num =
+            |c: &str, or: f64| b.get(c).and_then(|v| v.parse().ok()).filter(|v: &f64| v.is_finite()).unwrap_or(or);
+        col(b, "scale")?;
+        let scale = num("scale", 1.0);
         let task = task_benches.contains(&bench);
         if task {
             range.insert(bench, (num("random_baseline", 0.0), num("score_ceiling", 1.0)));
@@ -1144,7 +1164,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         let Some(rows) = csv_rows(&mut zip, file) else { continue };
         for r in &rows {
             let (Some(v), Some(s)) = (r.get("Model version"), r.get(score_col)) else { continue };
-            let Ok(s) = s.trim_end_matches('%').parse::<f64>() else { continue };
+            let Some(s) = s.trim_end_matches('%').parse::<f64>().ok().filter(|s| s.is_finite()) else { continue };
             let g = group_of(v);
             // Any benchmark result gives the model a page on Epoch; only a task's scores it.
             let e = ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new()));
@@ -1156,7 +1176,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         }
     }
     for r in csv_rows(&mut zip, "epoch_capabilities_index/eci_scores.csv").unwrap_or_default() {
-        let Ok(eci) = col(&r, "eci")?.parse::<f64>() else { continue };
+        let Some(eci) = col(&r, "eci")?.parse::<f64>().ok().filter(|e| e.is_finite()) else { continue };
         let g = col(&r, "Model")?.to_string();
         dates.entry(norm(&g)).or_insert_with(|| r.get("date").cloned().unwrap_or_default());
         if let Some(o) = r.get("Organization").filter(|o| !o.is_empty()) {
@@ -1253,8 +1273,11 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
 
 // ---------- merge ----------
 
-fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
-    let providers: HashMap<String, MdProvider> =
+/// `epoch`: Epoch's models when the scores are another source's, as its names decide which of
+/// two rows keeps its key (`merge_same_ids`) whatever the source: user.json is keyed by them.
+fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data, String> {
+    // Ordered, so that two refreshes of the same data merge the same way.
+    let providers: BTreeMap<String, MdProvider> =
         serde_json::from_slice(models_json).map_err(|e| format!("models.dev: {e}"))?;
     let mut by_key: HashMap<String, Model> = HashMap::new();
     let mut openrouter: HashMap<String, String> = HashMap::new();
@@ -1264,15 +1287,15 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
     // ("@cf/meta/...", "novita/..."), so the first offer alone is not to be trusted.
     let mut dev_votes: HashMap<String, HashMap<String, usize>> = HashMap::new();
 
-    let mut pids: Vec<&String> = providers.keys().collect();
-    pids.sort(); // deterministic merge order
-    let entries: Vec<(&String, &String, &MdModel, String)> = pids
-        .into_iter()
-        .flat_map(|pid| providers[pid].models.iter().map(move |(mid, md)| (pid, mid, md)))
+    let entries: Vec<(&String, &String, &MdModel, String)> = providers
+        .iter()
+        .flat_map(|(pid, p)| p.models.iter().map(move |(mid, md)| (pid, mid, md)))
         // Text generation models only: skip image/video/embedding endpoints, and retired ones.
         .filter(|(_, _, md)| md.modalities.output.is_empty() || md.modalities.output.iter().any(|o| o == "text"))
         .filter(|(_, _, md)| md.status != "deprecated")
         .map(|(pid, mid, md)| (pid, mid, md, offer_name(mid, &md.name)))
+        // ponytail: models.dev lists an embedding's output as text, so only its name tells.
+        .filter(|e| !["embed", "rerank"].iter().any(|w| e.3.to_lowercase().contains(w)))
         .filter(|e| !norm(&e.3).is_empty())
         .collect();
     let keys: HashSet<String> = entries.iter().map(|e| norm(&e.3)).collect();
@@ -1295,7 +1318,6 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
         let m = by_key.entry(key.clone()).or_insert_with(|| Model {
             key: key.clone(),
             name: name.clone(),
-            url: p.doc.clone(),
             ..Default::default()
         });
         if raw == key {
@@ -1332,8 +1354,9 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
         });
     }
 
+    let names = epoch.unwrap_or(ep);
     let moved = merge_same_ids(&mut by_key, |k| {
-        openrouter.contains_key(k) || ep.groups.contains_key(k) || ep.alias.contains_key(k)
+        openrouter.contains_key(k) || names.groups.contains_key(k) || names.alias.contains_key(k)
     });
     for (from, to) in moved {
         if let Some(id) = openrouter.remove(&from) {
@@ -1402,9 +1425,15 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
         }
     }
     unify_developers(&mut models);
-    models.sort_by(|a, b| b.eci.unwrap_or(0.0).total_cmp(&a.eci.unwrap_or(0.0)).then(b.release.cmp(&a.release)));
+    models.sort_by(|a, b| {
+        b.eci
+            .unwrap_or(0.0)
+            .total_cmp(&a.eci.unwrap_or(0.0))
+            .then(b.release.cmp(&a.release))
+            .then_with(|| a.key.cmp(&b.key))
+    });
     let benches = ep.source.benches().into_iter().map(String::from).collect();
-    Ok(Data { format: FORMAT, fetched: now(), harness: BTreeMap::new(), benches, latest: String::new(), models })
+    Ok(Data { format: FORMAT, fetched: now(), benches, models, ..Default::default() })
 }
 
 #[cfg(test)]
@@ -1440,6 +1469,9 @@ mod tests {
         }
         assert_eq!(clean_name("Free"), "Free", "a name is never cut to nothing");
         assert_ne!(norm("GPT-5.5"), norm("GPT-5.5 Pro"));
+        assert_eq!(norm("Command R+"), norm("command-r-plus"));
+        assert_eq!(words("Command A+"), words("command-a-plus"));
+        assert_ne!(aa_words("gpt-4-5", true), aa_words("gpt-5-4", true), "a version is not its digits in any order");
         assert_eq!(offer_name("muse-spark-1.3-contributor-free", "Muse Spark 1.3 Free"), "Muse Spark 1.3 Contributor");
         assert_eq!(
             offer_name("meta/muse-spark-1.3-contributor", "Meta: Muse Spark 1.3 Contributor"),
@@ -1478,7 +1510,7 @@ mod tests {
             "old/gpt-4.1": {"name": "GPT-4.1", "status": "deprecated", "cost": {"input": 1, "output": 1}},
             "shisa/shisa-v2-gpt-4.1": {"name": "Shisa v2 GPT-4.1", "cost": {"input": 0.5, "output": 0.5}}
         }}}"#;
-        let d = merge(json, &Scores::default()).unwrap();
+        let d = merge(json, &Scores::default(), None).unwrap();
         let offers = |k: &str| d.models.iter().find(|m| m.key == k).map(|m| m.offers.len());
         assert_eq!((offers("gpt41"), offers("shisav2gpt41")), (Some(1), Some(1)));
     }

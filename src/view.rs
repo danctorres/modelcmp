@@ -446,7 +446,8 @@ fn or_dash(s: &str) -> &str {
 /// With `typos`, a word of 3+ letters that starts no word may be one slip off one ("opsu").
 pub fn hits<const N: usize>(q: &str, fields: [&str; N], typos: bool) -> Option<[Vec<Range<usize>>; N]> {
     let mut out = [(); N].map(|_| vec![]);
-    for t in q.split_whitespace().map(norm).filter(|t| !t.is_empty()) {
+    // A "+" is dropped, not spelled out as in a key: `word_hit` reads the fields without it.
+    for t in q.split_whitespace().map(|w| norm(&w.replace('+', ""))).filter(|t| !t.is_empty()) {
         let find = |typo| fields.iter().enumerate().find_map(|(i, s)| Some((i, word_hit(s, &t, typo)?)));
         let fuzzy = typos && t.len() >= 3 && t.bytes().all(|b| b.is_ascii_alphabetic());
         let (i, r) = find(false).or_else(|| fuzzy.then(|| find(true)).flatten())?;

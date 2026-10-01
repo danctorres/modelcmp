@@ -67,11 +67,16 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     if let Some(e) = failed {
         app.refreshed(Err(e));
     }
+    if let Some(w) = app.store.warning.take() {
+        app.report(Err(w));
+    }
     let mut rx = None;
     if !fresh && (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
-    let mut terminal = ratatui::init();
+    // Run by an agent or a script there is no terminal to draw on: say so rather than abort.
+    let mut terminal =
+        ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}); see modelcmp --help"))?;
     // ratatui's panic hook restores the terminal but leaves mouse reporting on.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -271,8 +276,10 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                     click = None;
                     Some(Ok(k))
                 }
-                Event::Mouse(m) => hit(app, Rect::new(0, 0, size.width, size.height), m)
-                    .map(|m| Err(double(&mut click, m, Instant::now()))),
+                Event::Mouse(m) => match hit(app, Rect::new(0, 0, size.width, size.height), m) {
+                    Some(m) => Some(Err(double(&mut click, m, Instant::now()))),
+                    None => continue,
+                },
                 // A resize redraws; a key release, a pointer move and the like do nothing.
                 Event::Resize(..) => None,
                 _ => continue,
@@ -375,17 +382,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // An open list first: a click on an entry acts on it, on its frame nothing, and any click
     // outside closes it.
     let list = match &app.input {
-        Input::Menu { col, items, sel, query, .. } => {
+        // Scrolled as last drawn.
+        Input::Menu { col, items, top, query, .. } => {
             let rows = menu_rows(items, query);
-            // The cursor's line in view, as the dropdown scrolls: its inside is two rows shorter.
-            menu_box(inner, menu_x(inner, &l, *col), items, rows.len())
-                .map(|(b, _)| (b, sel.saturating_sub(usize::from(b.height.saturating_sub(3))), rows.len()))
+            menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, *top, rows.len()))
         }
-        Input::Choose { title, items, sel, query, .. } => {
-            let (rows, lines) = (choice_rows(items, query).len(), choice_lines(items, query));
-            let rect = overlay_rect(Rect { height: area.height - 1, ..area }, title, &lines);
-            let top = choice_top(*sel, rows, lines.len(), rect.height.saturating_sub(2));
-            Some((rect, top, rows))
+        Input::Choose { title, items, top, query, typing, .. } => {
+            let (rows, lines) = (choice_rows(items, query).len(), choice_lines(items, query, *typing));
+            Some((overlay_rect(Rect { height: area.height - 1, ..area }, title, &lines), *top, rows))
         }
         _ => None,
     };
@@ -685,9 +689,9 @@ fn hint_key(hint: &str) -> Option<KeyCode> {
 }
 
 /// The hints that fit a status bar `width` wide and the column the first starts at.
-fn hint_layout(app: &App, width: u16) -> (Vec<&'static str>, u16) {
+fn hint_layout(app: &App, parts: &[Line], width: u16) -> (Vec<&'static str>, u16) {
     // The pill, a space, then each part and its " · ".
-    let left = mode(app).0.chars().count() + 3 + parts(app).iter().map(|p| p.width() + 3).sum::<usize>();
+    let left = mode(app).0.chars().count() + 3 + parts.iter().map(|p| p.width() + 3).sum::<usize>();
     let all = hints(app);
     let mut hints = &all[..];
     while hints.len() > 1 && (hints[0] == SEP || left + hints.join("  ").chars().count() + 1 > width as usize) {
@@ -701,7 +705,7 @@ fn hint_at(app: &App, width: u16, x: u16) -> Option<KeyCode> {
     if app.input != Input::None {
         return None;
     }
-    let (hints, mut start) = hint_layout(app, width);
+    let (hints, mut start) = hint_layout(app, &parts(app), width);
     for hint in hints {
         let w = hint.chars().count() as u16;
         if (start..start + w).contains(&x) {
@@ -983,13 +987,17 @@ fn draw(app: &mut App, f: &mut Frame) {
         let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
         overlay(buf, body, "quit?", lines, &mut 0);
     }
-    if let Input::Choose { title, items, sel, query, .. } = &app.input {
-        // Scrolled as the mouse maps it, so the cursor stays in view when the list is taller than the screen.
-        let lines = choice_lines(items, query);
+    if let Input::Choose { title, items, sel, top, query, typing, .. } = &mut app.input {
+        let lines = choice_lines(items, query, *typing);
         let rect = overlay_rect(body, title, &lines);
         let rows = choice_rows(items, query).len();
-        let mut scroll = choice_top(*sel, rows, lines.len(), rect.height.saturating_sub(2)) as u16;
+        let shown = usize::from(rect.height.saturating_sub(2));
+        // At the last entry every line to the end, so the key hint below them shows too, unless
+        // that would scroll the cursor's line off.
+        let from = if *sel + 1 >= rows { lines.len().saturating_sub(shown) } else { *top };
+        let mut scroll = list_top(from, *sel, shown) as u16;
         let (above, below) = overlay(buf, body, title, lines, &mut scroll);
+        *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
             // its bar, as there.
@@ -1043,7 +1051,9 @@ fn layout(width: u16, app: &App) -> Layout {
         .max()
         .unwrap_or(0)
         .clamp(6, 24) as u16;
-    let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(str::len).max().unwrap_or(0).clamp(6, 40) as u16;
+    let notes_w =
+        ms.iter().filter_map(|m| app.store.note(&m.key)).map(|s| s.chars().count()).max().unwrap_or(0).clamp(6, 40)
+            as u16;
     let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
     // Row numbers as wide as the last one, a space, then the checkbox, the ☆ and the ✗ box,
     // each with a spare cell: some terminals draw them two cells wide, and the
@@ -1133,7 +1143,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let (box_x, star_x) = (area.x + num_w as u16 + 1, area.x + num_w as u16 + 3);
     let ex_x = area.x + num_w as u16 + 5;
     let (y, name_x, dev_x) = (area.y, area.x + name_x, area.x + name_x + name_w + GAP);
-    let (nw, dw) = (name_w as usize, dev_w as usize);
+    // In a terminal too narrow for both they are cut at the frame, not drawn over its border.
+    let room = |x: u16, w: u16| usize::from(w.min(area.right().saturating_sub(x)));
+    let (nw, dw) = (room(name_x, name_w), room(dev_x, dev_w));
     buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
     // Each mark column labelled with its own glyph, as mail clients head a star column with a star.
     for (x, g) in [(box_x, "✓"), (star_x, "★"), (ex_x, "✗")] {
@@ -1141,7 +1153,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     }
     buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
     buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
-    if first > 0 {
+    if first > 0 && dev_x + dev_w < area.right() {
         // Columns scrolled off to the left.
         buf.set_stringn(dev_x + dev_w, y, "‹", 1, fg(ACCENT).add_modifier(BOLD));
     }
@@ -1285,7 +1297,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         // fill the yellow is behind the hit, as yellow text would not read there.
         // ponytail: a char is taken as one cell; wide chars would shift the underline.
         // Via is drawn as its harnesses joined by ", ", so the hits line up; out of reach, it is not.
-        if let Some(hits) = hits(&app.query, [&m.name, &m.developer, &m.via.join(", "), note], app.typos) {
+        if !app.query.is_empty()
+            && let Some(hits) = hits(&app.query, [&m.name, &m.developer, &m.via.join(", "), note], app.typos)
+        {
             let style = if solid { base.bg(MATCH) } else { tint(MATCH) }.add_modifier(BOLD | Modifier::UNDERLINED);
             let [via, note] = [via.filter(|_| reach), notes].map(|c| c.map(|(x, w)| (area.x + x, w as usize)));
             for (field, ranges) in [Some((name_x, nw)), Some((dev_x, dw)), via, note].into_iter().zip(hits) {
@@ -1300,15 +1314,15 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         let drawn = app.rows.len().saturating_sub(top).min(height) as u16;
         buf.set_style(Rect::new(x, area.y + 2, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
     }
-    if let Input::Menu { col, items, sel, query, .. } = &app.input {
+    let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
+    if let Input::Menu { col, items, sel, top, query, .. } = &mut app.input {
         let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
-        let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
         let picked = match *col {
             1 => &app.dev,
             VIA => &app.via,
             _ => &level,
         };
-        dropdown(buf, area, menu_x(area, &l, *col), *col, items, query, *sel, picked);
+        dropdown(buf, area, menu_x(area, &l, *col), *col, items, query, *sel, top, picked);
     }
     (more, top > 0, top + height < app.rows.len())
 }
@@ -1346,6 +1360,7 @@ fn dropdown(
     items: &[(String, usize)],
     query: &str,
     sel: usize,
+    top: &mut usize,
     picked: &[String],
 ) {
     let rows = &menu_rows(items, query);
@@ -1355,7 +1370,9 @@ fn dropdown(
     Clear.render(rect, buf);
     block.render(rect, buf);
     let shown = inner.height as usize;
-    let top = sel.saturating_sub(shown - 1);
+    // No blank lines under the last entry when a search shortens the list.
+    *top = list_top(*top, sel, shown).min(rows.len().saturating_sub(shown));
+    let top = *top;
     for (k, &i) in rows.iter().enumerate().skip(top).take(shown) {
         let (label, n) = &items[i];
         let y = inner.y + (k - top) as u16;
@@ -1547,7 +1564,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
             Some(("/".to_string(), q, *cur))
         }
-        Input::Note { text, cur } => Some(("note: ".to_string(), text, *cur)),
+        Input::Note { text, cur, .. } => Some(("note: ".to_string(), text, *cur)),
         // Hidden from anyone looking at the screen; one `*` per byte keeps `cur` in place.
         Input::Key { text, cur, wrong } => {
             masked = "*".repeat(text.len());
@@ -1584,7 +1601,9 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             _ => "enter apply  esc cancel",
         };
         let width = |s: &str| Span::raw(s).width();
-        let hx = area.right().saturating_sub(width(hint) as u16 + 1);
+        // The hint shows only where it leaves the label and a few typed cells their room.
+        let fits = usize::from(x) + width(&label) + 8 + width(hint) < usize::from(area.right());
+        let hx = if fits { area.right() - (width(hint) as u16 + 1) } else { area.right() };
         // Text too long for the room scrolls sideways, so the cursor stays in view.
         let room = usize::from(hx.saturating_sub(x));
         let mut start = 0;
@@ -1593,14 +1612,16 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         }
         let text = format!("{label}{}{unit}", &typed[start..]);
         buf.set_stringn(x, area.y, &text, room, Style::new());
-        buf.set_stringn(hx, area.y, hint, width(hint), fg(MUTED));
+        if fits {
+            buf.set_stringn(hx, area.y, hint, width(hint), fg(MUTED));
+        }
         let cx = x + (width(&label) + width(&typed[start..cur])) as u16;
         return typing.then_some(cx.min(hx.saturating_sub(1)));
     }
     let parts = parts(app);
     // Key hints fill what the left side leaves free; whole hints drop from the front on
     // narrow terminals, and `? help` is the last to go.
-    let (hints, start) = hint_layout(app, area.width);
+    let (hints, start) = hint_layout(app, &parts, area.width);
     let limit = (area.x + start).saturating_sub(1);
     for (i, line) in parts.iter().enumerate() {
         if i > 0 {
@@ -1670,7 +1691,7 @@ fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> L
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
-fn choice_lines(items: &[(String, Effect)], query: &str) -> Vec<Line<'static>> {
+fn choice_lines(items: &[(String, Effect)], query: &str, typing: bool) -> Vec<Line<'static>> {
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
         .iter()
@@ -1698,6 +1719,9 @@ fn choice_lines(items: &[(String, Effect)], query: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(format!(" no entry matches {query} ")).style(fg(MUTED)));
     }
     let hint = match items.first() {
+        // While searching the letters are typed, as the status bar says.
+        Some((_, Effect::Fav(..))) if typing => " ↓ ↑ move · enter toggle · esc clear",
+        _ if typing => " ↓ ↑ move · enter pick · esc clear",
         Some((_, Effect::Fav(..))) => " j k move · / search · space enter toggle · esc close",
         Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc t close",
         Some((_, Effect::Source(_))) => " j k move · / search · enter picks · esc close",
@@ -1706,12 +1730,10 @@ fn choice_lines(items: &[(String, Effect)], query: &str) -> Vec<Line<'static>> {
     lines.push(Line::from(hint).style(fg(MUTED)));
     lines
 }
-/// The first line a choice list shows, `shown` lines of `lines` in view: the cursor's, and at
-/// the last of its `rows` entries every line to the end, so the key hint below them shows too,
-/// unless that would scroll the cursor's line off.
-fn choice_top(sel: usize, rows: usize, lines: usize, shown: u16) -> usize {
-    let shown = usize::from(shown.max(1));
-    if sel + 1 >= rows { lines.saturating_sub(shown).min(sel) } else { sel.saturating_sub(shown - 1) }
+/// The first line in view of a list `shown` lines tall with the cursor on `sel`: where it was,
+/// `top`, moved only as far as it takes to show the cursor, as the table scrolls.
+fn list_top(top: usize, sel: usize, shown: usize) -> usize {
+    top.clamp(sel.saturating_sub(shown.max(1) - 1), sel)
 }
 
 /// Where an overlay with these lines sits: centred, as wide as its widest line or title.
@@ -2782,6 +2804,25 @@ mod tests {
         assert!(labels(&typo).contains(&"context".to_string()), "a typo is forgiven when nothing matches");
     }
 
+    /// One check per defect a review found in the drawing.
+    #[test]
+    fn review_fixes_hold() {
+        assert_eq!(list_top(0, 5, 3), 3, "going down, the cursor is on the last line shown");
+        assert_eq!(list_top(3, 4, 3), 3, "back up inside the window, the list keeps still, as the table does");
+        assert_eq!(list_top(3, 2, 3), 2, "and past it, the cursor is on the first line");
+        let mut a = app();
+        // The table in the left 30 columns of a wider buffer, as inside its frame.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+        table(&mut buf, Rect::new(0, 0, 30, 6), &mut a);
+        let past: String = (0..6).flat_map(|y| (30..40).map(move |x| (x, y))).map(|at| buf[at].symbol()).collect();
+        assert_eq!(past.trim(), "", "Model and Dev stop at the frame");
+        a.col = 1;
+        a.key(KeyCode::Char('d').into());
+        let (_, lines) = render(&mut a, 50, 7);
+        let bar = lines.last().unwrap();
+        assert!(bar.contains("PICK") && bar.contains("Dev ▾"), "the prompt wins over its key hint: {bar}");
+    }
+
     #[test]
     fn theme_list_scrolls_to_the_cursor() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
@@ -2974,10 +3015,10 @@ mod tests {
         let hits = lit_text(&help("THEME"));
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
-        let lines = choice_lines(&items, "uv");
+        let lines = choice_lines(&items, "uv", true);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(&items, "gr");
+        let lines = choice_lines(&items, "gr", true);
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
     }

@@ -196,7 +196,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("h l ← →", "pick a column; in compare and recommend, a model"),
             ("0 _ $ w b", "first / last column; next / previous group"),
             ("gg G 3gg", "top / bottom / row 3"),
-            ("( ) ^d ^u", "half a page up / down"),
+            ("( ) ^u ^d", "half a page up / down"),
             ("v", "highlight a range; space e C act on all of it"),
         ],
     ),
@@ -270,7 +270,9 @@ pub enum Input {
         cur: usize,
         was: String,
     },
+    /// `key`: the model the note is for, as the rows can move under the prompt.
     Note {
+        key: String,
         text: String,
         cur: usize,
     },
@@ -294,6 +296,8 @@ pub enum Input {
         col: usize,
         items: Vec<(String, usize)>,
         sel: usize,
+        /// The first entry in view, kept by the draw (`tui::list_top`) as the table keeps its own.
+        top: usize,
         query: String,
         cur: usize,
         /// Typing into `query`, after `/`.
@@ -307,6 +311,8 @@ pub enum Input {
         title: &'static str,
         items: Vec<(String, Effect)>,
         sel: usize,
+        /// The first line in view, as a dropdown's.
+        top: usize,
         /// Filter on the entries, typed after `/` as in a dropdown; `sel` indexes what is left.
         query: String,
         cur: usize,
@@ -317,7 +323,7 @@ pub enum Input {
 impl Input {
     /// A choice list (`f`, `o`, `x`, `t`) with the cursor on `sel` and nothing searched yet.
     fn choose(title: &'static str, items: Vec<(String, Effect)>, sel: usize) -> Self {
-        Self::Choose { title, items, sel, query: String::new(), cur: 0, typing: false }
+        Self::Choose { title, items, sel, top: 0, query: String::new(), cur: 0, typing: false }
     }
 }
 
@@ -693,7 +699,8 @@ impl App {
     /// the one picked on the task's line in recommend.
     pub fn current(&self) -> Option<&Model> {
         if self.view == View::Compare {
-            return self.marked_models().get(self.compare_sel).copied();
+            let marked = self.marked_models();
+            return marked.get(self.compare_sel.min(marked.len().saturating_sub(1))).copied();
         }
         if self.view == View::Recommend {
             let front = self.task_frontier(&TASKS[self.task_cur]);
@@ -703,6 +710,14 @@ impl App {
             return self.data.models.iter().find(|m| m.key == self.detail);
         }
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
+    }
+
+    /// How many models the open overlay's sideways cursor moves over.
+    fn across_len(&self) -> usize {
+        match self.view {
+            View::Compare => self.marked_models().len(),
+            _ => self.task_frontier(&TASKS[self.task_cur]).len(),
+        }
     }
 
     /// The sideways model cursor of the open overlay: compare's, else recommend's.
@@ -894,7 +909,11 @@ impl App {
                 NOTES => self.store.note(&m.key).unwrap_or("").to_lowercase(),
                 _ => String::new(),
             };
-            rows.sort_by_cached_key(|&i| (text(&ms[i]), ms[i].name.to_lowercase()));
+            // Blanks last either way, as with numbers.
+            rows.sort_by_cached_key(|&i| {
+                let t = text(&ms[i]);
+                (t.is_empty() != self.descending, t, ms[i].name.to_lowercase())
+            });
             if self.descending {
                 rows.reverse();
             }
@@ -929,8 +948,8 @@ impl App {
         self.refreshing = false;
         self.refresh_failed = res.is_err();
         match res {
-            Ok(d) => {
-                self.status = "data refreshed".into();
+            Ok(mut d) => {
+                self.report(d.warning.take().map_or(Ok("data refreshed".into()), Err));
                 self.set_data(d);
             }
             // One from the environment is yours to change there, as a saved one would not replace it.
@@ -1094,13 +1113,18 @@ impl App {
         }
     }
 
-    fn move_by(&mut self, n: isize) {
+    /// `wrap`: a step from an end goes round to the other, as `j k` do; the wheel and a page
+    /// stop there.
+    fn move_by(&mut self, n: isize, wrap: bool) {
+        let go = |i: usize, len: usize| {
+            if wrap { step(i, n, len) } else { i.saturating_add_signed(n).min(len.saturating_sub(1)) }
+        };
         if let Some((sel, len)) = self.list() {
-            *sel = step(*sel, n, len);
+            *sel = go(*sel, len);
         } else if self.view == View::Table {
-            self.select(step(self.selected(), n, self.rows.len()));
+            self.select(go(self.selected(), self.rows.len()));
         } else if self.view == View::Recommend {
-            (self.task_cur, self.task_sel) = (step(self.task_cur, n, TASKS.len()), 0);
+            (self.task_cur, self.task_sel) = (go(self.task_cur, TASKS.len()), 0);
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
         }
@@ -1156,6 +1180,7 @@ impl App {
             col: self.col,
             items,
             sel: picked.map_or(0, |i| i + 1),
+            top: 0,
             query: String::new(),
             cur: 0,
             typing: false,
@@ -1221,17 +1246,19 @@ impl App {
         let n = count.max(1) as isize;
         let half = (self.page / 2).max(1) as isize;
         match k.code {
-            KeyCode::Down | KeyCode::Char('j') => self.move_by(n),
-            KeyCode::Up | KeyCode::Char('k') => self.move_by(-n),
-            KeyCode::PageDown => self.move_by(n * half * 2),
-            KeyCode::PageUp => self.move_by(-n * half * 2),
-            KeyCode::Char(')') => self.move_by(n * half),
-            KeyCode::Char('(') => self.move_by(-n * half),
-            KeyCode::Char('d') if ctrl => self.move_by(n * half),
-            KeyCode::Char('u') if ctrl => self.move_by(-n * half),
+            KeyCode::Down | KeyCode::Char('j') => self.move_by(n, true),
+            KeyCode::Up | KeyCode::Char('k') => self.move_by(-n, true),
+            KeyCode::PageDown => self.move_by(n * half * 2, false),
+            KeyCode::PageUp => self.move_by(-n * half * 2, false),
+            KeyCode::Char(')') => self.move_by(n * half, false),
+            KeyCode::Char('(') => self.move_by(-n * half, false),
+            KeyCode::Char('d') if ctrl => self.move_by(n * half, false),
+            KeyCode::Char('u') if ctrl => self.move_by(-n * half, false),
             KeyCode::Char('g') if count > 0 => self.go_to(count - 1),
             KeyCode::Home | KeyCode::Char('g') => self.go_to(0),
             KeyCode::End | KeyCode::Char('G') => self.go_to(usize::MAX),
+            // ^e is not `e`: only the keys above take ctrl.
+            KeyCode::Char(_) if ctrl => {}
             _ if list => return self.input_key(k.code, k.modifiers),
             _ => return self.table_key(k.code, n),
         }
@@ -1254,10 +1281,11 @@ impl App {
         if let Mouse::Key(code) = m {
             return self.on_key(code.into());
         }
-        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { typing: false, .. });
+        let typing = matches!(self.input, Input::Menu { typing: true, .. } | Input::Choose { typing: true, .. });
+        let list = matches!(self.input, Input::Menu { .. } | Input::Choose { .. });
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
-                self.move_by(n);
+                self.move_by(n, false);
             }
             return None;
         }
@@ -1272,8 +1300,14 @@ impl App {
                     self.input_key(KeyCode::Enter, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
-                // Outside, or anything else that is not an entry: close it.
-                _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
+                // Outside, or anything else that is not an entry: close it. A search takes an
+                // esc of its own first.
+                _ => {
+                    if typing {
+                        self.input_key(KeyCode::Esc, KeyModifiers::NONE);
+                    }
+                    self.input_key(KeyCode::Esc, KeyModifiers::NONE)
+                }
             };
         }
         // The sideways wheel moves the model cursor wherever h and l do.
@@ -1360,7 +1394,9 @@ impl App {
             }
             Mouse::Pick(n) if n < self.rows.len() => {
                 // The range, if any, becomes picked rows, then the clicked row toggles.
-                if let Some(r) = self.visual.take().map(|a| a.min(self.selected())..=a.max(self.selected())) {
+                let range = self.visual_range();
+                self.visual = None;
+                if let Some(r) = range {
                     for k in r {
                         if !self.picked.contains(&k) {
                             self.picked.push(k);
@@ -1418,26 +1454,19 @@ impl App {
         // Keys that act on the current model, which only help hides.
         let row = table || matches!(self.view, View::Detail | View::Compare | View::Recommend);
         // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
-        let across = match self.view {
-            View::Compare => Some(self.marked_models().len()),
-            View::Recommend => Some(self.task_frontier(&TASKS[self.task_cur]).len()),
-            _ => None,
-        };
+        let across = matches!(self.view, View::Compare | View::Recommend);
         match code {
             KeyCode::Char('h') | KeyCode::Left if table => self.col = step_col(self.col, -n),
             KeyCode::Char('l') | KeyCode::Right if table => self.col = step_col(self.col, n),
-            KeyCode::Char('h') | KeyCode::Left if across.is_some() => {
-                let (len, sel) = (across?, self.across_sel());
-                *sel = step((*sel).min(len.saturating_sub(1)), -n, len);
-            }
-            KeyCode::Char('l') | KeyCode::Right if across.is_some() => {
-                let (len, sel) = (across?, self.across_sel());
+            KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if across => {
+                let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
+                let (len, sel) = (self.across_len(), self.across_sel());
                 *sel = step((*sel).min(len.saturating_sub(1)), n, len);
             }
             KeyCode::Char('0' | '_') if table => self.col = 0,
             KeyCode::Char('$') if table => self.col = NCOLS - 1,
-            KeyCode::Char('0' | '_') if across.is_some() => *self.across_sel() = 0,
-            KeyCode::Char('$') if across.is_some() => *self.across_sel() = across?.saturating_sub(1),
+            KeyCode::Char('0' | '_') if across => *self.across_sel() = 0,
+            KeyCode::Char('$') if across => *self.across_sel() = self.across_len().saturating_sub(1),
             KeyCode::Char('w') if table => {
                 for _ in 0..n {
                     let end = if self.col == NCOLS - 1 { 0 } else { NCOLS - 1 };
@@ -1564,7 +1593,7 @@ impl App {
             KeyCode::Char('n') if row => {
                 let m = self.current()?;
                 let text = self.store.note(&m.key).unwrap_or("").to_string();
-                self.input = Input::Note { cur: text.len(), text };
+                self.input = Input::Note { key: m.key.clone(), cur: text.len(), text };
             }
             KeyCode::Char('o') if row => {
                 let mut items: Vec<_> =
@@ -1674,6 +1703,7 @@ impl App {
             Input::Search { cur, was } => {
                 let overlay = matches!(self.view, View::Compare | View::Help);
                 let query = if overlay { &mut self.overlay_query } else { &mut self.query };
+                let before = query.clone();
                 match code {
                     KeyCode::Enter => self.input = Input::None,
                     KeyCode::Esc => {
@@ -1681,13 +1711,14 @@ impl App {
                         self.input = Input::None;
                     }
                     KeyCode::Down | KeyCode::Up => {
-                        self.move_by(if code == KeyCode::Down { 1 } else { -1 });
+                        self.move_by(if code == KeyCode::Down { 1 } else { -1 }, true);
                         return None;
                     }
                     _ if edit(query, cur, code, mods, |_| true) => {}
                     _ => return None,
                 }
-                if !overlay {
+                // Not on a key that only moves in the text.
+                if !overlay && self.query != before {
                     self.rebuild();
                 }
             }
@@ -1713,11 +1744,10 @@ impl App {
                 KeyCode::Esc => self.input = Input::None,
                 _ => drop(edit(text, cur, code, mods, |_| true)),
             },
-            Input::Note { text, cur } => match code {
+            Input::Note { key, text, cur } => match code {
                 KeyCode::Enter => {
-                    let text = std::mem::take(text);
+                    let (key, text) = (std::mem::take(key), std::mem::take(text));
                     self.input = Input::None;
-                    let key = self.current()?.key.clone();
                     self.store.set_note(&key, &text);
                     // Search and the Notes sort read notes.
                     self.rebuild_in_place();
@@ -1742,14 +1772,13 @@ impl App {
                 }
                 _ => {}
             },
-            Input::Menu { col, items, sel, query, cur, typing } => {
+            Input::Menu { col, items, sel, query, cur, typing, .. } => {
                 let rows = menu_rows(items, query);
-                let last = rows.len() - 1;
                 // Enter does what space does; while searching, space is typed.
                 let toggle = code == KeyCode::Enter || (code == KeyCode::Char(' ') && !*typing);
                 match code {
-                    KeyCode::Down => *sel = (*sel + 1).min(last),
-                    KeyCode::Up => *sel = sel.saturating_sub(1),
+                    KeyCode::Down => *sel = step(*sel, 1, rows.len()),
+                    KeyCode::Up => *sel = step(*sel, -1, rows.len()),
                     // On Price it picks the level, or drops it when it is the picked one, and keeps the
                     // dropdown open.
                     _ if toggle && *col == PRICE => {
@@ -1774,9 +1803,12 @@ impl App {
                         (*sel, *typing, *cur) = (rows[*sel], false, 0);
                         query.clear();
                     }
-                    _ if *typing && edit(query, cur, code, mods, |_| true) => {
-                        // The first match, so that enter picks it.
-                        *sel = menu_rows(items, query).len().min(2) - 1;
+                    _ if *typing => {
+                        let was = query.clone();
+                        // The first match, so that enter picks it; a move within the text keeps the cursor.
+                        if edit(query, cur, code, mods, |_| true) && *query != was {
+                            *sel = menu_rows(items, query).len().min(2) - 1;
+                        }
                     }
                     KeyCode::Char('/') => *typing = true,
                     KeyCode::Esc => self.input = Input::None,
@@ -1785,8 +1817,8 @@ impl App {
             }
             Input::Choose { items, sel, query, cur, typing, .. } => match code {
                 // While searching, ↓ ↑ move the cursor, as in a dropdown.
-                KeyCode::Down if *typing => *sel = (*sel + 1).min(choice_rows(items, query).len().saturating_sub(1)),
-                KeyCode::Up if *typing => *sel = sel.saturating_sub(1),
+                KeyCode::Down if *typing => *sel = step(*sel, 1, choice_rows(items, query).len()),
+                KeyCode::Up if *typing => *sel = step(*sel, -1, choice_rows(items, query).len()),
                 // Space ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns,
                 // and so does enter. While searching, space is typed.
                 KeyCode::Char(' ') | KeyCode::Enter
@@ -1827,8 +1859,13 @@ impl App {
                         effect => return Some(effect),
                     }
                 }
-                // The first match, so that enter picks it.
-                _ if *typing && edit(query, cur, code, mods, |_| true) => *sel = 0,
+                _ if *typing => {
+                    let was = query.clone();
+                    // The first match, so that enter picks it; a move within the text keeps the cursor.
+                    if edit(query, cur, code, mods, |_| true) && *query != was {
+                        *sel = 0;
+                    }
+                }
                 KeyCode::Char('/') => *typing = true,
                 // Closing the first start's choice picks the default.
                 KeyCode::Esc if self.first_start && matches!(items.first(), Some((_, Effect::Source(_)))) => {
@@ -1926,6 +1963,41 @@ mod tests {
         assert_eq!(a.cache_hint, "% 50% cached", "the hint names it");
     }
 
+    /// One check per defect a review found, each of which did the wrong thing before.
+    #[test]
+    fn review_fixes_hold() {
+        let mut a = app();
+        press(&mut a, "G");
+        let last = a.selected();
+        a.mouse(Mouse::Scroll(1));
+        assert_eq!(a.selected(), last, "the wheel stops at the last row");
+        press(&mut a, "j");
+        assert_eq!(a.selected(), 0, "j goes round");
+        assert_eq!(a.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)), None);
+        assert!(a.store.excluded.is_empty(), "^e is not e");
+        let key = a.current().unwrap().key.clone();
+        press(&mut a, "nfast");
+        a.select(1);
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.note(&key), Some("fast"), "a note stays with the model it was opened on");
+        a.col = NOTES;
+        for order in ["A-Z", "Z-A"] {
+            press(&mut a, "s");
+            assert_eq!(a.data.models[a.rows[0]].key, key, "models without a note sort last, {order}");
+        }
+        press(&mut a, "t/nor");
+        assert_eq!(a.mouse(Mouse::Item(0)), Some(Effect::Save), "a click picks in a list being searched");
+        assert_eq!(a.store.theme, "nord");
+        press(&mut a, "t/nor");
+        a.mouse(Mouse::Outside);
+        assert_eq!(a.input, Input::None, "and a click outside closes it");
+        a.store.toggle_marked("gpt55");
+        a.store.toggle_marked("mini");
+        press(&mut a, "Cl");
+        a.store.toggle_marked("mini");
+        assert_eq!(a.current().map(|m| m.key.as_str()), Some("gpt55"), "compare's cursor stays on a model");
+    }
+
     #[test]
     fn t_picks_a_theme_from_a_panel() {
         let mut a = app();
@@ -2016,7 +2088,7 @@ mod tests {
         b.refreshed(Err("offline".into()));
         assert_eq!(b.input, Input::None, "any other failure is only reported");
         let mut c = app();
-        c.input = Input::Note { text: "half".into(), cur: 4 };
+        c.input = Input::Note { key: "gpt55".into(), text: "half".into(), cur: 4 };
         c.refreshed(Err(crate::data::AA_MISSING.into()));
         assert!(matches!(c.input, Input::Note { .. }), "a note being typed is kept");
     }
@@ -2206,10 +2278,14 @@ mod tests {
         let mut a = app();
         press(&mut a, "nfast enough  ");
         ctrl(&mut a, 'w');
-        assert_eq!(a.input, Input::Note { text: "fast ".into(), cur: 5 }, "trailing spaces go with the word");
+        assert_eq!(
+            a.input,
+            Input::Note { key: "gpt55".into(), text: "fast ".into(), cur: 5 },
+            "trailing spaces go with the word"
+        );
         ctrl(&mut a, 'w');
         ctrl(&mut a, 'w');
-        assert_eq!(a.input, Input::Note { text: String::new(), cur: 0 });
+        assert_eq!(a.input, Input::Note { key: "gpt55".into(), text: String::new(), cur: 0 });
         code(&mut a, KeyCode::Esc);
         press(&mut a, "/gpt 5");
         ctrl(&mut a, 'w');
@@ -2227,10 +2303,10 @@ mod tests {
     fn prompts_edit_around_a_cursor() {
         let mut a = App::new(Data::default(), Store::default());
         let note = |a: &App| match &a.input {
-            Input::Note { text, cur } => (text.clone(), *cur),
+            Input::Note { text, cur, .. } => (text.clone(), *cur),
             _ => unreachable!(),
         };
-        a.input = Input::Note { text: "über fast".into(), cur: 9 };
+        a.input = Input::Note { key: "gpt55".into(), text: "über fast".into(), cur: 9 };
         let alt = |a: &mut App, c: char| a.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
         alt(&mut a, 'b');
         assert_eq!(note(&a), ("über fast".into(), 6), "alt-b to the word start");
@@ -3158,9 +3234,9 @@ mod tests {
     #[test]
     fn ctrl_w_takes_a_word_after_a_wide_space() {
         let mut a = app();
-        a.input = Input::Note { text: "a\u{3000}b".into(), cur: 5 };
+        a.input = Input::Note { key: "gpt55".into(), text: "a\u{3000}b".into(), cur: 5 };
         ctrl(&mut a, 'w');
-        assert_eq!(a.input, Input::Note { text: "a\u{3000}".into(), cur: 4 });
+        assert_eq!(a.input, Input::Note { key: "gpt55".into(), text: "a\u{3000}".into(), cur: 4 });
     }
 
     #[test]

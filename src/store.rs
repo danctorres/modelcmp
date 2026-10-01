@@ -16,6 +16,9 @@ pub struct Store {
     /// Why the file could not be read, when it exists: saving over it would lose it.
     #[serde(skip)]
     unreadable: Option<String>,
+    /// What went wrong reading the file, for the caller to show: the TUI's screen hides stderr.
+    #[serde(skip)]
+    pub warning: Option<String>,
     /// Pins from older files, read once and loaded as marks.
     #[serde(alias = "favorites", skip_serializing)]
     pinned: BTreeSet<String>,
@@ -113,15 +116,21 @@ impl Store {
     pub fn load_from(path: PathBuf) -> Self {
         let mut s = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
-            Err(e) => {
-                eprintln!("warning: cannot read {} ({e}); changes will not be saved", path.display());
-                Store { unreadable: Some(e.to_string()), ..Store::default() }
-            }
+            Err(e) => Store {
+                warning: Some(format!("cannot read {} ({e}); changes will not be saved", path.display())),
+                unreadable: Some(e.to_string()),
+                ..Store::default()
+            },
             Ok(bytes) => serde_json::from_slice::<Store>(&bytes).unwrap_or_else(|e| {
-                let bad = path.with_extension("json.bad");
-                eprintln!("warning: {} is not valid ({e}); moved to {}", path.display(), bad.display());
+                let mut bad = path.with_extension("json.bad");
+                // An earlier one may hold the last good favorites and notes: keep both.
+                if bad.exists() {
+                    let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                    bad = path.with_extension(format!("json.{t}.bad"));
+                }
                 let _ = std::fs::rename(&path, &bad);
-                Store::default()
+                let warning = Some(format!("{} is not valid ({e}); moved to {}", path.display(), bad.display()));
+                Store { warning, ..Store::default() }
             }),
         };
         for k in std::mem::take(&mut s.pinned) {
@@ -222,7 +231,8 @@ impl Store {
     /// Whether the model is a favorite of the task or its tiers, or with no task of any.
     pub fn is_favorite(&self, task: Option<&crate::fit::Task>, key: &str) -> bool {
         match task {
-            Some(t) => self.task_favorites(t.name).contains(&key),
+            // Asked per row and per frame, so without `task_favorites`' list.
+            Some(t) => self.favorite.iter().any(|(s, k)| k == key && s.split(':').next() == Some(t.name)),
             None => self.favorite.values().any(|k| k == key),
         }
     }
@@ -341,6 +351,10 @@ mod tests {
         assert!(s.marked.is_empty());
         assert!(!p.exists());
         assert_eq!(std::fs::read(p.with_extension("json.bad")).unwrap(), b"{not json");
+        assert!(s.warning.is_some_and(|w| w.contains("moved to")));
+        std::fs::write(&p, b"{again").unwrap();
+        Store::load_from(p.clone());
+        assert_eq!(std::fs::read(p.with_extension("json.bad")).unwrap(), b"{not json", "the first is kept");
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 }

@@ -177,6 +177,9 @@ fn main() {
             unsafe {
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             }
+            if let Some(w) = &store.warning {
+                eprintln!("warning: {w}");
+            }
             run(cmd, args.refresh)
         }
     };

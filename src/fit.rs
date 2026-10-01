@@ -155,6 +155,10 @@ const ECI_TASKS: [&str; 2] = ["overall", "vision"];
 /// source's overall index, a task's capability in ECI points (Epoch) or its benchmark's score
 /// (Artificial Analysis); "value" alone stays a percentile.
 pub fn shown(m: &Model, t: &Task, s: f64) -> f64 {
+    // A favorite the task cannot score (`view::task_frontier`) shows no score.
+    if s.is_nan() {
+        return s;
+    }
     if ECI_TASKS.contains(&t.name) { m.eci.unwrap_or(s) } else { m.shown.get(t.name).copied().unwrap_or(s) }
 }
 
