@@ -128,7 +128,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         open_weights: m.open_weights,
         release: &m.release,
         knowledge: &m.knowledge,
-        url: m.links().into_iter().next().map(|(_, url)| url),
+        url: m.url().ok(),
         pages: full.then(|| m.links().into_iter().collect()),
         eci: m.eci,
         source: crate::data::source().id(),
@@ -329,10 +329,8 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
 /// site, else that of the site `on` starts the name of, in any case; "aa" is Artificial
 /// Analysis, as in `--source`. Err says which sites have the model.
 fn page(m: &Model, on: Option<&str>) -> std::result::Result<String, String> {
+    let Some(on) = on else { return m.url() };
     let links = m.links();
-    let Some(on) = on else {
-        return links.into_iter().next().map(|(_, url)| url).ok_or(format!("no site has a page for {}", m.name));
-    };
     let site = Some(on.to_lowercase()).filter(|s| s != "aa").unwrap_or("artificialanalysis".into());
     let sites = links.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", ");
     let found = links.into_iter().find(|(s, _)| !site.is_empty() && s.starts_with(&site));

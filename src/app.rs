@@ -710,6 +710,8 @@ pub struct App {
     pub status: String,
     /// The status is an error, shown in red.
     pub failed: bool,
+    /// The status says why a key or a click did nothing (`refuse`): red, but no error to keep.
+    refused: bool,
     pub refreshing: bool,
     /// The last refresh failed; stays in the frame until one succeeds.
     pub refresh_failed: bool,
@@ -767,6 +769,7 @@ impl App {
             g_pending: None,
             status: String::new(),
             failed: false,
+            refused: false,
             refreshing: false,
             refresh_failed: false,
             cache_on: 0.0,
@@ -1094,11 +1097,13 @@ impl App {
         match res {
             Ok(mut d) => {
                 // An error still standing, as the start's of an unreadable user.json, is not
-                // replaced by the news that the refresh went well, nor by its warning.
+                // replaced by the news that the refresh went well, nor by its warning. Why a
+                // key did nothing is.
+                let standing = self.failed && !self.refused;
                 match d.warning.take() {
-                    Some(w) if self.failed => self.status = format!("{}; {w}", self.status),
+                    Some(w) if standing => self.status = format!("{}; {w}", self.status),
                     Some(w) => self.report(Err(w)),
-                    None if !self.failed => self.report(Ok("data refreshed".into())),
+                    None if !standing => self.report(Ok("data refreshed".into())),
                     None => {}
                 }
                 self.set_data(d);
@@ -1123,8 +1128,15 @@ impl App {
 
     /// The outcome of an action in the status bar, an error in red.
     pub fn report(&mut self, res: Result<String, String>) {
-        self.failed = res.is_err();
+        (self.failed, self.refused) = (res.is_err(), false);
         self.status = res.unwrap_or_else(|e| e);
+    }
+
+    /// Why a key or a click did nothing, in red as an error is. Unlike one, the outcome of a
+    /// refresh replaces it.
+    fn refuse(&mut self, why: impl Into<String>) {
+        self.report(Err(why.into()));
+        self.refused = true;
     }
 
     /// The `B` chooser, each source saying what it takes; the TUI opens with it until one is picked.
@@ -1372,7 +1384,7 @@ impl App {
         if matches!(self.input, Input::None | Input::Quit | Input::Upgrade)
             || self.open_list().is_some_and(|l| !l.typing)
         {
-            self.report(Ok("nothing to paste into: / searches, n writes a note".into()));
+            self.refuse("nothing to paste into: / searches, n writes a note");
             return;
         }
         // No line breaks, which would be enter.
@@ -1475,6 +1487,11 @@ impl App {
         }
         let typing = self.open_list().is_some_and(|l| l.typing);
         let list = self.open_list().is_some();
+        // As a key does, and not under a prompt either.
+        if self.input == Input::None || (list && !typing) {
+            self.status.clear();
+            self.failed = false;
+        }
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
                 self.move_by(n, false);
@@ -1564,7 +1581,7 @@ impl App {
                 let cmd = launch_cmd(m, h, &self.data.harness);
                 // `env` is an API key, not a harness.
                 if cmd.is_none() {
-                    self.status = format!("{h} cannot be opened on {}", m.name);
+                    self.refuse(format!("{h} cannot be opened on {}", m.name));
                 }
                 return cmd.map(Effect::Launch);
             }
@@ -1586,7 +1603,7 @@ impl App {
                     (src.site(), m.page(src))
                 };
                 if page.is_none() {
-                    self.status = format!("{} has no page on {site}", m.name);
+                    self.refuse(format!("{} has no page on {site}", m.name));
                 }
                 return page.map(Effect::Open);
             }
@@ -1690,30 +1707,30 @@ impl App {
                 self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
-            KeyCode::Char('d') if table => self.status = "d opens a dropdown on the Dev, Price and Via columns".into(),
+            KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the Dev, Price and Via columns"),
             KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => {
-                self.status = "no selected models: space selects the one under the cursor".into();
+                self.refuse("no selected models: space selects the one under the cursor");
             }
             KeyCode::Char('M') if table => {
                 self.only_marked = !self.only_marked;
                 self.rebuild();
             }
             KeyCode::Char('F') if table && !self.only_fav && !self.any_fav() => {
-                self.status = "no favorites: f favorites the one under the cursor".into();
+                self.refuse("no favorites: f favorites the one under the cursor");
             }
             KeyCode::Char('F') if table => {
                 self.only_fav = !self.only_fav;
                 self.rebuild();
             }
             KeyCode::Char('E') if table && !self.only_excluded && self.store.excluded.is_empty() => {
-                self.status = "no excluded models: e excludes the one under the cursor".into();
+                self.refuse("no excluded models: e excludes the one under the cursor");
             }
             KeyCode::Char('E') if table => {
                 self.only_excluded = !self.only_excluded;
                 self.rebuild();
             }
             KeyCode::Char('U') if table && self.store.marked.is_empty() => {
-                self.status = "no selected models: space selects the one under the cursor".into();
+                self.refuse("no selected models: space selects the one under the cursor");
             }
             KeyCode::Char('U') if table => {
                 let n = std::mem::take(&mut self.store.marked).len();
@@ -1738,7 +1755,7 @@ impl App {
             KeyCode::Char('q') => self.input = Input::Quit,
             KeyCode::Char('u') if self.data.update().is_some() => self.input = Input::Upgrade,
             KeyCode::Char('u') if self.data.latest.is_empty() => {
-                self.status = "the newest version is not known: r asks again".into();
+                self.refuse("the newest version is not known: r asks again");
             }
             KeyCode::Char('u') => {
                 self.status = concat!("no newer version: this is modelcmp v", env!("CARGO_PKG_VERSION")).into();
@@ -1789,7 +1806,7 @@ impl App {
                     self.ask_fav(key);
                 } else if let n @ 2.. = keys.len() {
                     let what = if self.selecting() { "highlighted" } else { "selected" };
-                    self.status = format!("a task has one favorite: f takes one model, {n} are {what}");
+                    self.refuse(format!("a task has one favorite: f takes one model, {n} are {what}"));
                 }
             }
             KeyCode::Char('v') if table => {
@@ -1806,26 +1823,25 @@ impl App {
             }
             KeyCode::Char('o') if row => {
                 let m = self.current()?;
-                let mut items: Vec<_> =
-                    m.links().into_iter().map(|(site, url)| (site.into(), Effect::Open(url))).collect();
-                match items.len() {
-                    0 => self.status = format!("no site has a page for {}", m.name),
-                    1 => return items.pop().map(|(_, e)| e),
-                    _ => self.input = Input::choose("open on which site?", Kind::Open, items, 0),
+                let items: Vec<_> = m.links().into_iter().map(|(site, url)| (site.into(), Effect::Open(url))).collect();
+                match m.url() {
+                    Err(none) => self.refuse(none),
+                    Ok(_) => self.input = Input::choose("open on which site?", Kind::Open, items, 0),
                 }
             }
+            // A list even of one, as `o`'s.
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
-                let mut items: Vec<_> = m
+                let items: Vec<_> = m
                     .via
                     .iter()
                     .filter_map(|h| launch_cmd(m, h, &self.data.harness))
                     .map(|c| (c.join(" "), Effect::Launch(c)))
                     .collect();
-                match items.len() {
-                    0 => self.status = format!("no harness has {}; Via shows where you have access", m.name),
-                    1 => return items.pop().map(|(_, e)| e),
-                    _ => self.input = Input::choose("open in which harness?", Kind::Launch, items, 0),
+                if items.is_empty() {
+                    self.refuse(format!("no harness has {}; Via shows where you have access", m.name));
+                } else {
+                    self.input = Input::choose("open in which harness?", Kind::Launch, items, 0);
                 }
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?, &self.data.harness))),
@@ -1872,10 +1888,10 @@ impl App {
                 // scored one may cost more than the best.
                 let front: Vec<_> = self.task_frontier(t).into_iter().filter(|(_, s)| !s.is_nan()).collect();
                 let best = front.iter().max_by(|a, b| a.1.total_cmp(&b.1));
-                self.status = match (best, front.first()) {
-                    (Some(a), Some(b)) => format!("{} best, {} cheapest", a.0.name, b.0.name),
-                    _ => format!("no model has data for {}", t.name),
-                };
+                match (best, front.first()) {
+                    (Some(a), Some(b)) => self.status = format!("{} best, {} cheapest", a.0.name, b.0.name),
+                    _ => self.refuse(format!("no model has data for {}", t.name)),
+                }
             }
             KeyCode::Enter if table && self.current().is_some() => {
                 self.detail = self.current()?.key.clone();
@@ -2452,7 +2468,7 @@ mod tests {
     }
 
     #[test]
-    fn x_launches_the_only_harness_or_asks_which() {
+    fn x_lists_the_harnesses_even_one() {
         let mut a = app();
         for m in &mut a.data.models {
             let via = m.via.clone();
@@ -2475,7 +2491,8 @@ mod tests {
         assert_eq!(code(&mut a, KeyCode::Enter), cmd("opencode", "p/gpt55"), "opencode takes provider/model");
         assert_eq!(a.input, Input::None);
         press(&mut a, "G");
-        assert_eq!(press(&mut a, "x"), cmd("claude", "opus5"), "one harness launches at once");
+        assert_eq!(press(&mut a, "x"), None, "one harness: still listed, as o's one site");
+        assert_eq!(code(&mut a, KeyCode::Enter), cmd("claude", "opus5"));
         press(&mut a, "a");
         let llama = a.rows.iter().position(|&r| a.data.models[r].key == "llama4").unwrap();
         a.select(llama);
@@ -3168,10 +3185,11 @@ mod tests {
         assert_eq!(a.compare_sel, 0, "0 picks the first model");
         press(&mut a, "$");
         assert_eq!(a.compare_sel, 1, "$ picks the last model");
+        assert_eq!(press(&mut a, "o"), None, "o lists the sites even when only OpenRouter has it");
         assert_eq!(
-            press(&mut a, "o"),
+            code(&mut a, KeyCode::Enter),
             Some(Effect::Open("https://openrouter.ai/x/opus5".into())),
-            "o opens the selected model, at once when only OpenRouter has it"
+            "o opens the selected model"
         );
         press(&mut a, "/eci");
         assert_eq!((a.overlay_query.as_str(), a.query.as_str()), ("eci", ""), "/ in compare filters its rows");
@@ -3392,9 +3410,11 @@ mod tests {
         let last = Some(Effect::Open("https://openrouter.ai/x/gpt55".into()));
         assert_eq!(code(&mut a, KeyCode::Enter), last, "openrouter.ai last");
         a.data.models[0].openrouter = None;
-        assert_eq!(press(&mut a, "o"), Some(Effect::Open("https://epoch.ai/models/gpt55".into())), "one page: at once");
+        assert_eq!(press(&mut a, "o"), None, "one page: still listed");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));
         a.data.models[0].epoch = None;
         assert_eq!((press(&mut a, "o"), a.status.as_str()), (None, "no site has a page for gpt55"), "none: it says so");
+        assert!(a.failed, "in red, as nothing was opened");
         a.data.models[0].epoch = Some("gpt55".into());
         assert_eq!(press(&mut a, "y"), Some(Effect::Copy("p/gpt55".into())));
         a.data.models[0].name = "GPT 5.5".into();
@@ -3431,6 +3451,14 @@ mod tests {
         assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");
         a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }));
         assert_eq!(a.status, "user.json is not valid; pi did not list its models", "nor by a warning");
+        // Why a key did nothing is red too, and no error: the refresh's outcome replaces it.
+        press(&mut a, "U");
+        assert!(a.failed && a.status.starts_with("no selected models"));
+        a.refreshed(Ok(Data::default()));
+        assert_eq!((a.failed, a.status.as_str()), (false, "data refreshed"));
+        press(&mut a, "U");
+        a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }));
+        assert_eq!(a.status, "pi did not list its models", "as its warning does");
         // A message set under an open list is no error, whatever stood before it.
         a.first_start = true;
         a.switch(crate::data::source());
@@ -3442,7 +3470,10 @@ mod tests {
     #[test]
     fn mouse_selects_sorts_and_scrolls() {
         let mut a = app();
+        a.mouse(Mouse::OnlyMarked);
+        assert!(a.failed && a.status.starts_with("no selected models"), "{}", a.status);
         assert_eq!(a.mouse(Mouse::Row(2)), None);
+        assert!(!a.failed && a.status.is_empty(), "the next click clears it, as a key does");
         assert_eq!(a.selected(), 2);
         assert_eq!(a.mouse(Mouse::Row(2)), None);
         assert_eq!(a.view, View::Table, "a click only highlights, however often");

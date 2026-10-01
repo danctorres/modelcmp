@@ -555,12 +555,22 @@ pub fn visible<'a>(
 /// Everything about one model, one line per entry.
 pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     let yes = |b: bool| if b { "yes" } else { "no" };
-    let mut pages = m.links().into_iter().map(|(_, url)| url);
     let mut v = vec![
         format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.developer)),
         format!("  via:        {}", via(&m.via)),
         format!("  context:    {} (max output {})", ctx(m.context), ctx(m.max_output)),
+    ];
+    // Under context: what the model costs in time, next to what it holds.
+    if m.tps.is_some() || m.ttft.is_some() {
+        let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
+        v.push(format!(
+            "  speed:      {} tokens/s, first token in {} (median across providers)",
+            n(m.tps, |v| format!("{v:.0}")),
+            n(m.ttft, |v| format!("{v:.1}s"))
+        ));
+    }
+    v.extend([
         format!(
             "  features:   tools {} · reasoning {} · vision {} · open weights {}",
             yes(m.tool_call),
@@ -569,7 +579,12 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
             yes(m.open_weights)
         ),
         format!("  released:   {}   knowledge: {}", or_dash(&m.release), or_dash(&m.knowledge)),
-        format!("  pages:      {}", pages.next().unwrap_or("-".into())),
+    ]);
+    // A page per line, as the details panel cuts a line at its width.
+    let mut pages = m.links().into_iter().map(|(_, url)| url);
+    v.push(format!("  pages:      {}", pages.next().unwrap_or("-".into())));
+    v.extend(pages.map(|url| format!("              {url}")));
+    v.extend([
         format!("  note:       {}", store.note(&m.key).unwrap_or("-")),
         format!(
             "  favorite:   {}",
@@ -578,19 +593,7 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         String::new(),
         format!("  {} {}", crate::data::source().index().0, score(m.eci)),
         format!("  task fit ({}, value a percentile):", crate::data::source().scale()),
-    ];
-    // A page per line, as the details panel cuts a line at its width.
-    v.splice(7..7, pages.map(|url| format!("              {url}")));
-    if m.tps.is_some() || m.ttft.is_some() {
-        let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
-        let speed = format!(
-            "  speed:      {} tokens/s, first token in {} (median across providers)",
-            n(m.tps, |v| format!("{v:.0}")),
-            n(m.ttft, |v| format!("{v:.1}s"))
-        );
-        // Under context: what the model costs in time, next to what it holds.
-        v.insert(4, speed);
-    }
+    ]);
     for t in TASKS {
         if let Some(s) = fit::fit(m, t) {
             v.push(format!("    {:<13}{:>4.0}  {}", t.name, fit::shown(m, t, s), t.about));
@@ -724,6 +727,18 @@ fn best(
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn details_list_a_page_per_line_under_pages() {
+        let m = Model { md: Some("a/b".into()), epoch: Some("b".into()), tps: Some(50.0), ..Default::default() };
+        let lines = detail_lines(&m, &Store::default());
+        let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
+        assert_eq!(at("  speed:"), at("  context:") + 1, "speed under context");
+        let pages = at("  pages:");
+        assert_eq!(lines[pages], "  pages:      https://models.dev/models/a/b/");
+        assert_eq!(lines[pages + 1], "              https://epoch.ai/models/b");
+        assert_eq!(at("  note:"), pages + 2);
+    }
 
     #[test]
     fn tiers_pick_the_cheapest_good_enough() {

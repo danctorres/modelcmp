@@ -61,8 +61,8 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 |-----|--------|
 | `n` | note for the model; `recommend --json` gives it to agents, who use it to choose between models |
 | `y` `Y` | copy the model id (`provider/model`, as opencode takes it, or pi when only pi has the model) / the model name |
-| `o` | open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai, whichever have a page for it; asks which when several do |
-| `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`, else `x-terminal-emulator`); asks which when several have it |
+| `o` | open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai, whichever have a page for it; lists them to pick from, even when only one does |
+| `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`, else `x-terminal-emulator`); lists the harnesses that have it to pick from, even when only one does |
 
 ## Panels
 

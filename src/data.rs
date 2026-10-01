@@ -12,8 +12,8 @@ const MODELS_URL: &str = "https://models.dev/api.json";
 /// Epoch's scores; with Artificial Analysis's, only its names, to link a model there.
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
 /// Epoch's model pages, as it has none for some models it scored and some for models it did not.
-// ponytail: the first sitemap file only, which holds them all; read its index once Epoch splits it.
-const EPOCH_PAGES_URL: &str = "https://epoch.ai/sitemap-models-0.xml";
+/// The index of Epoch's sitemaps, which names those of its model pages (`epoch_pages`).
+const EPOCH_PAGES_URL: &str = "https://epoch.ai/sitemap-index.xml";
 /// Artificial Analysis's page names, to link a model there that its API did not name one for.
 const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 /// Artificial Analysis's scores, with an API key (`aa_key`).
@@ -447,6 +447,12 @@ impl Model {
         md.into_iter().chain(sources).chain(or).collect()
     }
 
+    /// The first of `links`, which `o` then `enter` opens. Err says that no site has the model.
+    pub fn url(&self) -> Result<String, String> {
+        let first = self.links().into_iter().next().map(|(_, url)| url);
+        first.ok_or_else(|| format!("no site has a page for {}", self.name))
+    }
+
     /// `cost`, but never 0, for dividing by.
     pub fn blended(&self) -> Option<f64> {
         self.cost().filter(|p| *p > 0.0)
@@ -702,10 +708,12 @@ pub fn refresh() -> Result<Data, Failure> {
     let (aa, epoch) = (sitemap(&aa, Source::Aa), sitemap(&epoch, Source::Epoch));
     aa_pages(&mut data.models, &aa);
     epoch_listed(&mut data.models, &epoch);
-    let unpaged = |pages: &HashSet<&str>, s: Source| {
-        pages.is_empty().then(|| format!("{} did not list its pages: links to it may be missing", s.site()))
+    // Artificial Analysis's links are found in its list, and Epoch's only checked against it.
+    let unpaged = |pages: &HashSet<&str>, s: Source, so: &str| {
+        pages.is_empty().then(|| format!("{} did not list its pages: links to it {so}", s.site()))
     };
-    let unpaged = [unpaged(&aa, Source::Aa), unpaged(&epoch, Source::Epoch)];
+    let unpaged =
+        [unpaged(&aa, Source::Aa, "may be missing"), unpaged(&epoch, Source::Epoch, "are unchecked and may be dead")];
     let silent;
     (data.harness, silent) =
         keep_listed(listed, || cached_harness(&std::fs::read(cache_path(src)).unwrap_or_default()));
@@ -755,7 +763,7 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
             continue;
         }
         let tx = tx.clone();
-        std::thread::spawn(move || tx.send((i, fetch(url, key.as_deref()))));
+        std::thread::spawn(move || tx.send((i, if i == 4 { epoch_pages(url) } else { fetch(url, key.as_deref()) })));
     }
     drop(tx);
     let mut got: [Result<Vec<u8>, Failure>; 6] = URLS.map(|url| Err(format!("{url}: no reply").into()));
@@ -838,6 +846,23 @@ fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, Failure> {
     })
 }
 
+/// The sitemaps of model pages that Epoch's `index` names: one, and more once Epoch splits it.
+fn model_sitemaps(index: &str) -> impl Iterator<Item = &str> {
+    let urls = index.split("<loc>").skip(1).filter_map(|s| s.split_once('<').map(|(url, _)| url));
+    urls.filter(|url| url.starts_with("https://epoch.ai/sitemap-models-"))
+}
+
+/// Epoch's sitemaps of model pages, one after the other. All of them or none: a part of the
+/// list would drop the links to the pages it lacks without a word.
+fn epoch_pages(index: &str) -> Result<Vec<u8>, Failure> {
+    let index = fetch(index, None)?;
+    let mut all = Vec::new();
+    for url in model_sitemaps(&String::from_utf8_lossy(&index)) {
+        all.extend(fetch(url, None)?);
+    }
+    Ok(all)
+}
+
 /// "Claude Opus 4.5" -> ["claude", "opus", "4", "5"]: its lowercase alphanumeric runs, a "+"
 /// being "plus" as in `norm`.
 fn words(s: &str) -> Vec<String> {
@@ -888,10 +913,9 @@ fn aa_pages(models: &mut [Model], pages: &HashSet<&str>) {
     }
     by_model.values_mut().for_each(|ps| ps.sort_by_key(|p| (p.len(), *p)));
     // Whether a name says it reasons. An effort alone does not: "-low" is a page beside the model's.
-    let reasons = |s: &str| {
+    let spelled = |s: &str| {
         let w = words(s);
-        let said = |list: &[&str]| w[setting_at(&w)..].iter().any(|x| list.contains(&x.as_str()));
-        if said(&["non"]) { Some(false) } else { said(&["reasoning", "thinking", "adaptive"]).then_some(true) }
+        reasons(&w[setting_at(&w)..])
     };
     let plain = plain(models);
     // The API's own page for a model it scored stands.
@@ -899,8 +923,8 @@ fn aa_pages(models: &mut [Model], pages: &HashSet<&str>) {
         let slug = words(&m.name).join("-");
         let any_setting = || {
             let of_model = by_model.get(&aa_words(&slug, true))?;
-            let asked = reasons(&slug);
-            let said = of_model.iter().find(|p| asked.is_some() && reasons(p) == asked);
+            let asked = spelled(&slug);
+            let said = of_model.iter().find(|p| asked.is_some() && spelled(p) == asked);
             said.or(of_model.first().filter(|_| !own_reasoner(&m.name, &plain))).copied()
         };
         let page = pages.get(slug.as_str()).or_else(|| by_key.get(&aa_words(&slug, false))).copied();
@@ -966,25 +990,34 @@ fn aa_words(slug: &str, effort: bool) -> Vec<String> {
 /// Where the reasoning setting a name ends in starts among its words: their count when it ends
 /// in none.
 fn setting_at(w: &[String]) -> usize {
-    const EFFORT: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "reasoning", "non", "thinking", "adaptive"];
     let digit = |x: &String| x.bytes().any(|b| b.is_ascii_digit());
+    let said = |x: &str| x == "non" || REASONS.contains(&x) || EFFORTS.contains(&x);
     let mut n = w.len();
-    while n > 0 && EFFORT.contains(&w[n - 1].as_str()) && w[..n - 1].iter().any(digit) {
+    while n > 0 && said(&w[n - 1]) && w[..n - 1].iter().any(digit) {
         n -= 1;
     }
     n
 }
 
+/// The words of a reasoning setting: that the model reasons, and how hard.
+const REASONS: &[&str] = &["reasoning", "thinking", "adaptive"];
+const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+
 /// A reasoning setting as a name spells it: whether the model reasons, and at which effort.
 /// `None` is unsaid.
 type Setting = (Option<bool>, Option<String>);
 
+/// Whether `words` say the model reasons: "non" is that it does not. `None` is unsaid.
+fn reasons(words: &[String]) -> Option<bool> {
+    let said = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
+    if said(&["non"]) { Some(false) } else { said(REASONS).then_some(true) }
+}
+
 /// The setting `words` spell: "non" is no reasoning, and an effort without it is reasoning.
+/// "max" is an effort here and not where a name ends (`setting_at`), as "Qwen 3.8 Max" is a model.
 fn setting(words: &[String]) -> Setting {
-    let said = |list: &[&str]| words.iter().find(|w| list.contains(&w.as_str())).cloned();
-    let effort = said(&["minimal", "low", "medium", "high", "xhigh", "max"]);
-    let on = effort.is_some() || said(&["reasoning", "thinking", "adaptive"]).is_some();
-    (if said(&["non"]).is_some() { Some(false) } else { on.then_some(true) }, effort)
+    let effort = words.iter().find(|w| EFFORTS.contains(&w.as_str()) || *w == "max").cloned();
+    (reasons(words).or(effort.as_ref().map(|_| true)), effort)
 }
 
 /// The setting of one of the API's entries: what its name says in brackets, "Claude Opus 4.6
@@ -1534,9 +1567,9 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     for (k, (name, eci, scores)) in &ep.groups {
         let short = norm(&clean_name(name));
         let date = dates.get(k).map_or("", String::as_str);
-        let rank = (eci.is_some(), bare.contains(k), !scores.is_empty(), date);
-        // One with an index wins, then the one filed under the bare id, then a scored one, then
-        // the strictly newer; on ties the first in key order keeps it.
+        let rank = (eci.is_some(), !scores.is_empty(), bare.contains(k), date);
+        // One with an index wins, then one scored on a task, then the one filed under the bare
+        // id, then the strictly newer; on ties the first in key order keeps it.
         if short != *k && newest.get(&short).is_none_or(|r| rank > *r) {
             newest.insert(short.clone(), rank);
             ep.alias.insert(short, k.clone());
@@ -1745,10 +1778,19 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             for o in &m.offers {
                 *counts.entry(slug(&o.id)).or_default() += 1;
             }
-            let most = counts.values().copied().max();
-            let top: Vec<&String> = counts.iter().filter(|(_, n)| Some(**n) == most).map(|(s, _)| s).collect();
             // The commonest id, or one that is it with more or less at its end: a date, a size.
-            let near = |s: &str| top.iter().any(|t| s.starts_with(t.as_str()) || t.starts_with(s));
+            // ponytail: "-mini" is such an end too; a list of the ends that name a model if it bites.
+            let end =
+                |long: &str, short: &str| long.strip_prefix(short).is_some_and(|e| e.starts_with(['-', ':', '@']));
+            // On a tie the shortest, when the others only add an end to it: "kimi-k3-tee" and
+            // "kimi-k3". Ids that differ otherwise, one offer each, name no model.
+            let most = counts.values().copied().max()?;
+            let mut top = counts.iter().filter(|(_, n)| **n == most).map(|(s, _)| s.as_str());
+            let main = top.clone().min_by_key(|s| s.len())?;
+            if !top.all(|t| t == main || end(t, main)) {
+                return None;
+            }
+            let near = |s: &str| s == main || end(s, main) || end(main, s);
             let listed = counts.iter().filter(|(s, _)| near(s)).filter_map(|(s, n)| Some((*n, or_slug.get(s)?)));
             listed.max_by_key(|(n, id)| (*n, std::cmp::Reverse(*id))).map(|(_, id)| id)
         });
@@ -2001,17 +2043,31 @@ mod tests {
                 "qwen3.8-max": {"name": "Qwen 3.8 Max"},
                 "gemma-4-it": {"name": "Gemma 4"},
                 "sonar": {"name": "Sonar"},
-                "llama-9-fp8": {"name": "Llama 9 FP8"}
+                "llama-9-fp8": {"name": "Llama 9 FP8"},
+                "phi-9-31b": {"name": "Phi 9"},
+                "mini-7.5": {"name": "Mini 7.5"}
             }},
             "b": {"models": {
                 "glm-latest": {"name": "GLM-5.3", "canonical_model_id": "zai/glm-latest"},
                 "auto": {"name": "Auto", "canonical_model_id": "x/two"},
                 "qwen3.8-max": {"name": "Qwen 3.8 Max"},
-                "llama-9-fp8": {"name": "Llama 9 FP8"}
+                "llama-9-fp8": {"name": "Llama 9 FP8"},
+                "phi-9": {"name": "Phi 9"},
+                "mini-7.5": {"name": "Mini 7.5"}
             }},
-            "c": {"models": {"Qwen/Qwen3.8-2.4T": {"name": "Qwen 3.8 Max"}, "llama-9": {"name": "Llama 9 FP8"}}},
+            "c": {"models": {
+                "Qwen/Qwen3.8-2.4T": {"name": "Qwen 3.8 Max"},
+                "llama-9": {"name": "Llama 9 FP8"},
+                "phi9": {"name": "Phi 9"},
+                "mini-7": {"name": "Mini 7.5"},
+                "kimi-k9-tee": {"name": "Kimi K9 TEE"}
+            }},
+            "d": {"models": {"kimi-k9": {"name": "Kimi K9 TEE"}}},
             "openrouter": {"models": {
                 "qwen/qwen3.8-2.4t": {"name": "Qwen3.8 2.4T"},
+                "microsoft/phi-9-31b": {"name": "Phi 9 31B"},
+                "x/mini-7": {"name": "Mini 7"},
+                "moonshotai/kimi-k9": {"name": "Kimi K9"},
                 "google/gemma-4-it:free": {"name": "Gemma 4 (free)"},
                 "google/gemma-4-it": {"name": "Gemma 4 IT"},
                 "perplexity/sonar": {"name": "Perplexity Sonar"},
@@ -2026,6 +2082,9 @@ mod tests {
         assert_eq!(row("auto").openrouter, None, "nor is OpenRouter's router another provider's");
         assert_eq!(row("qwen38max").openrouter, None, "one mislabelled offer of three is not the model");
         assert_eq!(row("llama9fp8").openrouter.as_deref(), Some("meta-llama/llama-9"), "but the id cut short is");
+        assert_eq!(row("phi9").openrouter, None, "an id per offer: none is the row's");
+        assert_eq!(row("kimik9tee").openrouter.as_deref(), Some("moonshotai/kimi-k9"), "unless they differ by an end");
+        assert_eq!(row("mini75").openrouter, None, "cut inside a version, it is another model");
         assert_eq!(row("gemma4").openrouter.as_deref(), Some("google/gemma-4-it"), "the standard page over :free");
         assert_eq!(row("sonar").openrouter.as_deref(), Some("perplexity/sonar"), "an id with no digit is one too");
     }
@@ -2059,6 +2118,15 @@ mod tests {
         let pages = sitemap(&xml, Source::Aa);
         assert_eq!(pages.len(), 17, "the model pages alone");
         assert!(sitemap("<html>not found</html>", Source::Aa).is_empty());
+        let index = "<sitemap><loc>https://epoch.ai/sitemap-data-0.xml</loc></sitemap>\
+                     <sitemap><loc>https://epoch.ai/sitemap-models-0.xml</loc></sitemap>\
+                     <sitemap><loc>https://epoch.ai/sitemap-models-1.xml</loc></sitemap>\
+                     <sitemap><loc>https://else.where/sitemap-models-2.xml</loc></sitemap>";
+        assert_eq!(
+            model_sitemaps(index).collect::<Vec<_>>(),
+            ["https://epoch.ai/sitemap-models-0.xml", "https://epoch.ai/sitemap-models-1.xml"],
+            "every sitemap of model pages, and only Epoch's own"
+        );
         let names = [
             ("Claude Sonnet 4.5", Some("claude-4-5-sonnet")),
             ("Claude Opus 4.5", Some("claude-opus-4-5")),
@@ -2385,16 +2453,25 @@ mod tests {
                 "model_metadata.csv",
                 b"model_version,model_group,date\ngoogle/flash-9,Flash 9 (Jun 2025),2025-06-17\n\
                   flash-9-preview-09,Flash 9 (Sep 2025),2025-09-25\nchat-4o-03,GPT-4o (Mar 2025),2025-03-27\n\
-                  gpt-4o-11,GPT-4o (Nov 2024),2024-11-20\n",
+                  gpt-4o-11,GPT-4o (Nov 2024),2024-11-20\nfoo-2,Foo 2 (Jun 2025),2025-06-01\n\
+                  foo-2-09,Foo 2 (Sep 2025),2025-09-01\n",
             );
-            file("benchmark_metadata.csv", b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\n");
-            file("ocr.csv", b"Model version,score\ngoogle/flash-9,0.5\nflash-9-preview-09,0.6\nchat-4o-03,0.5\n");
+            file(
+                "benchmark_metadata.csv",
+                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,SWE-Bench verified,1\n",
+            );
+            file(
+                "ocr.csv",
+                b"Model version,score\ngoogle/flash-9,0.5\nflash-9-preview-09,0.6\nchat-4o-03,0.5\nfoo-2,0.5\n",
+            );
+            file("swe.csv", b"Model version,score\nfoo-2-09,0.5\n");
             file("epoch_capabilities_index/eci_scores.csv", b"Model,eci\nGPT-4o (Nov 2024),128\n");
             z.finish().unwrap();
         }
         let ep = parse_epoch(buf.get_ref()).unwrap();
         assert_eq!(ep.alias["flash9"], "flash9jun2025", "the release filed under the bare id, not the newest");
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
+        assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
     }
 
     #[test]
