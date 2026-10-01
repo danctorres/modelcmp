@@ -190,7 +190,7 @@ fn main() {
 }
 
 fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
-    let (data, warn) = data::load(force)?;
+    let (data, warn) = data::load(force).map_err(|e| e.to_string())?;
     if let Some(w) = warn {
         eprintln!("warning: {w}");
     }

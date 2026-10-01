@@ -113,7 +113,8 @@ skills can take its body in `AGENTS.md`.
   only its sitemap is read, to link models that have a page there (`o`).
 - What you have: the models `opencode models` and `pi --list-models` list, the `claude`, `codex`
   and `gemini` binaries on `PATH` (each counts as its own provider), and providers whose API key
-  is set in the environment. The Via column says which.
+  is set in the environment. The Via column says which. A harness that fails to list its models
+  keeps the ones from the last refresh, and the refresh says so.
 
 Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/` on Linux
 (`~/Library/Caches/modelcmp/` on macOS). Your selection, exclusions, notes and per-task

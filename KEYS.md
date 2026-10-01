@@ -30,7 +30,7 @@ commands and JSON.
 | Key | Action |
 |-----|--------|
 | `s` | sort by the column; again reverses |
-| `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare it filters the rows, in the help its lines, and in a list like the theme panel its entries; what matched is underlined in yellow everywhere, with the yellow behind it on a selected row's solid fill |
+| `/` | filter by name, developer, Via or note, words in any order (`anthropic opus`), a typo forgiven when nothing matches (`opsu`); `/` again starts a new search, `esc` clears; in compare it filters the rows, in the help its lines, and in a list like the theme panel its entries, `f`'s tasks by their name; what matched is underlined in yellow everywhere, with the yellow behind it on a selected row's solid fill |
 | `>` `<` | minimum / maximum for the column, e.g. `>` `155` `enter` on Coding; Ctx in thousands of tokens, `>` `200` for 200k |
 | `d` | dropdown on the Dev, Price and Via headers (▾); `/` searches it, as in every list, `space` or `enter` toggles several, as `space` selects models, and the dropdown stays open until `esc`; on Price, where one level applies, they pick it or drop it |
 | `a` | all models, including ones you have no access to, greyed out with `not available` under Via |

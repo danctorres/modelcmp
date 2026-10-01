@@ -8,8 +8,8 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about,
-    col_name, has_menu, hidden, menu_rows,
+    App, COLS, ECI, Effect, GROUPS, HELP, Input, Kind, List, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows,
+    col_about, col_name, has_menu, hidden, menu_rows,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -35,7 +35,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-type Refresh = Receiver<Result<Data, String>>;
+type Refresh = Receiver<Result<Data, data::Failure>>;
 
 /// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
 /// no data until one is picked.
@@ -65,7 +65,7 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
                 }
                 // A wrong or missing key: open anyway, so `B` can fix it or go back to Epoch.
                 Err(e) if data::source() == data::Source::Aa => (Data::default(), true, Some(e)),
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.to_string()),
             }
         }
     };
@@ -78,13 +78,14 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     if let Some(e) = failed {
         app.refreshed(Err(e));
     }
-    // The store's last: it is your marks and notes that are at stake.
-    for w in [warning, app.store.warning.take()].into_iter().flatten() {
-        app.report(Err(w));
-    }
     let mut rx = None;
     if !fresh && (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
+    }
+    // After the refresh starts, which clears the status. The store's last: it is your marks and
+    // notes that are at stake.
+    for w in [warning, app.store.warning.take()].into_iter().flatten() {
+        app.report(Err(w));
     }
     let mut terminal =
         ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}); see modelcmp --help"))?;
@@ -398,13 +399,13 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // outside closes it.
     let list = match &app.input {
         // Scrolled as last drawn.
-        Input::Menu { col, items, top, query, .. } => {
-            let rows = menu_rows(items, query);
-            menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, *top, rows.len()))
+        Input::Menu { col, items, list } => {
+            let rows = menu_rows(items, &list.query);
+            menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, list.top, rows.len()))
         }
-        Input::Choose { title, items, top, query, typing, .. } => {
-            let (rows, lines) = (choice_rows(items, query).len(), choice_lines(items, query, *typing));
-            Some((overlay_rect(Rect { height: area.height - 1, ..area }, title, &lines), *top, rows))
+        Input::Choose { title, kind, items, list } => {
+            let (rows, lines) = (choice_rows(items, &list.query).len(), choice_lines(*kind, items, list));
+            Some((overlay_rect(Rect { height: area.height - 1, ..area }, title, &lines), list.top, rows))
         }
         _ => None,
     };
@@ -1026,10 +1027,11 @@ fn draw(app: &mut App, f: &mut Frame) {
         let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
         overlay(buf, body, "quit?", lines, &mut 0);
     }
-    if let Input::Choose { title, items, sel, top, query, typing, .. } = &mut app.input {
-        let lines = choice_lines(items, query, *typing);
+    if let Input::Choose { title, kind, items, list } = &mut app.input {
+        let lines = choice_lines(*kind, items, list);
         let rect = overlay_rect(body, title, &lines);
-        let rows = choice_rows(items, query).len();
+        let rows = choice_rows(items, &list.query).len();
+        let (sel, top) = (&list.sel, &mut list.top);
         let shown = usize::from(rect.height.saturating_sub(2));
         // At the last entry every line to the end, so the key hint below them shows too, unless
         // that would scroll the cursor's line off.
@@ -1085,7 +1087,8 @@ fn layout(width: u16, app: &App) -> Layout {
     let out = app.rows.iter().any(|&r| !app.accessible(&ms[r]));
     let via_w = ms
         .iter()
-        .map(|m| m.via.iter().map(|v| v.len() + 1).sum::<usize>())
+        // As drawn: joined by ", ".
+        .map(|m| m.via.iter().map(|v| v.len() + 2).sum::<usize>().saturating_sub(2))
         .chain(out.then_some(OUT_OF_REACH.len()))
         .max()
         .unwrap_or(0)
@@ -1354,14 +1357,14 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         buf.set_style(Rect::new(x, area.y + 2, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
     }
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
-    if let Input::Menu { col, items, sel, top, query, .. } = &mut app.input {
+    if let Input::Menu { col, items, list } = &mut app.input {
         let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
         let picked = match *col {
             1 => &app.dev,
             VIA => &app.via,
             _ => &level,
         };
-        dropdown(buf, area, menu_x(area, &l, *col), *col, items, query, *sel, top, picked);
+        dropdown(buf, area, menu_x(area, &l, *col), *col, items, list, picked);
     }
     (more, top > 0, top + height < app.rows.len())
 }
@@ -1390,18 +1393,16 @@ fn menu_box(area: Rect, x: u16, items: &[(String, usize)], rows: usize) -> Optio
 /// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
 /// listed; the width fits every entry so the box keeps still while typing. `picked` entries
 /// show `✓`, the rest `☐`.
-#[allow(clippy::too_many_arguments)]
 fn dropdown(
     buf: &mut Buffer,
     area: Rect,
     x: u16,
     col: usize,
     items: &[(String, usize)],
-    query: &str,
-    sel: usize,
-    top: &mut usize,
+    list: &mut List,
     picked: &[String],
 ) {
+    let (query, sel, top) = (list.query.as_str(), list.sel, &mut list.top);
     let rows = &menu_rows(items, query);
     let Some((rect, (label_w, n_w))) = menu_box(area, x, items, rows.len()) else { return };
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(ACCENT));
@@ -1568,15 +1569,16 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
-        (Input::Choose { items, .. }, _) if matches!(items.first(), Some((_, Effect::Launch(_)))) => {
-            ("LAUNCH", Color::Green)
+        (Input::Choose { kind, .. }, _) => {
+            let name = match kind {
+                Kind::Launch => "LAUNCH",
+                Kind::Fav => "FAV",
+                Kind::Theme => "THEME",
+                Kind::Source => "SOURCE",
+                Kind::Open => "OPEN",
+            };
+            (name, Color::Green)
         }
-        (Input::Choose { .. }, _) if app.choosing_favs() => ("FAV", Color::Green),
-        (Input::Choose { .. }, _) if app.theme_preview().is_some() => ("THEME", Color::Green),
-        (Input::Choose { items, .. }, _) if matches!(items.first(), Some((_, Effect::Source(_)))) => {
-            ("SOURCE", Color::Green)
-        }
-        (Input::Choose { .. }, _) => ("OPEN", Color::Green),
         (Input::None, View::Table) if app.selecting() => ("HIGHLIGHT", Color::Yellow),
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
         (Input::None, View::Help) => ("HELP", Color::Cyan),
@@ -1592,7 +1594,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let (mode, color) = mode(app);
     let end = pill(buf, area.x, area.y, mode, color, area.width);
     let mut x = end + 1;
-    if matches!(app.input, Input::Quit | Input::Choose { typing: false, .. }) {
+    if matches!(&app.input, Input::Quit | Input::Choose { list: List { typing: false, .. }, .. }) {
         // The question is in a box in the middle of the screen.
         return None;
     }
@@ -1614,11 +1616,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         Input::Bound { col, min, text, cur } => {
             Some((format!("{} {} ", col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
         }
-        Input::Menu { col, query, cur, typing, .. } => Some(match (*typing, query.is_empty()) {
-            (false, true) => (format!("{} ▾", col_name(*col)), query, *cur),
-            _ => (format!("{} ▾ /", col_name(*col)), query, *cur),
+        Input::Menu { col, list, .. } => Some(match (list.typing, list.query.is_empty()) {
+            (false, true) => (format!("{} ▾", col_name(*col)), &list.query, list.cur),
+            _ => (format!("{} ▾ /", col_name(*col)), &list.query, list.cur),
         }),
-        Input::Choose { title, query, cur, .. } => Some((format!("{title} /"), query, *cur)),
+        Input::Choose { title, list, .. } => Some((format!("{title} /"), &list.query, list.cur)),
         Input::Quit | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
@@ -1627,8 +1629,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             Input::Bound { col, .. } if crate::app::numeric(col).is_some_and(|c| c.id == "ctx") => "k",
             _ => "",
         };
-        let (menu, typing) = match app.input {
-            Input::Menu { typing, .. } => (true, typing),
+        let (menu, typing) = match &app.input {
+            Input::Menu { list, .. } => (true, list.typing),
             Input::Choose { .. } => (true, true),
             _ => (false, true),
         };
@@ -1730,7 +1732,8 @@ fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> L
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
-fn choice_lines(items: &[(String, Effect)], query: &str, typing: bool) -> Vec<Line<'static>> {
+fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line<'static>> {
+    let (query, typing) = (list.query.as_str(), list.typing);
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
         .iter()
@@ -1757,14 +1760,14 @@ fn choice_lines(items: &[(String, Effect)], query: &str, typing: bool) -> Vec<Li
     if rows.is_empty() {
         lines.push(Line::from(format!(" no entry matches {query} ")).style(fg(MUTED)));
     }
-    let hint = match items.first() {
+    let hint = match kind {
         // While searching the letters are typed, as the status bar says.
-        Some((_, Effect::Fav(..))) if typing => " ↓ ↑ move · enter toggle · esc clear",
+        Kind::Fav if typing => " ↓ ↑ move · enter toggle · esc clear",
         _ if typing => " ↓ ↑ move · enter pick · esc clear",
-        Some((_, Effect::Fav(..))) => " j k move · / search · space enter toggle · esc close",
-        Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc t close",
-        Some((_, Effect::Source(_))) => " j k move · / search · enter picks · esc close",
-        _ => " j k move · / search · enter opens",
+        Kind::Fav => " j k move · / search · space enter toggle · esc close",
+        Kind::Theme => " j k preview · / search · enter saves · esc t close",
+        Kind::Source => " j k move · / search · enter picks · esc close",
+        Kind::Open | Kind::Launch => " j k move · / search · enter opens",
     };
     lines.push(Line::from(hint).style(fg(MUTED)));
     lines
@@ -2147,6 +2150,16 @@ mod tests {
         let (_, lines) = render(&mut a, 200, 4);
         assert!(lines[3].contains("a all  % 90% cached  │"), "off the default, the way back: {}", lines[3]);
         assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "refreshing: {}", lines[3]);
+    }
+
+    #[test]
+    fn via_fits_every_harness_of_a_model() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        data.models[0].via = vec!["claude".into(), "opencode".into(), "pi".into()];
+        a.set_data(data);
+        let (_, lines) = render(&mut a, 200, 5);
+        assert!(lines.iter().any(|l| l.contains("claude, opencode, pi")), "{lines:?}");
     }
 
     fn render(app: &mut App, width: u16, height: u16) -> (Buffer, Vec<String>) {
@@ -3078,10 +3091,11 @@ mod tests {
         let hits = lit_text(&help("THEME"));
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
-        let lines = choice_lines(&items, "uv", true);
+        let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"));
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(&items, "gr", true);
+        let lines = choice_lines(Kind::Theme, &items, &search("gr"));
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
     }

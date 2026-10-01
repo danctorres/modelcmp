@@ -152,10 +152,40 @@ pub fn set_source(s: Source) {
 
 /// Artificial Analysis's API key: `AA_KEY_ENV`, else the one saved with `save_aa_key`.
 pub const AA_KEY_ENV: &str = "ARTIFICIAL_ANALYSIS_API_KEY";
-/// A refresh's error when Artificial Analysis turns the key down, for the TUI to ask again.
-pub const AA_REJECTED: &str = "Artificial Analysis rejected the API key";
-/// A refresh's error when there is no key at all, for the TUI to ask for one.
-pub const AA_MISSING: &str = "Artificial Analysis needs an API key";
+
+/// Why a refresh failed: the two the TUI answers by asking for a key, and the rest.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Failure {
+    /// Artificial Analysis is the source and there is no API key.
+    NoKey,
+    /// Artificial Analysis turned the key down.
+    BadKey,
+    Other(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Failure::NoKey => {
+                write!(f, "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or pick it with B in the TUI")
+            }
+            Failure::BadKey => f.write_str("Artificial Analysis rejected the API key"),
+            Failure::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(e: String) -> Self {
+        Failure::Other(e)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(e: &str) -> Self {
+        Failure::Other(e.into())
+    }
+}
 
 #[cfg(not(test))]
 fn aa_key_path() -> PathBuf {
@@ -279,6 +309,18 @@ impl Offer {
     }
 }
 
+fn paid(o: &Offer) -> bool {
+    !o.unpriced && o.input + o.output > 0.0
+}
+
+/// Of offers you can use, the one you'd pay: the cheapest paid one, else a free one, else one
+/// with no listed price.
+fn cheapest<'a>(offers: impl Iterator<Item = &'a Offer>) -> Option<&'a Offer> {
+    let offers: Vec<&Offer> = offers.collect();
+    let by_price = offers.iter().copied().filter(|o| paid(o)).min_by(|a, b| a.blended().total_cmp(&b.blended()));
+    by_price.or_else(|| offers.iter().copied().find(|o| !o.unpriced)).or(offers.first().copied())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Model {
     pub key: String,
@@ -332,18 +374,13 @@ impl Model {
     /// else one of yours with no listed price, else the most common list price. It may be
     /// `unpriced`, still naming the id to use; `priced_offer` is the one with prices to show.
     pub fn price(&self) -> Option<&Offer> {
-        let paid = |o: &&Offer| !o.unpriced && o.input + o.output > 0.0;
-        let avail: Vec<&Offer> = self.offers.iter().filter(|o| o.available).collect();
-        if let Some(o) = avail.iter().copied().filter(paid).min_by(|a, b| a.blended().total_cmp(&b.blended())) {
-            return Some(o);
-        }
-        if let Some(o) = avail.iter().find(|o| !o.unpriced).or(avail.first()) {
+        if let Some(o) = cheapest(self.offers.iter().filter(|o| o.available)) {
             return Some(o);
         }
         // ponytail: mode of prices ≈ list price; resellers with odd pricing are outvoted.
         // Ordered by price bits so that on a tie the cheapest wins, deterministically.
         let mut counts: BTreeMap<(u64, u64, u64), (usize, &Offer)> = BTreeMap::new();
-        for o in self.offers.iter().filter(paid) {
+        for o in self.offers.iter().filter(|o| paid(o)) {
             let cache = o.input_cached().to_bits();
             counts.entry((o.input.to_bits(), o.output.to_bits(), cache)).or_insert((0, o)).0 += 1;
         }
@@ -354,6 +391,11 @@ impl Model {
             .map(|(_, o)| o)
             .or_else(|| self.offers.iter().find(|o| !o.unpriced))
             .or(self.offers.first())
+    }
+
+    /// The offer `harness` runs the model on: of the ones it reaches, the one you'd pay.
+    pub fn offer_via(&self, harness: &str) -> Option<&Offer> {
+        cheapest(self.offers.iter().filter(|o| o.via.iter().any(|v| v == harness)))
     }
 
     /// `price`, when its prices are known.
@@ -531,25 +573,43 @@ pub fn load_cache() -> Option<Data> {
     Some(d)
 }
 
-/// Ask each installed harness which models it can use. A missing, failing or hung harness
-/// reports nothing, so a refresh always finishes; so does one still running when `stop` is set.
-fn harness_models(stop: &AtomicBool) -> BTreeMap<String, Vec<String>> {
+/// What each installed harness says it can use: its ids, or none when its listing failed, hung
+/// or was cut short by `stop`, so a refresh always finishes. One not installed is left out.
+fn harness_models(stop: &AtomicBool) -> BTreeMap<String, Option<Vec<String>>> {
     let on_path =
         |bin: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()));
-    HARNESSES
-        .iter()
-        .filter_map(|(bin, probe)| {
-            let ids = match probe {
-                Probe::Provider(p) => on_path(bin).then(|| vec![format!("{p}/*")])?,
-                Probe::List(args) => {
-                    let out = run(bin, args, Duration::from_secs(30), stop)?;
-                    out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect()
-                }
-                Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?)?,
-            };
-            Some((bin.to_string(), ids))
-        })
-        .collect()
+    let ids = |bin: &str, probe: &Probe| match probe {
+        Probe::Provider(p) => Some(vec![format!("{p}/*")]),
+        Probe::List(args) => {
+            let out = run(bin, args, Duration::from_secs(30), stop)?;
+            Some(out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect())
+        }
+        Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?),
+    };
+    HARNESSES.iter().filter(|(bin, _)| on_path(bin)).map(|(bin, probe)| (bin.to_string(), ids(bin, probe))).collect()
+}
+
+/// The listings a refresh keeps, and the harnesses that gave none: one that did not answer
+/// keeps what it listed `before`, as one bad run is not a day without its models.
+fn keep_listed(
+    now: BTreeMap<String, Option<Vec<String>>>,
+    before: impl FnOnce() -> BTreeMap<String, Vec<String>>,
+) -> (BTreeMap<String, Vec<String>>, Vec<String>) {
+    let silent: Vec<String> = now.iter().filter(|(_, ids)| ids.is_none()).map(|(h, _)| h.clone()).collect();
+    let mut before = if silent.is_empty() { BTreeMap::new() } else { before() };
+    let kept = now.into_iter().filter_map(|(h, ids)| Some((ids.or_else(|| before.remove(&h))?, h)));
+    (kept.map(|(ids, h)| (h, ids)).collect(), silent)
+}
+
+/// What the harnesses listed at the last refresh of `src`, whatever the cache's format.
+fn cached_harness(src: Source) -> BTreeMap<String, Vec<String>> {
+    #[derive(Deserialize, Default)]
+    struct Listed {
+        #[serde(default)]
+        harness: BTreeMap<String, Vec<String>>,
+    }
+    let bytes = std::fs::read(cache_path(src)).unwrap_or_default();
+    serde_json::from_slice::<Listed>(&bytes).unwrap_or_default().harness
 }
 
 /// The `provider/model` ids of a table under a `provider model ...` header, as `pi --list-models`
@@ -605,13 +665,11 @@ fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<S
 }
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache.
-pub fn refresh() -> Result<Data, String> {
+pub fn refresh() -> Result<Data, Failure> {
     let src = source();
     let key = match src {
         Source::Epoch => None,
-        Source::Aa => {
-            Some(aa_key().ok_or_else(|| format!("{AA_MISSING}: set {AA_KEY_ENV}, or pick it with B in the TUI"))?)
-        }
+        Source::Aa => Some(aa_key().ok_or(Failure::NoKey)?),
     };
     let stop = Arc::new(AtomicBool::new(false));
     let harness = {
@@ -621,13 +679,14 @@ pub fn refresh() -> Result<Data, String> {
     let res = download(src, key.as_deref());
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
-    let harness = harness.join().unwrap_or_default();
+    let listed = harness.join().unwrap_or_default();
     let (mut data, aa, release) = res?;
     // Only links hang on it, so without it the refresh still succeeds, with no AA links.
     if let Ok(xml) = aa {
         aa_pages(&mut data.models, &String::from_utf8_lossy(&xml));
     }
-    data.harness = harness;
+    let silent;
+    (data.harness, silent) = keep_listed(listed, || cached_harness(src));
     // Only the update notice hangs on it, so without it the refresh still succeeds.
     data.latest = release
         .ok()
@@ -637,21 +696,29 @@ pub fn refresh() -> Result<Data, String> {
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
     // Its own source's file, though a switch may have happened meanwhile.
     // An unwritable cache costs the next start a download, not this one its data.
-    data.warning = crate::store::write_atomic(&cache_path(src), &json)
+    let uncached = crate::store::write_atomic(&cache_path(src), &json)
         .err()
         .map(|e| format!("could not cache the data in {}: {e}", cache_path(src).display()));
+    let unlisted = (!silent.is_empty())
+        .then(|| format!("{} did not list its models: kept the ones from the last refresh", silent.join(", ")));
+    data.warning =
+        Some([unlisted, uncached].into_iter().flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
 
 /// What `download` gives: the merged data, then Artificial Analysis's sitemap and modelcmp's
 /// newest release, which a refresh can do without.
-type Downloaded = (Data, Result<Vec<u8>, String>, Result<Vec<u8>, String>);
+type Downloaded = (Data, Result<Vec<u8>, Failure>, Result<Vec<u8>, Failure>);
+
+/// How long the downloads a refresh can do without are waited for once it has the others.
+const GRACE: Duration = Duration::from_secs(10);
 
 /// The sources, downloaded in parallel and merged. It returns at the first failure of a download
 /// it cannot do without, models.dev's and the source's scores, leaving the others to end on
-/// their own: none is waited for once the refresh cannot finish.
-fn download(src: Source, key: Option<&str>) -> Result<Downloaded, String> {
+/// their own: none is waited for once the refresh cannot finish, and those it can do without
+/// no longer than `GRACE` once it can.
+fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
     const URLS: [&str; 5] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, RELEASE_URL];
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
     let (tx, rx) = std::sync::mpsc::channel();
@@ -665,10 +732,21 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, String> {
         std::thread::spawn(move || tx.send((i, fetch(url, key.as_deref()))));
     }
     drop(tx);
-    let mut got: [Result<Vec<u8>, String>; 5] = URLS.map(|url| Err(format!("{url}: no reply")));
-    for (i, res) in rx {
+    let mut got: [Result<Vec<u8>, Failure>; 5] = URLS.map(|url| Err(format!("{url}: no reply").into()));
+    // Once the needed ones are in, the rest get `GRACE` and no more.
+    let (mut missing, mut end) = (needed.len(), None::<Instant>);
+    loop {
+        let next = match end {
+            None => rx.recv().ok(),
+            Some(end) => rx.recv_timeout(end.saturating_duration_since(Instant::now())).ok(),
+        };
+        let Some((i, res)) = next else { break };
         if needed.contains(&i) {
-            res.as_ref().map_err(String::clone)?;
+            res.as_ref().map_err(Failure::clone)?;
+            missing -= 1;
+            if missing == 0 {
+                end = Some(Instant::now() + GRACE);
+            }
         }
         got[i] = res;
     }
@@ -677,7 +755,7 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, String> {
         Source::Epoch => merge(&models?, &parse_epoch(&epoch?)?, None)?,
         Source::Aa => {
             // Only links hang on it, so without it the refresh still succeeds, with no epoch.ai links.
-            let ep = epoch.and_then(|z| parse_epoch(&z)).ok();
+            let ep = epoch.ok().and_then(|z| parse_epoch(&z).ok());
             let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref())?;
             if let Some(ep) = &ep {
                 epoch_pages(&mut data.models, ep);
@@ -689,7 +767,7 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, String> {
 }
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
-pub fn load(force: bool) -> Result<(Data, Option<String>), String> {
+pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
         cached => match refresh() {
@@ -702,22 +780,25 @@ pub fn load(force: bool) -> Result<(Data, Option<String>), String> {
                     let w = format!("refresh failed ({e}); using data {} old", crate::view::age(d.age()));
                     Ok((d, Some(w)))
                 }
-                None => Err(format!("could not download model data: {e}")),
+                None => Err(match e {
+                    Failure::Other(e) => Failure::Other(format!("could not download model data: {e}")),
+                    key => key,
+                }),
             },
         },
     }
 }
 
 /// `url`'s body; `key` goes in Artificial Analysis's `x-api-key` header.
-fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, String> {
+fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, Failure> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).build().into();
     let mut req = agent.get(url);
     if let Some(k) = key {
         req = req.header("x-api-key", k);
     }
     req.call().and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec()).map_err(|e| match e {
-        ureq::Error::StatusCode(401 | 403) if key.is_some() => AA_REJECTED.to_string(),
-        e => format!("{url}: {e}"),
+        ureq::Error::StatusCode(401 | 403) if key.is_some() => Failure::BadKey,
+        e => format!("{url}: {e}").into(),
     })
 }
 
@@ -1592,6 +1673,25 @@ mod tests {
                    openrouter  a/b:free  8K\npi 1.0 is out: run pi update\n";
         assert_eq!(table_ids(out).unwrap(), ["anthropic/claude-x", "openrouter/a/b:free"], "only the table's rows");
         assert_eq!(table_ids("no models\n"), None, "no header, no ids");
+    }
+
+    #[test]
+    fn a_harness_that_does_not_answer_keeps_its_last_listing() {
+        let ids = |s: &str| vec![s.to_string()];
+        let now = BTreeMap::from([
+            ("claude".to_string(), Some(ids("anthropic/*"))),
+            ("opencode".to_string(), None),
+            ("pi".to_string(), None),
+        ]);
+        let before =
+            || BTreeMap::from([("opencode".to_string(), ids("google/flash")), ("codex".into(), ids("openai/*"))]);
+        let (kept, silent) = keep_listed(now, before);
+        assert_eq!(kept["claude"], ids("anthropic/*"));
+        assert_eq!(kept["opencode"], ids("google/flash"), "what it listed before");
+        assert!(!kept.contains_key("pi") && !kept.contains_key("codex"), "never listed, or no longer installed");
+        assert_eq!(silent, ["opencode", "pi"]);
+        let all = BTreeMap::from([("claude".to_string(), Some(ids("anthropic/*")))]);
+        assert_eq!(keep_listed(all, || unreachable!("every harness answered")).1, [""; 0]);
     }
 
     #[test]

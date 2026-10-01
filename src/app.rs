@@ -1,7 +1,7 @@
 //! TUI state and key handling. No I/O here: side effects come back to the shell as `Effect`s,
 //! so every key is unit-testable.
 
-use crate::data::{Data, Model, Source};
+use crate::data::{Data, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::{Store, slot, slots};
 use crate::view::{
@@ -291,39 +291,97 @@ pub enum Input {
         cur: usize,
     },
     /// The dropdown under the Dev or $ header: each entry and how many models it would show,
-    /// "any" first. `sel` indexes the entries matching `query`, see `menu_rows`.
+    /// "any" first. `list.sel` indexes the entries matching its query, see `menu_rows`.
     Menu {
         col: usize,
         items: Vec<(String, usize)>,
-        sel: usize,
-        /// The first entry in view, kept by the draw (`tui::list_top`) as the table keeps its own.
-        top: usize,
-        query: String,
-        cur: usize,
-        /// Typing into `query`, after `/`.
-        typing: bool,
+        list: List,
     },
     /// `q` asks before quitting.
     Quit,
-    /// A choice of what to do, `sel` under the cursor: `x` on a model several harnesses have
-    /// launches one, `o` opens one of the model's pages. Each item is its label and effect.
+    /// A choice of what to do, `list.sel` under the cursor: `x` on a model several harnesses
+    /// have launches one, `o` opens one of the model's pages. Each item is its label and effect.
     Choose {
         title: &'static str,
+        kind: Kind,
         items: Vec<(String, Effect)>,
-        sel: usize,
-        /// The first line in view, as a dropdown's.
-        top: usize,
-        /// Filter on the entries, typed after `/` as in a dropdown; `sel` indexes what is left.
-        query: String,
-        cur: usize,
-        typing: bool,
+        list: List,
     },
 }
 
+/// What a choice list chooses: the key that opened it.
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum Kind {
+    /// `f`: the tasks a model is the favorite for; space or enter ticks one and the list stays open.
+    Fav,
+    /// `o`: the site to open the model on.
+    Open,
+    /// `x`: the harness to open on the model.
+    Launch,
+    /// `t`: the theme, previewed under the cursor.
+    Theme,
+    /// `B`: the benchmark source.
+    Source,
+}
+
+/// The cursor and the search of an open list, a dropdown or a choice list.
+#[derive(PartialEq, Debug, Default)]
+pub struct List {
+    /// The cursor, among the entries matching `query`.
+    pub sel: usize,
+    /// The first entry in view, kept by the draw (`tui::list_top`) as the table keeps its own.
+    pub top: usize,
+    /// Filter on the entries, typed after `/`.
+    pub query: String,
+    /// The cursor's byte offset in `query`.
+    pub cur: usize,
+    /// Typing into `query`, after `/`.
+    pub typing: bool,
+}
+
+impl List {
+    fn at(sel: usize) -> Self {
+        List { sel, ..Default::default() }
+    }
+
+    /// The keys a list takes whatever it lists: `/` starts a search, and while searching ↓ ↑
+    /// move, esc drops the search and the rest is typed. `at` is the entry under the cursor,
+    /// among them all, and `len` counts the entries a query leaves; with `any` the first always
+    /// stays, as a dropdown's "any". False when the key is none of these.
+    fn key(
+        &mut self,
+        code: KeyCode,
+        mods: KeyModifiers,
+        at: Option<usize>,
+        len: impl Fn(&str) -> usize,
+        any: bool,
+    ) -> bool {
+        match code {
+            KeyCode::Down if self.typing => self.sel = step(self.sel, 1, len(&self.query)),
+            KeyCode::Up if self.typing => self.sel = step(self.sel, -1, len(&self.query)),
+            // Esc while searching drops the search but keeps the entry under the cursor.
+            KeyCode::Esc if self.typing => {
+                (self.sel, self.typing, self.cur) = (at.unwrap_or(0), false, 0);
+                self.query.clear();
+            }
+            _ if self.typing => {
+                let was = self.query.clone();
+                // The first match, so that enter picks it; a move within the text keeps the cursor.
+                if edit(&mut self.query, &mut self.cur, code, mods, |_| true) && self.query != was {
+                    self.sel = if any { len(&self.query).min(2).saturating_sub(1) } else { 0 };
+                }
+            }
+            KeyCode::Char('/') => self.typing = true,
+            _ => return false,
+        }
+        true
+    }
+}
+
 impl Input {
-    /// A choice list (`f`, `o`, `x`, `t`) with the cursor on `sel` and nothing searched yet.
-    fn choose(title: &'static str, items: Vec<(String, Effect)>, sel: usize) -> Self {
-        Self::Choose { title, items, sel, top: 0, query: String::new(), cur: 0, typing: false }
+    /// A choice list with the cursor on `sel` and nothing searched yet.
+    fn choose(title: &'static str, kind: Kind, items: Vec<(String, Effect)>, sel: usize) -> Self {
+        Self::Choose { title, kind, items, list: List::at(sel) }
     }
 }
 
@@ -334,10 +392,15 @@ pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
 }
 
 /// Indices of the choice list entries whose label contains `query`, any case; empty when none
-/// match, which the overlay says.
+/// match, which the overlay says. `f`'s tasks match by their name alone: a tick rewrites the
+/// rest of the label, and the entry would leave the list from under the cursor.
 pub fn choice_rows(items: &[(String, Effect)], query: &str) -> Vec<usize> {
     let q = query.to_lowercase();
-    (0..items.len()).filter(|&i| items[i].0.to_lowercase().contains(&q)).collect()
+    let hit = |(label, effect): &(String, Effect)| match effect {
+        Effect::Fav(_, task, tier) => slot(task, *tier).contains(&q),
+        _ => label.to_lowercase().contains(&q),
+    };
+    (0..items.len()).filter(|&i| hit(&items[i])).collect()
 }
 
 /// Index `i` moved by `n` in a list of `len`: a move stops at an end, and one that starts
@@ -497,7 +560,7 @@ pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
 /// `provider/model` as they listed it (`listed`, pi's `openai-codex/...` for models.dev's `openai/...`),
 /// the single-provider CLIs (claude, codex, gemini) the bare model id.
 pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
-    let o = m.offers.iter().find(|o| o.via.iter().any(|v| v == harness) && harness != "env")?;
+    let o = m.offer_via(harness).filter(|_| harness != "env")?;
     let id = if matches!(harness, "opencode" | "pi") {
         let id = format!("{}/{}", o.provider, o.id);
         let own = listed.get(harness).and_then(|ids| ids.iter().find(|i| crate::data::canonical(harness, i) == id));
@@ -819,16 +882,18 @@ impl App {
     /// Whether the open choice list is `f`'s tasks, where space or enter ticks one and the list
     /// stays open.
     pub fn choosing_favs(&self) -> bool {
-        matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(..)))))
+        matches!(self.input, Input::Choose { kind: Kind::Fav, .. })
     }
 
     /// The theme under the cursor of the open `t` list, which the screen previews.
     pub fn theme_preview(&self) -> Option<&'static str> {
         match &self.input {
-            Input::Choose { items, sel, query, .. } => match choice_rows(items, query).get(*sel).map(|&i| &items[i]) {
-                Some((_, Effect::Theme(name))) => Some(name),
-                _ => None,
-            },
+            Input::Choose { items, list, .. } => {
+                match choice_rows(items, &list.query).get(list.sel).map(|&i| &items[i]) {
+                    Some((_, Effect::Theme(name))) => Some(name),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -892,7 +957,8 @@ impl App {
             self.typos = true;
             rows = matching(self);
         }
-        self.fronts = TASKS.iter().map(|t| self.front(t)).collect();
+        // Before a task keeps only its line: the models every task's line is drawn from.
+        self.fronts = TASKS.iter().map(|t| self.front(t, &rows)).collect();
         let ms = &self.data.models;
         if let Some(t) = self.task {
             // The same line the recommend panel and `list --task` show.
@@ -948,25 +1014,30 @@ impl App {
     }
 
     /// A background refresh finished.
-    pub fn refreshed(&mut self, res: Result<Data, String>) {
+    pub fn refreshed(&mut self, res: Result<Data, Failure>) {
         self.refreshing = false;
         self.refresh_failed = res.is_err();
         match res {
             Ok(mut d) => {
-                self.report(d.warning.take().map_or(Ok("data refreshed".into()), Err));
+                // An error still standing, as the start's of an unreadable user.json, is not
+                // replaced by the news that the refresh went well.
+                match d.warning.take() {
+                    Some(w) => self.report(Err(w)),
+                    None if !self.failed => self.report(Ok("data refreshed".into())),
+                    None => {}
+                }
                 self.set_data(d);
             }
             // One from the environment is yours to change there, as a saved one would not replace it.
-            Err(e) if e.contains(crate::data::AA_REJECTED) && crate::data::aa_key_env().is_some() => {
+            Err(e @ Failure::BadKey) if crate::data::aa_key_env().is_some() => {
                 self.report(Err(format!("{e} in {}", crate::data::AA_KEY_ENV)));
             }
             // No key, or the saved one was turned down: ask for one, unless you are typing or
             // choosing something else, which the prompt would throw away; `B` asks then.
-            Err(e) if e.contains(crate::data::AA_REJECTED) || e.contains(crate::data::AA_MISSING) => {
-                let wrong = e.contains(crate::data::AA_REJECTED);
+            Err(e @ (Failure::BadKey | Failure::NoKey)) => {
                 if self.input == Input::None {
-                    self.report(Err(e));
-                    self.input = Input::Key { text: String::new(), cur: 0, wrong };
+                    self.report(Err(e.to_string()));
+                    self.input = Input::Key { text: String::new(), cur: 0, wrong: e == Failure::BadKey };
                 } else {
                     self.report(Err(format!("{e}; B then Artificial Analysis to enter one")));
                 }
@@ -987,7 +1058,7 @@ impl App {
             Source::ALL.iter().map(|s| (format!("{:<20} {}", s.label(), s.about()), Effect::Source(*s))).collect();
         let sel = Source::ALL.iter().position(|s| *s == crate::data::source()).unwrap_or(0);
         let title = if self.first_start { "benchmarks? B changes it later" } else { "benchmarks?" };
-        self.input = Input::choose(title, items, sel);
+        self.input = Input::choose(title, Kind::Source, items, sel);
     }
 
     /// Use benchmarks from `src` from now on; the shell loads its data (`switched`). The first
@@ -1043,11 +1114,12 @@ impl App {
         self.fronts.get(TASKS.iter().position(|x| x.name == t.name)?)
     }
 
-    /// `task_frontier` and the favorites on it only for being favorites, computed.
-    fn front(&self, t: &Task) -> Front {
+    /// `task_frontier` and the favorites on it only for being favorites, computed from `shown`,
+    /// the models the filters let through.
+    fn front(&self, t: &Task, shown: &[usize]) -> Front {
         let usable = |m: &&Model| self.usable(m);
         // Ranked only when the filters show them, so a hidden favorite drops no shown model.
-        let shown = self.filtered(usize::MAX).map(|(_, m)| m).filter(usable);
+        let shown = shown.iter().map(|&i| &self.data.models[i]).filter(usable);
         let (line, off) = task_line(shown, self.data.models.iter().filter(usable), &self.store, t);
         let at = |m: &Model| self.data.models.iter().position(|x| std::ptr::eq(x, m)).unwrap_or(0);
         let off = line.iter().filter(|(m, _)| off.contains(&m.key.as_str())).map(|&(m, _)| at(m)).collect();
@@ -1117,12 +1189,20 @@ impl App {
         Some(Effect::Save)
     }
 
+    /// The open dropdown's or choice list's cursor and search.
+    pub fn open_list(&self) -> Option<&List> {
+        match &self.input {
+            Input::Menu { list, .. } | Input::Choose { list, .. } => Some(list),
+            _ => None,
+        }
+    }
+
     /// The cursor and length of the open dropdown or choice list (`o`, `x`), whose moves take the
     /// table's vim motions.
     fn list(&mut self) -> Option<(&mut usize, usize)> {
         match &mut self.input {
-            Input::Menu { items, query, sel, .. } => Some((sel, menu_rows(items, query).len())),
-            Input::Choose { items, sel, query, .. } => Some((sel, choice_rows(items, query).len())),
+            Input::Menu { items, list, .. } => Some((&mut list.sel, menu_rows(items, &list.query).len())),
+            Input::Choose { items, list, .. } => Some((&mut list.sel, choice_rows(items, &list.query).len())),
             _ => None,
         }
     }
@@ -1190,15 +1270,7 @@ impl App {
             (items, self.price_level())
         };
         items.insert(0, ("any".into(), ms.len()));
-        self.input = Input::Menu {
-            col: self.col,
-            items,
-            sel: picked.map_or(0, |i| i + 1),
-            top: 0,
-            query: String::new(),
-            cur: 0,
-            typing: false,
-        };
+        self.input = Input::Menu { col: self.col, items, list: List::at(picked.map_or(0, |i| i + 1)) };
     }
 
     fn toggle_mark(&mut self) {
@@ -1231,7 +1303,7 @@ impl App {
             return Some(Effect::Quit);
         }
         // A dropdown not being searched and a choice list take counts and motions too.
-        let list = matches!(self.input, Input::Menu { typing: false, .. } | Input::Choose { typing: false, .. });
+        let list = self.open_list().is_some_and(|l| !l.typing);
         if self.input != Input::None && !list {
             return self.input_key(k.code, k.modifiers);
         }
@@ -1295,8 +1367,8 @@ impl App {
         if let Mouse::Key(code) = m {
             return self.on_key(code.into());
         }
-        let typing = matches!(self.input, Input::Menu { typing: true, .. } | Input::Choose { typing: true, .. });
-        let list = matches!(self.input, Input::Menu { .. } | Input::Choose { .. });
+        let typing = self.open_list().is_some_and(|l| l.typing);
+        let list = self.open_list().is_some();
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
                 self.move_by(n, false);
@@ -1595,7 +1667,7 @@ impl App {
                 // Starting on the task at hand, so f enter toggles it.
                 let items = self.fav_items(&self.current()?.key);
                 let sel = self.task_at_hand().and_then(|t| slots().position(|s| s == (t.name, None))).unwrap_or(0);
-                self.input = Input::choose("favorite for which tasks?", items, sel);
+                self.input = Input::choose("favorite for which tasks?", Kind::Fav, items, sel);
             }
             KeyCode::Char('v') if table => {
                 if self.selecting() {
@@ -1615,7 +1687,7 @@ impl App {
                 if items.len() == 1 {
                     return items.pop().map(|(_, e)| e);
                 }
-                self.input = Input::choose("open on which site?", items, 0);
+                self.input = Input::choose("open on which site?", Kind::Open, items, 0);
             }
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
@@ -1628,7 +1700,7 @@ impl App {
                 match items.len() {
                     0 => self.status = format!("no harness has {}; Via shows where you have access", m.name),
                     1 => return items.pop().map(|(_, e)| e),
-                    _ => self.input = Input::choose("open in which harness?", items, 0),
+                    _ => self.input = Input::choose("open in which harness?", Kind::Launch, items, 0),
                 }
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?, &self.data.harness))),
@@ -1660,7 +1732,7 @@ impl App {
             KeyCode::Char('r') => return self.refresh(),
             KeyCode::Char('t') => {
                 let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
-                self.input = Input::choose("theme?", items, crate::view::theme(&self.store.theme));
+                self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
             }
             KeyCode::Char('B') => self.ask_source(),
             KeyCode::Enter if self.view == View::Recommend => {
@@ -1786,111 +1858,81 @@ impl App {
                 }
                 _ => {}
             },
-            Input::Menu { col, items, sel, query, cur, typing, .. } => {
-                let rows = menu_rows(items, query);
-                // Enter does what space does; while searching, space is typed.
-                let toggle = code == KeyCode::Enter || (code == KeyCode::Char(' ') && !*typing);
+            Input::Menu { col, items, list } => {
+                let rows = menu_rows(items, &list.query);
+                let at = rows.get(list.sel).copied();
                 match code {
-                    KeyCode::Down => *sel = step(*sel, 1, rows.len()),
-                    KeyCode::Up => *sel = step(*sel, -1, rows.len()),
-                    // On Price it picks the level, or drops it when it is the picked one, and keeps the
-                    // dropdown open.
-                    _ if toggle && *col == PRICE => {
-                        let i = rows[*sel];
-                        self.set_price_level(if self.price_level() == i.checked_sub(1) { 0 } else { i });
-                        self.rebuild();
-                    }
-                    // On Dev and Via it adds or drops the entry, as space marks a model, keeping the
-                    // dropdown open; on "any" it drops all.
-                    _ if toggle => {
-                        let i = rows[*sel];
-                        let list = if *col == 1 { &mut self.dev } else { &mut self.via };
-                        match list.iter().position(|d| *d == items[i].0) {
-                            _ if i == 0 => list.clear(),
-                            Some(k) => drop(list.remove(k)),
-                            None => list.push(items[i].0.clone()),
+                    // Enter does what space does; while searching, space is typed. On Price it
+                    // picks the level, or drops it when it is the picked one; on Dev and Via it
+                    // adds or drops the entry, as space marks a model, and on "any" drops all.
+                    // The dropdown stays open.
+                    KeyCode::Enter | KeyCode::Char(' ') if code == KeyCode::Enter || !list.typing => {
+                        let i = at?;
+                        if *col == PRICE {
+                            self.set_price_level(if self.price_level() == i.checked_sub(1) { 0 } else { i });
+                        } else {
+                            let picked = if *col == 1 { &mut self.dev } else { &mut self.via };
+                            match picked.iter().position(|d| *d == items[i].0) {
+                                _ if i == 0 => picked.clear(),
+                                Some(k) => drop(picked.remove(k)),
+                                None => picked.push(items[i].0.clone()),
+                            }
                         }
                         self.rebuild();
                     }
-                    // Esc while searching drops the search but keeps the entry under the cursor.
-                    KeyCode::Esc if *typing => {
-                        (*sel, *typing, *cur) = (rows[*sel], false, 0);
-                        query.clear();
-                    }
-                    _ if *typing => {
-                        let was = query.clone();
-                        // The first match, so that enter picks it; a move within the text keeps the cursor.
-                        if edit(query, cur, code, mods, |_| true) && *query != was {
-                            *sel = menu_rows(items, query).len().min(2) - 1;
-                        }
-                    }
-                    KeyCode::Char('/') => *typing = true,
+                    _ if list.key(code, mods, at, |q| menu_rows(items, q).len(), true) => {}
                     KeyCode::Esc => self.input = Input::None,
                     _ => {}
                 }
             }
-            Input::Choose { items, sel, query, cur, typing, .. } => match code {
-                // While searching, ↓ ↑ move the cursor, as in a dropdown.
-                KeyCode::Down if *typing => *sel = step(*sel, 1, choice_rows(items, query).len()),
-                KeyCode::Up if *typing => *sel = step(*sel, -1, choice_rows(items, query).len()),
-                // Space ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns,
-                // and so does enter. While searching, space is typed.
-                KeyCode::Char(' ') | KeyCode::Enter
-                    if (code == KeyCode::Enter || !*typing) && matches!(items.first(), Some((_, Effect::Fav(..)))) =>
-                {
-                    let i = *choice_rows(items, query).get(*sel)?;
-                    if let Some((_, Effect::Fav(key, task, tier))) = items.get(i) {
-                        let (key, task, tier) = (key.clone(), *task, *tier);
-                        return self.fav(&key, task, tier);
-                    }
-                }
-                // Esc while searching drops the search but keeps the entry under the cursor.
-                KeyCode::Esc if *typing => {
-                    (*sel, *typing, *cur) = (*choice_rows(items, query).get(*sel).unwrap_or(&0), false, 0);
-                    query.clear();
-                }
-                KeyCode::Enter => {
-                    let i = *choice_rows(items, query).get(*sel)?;
-                    let (_, effect) = items.swap_remove(i);
-                    self.input = Input::None;
-                    match effect {
-                        Effect::Theme(name) => {
-                            self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
-                            self.status = format!("theme {name}");
-                            return Some(Effect::Save);
+            Input::Choose { kind, items, list, .. } => {
+                let at = choice_rows(items, &list.query).get(list.sel).copied();
+                match code {
+                    // Space ticks a task in f's list and keeps it open, as in the Dev and Via
+                    // dropdowns, and so does enter. While searching, space is typed.
+                    KeyCode::Char(' ') | KeyCode::Enter
+                        if *kind == Kind::Fav && (code == KeyCode::Enter || !list.typing) =>
+                    {
+                        if let Some((_, Effect::Fav(key, task, tier))) = items.get(at?) {
+                            let (key, task, tier) = (key.clone(), *task, *tier);
+                            return self.fav(&key, task, tier);
                         }
-                        // Asked once: a key it turns down is asked for again (`refreshed`), and
-                        // picking it again when it is the source changes a saved key.
-                        Effect::Source(Source::Aa)
-                            if crate::data::aa_key().is_none()
-                                || (crate::data::source() == Source::Aa
-                                    && !self.first_start
-                                    && crate::data::aa_key_env().is_none()) =>
-                        {
-                            self.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+                    }
+                    KeyCode::Enter => {
+                        let (_, effect) = items.swap_remove(at?);
+                        self.input = Input::None;
+                        match effect {
+                            Effect::Theme(name) => {
+                                self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
+                                self.status = format!("theme {name}");
+                                return Some(Effect::Save);
+                            }
+                            // Asked once: a key it turns down is asked for again (`refreshed`), and
+                            // picking it again when it is the source changes a saved key.
+                            Effect::Source(Source::Aa)
+                                if crate::data::aa_key().is_none()
+                                    || (crate::data::source() == Source::Aa
+                                        && !self.first_start
+                                        && crate::data::aa_key_env().is_none()) =>
+                            {
+                                self.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+                            }
+                            Effect::Source(src) => return self.switch(src),
+                            effect => return Some(effect),
                         }
-                        Effect::Source(src) => return self.switch(src),
-                        effect => return Some(effect),
                     }
-                }
-                _ if *typing => {
-                    let was = query.clone();
-                    // The first match, so that enter picks it; a move within the text keeps the cursor.
-                    if edit(query, cur, code, mods, |_| true) && *query != was {
-                        *sel = 0;
+                    _ if list.key(code, mods, at, |q| choice_rows(items, q).len(), false) => {}
+                    // Closing the first start's choice picks the default.
+                    KeyCode::Esc if self.first_start && *kind == Kind::Source => {
+                        self.input = Input::None;
+                        return self.switch(Source::default());
                     }
+                    // The key that opens the theme list also closes it.
+                    KeyCode::Char('t') if *kind == Kind::Theme => self.input = Input::None,
+                    KeyCode::Esc => self.input = Input::None,
+                    _ => {}
                 }
-                KeyCode::Char('/') => *typing = true,
-                // Closing the first start's choice picks the default.
-                KeyCode::Esc if self.first_start && matches!(items.first(), Some((_, Effect::Source(_)))) => {
-                    self.input = Input::None;
-                    return self.switch(Source::default());
-                }
-                // The key that opens the theme list also closes it.
-                KeyCode::Char('t') if self.theme_preview().is_some() => self.input = Input::None,
-                KeyCode::Esc => self.input = Input::None,
-                _ => {}
-            },
+            }
             Input::Quit => {
                 if code == KeyCode::Char('q') {
                     return Some(Effect::Quit);
@@ -2040,7 +2082,27 @@ mod tests {
         assert_eq!(a.store.theme, "nord");
         press(&mut a, "t/zzz");
         assert_eq!(a.theme_preview(), None, "nothing matches, so enter picks nothing");
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Theme, .. }), "and it is the theme list still");
         assert_eq!(code(&mut a, KeyCode::Enter), None);
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
+        // f's tasks are searched by name, so a tick, which rewrites the label, keeps the entry.
+        press(&mut a, "f/now");
+        assert!(matches!(&a.input, Input::Choose { items, list, .. } if choice_rows(items, &list.query).is_empty()));
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "/coding:l");
+        let ticked = |a: &App| match &a.input {
+            Input::Choose { items, list, .. } => {
+                let rows = choice_rows(items, &list.query);
+                (rows.len(), items[rows[list.sel]].0.starts_with('✓'))
+            }
+            _ => (0, false),
+        };
+        assert_eq!(ticked(&a), (1, false));
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(ticked(&a), (1, true), "ticked, and still under the cursor");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((ticked(&a), a.store.favorite("coding:low")), ((1, false), None), "enter again unticks it");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         press(&mut a, "?/sort");
@@ -2084,9 +2146,8 @@ mod tests {
 
     #[test]
     fn a_rejected_key_is_asked_for_again() {
-        let rejected = format!("could not download model data: {}", crate::data::AA_REJECTED);
         let mut a = app();
-        a.refreshed(Err(rejected.clone()));
+        a.refreshed(Err(Failure::BadKey));
         assert!(matches!(a.input, Input::Key { wrong: true, .. }));
         // A new key while the old one's refresh is under way starts another.
         crate::data::set_source(Source::Aa);
@@ -2096,14 +2157,14 @@ mod tests {
         assert_eq!(crate::data::aa_key().as_deref(), Some("new"));
         crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = Some("env".into()));
         let mut e = app();
-        e.refreshed(Err(rejected));
+        e.refreshed(Err(Failure::BadKey));
         assert!(e.input == Input::None && e.status.contains(crate::data::AA_KEY_ENV), "fixed where it is set");
         let mut b = app();
         b.refreshed(Err("offline".into()));
         assert_eq!(b.input, Input::None, "any other failure is only reported");
         let mut c = app();
         c.input = Input::Note { key: "gpt55".into(), text: "half".into(), cur: 4 };
-        c.refreshed(Err(crate::data::AA_MISSING.into()));
+        c.refreshed(Err(Failure::NoKey));
         assert!(matches!(c.input, Input::Note { .. }), "a note being typed is kept");
     }
 
@@ -2143,13 +2204,16 @@ mod tests {
         press(&mut a, "ld");
         assert_eq!(menu(&a), [("any", 3), ("anthropic", 1), ("openai", 2)], "developers A-Z, not by count");
         press(&mut a, "G");
-        assert!(matches!(a.input, Input::Menu { sel: 2, .. }), "G to the last entry");
+        assert!(matches!(a.input, Input::Menu { list: List { sel: 2, .. }, .. }), "G to the last entry");
         press(&mut a, "gg");
-        assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "gg to the first");
+        assert!(matches!(a.input, Input::Menu { list: List { sel: 0, .. }, .. }), "gg to the first");
         press(&mut a, "3gg");
-        assert!(matches!(a.input, Input::Menu { sel: 2, .. }), "a count picks the entry");
+        assert!(matches!(a.input, Input::Menu { list: List { sel: 2, .. }, .. }), "a count picks the entry");
         code(&mut a, KeyCode::Enter);
-        assert!(matches!(a.input, Input::Menu { sel: 2, .. }), "enter toggles as space does: the dropdown stays open");
+        assert!(
+            matches!(a.input, Input::Menu { list: List { sel: 2, .. }, .. }),
+            "enter toggles as space does: the dropdown stays open"
+        );
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
@@ -2161,7 +2225,7 @@ mod tests {
         assert_eq!(keys(&a), ["mini"]);
         // Reopening starts on the level in effect; esc leaves it alone, "any" drops it.
         press(&mut a, "d");
-        assert!(matches!(a.input, Input::Menu { sel: 3, .. }));
+        assert!(matches!(a.input, Input::Menu { list: List { sel: 3, .. }, .. }));
         code(&mut a, KeyCode::Esc);
         assert_eq!(keys(&a), ["mini"]);
         press(&mut a, "dkkk");
@@ -2171,7 +2235,7 @@ mod tests {
         // Space picks a level and keeps the dropdown open; again on it drops it.
         press(&mut a, "djjj ");
         assert_eq!((a.price_level(), keys(&a)), (Some(2), vec!["mini"]));
-        assert!(matches!(a.input, Input::Menu { sel: 3, .. }));
+        assert!(matches!(a.input, Input::Menu { list: List { sel: 3, .. }, .. }));
         press(&mut a, "j ");
         assert_eq!((a.price_level(), keys(&a).len()), (Some(3), 1), "another level replaces it");
         code(&mut a, KeyCode::Enter);
@@ -2240,7 +2304,14 @@ mod tests {
         let listed = BTreeMap::new();
         assert_eq!(m.price().unwrap().provider, "anthropic", "at the same price, the first is the one you'd pay");
         assert_eq!(model_id(&m, &listed), "openrouter/anthropic/claude-sonnet-5.5", "opencode has OpenRouter's");
-        m.offers.truncate(1);
+        // Of two that opencode reaches, the one you'd pay, not the first.
+        let mut bedrock = offer("amazon-bedrock", "anthropic.claude-sonnet-5-5", "opencode");
+        bedrock.input = 6.0;
+        m.offers.insert(0, bedrock);
+        assert_eq!(model_id(&m, &listed), "openrouter/anthropic/claude-sonnet-5.5");
+        assert_eq!(launch_cmd(&m, "opencode", &listed).unwrap()[2], "openrouter/anthropic/claude-sonnet-5.5");
+        m.offers.truncate(2);
+        m.offers.remove(0);
         assert_eq!(model_id(&m, &listed), "anthropic/claude-sonnet-5-5", "with neither, the one you'd pay");
     }
 
@@ -2253,7 +2324,7 @@ mod tests {
         }
         let cmd = |h: &str, id: &str| Some(Effect::Launch(vec![h.into(), "--model".into(), id.into()]));
         assert_eq!(press(&mut a, "x"), None, "gpt55 has codex and opencode");
-        assert!(matches!(&a.input, Input::Choose { items, sel: 0, .. } if items.len() == 2));
+        assert!(matches!(&a.input, Input::Choose { items, list: List { sel: 0, .. }, .. } if items.len() == 2));
         assert_eq!(press(&mut a, "jj"), None, "j stops at the last");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.input, Input::None, "esc cancels");
@@ -2281,21 +2352,26 @@ mod tests {
         let mut a = app();
         a.col = 0;
         press(&mut a, "ld/OPEN");
-        assert!(matches!(&a.input, Input::Menu { query, sel: 1, typing: true, .. } if query == "OPEN"));
+        assert!(
+            matches!(&a.input, Input::Menu { list: List { query, sel: 1, typing: true, .. }, .. } if query == "OPEN")
+        );
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.dev, ["openai"], "enter toggles the first match");
-        assert!(matches!(&a.input, Input::Menu { query, typing: true, .. } if query == "OPEN"), "and the search stays");
+        assert!(
+            matches!(&a.input, Input::Menu { list: List { query, typing: true, .. }, .. } if query == "OPEN"),
+            "and the search stays"
+        );
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         press(&mut a, "d/anth");
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
         assert!(
-            matches!(&a.input, Input::Menu { query, sel: 1, typing: false, .. } if query.is_empty()),
+            matches!(&a.input, Input::Menu { list: List { query, sel: 1, typing: false, .. }, .. } if query.is_empty()),
             "esc drops the search, the cursor stays on anthropic"
         );
         press(&mut a, "/zzz");
-        assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "no match leaves only any");
+        assert!(matches!(a.input, Input::Menu { list: List { sel: 0, .. }, .. }), "no match leaves only any");
         code(&mut a, KeyCode::Enter);
         assert!(a.dev.is_empty(), "enter on any drops them all");
     }
@@ -2333,7 +2409,7 @@ mod tests {
         a.col = 1;
         press(&mut a, "d/anth");
         ctrl(&mut a, 'w');
-        assert!(matches!(&a.input, Input::Menu { query, sel: 1, .. } if query.is_empty()));
+        assert!(matches!(&a.input, Input::Menu { list: List { query, sel: 1, .. }, .. } if query.is_empty()));
     }
 
     #[test]
@@ -2773,7 +2849,9 @@ mod tests {
         press(&mut a, "Rj");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
-        assert!(matches!(&a.input, Input::Choose { sel: 4, items, .. } if items[4].0 == "☐ coding  (now gpt55)"));
+        assert!(
+            matches!(&a.input, Input::Choose { list: List { sel: 4, .. }, items, .. } if items[4].0 == "☐ coding  (now gpt55)")
+        );
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), Some("mini"));
         assert!(a.status.starts_with("★ mini"));
@@ -3147,6 +3225,10 @@ mod tests {
         assert!(!a.failed && a.status.is_empty() && a.refresh_failed, "the frame keeps saying it failed");
         a.refreshed(Ok(Data::default()));
         assert!(!a.refresh_failed, "until one succeeds");
+        assert_eq!(a.status, "data refreshed");
+        a.report(Err("user.json is not valid".into()));
+        a.refreshed(Ok(Data::default()));
+        assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");
         a.report(Ok("done".into()));
         assert!(!a.failed);
     }
