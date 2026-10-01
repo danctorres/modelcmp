@@ -8,7 +8,7 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, SPEED, VIA, View, choice_rows, col_about,
+    App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about,
     col_name, has_menu, hidden, menu_rows,
 };
 use crate::data::{self, Data, Model};
@@ -242,6 +242,8 @@ fn spawn_refresh() -> Refresh {
 
 fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refresh>) -> Result<(), String> {
     let mut dirty = true;
+    // The last press on a cell, which a second one makes a double click (`double`).
+    let mut click = None;
     loop {
         if dirty {
             terminal
@@ -265,8 +267,12 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
             wait = Duration::ZERO;
             let size = terminal.size().map_err(|e| e.to_string())?;
             let input = match event::read().map_err(|e| e.to_string())? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => Some(Ok(k)),
-                Event::Mouse(m) => hit(app, Rect::new(0, 0, size.width, size.height), m).map(Err),
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    click = None;
+                    Some(Ok(k))
+                }
+                Event::Mouse(m) => hit(app, Rect::new(0, 0, size.width, size.height), m)
+                    .map(|m| Err(double(&mut click, m, Instant::now()))),
                 // A resize redraws; a key release, a pointer move and the like do nothing.
                 Event::Resize(..) => None,
                 _ => continue,
@@ -431,21 +437,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             Mouse::Exclude(n)
         } else if pick {
             Mouse::Pick(n)
-        } else if let Some(j) = harness_at(app, &l, n, x) {
-            Mouse::Harness(n, j)
-        } else if (l.name_x..l.name_x + l.name_w + GAP + l.dev_w).contains(&x) {
-            Mouse::Name(n)
-        } else if let Some(&(i, ..)) = l.cols.iter().find(|&&(_, cx, w)| (cx..cx + w).contains(&x)) {
-            // The groups of `GROUPS` and where each comes from: prices and context, benchmarks,
-            // then speed, which only Artificial Analysis measures.
-            let site = match i + 2 {
-                PRICE..ECI => "models.dev",
-                ECI..SPEED if data::source() == data::Source::Epoch => "epoch.ai",
-                _ => "artificialanalysis.ai",
-            };
-            Mouse::Site(n, site)
         } else {
-            Mouse::Row(n)
+            // A cell opens what it shows, on a double click (`double`): Via the harness under
+            // the pointer, and Notes nothing.
+            match col_at(&l, x) {
+                Some((VIA, vx, _)) => harness_at(app, n, x - vx).map_or(Mouse::Row(n), |j| Mouse::Harness(n, j)),
+                Some((col, ..)) if col != NOTES => Mouse::Cell(n, col),
+                _ => Mouse::Row(n),
+            }
         });
     }
     let x = m.column - inner.x;
@@ -461,34 +460,55 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             _ => None,
         };
     }
-    let dev_x = l.name_x + l.name_w + GAP;
-    let (col, cx, w) = if x < dev_x {
-        (0, l.name_x, l.name_w)
-    } else if x < dev_x + l.dev_w {
-        (1, dev_x, l.dev_w)
-    } else if let Some(&(i, cx, w)) = l.cols.iter().find(|&&(_, cx, w)| (cx..cx + w).contains(&x)) {
-        (i + 2, cx, w)
-    } else if let Some((vx, w)) = l.via.filter(|&(vx, w)| (vx..vx + w).contains(&x)) {
-        (VIA, vx, w)
-    } else if let Some((nx, w)) = l.notes.filter(|&(nx, w)| (nx..nx + w).contains(&x)) {
-        (NOTES, nx, w)
-    } else {
-        return None;
-    };
+    let (col, cx, w) = col_at(&l, x)?;
     // The ▾ ends a left-aligned text header ("Dev▼ ▾") and is the last cell of a numeric one.
     let arrow = if col == 1 || col == VIA { cx + 4 + u16::from(app.sort_col == col) } else { cx + w - 1 };
     Some(if has_menu(col) && x >= arrow { Mouse::Menu(col) } else { Mouse::Header(col) })
 }
 
-/// Which of row `n`'s harnesses column `x` is on, as `draw` lays Via out: the names joined by ", ".
-fn harness_at(app: &App, l: &Layout, n: usize, x: u16) -> Option<usize> {
-    let (mut end, _) = l.via.filter(|&(vx, w)| (vx..vx + w).contains(&x))?;
+/// The column `x` is on, from the model name on: its cursor index, where it starts and its width.
+fn col_at(l: &Layout, x: u16) -> Option<(usize, u16, u16)> {
+    let dev_x = l.name_x + l.name_w + GAP;
+    if x < l.name_x {
+        None
+    } else if x < dev_x {
+        Some((0, l.name_x, l.name_w))
+    } else if x < dev_x + l.dev_w {
+        Some((1, dev_x, l.dev_w))
+    } else if let Some(&(i, cx, w)) = l.cols.iter().find(|&&(_, cx, w)| (cx..cx + w).contains(&x)) {
+        Some((i + 2, cx, w))
+    } else if let Some((vx, w)) = l.via.filter(|&(vx, w)| (vx..vx + w).contains(&x)) {
+        Some((VIA, vx, w))
+    } else {
+        l.notes.filter(|&(nx, w)| (nx..nx + w).contains(&x)).map(|(nx, w)| (NOTES, nx, w))
+    }
+}
+
+/// Which of row `n`'s harnesses is `x` cells into its Via, as `draw` lays it out: the names
+/// joined by ", ".
+fn harness_at(app: &App, n: usize, x: u16) -> Option<usize> {
     let m = app.data.models.get(*app.rows.get(n)?).filter(|m| app.accessible(m))?;
+    let mut end = 0;
     m.via.iter().position(|h| {
         let start = end;
         end += h.len() as u16 + 2;
         (start..end - 2).contains(&x)
     })
+}
+
+/// How far apart the two presses of a double click may be.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// A cell opens on a double click, two presses on it within `DOUBLE_CLICK`: a single press,
+/// the first of the two included, is a click on its row. `last` is the press to pair with.
+fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Mouse {
+    let (Mouse::Cell(n, _) | Mouse::Harness(n, _)) = m else {
+        *last = None;
+        return m;
+    };
+    let again = last.is_some_and(|(t, was)| was == m && at.duration_since(t) < DOUBLE_CLICK);
+    *last = (!again).then_some((at, m));
+    if again { m } else { Mouse::Row(n) }
 }
 
 /// Start `cmd` in a new terminal window here, without waiting: Windows Terminal under WSL,
@@ -2407,6 +2427,20 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_takes_a_double_click() {
+        let (t, ms) = (Instant::now(), Duration::from_millis);
+        let (cell, row) = (Mouse::Cell(3, PRICE), Mouse::Row(3));
+        let mut last = None;
+        assert_eq!(double(&mut last, cell, t), row, "one press highlights the row");
+        assert_eq!(double(&mut last, cell, t + ms(200)), cell, "a second on the cell opens it");
+        assert_eq!(double(&mut last, cell, t + ms(300)), row, "a third starts over");
+        assert_eq!(double(&mut last, cell, t + ms(800)), row, "too slow: two clicks");
+        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(900)), row, "another cell: a click");
+        assert_eq!(double(&mut last, Mouse::Extend(4), t + ms(950)), Mouse::Extend(4), "a drag is itself");
+        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(999)), row, "and breaks the pair");
+    }
+
+    #[test]
     fn clicks_land_on_rows_headers_and_dropdown_entries() {
         use ratatui::crossterm::event::KeyModifiers;
         let mut a = app();
@@ -2422,8 +2456,9 @@ mod tests {
             row: y,
             modifiers: KeyModifiers::NONE,
         };
-        assert_eq!(hit(&a, area, click(12, 4)), Some(Mouse::Name(1)));
-        assert_eq!(hit(&a, area, click(col("Dev"), 4)), Some(Mouse::Name(1)), "the developer, as the name");
+        assert_eq!(hit(&a, area, click(12, 4)), Some(Mouse::Cell(1, 0)));
+        assert_eq!(hit(&a, area, click(col("Dev"), 4)), Some(Mouse::Cell(1, 1)));
+        assert_eq!(hit(&a, area, click(1, 4)), Some(Mouse::Row(1)), "the row number is no cell");
         assert_eq!(hit(&a, area, click(3, 4)), Some(Mouse::Box(1)), "a click on the checkbox cycles it");
         assert_eq!(hit(&a, area, click(5, 4)), Some(Mouse::Star(1)), "and on the ☆ picks tasks");
         assert_eq!(hit(&a, area, click(7, 4)), Some(Mouse::Exclude(1)), "and on the ✗ box excludes the model");
@@ -2453,23 +2488,14 @@ mod tests {
         assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
         let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.find("opencode")?))).unwrap();
         let (x, y) = (lines[k][..via].chars().count() as u16 + 1, k as u16 + 1);
-        assert_eq!(
-            hit(&a, area, click(x + 7, y)),
-            Some(Mouse::Harness(k - 2, 0)),
-            "a harness in Via: a second click opens it"
-        );
+        assert_eq!(hit(&a, area, click(x + 7, y)), Some(Mouse::Harness(k - 2, 0)), "a harness in Via");
         assert_eq!(hit(&a, area, click(x + 8, y)), Some(Mouse::Row(k - 2)), "past its name: the row");
         assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
-        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Site(1, "epoch.ai")), "a benchmark score");
-        assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Site(1, "models.dev")), "a price");
+        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 8)), "a benchmark score");
+        assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Cell(1, PRICE)), "a price");
+        assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Row(1)), "the notes open nothing");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
         assert_eq!(hit(&a, area, wheel(MouseEventKind::ScrollLeft)), Some(Mouse::Cols(-1)));
-        data::set_source(data::Source::Aa);
-        let (_, aa) = render(&mut a, w - 2, h - 3);
-        let tps = aa[0][..aa[0].find("Tok/s").unwrap()].chars().count() as u16 + 1;
-        let site = Some(Mouse::Site(1, "artificialanalysis.ai"));
-        assert_eq!(hit(&a, area, click(tps, 4)), site, "speed is Artificial Analysis's");
-        data::set_source(data::Source::Epoch);
         a.mouse(Mouse::Menu(1));
         let (_, lines) = render(&mut a, w - 2, h - 3);
         let any = lines[2][..lines[2].find("any").unwrap()].chars().count() as u16 + 1;

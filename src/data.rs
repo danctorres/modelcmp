@@ -93,6 +93,14 @@ impl Source {
         }
     }
 
+    /// Its website, as `Model::links` names it.
+    pub fn site(self) -> &'static str {
+        match self {
+            Source::Epoch => "epoch.ai",
+            Source::Aa => "artificialanalysis.ai",
+        }
+    }
+
     /// What it takes, for the `B` chooser.
     pub fn about(self) -> &'static str {
         match self {
@@ -355,23 +363,37 @@ impl Model {
         self.priced_offer().map(Offer::blended)
     }
 
-    /// The model's pages, (site, url): models.dev when its developer offers it, as models.dev
-    /// has pages only under the lab (`openai/gpt-5.5`, not a reseller's); Epoch AI when it has
-    /// benchmarked the model (`epoch`); Artificial Analysis when it has a page
-    /// for it (`aa`); OpenRouter always, `url`.
-    pub fn links(&self) -> Vec<(&'static str, String)> {
+    /// The model's page on models.dev if `o` is its developer's offer, as models.dev has model
+    /// pages only under the lab (`openai/gpt-5.5`, not a reseller's).
+    fn lab_page(&self, o: &Offer) -> Option<String> {
         let dev = norm(&self.developer);
-        let md = self.offers.iter().find(|o| !dev.is_empty() && norm(&short_org(&o.provider)) == dev);
-        let epoch =
-            self.epoch.as_ref().map(|n| ("epoch.ai", format!("https://epoch.ai/models/{}", words(n).join("-"))));
-        let aa =
-            self.aa.as_ref().map(|p| ("artificialanalysis.ai", format!("https://artificialanalysis.ai/models/{p}")));
-        md.map(|o| ("models.dev", format!("https://models.dev/models/{}/{}/", o.provider, o.id)))
-            .into_iter()
-            .chain(epoch)
-            .chain(aa)
-            .chain([("openrouter.ai", self.url.clone())])
-            .collect()
+        (!dev.is_empty() && norm(&short_org(&o.provider)) == dev)
+            .then(|| format!("https://models.dev/models/{}/{}/", o.provider, o.id))
+    }
+
+    /// Where models.dev shows the price you'd pay: the model's page when its developer is who
+    /// you'd pay, else the provider's, which lists its models with their prices.
+    pub fn price_page(&self) -> Option<String> {
+        let o = self.price()?;
+        self.lab_page(o).or_else(|| Some(format!("https://models.dev/providers/{}/", o.provider)))
+    }
+
+    /// The model's page on a benchmark source: Epoch AI when it has benchmarked the model
+    /// (`epoch`), Artificial Analysis when it has a page for it (`aa`).
+    pub fn page(&self, s: Source) -> Option<String> {
+        let id = match s {
+            Source::Epoch => words(self.epoch.as_ref()?).join("-"),
+            Source::Aa => self.aa.clone()?,
+        };
+        Some(format!("https://{}/models/{id}", s.site()))
+    }
+
+    /// The model's pages, (site, url): models.dev when its developer offers it (`lab_page`), the
+    /// benchmark sources that have one (`page`), and OpenRouter always, `url`.
+    pub fn links(&self) -> Vec<(&'static str, String)> {
+        let md = self.offers.iter().find_map(|o| self.lab_page(o)).map(|url| ("models.dev", url));
+        let sources = Source::ALL.into_iter().filter_map(|s| Some((s.site(), self.page(s)?)));
+        md.into_iter().chain(sources).chain([("openrouter.ai", self.url.clone())]).collect()
     }
 
     /// `cost`, but never 0, for dividing by.
@@ -1508,6 +1530,14 @@ mod tests {
             ["epoch.ai", "artificialanalysis.ai", "openrouter.ai"],
             "models.dev has pages only under the developer"
         );
+        let paid =
+            |p: &str, id: &str, price: f64| Offer { available: true, input: price, output: price, ..offer(p, id) };
+        m.offers = vec![paid("anthropic", "claude-opus-5-5", 5.0), paid("302ai", "claude-opus-5-5", 9.0)];
+        let page = "https://models.dev/models/anthropic/claude-opus-5-5/";
+        assert_eq!(m.price_page().as_deref(), Some(page), "the developer's price: the model's page");
+        m.offers[1].input = 1.0;
+        let page = "https://models.dev/providers/302ai/";
+        assert_eq!(m.price_page().as_deref(), Some(page), "a reseller's: its page, where its prices are");
     }
 
     #[test]
