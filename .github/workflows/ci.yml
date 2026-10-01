@@ -7,12 +7,14 @@ on:
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   check:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
@@ -24,7 +26,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal
       - run: cargo run --quiet -- list --all --json --refresh > models.json
       - run: |
@@ -44,7 +46,7 @@ jobs:
           - { target: aarch64-apple-darwin, os: macos-latest }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check tag matches Cargo.toml version
         run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml
       - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
@@ -56,7 +58,7 @@ jobs:
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/modelcmp" README.md KEYS.md REFERENCE.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: "*.tar.gz"
@@ -69,7 +71,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -83,7 +85,7 @@ jobs:
     env:
       VERSION: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Render
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,7 +93,7 @@ jobs:
           gh release download "$VERSION" -p SHA256SUMS
           mkdir out
           pkg/render.sh "$VERSION" SHA256SUMS pkg/modelcmp.rb > out/modelcmp.rb
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: danctorres/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}

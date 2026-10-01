@@ -1,5 +1,5 @@
-# Homebrew formula template. The release workflow fills in @VERSION@ and the
-# @SHA256_<target>@ placeholders and pushes it to danctorres/homebrew-tap.
+# Homebrew formula template. The release workflow fills in the version and the
+# checksum placeholders and pushes it to danctorres/homebrew-tap.
 class Modelcmp < Formula
   desc "Compare models, pick favorites, get recommendations"
   homepage "https://github.com/danctorres/modelcmp"
