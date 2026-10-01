@@ -106,7 +106,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     const SPEED: usize = 2;
     /// Frames each colour lasts in a cell, so the bands are `STEP * SPEED` columns wide.
     const STEP: usize = 3;
-    /// Frames the glide takes.
+    /// Frames the glide takes at most: it ends as soon as the wordmark rounds into place.
     const SLIDE: usize = 20;
     let (w, rows, tw) = (LOGO[0].chars().count(), LOGO.len(), TAGLINE.len());
     let palette = THEMES[crate::view::theme(&app.store.theme)].1.as_ref();
@@ -147,9 +147,10 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                     buf[(x + c as u16, yr)].set_char(ch).set_style(style);
                 }
             }
-            // Each character as the wave's front passes over it.
+            // Each character as the wave's front passes over it: two rows under the bottom one,
+            // so 4 columns ahead of the front there.
             if tall && t > SLIDE {
-                let typed = &TAGLINE[..((t - SLIDE) * SPEED).saturating_sub((w - tw) / 2).min(tw)];
+                let typed = &TAGLINE[..((t - SLIDE) * SPEED + 4).saturating_sub((w - tw) / 2).min(tw)];
                 buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows as u16 + 1, typed, fg(Color::Reset));
             }
             recolor(buf, palette);
@@ -161,9 +162,14 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
             // Once it rounds into place, start the rainbow rather than hold it still.
             t = t.max(SLIDE);
         }
-        // A key skips it; a pointer move or a resize does not, nor does it cut the frame short.
+        // A key skips it; a pointer move or a resize does not, nor does it cut the frame short
+        // or, by stopping at the deadline with events still queued, stretch it.
         let until = Instant::now() + Duration::from_millis(if t == end { 750 } else { 15 });
-        while event::poll(until.saturating_duration_since(Instant::now()))? {
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() || !event::poll(left)? {
+                break;
+            }
             if matches!(event::read()?, Event::Key(k) if k.kind == KeyEventKind::Press) {
                 return Ok(());
             }
@@ -806,6 +812,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.compare_x,
                 area.width.saturating_sub(4) as usize,
                 &app.overlay_query,
+                |m| app.muted(m),
             );
             app.compare_x = first;
             Some(("compare".into(), lines))
@@ -1029,6 +1036,12 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         let on = k == sel || app.is_selected(k);
         let base = if on { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
         let tint = |c: Color| if on { base } else { fg(c) };
+        // A model excluded or out of reach has its row muted: the text and the developer, harness
+        // and price level colours go grey, as every row has those, while the ✓, ★, ✗, best and
+        // worst keep theirs, as a column would else lose its extremes.
+        let dim = app.muted(m);
+        let text = if dim { tint(MUTED) } else { base };
+        let soft = |c: Color| if dim { text } else { tint(c) };
         buf.set_style(Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
         match app.store.is_marked(&m.key) {
@@ -1045,18 +1058,13 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         } else {
             buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
-        // A marked model's name is light blue and bold, as the ✓; on the bar, bold only. One you
-        // have no access to stays muted, marked or not, with the bold still showing the mark, and
-        // its Via says so.
+        // A marked model's name is light blue and bold, as the ✓; on the bar, bold only. On a
+        // muted row it stays muted, with the bold still showing the mark; out of reach, its Via
+        // says so.
         let reach = app.accessible(m);
-        let name = match (app.store.is_marked(&m.key), reach) {
-            (true, true) => tint(MARK).add_modifier(BOLD),
-            (true, false) => tint(MUTED).add_modifier(BOLD),
-            (false, true) => base,
-            (false, false) => tint(MUTED),
-        };
+        let name = if app.store.is_marked(&m.key) { soft(MARK).add_modifier(BOLD) } else { text };
         buf.set_stringn(name_x, y, &m.name, nw, name);
-        buf.set_stringn(dev_x, y, &m.developer, dw, tint(dev_color(&m.developer)));
+        buf.set_stringn(dev_x, y, &m.developer, dw, soft(dev_color(&m.developer)));
         for &(i, x, w) in &cols {
             let Some(v) = app.vals[r][i] else {
                 buf.set_stringn(area.x + x + w - 1, y, "-", 1, tint(MUTED));
@@ -1064,10 +1072,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             };
             let style = match ext[i] {
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
-                _ if i + 2 == PRICE => tint(LEVEL[level(v)]),
+                _ if i + 2 == PRICE => soft(LEVEL[level(v)]),
                 Some((best, _)) if v == best => tint(GOOD).add_modifier(BOLD),
                 Some((_, worst)) if v == worst => tint(BAD),
-                _ => base,
+                _ => text,
             };
             let w = w as usize;
             buf.set_stringn(area.x + x, y, format!("{:>w$}", (COLS[i].show)(v)), w, style);
@@ -1079,20 +1087,17 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             } else {
                 for (j, h) in m.via.iter().enumerate() {
                     if j > 0 {
-                        x = buf.set_stringn(x, y, ", ", end.saturating_sub(x) as usize, base).0;
+                        x = buf.set_stringn(x, y, ", ", end.saturating_sub(x) as usize, text).0;
                     }
-                    x = buf.set_stringn(x, y, h, end.saturating_sub(x) as usize, tint(dev_color(h))).0;
+                    x = buf.set_stringn(x, y, h, end.saturating_sub(x) as usize, soft(dev_color(h))).0;
                 }
             }
         }
         let note = app.store.note(&m.key).unwrap_or("");
         if let Some((x, w)) = notes {
-            buf.set_stringn(area.x + x, y, note, w as usize, base.add_modifier(Modifier::ITALIC));
+            buf.set_stringn(area.x + x, y, note, w as usize, text.add_modifier(Modifier::ITALIC));
         }
         if app.store.is_excluded(&m.key) {
-            // The whole row is muted; search hits still show on top. The ✗ is drawn after it,
-            // so it keeps its red.
-            buf.set_style(Rect { y, height: 1, ..area }, tint(MUTED));
             buf.set_stringn(ex_x, y, "✗", 1, tint(BAD).add_modifier(BOLD));
         } else {
             buf.set_stringn(ex_x, y, "·", 1, tint(MUTED));
@@ -1686,10 +1691,18 @@ fn detail(m: &Model, store: &Store) -> Vec<Line<'static>> {
 }
 
 /// The verdict, then the marked models side by side with the best value of each row in green
-/// and the selected one as a reverse-video column. When they do not all fit in `avail` cells,
-/// the view starts at model `first`, moved only as far as it takes to show the selection, and
-/// the `first` in effect comes back for `App::compare_x`.
-fn compare(models: &[&Model], sel: usize, first: usize, avail: usize, query: &str) -> (Vec<Line<'static>>, usize) {
+/// and the selected one as a reverse-video column; a `muted` model's column is grey but for its
+/// bests, as its row in the table. When they do not all fit in `avail` cells, the view starts at
+/// model `first`, moved only as far as it takes to show the selection, and the `first` in effect
+/// comes back for `App::compare_x`.
+fn compare(
+    models: &[&Model],
+    sel: usize,
+    first: usize,
+    avail: usize,
+    query: &str,
+    muted: impl Fn(&Model) -> bool,
+) -> (Vec<Line<'static>>, usize) {
     let mut rows = compare_rows(models);
     // The model row is the header; `query` filters the rest, forgiving a typo when nothing matches.
     let mut typos = false;
@@ -1756,6 +1769,8 @@ fn compare(models: &[&Model], sel: usize, first: usize, avail: usize, query: &st
                 Style::new().add_modifier(Modifier::REVERSED)
             } else if r.best == Some(i) {
                 fg(GOOD).add_modifier(BOLD)
+            } else if muted(models[i]) {
+                fg(MUTED)
             } else {
                 Style::new()
             };
@@ -1997,6 +2012,16 @@ mod tests {
         assert_eq!(buf[(name_x, opus)].fg, MUTED, "{lines:?}");
         assert!(buf[(name_x, opus)].modifier.contains(BOLD));
         assert!(lines[opus as usize].contains("not available"), "{lines:?}");
+        // The rest of its row is muted too, but for what says the same on every row.
+        let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
+        assert_eq!(at("anthropic"), MUTED, "the developer's colour gives way");
+        assert_eq!(at("✓"), MARK, "the ✓ keeps the mark colour");
+        assert_eq!(at("5.0"), MUTED, "and so does the price level's");
+        // In compare its column is muted as well.
+        let rows = compare(&a.marked_models(), 0, 0, 200, "", |m| a.muted(m)).0;
+        let names = rows.iter().find(|l| l.to_string().starts_with("model ")).unwrap();
+        let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
+        assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
         // Back in the available view it shows only for being marked, and says so.
         a.key(KeyCode::Char('a').into());
         let (_, lines) = render(&mut a, 160, 5);
@@ -2401,18 +2426,18 @@ mod tests {
         let ms: Vec<&Model> =
             ["opus", "flash"].iter().map(|k| a.data.models.iter().find(|m| m.key == *k).unwrap()).collect();
         let row = |v: &Vec<Line>| v.iter().find(|l| l.to_string().starts_with("model ")).unwrap().to_string();
-        let (full, first) = compare(&ms, 1, 1, 200, "");
+        let (full, first) = compare(&ms, 1, 1, 200, "", |_| false);
         assert!(row(&full).contains("opus") && row(&full).contains("flash"));
         assert_eq!(first, 0, "everything fits, so nothing scrolls off");
         assert!(!row(&full).contains('‹') && !row(&full).contains('›'), "no scroll marks when all fit");
-        let (cut, first) = compare(&ms, 1, 0, 20, "");
+        let (cut, first) = compare(&ms, 1, 0, 20, "", |_| false);
         assert!(!row(&cut).contains("opus") && row(&cut).contains("flash"), "scrolls to show the selection");
         assert_eq!(first, 1);
         assert!(cut.iter().any(|l| l.to_string().starts_with("models 2-2 of 2")));
         assert!(row(&cut).contains('‹') && !row(&cut).contains('›'), "‹ marks models off to the left");
-        let (past, first) = compare(&ms, 7, 0, 20, "");
+        let (past, first) = compare(&ms, 7, 0, 20, "", |_| false);
         assert!(row(&past).contains("flash") && first == 1, "a cursor past the models lands on the last");
-        let (back, first) = compare(&ms, 0, 1, 20, "");
+        let (back, first) = compare(&ms, 0, 1, 20, "", |_| false);
         assert!(row(&back).contains("opus") && !row(&back).contains("flash"));
         assert_eq!(first, 0);
         assert!(row(&back).ends_with("opus ›") && !row(&back).contains('‹'), "› marks models off to the right");
@@ -2428,7 +2453,7 @@ mod tests {
         let topics: Vec<String> = full.iter().map(Line::to_string).filter(|l| l.starts_with("── ")).collect();
         assert!(topics[0].starts_with("── scores ─"), "{topics:?}");
         assert!(topics.iter().all(|t| t.chars().count() == full[rule].width()), "topic rules span the model row");
-        let (some, _) = compare(&ms, 0, 0, 200, "eci");
+        let (some, _) = compare(&ms, 0, 0, 200, "eci", |_| false);
         assert_eq!(
             labels(&some).iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
             ["model", "ECI"],
@@ -2436,7 +2461,7 @@ mod tests {
         );
         let names = |v: &Vec<Line>| v.iter().filter(|l| l.to_string().starts_with("── ")).count();
         assert_eq!(names(&some), 1, "only the topics with a shown row keep their rule");
-        let (typo, _) = compare(&ms, 0, 0, 200, "contxt");
+        let (typo, _) = compare(&ms, 0, 0, 200, "contxt", |_| false);
         assert!(labels(&typo).contains(&"context".to_string()), "a typo is forgiven when nothing matches");
     }
 
@@ -2556,7 +2581,7 @@ mod tests {
         let a = app();
         let text: Vec<String> = detail(&a.data.models[0], &a.store).iter().map(ToString::to_string).collect();
         assert!(text.iter().any(|l| l.starts_with("  developer:  anthropic")), "{text:?}");
-        let rows = compare(&a.marked_models(), 0, 0, 200, "").0;
+        let rows = compare(&a.marked_models(), 0, 0, 200, "", |_| false).0;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
         assert!(rows.iter().any(|l| l.to_string().starts_with("model")));
     }

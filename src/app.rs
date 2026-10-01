@@ -1024,6 +1024,11 @@ impl App {
         in_reach(m, self.all, self.any_available)
     }
 
+    /// Whether `m` is drawn muted: excluded, or one you have no access to.
+    pub fn muted(&self, m: &Model) -> bool {
+        self.store.is_excluded(&m.key) || !self.accessible(m)
+    }
+
     /// Whether `m` can be recommended: in reach and not excluded.
     fn usable(&self, m: &Model) -> bool {
         self.in_reach(m) && !self.store.is_excluded(&m.key)
