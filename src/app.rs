@@ -110,10 +110,11 @@ pub const COLS: [Col; 12] = [
 
 /// Text columns before the numbers: 0 is the model name, 1 its developer. `VIA` follows them.
 pub const TEXT: usize = 2;
-/// Column index of the blended price, the default sort and the frontier's.
+/// Column index of the blended price, the frontier's sort.
 pub const PRICE: usize = TEXT;
-/// The sort the table starts with, and that `c` and leaving a task go back to: priciest first.
-const DEFAULT_SORT: (usize, bool) = (PRICE, true);
+/// The sort the table starts with, and that `c` and leaving a task go back to: the source's
+/// index (ECI or AAII), best first. The cursor starts on that column too.
+const DEFAULT_SORT: (usize, bool) = (ECI, true);
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 5;
 /// Column index of Tok/s.
@@ -585,7 +586,7 @@ impl App {
             all: false,
             any_available: false,
             detail: String::new(),
-            col: PRICE,
+            col: DEFAULT_SORT.0,
             sort_col: DEFAULT_SORT.0,
             descending: DEFAULT_SORT.1,
             bounds: vec![],
@@ -978,7 +979,7 @@ impl App {
     pub fn switched(&mut self, cached: Option<Data>) -> bool {
         // Off a column this source does not have: the cursor, the sort and any bound on it.
         if hidden(self.col) {
-            self.col = PRICE;
+            self.col = DEFAULT_SORT.0;
         }
         if hidden(self.sort_col) {
             (self.sort_col, self.descending) = DEFAULT_SORT;
@@ -2119,7 +2120,7 @@ mod tests {
         press(&mut a, "xj");
         assert_eq!(code(&mut a, KeyCode::Enter), cmd("opencode", "p/gpt55"), "opencode takes provider/model");
         assert_eq!(a.input, Input::None);
-        press(&mut a, "j");
+        press(&mut a, "G");
         assert_eq!(press(&mut a, "x"), cmd("claude", "opus5"), "one harness launches at once");
         press(&mut a, "a");
         let llama = a.rows.iter().position(|&r| a.data.models[r].key == "llama4").unwrap();
@@ -2235,7 +2236,7 @@ mod tests {
         assert!(matches!(a.input, Input::Menu { .. }), "the dropdown stays open");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         press(&mut a, "j ");
-        assert_eq!(keys(&a), ["gpt55", "opus5", "mini"], "both developers show");
+        assert_eq!(keys(&a), ["gpt55", "mini", "opus5"], "both developers show");
         press(&mut a, "k ");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
         press(&mut a, "/open ");
@@ -2269,18 +2270,18 @@ mod tests {
     }
 
     #[test]
-    fn starts_by_price_and_blanks_sink_either_way() {
+    fn starts_by_the_index_best_first_and_blanks_sink_either_way() {
         let mut a = app();
-        assert_eq!((a.sort_col, a.descending), (PRICE, true));
-        assert_eq!(keys(&a), ["gpt55", "opus5", "mini"]);
-        press(&mut a, "s");
-        assert!(!a.descending, "the cursor starts on Price, so s reverses");
-        assert_eq!(keys(&a), ["mini", "opus5", "gpt55"]);
-        a.col = ECI;
-        press(&mut a, "s");
+        assert_eq!((a.col, a.sort_col, a.descending), (ECI, ECI, true));
         assert_eq!(keys(&a), ["gpt55", "mini", "opus5"]);
         press(&mut a, "s");
+        assert!(!a.descending, "the cursor starts on the index, so s reverses");
         assert_eq!(keys(&a), ["mini", "gpt55", "opus5"]);
+        a.col = PRICE;
+        press(&mut a, "s");
+        assert_eq!(keys(&a), ["mini", "opus5", "gpt55"]);
+        press(&mut a, "s");
+        assert_eq!(keys(&a), ["gpt55", "opus5", "mini"]);
     }
 
     #[test]
@@ -2322,24 +2323,24 @@ mod tests {
         press(&mut a, "gg");
         assert_eq!(a.current().unwrap().key, "gpt55");
         press(&mut a, "G");
-        assert_eq!(a.current().unwrap().key, "mini");
+        assert_eq!(a.current().unwrap().key, "opus5");
         press(&mut a, "3gg");
         assert_eq!(a.current().unwrap().key, "llama4");
         press(&mut a, "99j");
-        assert_eq!(a.current().unwrap().key, "mini", "a move stops at the end");
+        assert_eq!(a.current().unwrap().key, "opus5", "a move stops at the end");
         press(&mut a, "j");
         assert_eq!(a.current().unwrap().key, "gpt55", "and wraps from there");
         press(&mut a, "k");
-        assert_eq!(a.current().unwrap().key, "mini");
+        assert_eq!(a.current().unwrap().key, "opus5");
         ctrl(&mut a, 'u');
         assert_eq!(a.current().unwrap().key, "gpt55");
         let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
         assert!(shown < NCOLS, "Epoch has no speed columns");
         press(&mut a, &format!("{shown}l"));
-        assert_eq!(a.col, PRICE, "counted column moves wrap around, over the shown ones");
+        assert_eq!(a.col, ECI, "counted column moves wrap around, over the shown ones");
         crate::data::set_source(Source::Aa);
         press(&mut a, &format!("{NCOLS}l"));
-        assert_eq!(a.col, PRICE, "Artificial Analysis shows them all");
+        assert_eq!(a.col, ECI, "Artificial Analysis shows them all");
     }
 
     #[test]
@@ -2371,7 +2372,7 @@ mod tests {
         press(&mut a, "$");
         assert_eq!(a.col, NOTES);
         press(&mut a, "a10j");
-        assert_eq!((a.col, a.current().unwrap().key.as_str()), (NOTES, "mini"), "0 inside a count");
+        assert_eq!((a.col, a.current().unwrap().key.as_str()), (NOTES, "opus5"), "0 inside a count");
     }
 
     #[test]
@@ -2729,7 +2730,7 @@ mod tests {
         assert_eq!(press(&mut a, "C"), None);
         assert_eq!(a.view, View::Compare, "opens to say models must be marked first");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, " j ");
+        press(&mut a, " G ");
         assert_eq!(a.store.marked, vec!["gpt55", "opus5"]);
         press(&mut a, "M");
         assert_eq!(keys(&a), ["gpt55", "opus5"]);
@@ -2759,7 +2760,7 @@ mod tests {
         assert_eq!(a.input, Input::None);
         press(&mut a, "$e");
         assert!(
-            a.store.is_excluded("opus5") && a.selected() == 1,
+            a.store.is_excluded("opus5") && a.selected() == 2,
             "e on the compared model leaves the table row alone"
         );
         press(&mut a, "e");
@@ -2771,8 +2772,8 @@ mod tests {
         assert_eq!(a.view, View::Table, "esc closes the overlay");
         press(&mut a, "Mc");
         assert_eq!((a.marked_models().len(), a.only_marked, a.rows.len()), (2, false, 3), "c keeps them and leaves M");
-        press(&mut a, "G M");
-        assert_eq!(keys(&a), ["gpt55", "opus5", "mini"]);
+        press(&mut a, "ggj M");
+        assert_eq!(keys(&a), ["gpt55", "mini", "opus5"]);
         press(&mut a, "ggvG ");
         assert_eq!(
             (a.store.marked.len(), a.only_marked, a.rows.len()),
@@ -2851,24 +2852,24 @@ mod tests {
         press(&mut a, "vj");
         assert_eq!(a.visual_range(), Some(0..=1));
         assert_eq!(press(&mut a, "e"), Some(Effect::Save));
-        assert!(a.store.is_excluded("gpt55") && a.store.is_excluded("opus5") && !a.store.is_excluded("mini"));
+        assert!(a.store.is_excluded("gpt55") && a.store.is_excluded("mini") && !a.store.is_excluded("opus5"));
         assert_eq!((a.visual, a.status.as_str()), (None, "excluded 2 models"), "an action ends the range");
         press(&mut a, "ggvje");
-        assert!(!a.store.is_excluded("gpt55") && !a.store.is_excluded("opus5"), "all had it: cleared");
+        assert!(!a.store.is_excluded("gpt55") && !a.store.is_excluded("mini"), "all had it: cleared");
         press(&mut a, "Gvk");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.visual, a.rows.len()), (None, 3), "esc cancels the range only");
         press(&mut a, "ggvj ");
-        assert_eq!(a.store.marked, ["gpt55", "opus5"]);
+        assert_eq!(a.store.marked, ["gpt55", "mini"]);
         press(&mut a, "Ge");
-        assert!(a.store.is_excluded("mini") && !a.store.is_excluded("gpt55"), "e on an unmarked row acts on it alone");
+        assert!(a.store.is_excluded("opus5") && !a.store.is_excluded("gpt55"), "e on an unmarked row acts on it alone");
         press(&mut a, "Gegge");
         assert!(
-            a.store.is_excluded("gpt55") && a.store.is_excluded("opus5") && !a.store.is_excluded("mini"),
+            a.store.is_excluded("gpt55") && a.store.is_excluded("mini") && !a.store.is_excluded("opus5"),
             "e on a mark: all marks"
         );
         press(&mut a, "ggvjj ");
-        assert_eq!(a.store.marked, ["gpt55", "opus5", "mini"], "space on a partly marked range marks the rest");
+        assert_eq!(a.store.marked, ["gpt55", "mini", "opus5"], "space on a partly marked range marks the rest");
         press(&mut a, "ggvjj ");
         assert_eq!(
             (a.store.marked.len(), a.status.as_str()),
@@ -2887,14 +2888,14 @@ mod tests {
     fn box_click_toggles_the_mark_and_star_click_picks_tasks() {
         let mut a = app();
         assert_eq!(a.mouse(Mouse::Box(1)), Some(Effect::Save));
-        assert_eq!((a.selected(), a.store.is_marked("opus5")), (1, true), "☐ → ✓, and the cursor goes there");
+        assert_eq!((a.selected(), a.store.is_marked("mini")), (1, true), "☐ → ✓, and the cursor goes there");
         a.mouse(Mouse::Box(1));
-        assert!(!a.store.is_marked("opus5"), "✓ → ☐");
+        assert!(!a.store.is_marked("mini"), "✓ → ☐");
         assert_eq!(a.mouse(Mouse::Star(2)), None);
         assert!(a.choosing_favs() && a.selected() == 2, "the ☆ lists the tasks for its row");
         assert_eq!(a.mouse(Mouse::Item(4)), Some(Effect::Save));
         assert!(a.choosing_favs(), "a click ticks a task and keeps the list open");
-        assert_eq!(a.store.favorite("coding"), Some("mini"));
+        assert_eq!(a.store.favorite("coding"), Some("opus5"));
     }
 
     #[test]

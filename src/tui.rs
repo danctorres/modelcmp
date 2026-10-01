@@ -2017,6 +2017,7 @@ mod tests {
     #[test]
     fn old_data_says_so_in_the_status_bar() {
         let mut a = app();
+        a.col = PRICE;
         let (_, lines) = render(&mut a, 200, 4);
         assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "fresh: {}", lines[3]);
         a.data.fetched -= data::MAX_AGE.as_secs() + 3600;
@@ -2273,7 +2274,7 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 206, 6);
-        let header = "# ✓ ★ ✗ Model Dev ▾ │ ▼Price ▾ $in $cache $out Ctx │ ECI Coding Agentic Reason \
+        let header = "# ✓ ★ ✗ Model Dev ▾ │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding Agentic Reason \
                       Code/$ │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
@@ -2295,7 +2296,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  d dropdown  R recommend  a all  % no cache  │  enter details  x launch  o open  y copy id  space select  f fav  e exclude  n note  │  q quit  ? help"
+                "h l column  │  / filter  s sort  R recommend  a all  │  enter details  x launch  o open  y copy id  space select  f fav  e exclude  n note  │  q quit  ? help"
             ),
             "{}",
             lines[5]
@@ -2410,8 +2411,8 @@ mod tests {
         assert_eq!(hit(&a, area, click(3, 2)), None, "the rule under the header");
         assert_eq!(hit(&a, area, click(col("Dev"), 1)), Some(Mouse::Header(1)));
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
-        assert_eq!(hit(&a, area, click(col("▼Price"), 1)), Some(Mouse::Header(2)));
-        assert_eq!(hit(&a, area, click(col("▼Price") + 7, 1)), Some(Mouse::Menu(2)), "the ▾ after Price");
+        assert_eq!(hit(&a, area, click(col("Price"), 1)), Some(Mouse::Header(2)));
+        assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(2)), "the ▾ after Price");
         assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(8)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
@@ -2521,8 +2522,8 @@ mod tests {
         let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(
             words(&lines[0]),
-            ["#", "✓", "★", "✗", "Model", "Dev", "▾", "│", "▼Price", "▾"],
-            "the cursor starts on Price"
+            ["#", "✓", "★", "✗", "Model", "Dev", "▾", "‹│", "▼ECI"],
+            "the cursor starts on the index"
         );
         assert!(layout(46, &a).more, "columns cut off on the right");
         assert!(!layout(400, &a).more, "all columns fit");
@@ -2555,7 +2556,7 @@ mod tests {
         assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Code/$"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "│", "▼Price", "▾"]);
+        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "│", "Price", "▾"]);
         for (w, h) in [(1, 1), (3, 2), (0, 0), (30, 3), (12, 1)] {
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);
@@ -2587,8 +2588,6 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         data.models.extend((0..20).map(|i| model(&format!("m{i}"), "x", Some(i as f64), 1.0)));
         a.set_data(data);
-        a.col = ECI;
-        a.key(KeyCode::Char('s').into());
         a.table.select(Some(15));
         let (_, lines) = render(&mut a, 60, 6);
         assert_eq!(words(&lines[4])[..5], ["16", "☐", "☆", "·", "m6"], "row 15 (m6) is the last of the 3 visible rows");
@@ -2787,7 +2786,7 @@ mod tests {
         term.draw(|f| draw(&mut a, f)).unwrap();
         let top: String = (0..100).map(|x| term.backend().buffer()[(x, 0)].symbol()).collect();
         assert!(top.starts_with("╭──"), "{top}");
-        assert!(top.ends_with("─ ▼ by Price ╮"), "{top}");
+        assert!(top.ends_with("─ ▼ by ECI ╮"), "{top}");
         let (l, r) = top.split_once(" ECI: Epoch AI's overall capability index ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         let bottom: String = (0..100).map(|x| term.backend().buffer()[(x, 6)].symbol()).collect();
