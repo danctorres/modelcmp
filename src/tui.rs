@@ -5,7 +5,7 @@
 //! The table is drawn straight into the buffer: one pass over the visible rows, no widget
 //! allocations per frame. Colours come from the terminal's 16-colour palette, so a themed
 //! terminal themes modelcmp too, and nothing paints a background over a transparent one but a
-//! marked row's fill.
+//! marked row's fill and the cursor's.
 
 use crate::app::{
     App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about,
@@ -353,7 +353,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
                 .map(|(b, _)| (b, sel.saturating_sub(usize::from(b.height.saturating_sub(3))), rows.len()))
         }
         Input::Choose { title, items, sel, query, .. } => {
-            let (rows, lines) = (choice_rows(items, query).len(), choice_lines(items, *sel, query));
+            let (rows, lines) = (choice_rows(items, query).len(), choice_lines(items, query));
             let rect = overlay_rect(Rect { height: area.height - 1, ..area }, title, &lines);
             let top = choice_top(*sel, rows, lines.len(), rect.height.saturating_sub(2));
             Some((rect, top, rows))
@@ -679,14 +679,22 @@ const DEVS: [Color; 6] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magent
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
-/// The share of the mark colour in a marked row's fill, in percent, the rest being the theme's
-/// background: faint, as the row's colours are read on it.
+/// The cursor's fill, on a row, a column of compare or a name in recommend: the accent, faint
+/// as a marked row's fill, so what is under the cursor keeps its colours, between two bars of
+/// the accent that say where it is (`cursor_ends`, `cursor`).
+const CURSOR: Color = ACCENT;
+/// The bars at the cursor's two ends.
+const EDGE: Style = Style::new().fg(ACCENT).bg(CURSOR).add_modifier(BOLD);
+/// The share of the mark colour in a marked row's fill, and of the accent in the cursor's, in
+/// percent, the rest being the theme's background: faint, as the row's colours are read on it.
 /// ponytail: text on it reads at 2.2:1 or better, not the 3:1 it has on the background; past
 /// that the palettes need retuning (`every_theme_reads_on_its_own_background`).
 const WASH: u32 = 12;
 /// The mark colour in that fill with the terminal's own colours, which do not tell their slot 12.
 /// ponytail: one blue for a dark and a light terminal; ask for slot 12 (OSC 4) to follow the rice.
 const TERM_MARK: u32 = 0x5c9cff;
+/// And the accent in the cursor's fill there.
+const TERM_ACCENT: u32 = 0xc678dd;
 
 /// Swap the terminal colours for the theme's after drawing, so the drawing code keeps naming
 /// terminal colours: the 16, default text, and a developer's placeholder (see `dev_color`).
@@ -695,6 +703,17 @@ const TERM_MARK: u32 = 0x5c9cff;
 fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>) {
     let bg = palette.map(|p| Color::from_u32(p.bg));
     for cell in &mut buf.content {
+        // The terminal's own colours with its background unknown have no faint fill: the cursor
+        // is a reverse-video bar there, its two ends part of it and colours off it so it reads
+        // as one. A pill in the accent keeps its fill.
+        if palette.is_none() && term_bg.is_none() && cell.bg == CURSOR && cell.fg != Color::Black {
+            if matches!(cell.symbol(), "▌" | "▐") {
+                cell.set_symbol(" ");
+            }
+            (cell.fg, cell.bg) = (Color::Reset, Color::Reset);
+            cell.modifier.insert(Modifier::REVERSED);
+            continue;
+        }
         // A pill is the only black text (see `pill`), and the dim half of a palette is too close
         // to its own background to read on: give it the theme's background as its text and the
         // half of its fill colour that stands furthest from it, which is dark in a light theme.
@@ -707,12 +726,15 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>) {
             (Color::Reset, Some(p)) => Color::from_u32(p.text),
             (c, p) => resolve(c, p),
         };
-        // Any other text on a colour is a marked row's: the fill is faint, so the text reads on
-        // it. The terminal's own colours have a faint one only when its background is known.
+        // Any other text on a colour is a marked row's or the cursor's: the fill is faint, so the
+        // text reads on it. The terminal's own colours have a faint one only when its background
+        // is known.
         cell.bg = match (cell.bg, palette, term_bg) {
             (Color::Reset, ..) => bg.unwrap_or(Color::Reset),
             (c, Some(p), _) => wash(resolve(c, palette), p.bg),
-            (_, None, Some(b)) if cell.fg != Color::Black => wash(Color::from_u32(TERM_MARK), b),
+            (c, None, Some(b)) if cell.fg != Color::Black => {
+                wash(Color::from_u32(if c == CURSOR { TERM_ACCENT } else { TERM_MARK }), b)
+            }
             (c, None, _) => c,
         };
     }
@@ -876,9 +898,8 @@ fn draw(app: &mut App, f: &mut Frame) {
     };
     if let Some((title, lines)) = lines {
         if app.view == View::Recommend {
-            // Keep the cursor's block in view: it runs from the highlighted name to the next blank line.
-            let start =
-                lines.iter().position(|l| l.spans.iter().any(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
+            // Keep the cursor's block in view: it runs from the name under it to the next blank line.
+            let start = lines.iter().position(|l| l.spans.iter().any(|s| s.style.bg == Some(CURSOR)));
             if let Some(start) = start {
                 let end = lines[start..].iter().position(|l| l.width() == 0).map_or(lines.len(), |n| start + n);
                 let shown = body.height.saturating_sub(2) as usize;
@@ -895,15 +916,16 @@ fn draw(app: &mut App, f: &mut Frame) {
     }
     if let Input::Choose { title, items, sel, query, .. } = &app.input {
         // Scrolled as the mouse maps it, so the bar stays in view when the list is taller than the screen.
-        let lines = choice_lines(items, *sel, query);
+        let lines = choice_lines(items, query);
         let rect = overlay_rect(body, title, &lines);
         let rows = choice_rows(items, query).len();
         let mut scroll = choice_top(*sel, rows, lines.len(), rect.height.saturating_sub(2)) as u16;
         overlay(buf, body, title, lines, &mut scroll);
         if !choice_rows(items, query).is_empty() {
-            // The bar runs through the box's border, as in the table.
+            // The cursor runs through the box's border, as in the table.
             let y = (rect.y + 1 + *sel as u16 - scroll).min(rect.bottom() - 1);
-            buf.set_style(Rect::new(rect.x, y, rect.width, 1), Style::new().add_modifier(Modifier::REVERSED));
+            buf.set_style(Rect::new(rect.x, y, rect.width, 1), Style::new().bg(CURSOR));
+            cursor_ends(buf, rect.x, rect.right() - 1, y);
         }
     }
     if let Some(x) = cursor {
@@ -1088,35 +1110,38 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + 2 + (k - top) as u16;
         let m = &app.data.models[r];
-        // The selection, or the visual range, is a reverse-video bar through the frame's border;
-        // colours stay off it so it reads as one.
+        // The cursor, or the visual range, is a faint fill through the frame's border, which
+        // becomes its two bars; the row keeps its colours on it.
         let on = k == sel || app.is_selected(k);
         // A model excluded or out of reach has its row muted: the text and the developer, harness
         // and price level colours go grey, as every row has those, while the ✓, ★, ✗, best and
         // worst keep theirs, as a column would else lose its extremes.
         let dim = app.muted(m);
-        // A marked row off the bar is filled through the border, as the bar is. The fill is
-        // faint (`WASH`), so the row keeps its colours on it. The terminal's own 16 have no
-        // faint one, so with them it takes a terminal that told its background; else the fill
-        // is solid like a pill, with colours off it as on the bar, a muted row's grey included,
-        // and the filled ★ and the ✗ say favorite and excluded by their shape.
+        // A marked row off the cursor is filled through the border too, in the mark's colour.
+        // The fill is faint (`WASH`), so the row keeps its colours on it. The terminal's own 16
+        // have no faint one, so with them it takes a terminal that told its background; else
+        // the fill is solid like a pill, with colours off it, a muted row's grey included, and
+        // the filled ★ and the ✗ say favorite and excluded by their shape.
         let marked = app.store.is_marked(&m.key);
         let fill = !on && marked;
         let solid = fill && !faint;
         let base = match (on, fill) {
-            (true, _) => Style::new().add_modifier(Modifier::REVERSED),
+            (true, _) => Style::new().bg(CURSOR),
             (_, true) if solid => fg(Color::Black).bg(MARK),
             (_, true) => Style::new().bg(MARK),
             _ => Style::new(),
         };
-        let tint = |c: Color| if on || solid { base } else { fg(c) };
+        let tint = |c: Color| if solid { base } else { fg(c) };
         let text = if dim { tint(MUTED) } else { base };
         let soft = |c: Color| if dim { text } else { tint(c) };
         buf.set_style(Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
+        if on && area.x > 0 {
+            cursor_ends(buf, area.x - 1, area.right(), y);
+        }
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
         match marked {
-            // Bold as well as blue: on the selection bar and a solid fill, which keep colours
-            // off, that is all the mark has left to show itself with.
+            // Bold as well as blue: on a solid fill, which keeps colours off, that is all the
+            // mark has left to show itself with.
             true => buf.set_stringn(box_x, y, "✓", 1, tint(MARK).add_modifier(BOLD)),
             false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
         };
@@ -1128,8 +1153,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         } else {
             buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
-        // A marked model's name is bold, as the ✓, which is all the bar leaves of the mark, and
-        // takes no colour: the fill says the row is marked. Out of reach, its Via says so.
+        // A marked model's name is bold, as the ✓, and takes no colour: the fill says the row is
+        // marked, and under the cursor the ✓ and the bold do. Out of reach, its Via says so.
         let reach = app.accessible(m);
         let name = if marked { text.add_modifier(BOLD) } else { text };
         buf.set_stringn(name_x, y, &m.name, nw, name);
@@ -1252,33 +1277,54 @@ fn dropdown(
     for (k, &i) in rows.iter().enumerate().skip(top).take(shown) {
         let (label, n) = &items[i];
         let y = inner.y + (k - top) as u16;
-        let base = if k == sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
-        // Entries keep the colour they have in the table, off the selection bar like there.
+        // Entries keep the colour they have in the table, under the cursor like there.
         let color = match i {
             0 => Color::Reset,
             _ if col == PRICE => LEVEL[i - 1],
             _ => dev_color(label),
         };
-        let tint = |c: Color| if k == sel { base } else { fg(c) };
-        // The bar runs through the box's border, as in the table.
-        buf.set_style(Rect { y, height: 1, ..rect }, base);
+        // The cursor runs through the box's border, as in the table.
+        if k == sel {
+            buf.set_style(Rect { y, height: 1, ..rect }, Style::new().bg(CURSOR));
+            cursor_ends(buf, rect.x, rect.right() - 1, y);
+        }
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
         // entry does not read as an empty box in the entry's colour; "any" is ticked while
         // nothing is picked, as it is then what applies.
         let on = if i == 0 { picked.is_empty() } else { picked.contains(label) };
         let (mark, style) = match i {
-            _ if on => ("✓ ", tint(MARK).add_modifier(BOLD)),
-            _ => ("☐ ", tint(color)),
+            _ if on => ("✓ ", fg(MARK).add_modifier(BOLD)),
+            _ => ("☐ ", fg(color)),
         };
         let x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
         let at = x;
-        let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, tint(color)).0;
+        let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, fg(color)).0;
         for r in found(label, query).into_iter().map(|r| r.start.min(label_w)..r.end.min(label_w)) {
-            buf.set_style(Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(tint(color)));
+            buf.set_style(Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(fg(color)));
         }
-        buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, tint(MUTED));
+        buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, fg(MUTED));
     }
     vmarks(buf, rect.x, inner.y, inner.bottom() - 1, top > 0, top + shown < rows.len());
+}
+
+/// The cursor's two bars on row `y`, at the columns `left` and `right` its fill runs to: the
+/// borders of the frame or the box, which the bars take the place of.
+fn cursor_ends(buf: &mut Buffer, left: u16, right: u16, y: u16) {
+    for (x, bar) in [(left, "▌"), (right, "▐")] {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(bar).set_style(EDGE);
+        }
+    }
+}
+
+/// `spans` with a cell at each end: under the cursor those are its bars and the spans are on its
+/// fill, keeping their colours; else they are blank, so nothing moves when the cursor does.
+fn cursor(on: bool, spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    if !on {
+        return [Span::raw(" ")].into_iter().chain(spans).chain([Span::raw(" ")]).collect();
+    }
+    let fill = spans.into_iter().map(|s| s.patch_style(Style::new().bg(CURSOR)));
+    [Span::styled("▌", EDGE)].into_iter().chain(fill).chain([Span::styled("▐", EDGE)]).collect()
 }
 
 /// `▲` and `▼` on the left border column `x`, at the first and last content row, for rows
@@ -1507,11 +1553,9 @@ fn found(s: &str, q: &str) -> Vec<Range<usize>> {
     (0..(s.len() + 1).saturating_sub(q.len())).filter(|&i| s[i..i + q.len()] == q[..]).map(|i| i..i + q.len()).collect()
 }
 
-/// How a search hit is drawn, as in the table: yellow, bold and underlined, but off the
-/// reverse-video selection bar only bold and underlined, so the bar keeps no colour.
+/// How a search hit is drawn, as in the table: yellow, bold and underlined.
 fn hit_style(style: Style) -> Style {
-    let hit = style.add_modifier(BOLD | Modifier::UNDERLINED);
-    if style.add_modifier.contains(Modifier::REVERSED) { hit } else { hit.fg(MATCH) }
+    style.fg(MATCH).add_modifier(BOLD | Modifier::UNDERLINED)
 }
 
 /// `line` with the chars each span's `ranges` cover drawn as search hits.
@@ -1537,27 +1581,25 @@ fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> L
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
-fn choice_lines(items: &[(String, Effect)], sel: usize, query: &str) -> Vec<Line<'static>> {
+fn choice_lines(items: &[(String, Effect)], query: &str) -> Vec<Line<'static>> {
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
         .iter()
-        .enumerate()
-        .map(|(i, &k)| {
+        .map(|&k| {
             let (label, effect) = &items[k];
             // f's tasks in their colours, harnesses and sites in theirs.
             let color = match effect {
                 Effect::Fav(_, t, _) => task_color(t),
                 _ => dev_color(label.split(' ').next().unwrap_or_default()),
             };
-            let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { fg(color) };
             // A ticked box in the mark's colour, as in the table and the dropdowns; the rest of
             // the label keeps the task's or the harness's own.
             match label.strip_prefix('✓') {
-                Some(rest) if i != sel => Line::from(vec![
+                Some(rest) => Line::from(vec![
                     Span::styled(" ✓", fg(MARK).add_modifier(BOLD)),
-                    Span::styled(format!("{rest} "), style),
+                    Span::styled(format!("{rest} "), fg(color)),
                 ]),
-                _ => Line::from(format!(" {label} ")).style(style),
+                _ => Line::from(format!(" {label} ")).style(fg(color)),
             }
         })
         .map(|l| lit(l, |s| found(s, query)))
@@ -1656,9 +1698,10 @@ fn help(query: &str) -> Vec<Line<'static>> {
 /// ranks the table by it.
 fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
     let cur = app.current().map(|m| m.key.clone());
-    let name = |i: usize, s: String| {
-        let style = fg(TASK[i]).add_modifier(BOLD);
-        Span::styled(s, if i == app.task_cur { style.add_modifier(Modifier::REVERSED) } else { style })
+    let name = |i: usize, s: &'static str| {
+        let mut name = cursor(i == app.task_cur, vec![Span::styled(s, fg(TASK[i]).add_modifier(BOLD))]);
+        name.push(Span::raw(" "));
+        name
     };
     let label = |s: &'static str| vec![Span::styled(s, fg(MUTED))];
     let words = |s: &str| s.split(' ').map(|w| Line::from(w.to_string())).collect();
@@ -1669,13 +1712,14 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
         .collect();
     for (i, t) in TASKS.iter().enumerate() {
         v.push(Line::default());
-        v.extend(wrapped(vec![name(i, format!(" {} ", t.name)), space.clone()], words(t.about), &space, width));
+        v.extend(wrapped(name(i, t.name), words(t.about), &space, width));
         v.extend(wrapped(label("  use for:         "), words(t.when), &space, width));
         let picked = (i == app.task_cur).then_some(cur.as_deref()).flatten();
+        // Each entry brings a cell for the cursor's bar at either end, the gaps between them.
         v.extend(wrapped(
-            label("  best per price:  "),
+            label("  best per price: "),
             frontier_spans(app, t, picked),
-            &Span::styled(" · ", fg(MUTED)),
+            &Span::styled("·", fg(MUTED)),
             width,
         ));
     }
@@ -1722,29 +1766,27 @@ fn wrapped(
 /// `name $price (score)` for each entry of the task's price frontier, cheapest first and the
 /// best last, each in its price level's colour as in the Price column, the favorite's ★ in
 /// the task's colour, or grey and marked not recommended when it is on the line only as the
-/// favorite. The `picked` model is a reverse-video bar, colour kept off it as in the table.
+/// favorite. The `picked` model is under the cursor, keeping its colours as in the table.
 fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'static>> {
     let front = app.task_frontier(t);
     if front.is_empty() {
-        return vec![Line::from(Span::styled("no data", fg(MUTED)))];
+        return vec![Line::from(cursor(false, vec![Span::styled("no data", fg(MUTED))]))];
     }
     front
         .iter()
         .map(|(m, s)| {
-            let on = picked == Some(m.key.as_str());
-            let tint = |c: Color| if on { Style::new().add_modifier(Modifier::REVERSED) } else { fg(c) };
             let fav = app.store.is_favorite(Some(t), &m.key);
             let off = fav && app.favorite_unrecommended(t, &m.key);
             let mut spans = Vec::with_capacity(3);
             if fav {
-                spans.push(Span::styled("★ ", tint(task_color(t.name)).add_modifier(BOLD)));
+                spans.push(Span::styled("★ ", fg(task_color(t.name)).add_modifier(BOLD)));
             }
             let price = if fav && off { MUTED } else { m.cost().map_or(MUTED, |c| LEVEL[level(c)]) };
-            spans.push(Span::styled(priced(m, fit::shown(m, t, *s), false, false), tint(price)));
+            spans.push(Span::styled(priced(m, fit::shown(m, t, *s), false, false), fg(price)));
             if fav && off {
-                spans.push(Span::styled(" not recommended", tint(MUTED)));
+                spans.push(Span::styled(" not recommended", fg(MUTED)));
             }
-            Line::from(spans)
+            Line::from(cursor(picked == Some(m.key.as_str()), spans))
         })
         .collect()
 }
@@ -1766,7 +1808,7 @@ fn detail(m: &Model, store: &Store) -> Vec<Line<'static>> {
 }
 
 /// The verdict, then the marked models side by side with the best value of each row in green
-/// and the selected one as a reverse-video column; a `muted` model's column is grey but for its
+/// and the one under the cursor filled between its two bars; a `muted` model's column is grey but for its
 /// bests, as its row in the table. When they do not all fit in `avail` cells, the view starts at
 /// model `first`, moved only as far as it takes to show the selection, and the `first` in effect
 /// comes back for `App::compare_x`.
@@ -1809,9 +1851,10 @@ fn compare(
         };
         widths[f..].iter().take_while(ok).count().max(1)
     };
-    // Two cells go to the " ›" marking models cut off on the right, but only when there are any.
+    // Two cells go to the " ›" marking models cut off on the right, but only when there are any;
+    // else one, to the right bar of the cursor on the last model.
     let fits = |f: usize| {
-        let all = count(f, 0);
+        let all = count(f, 1);
         if f + all >= n { all } else { count(f, 2) }
     };
     let max_first = (0..n).find(|&f| f + fits(f) >= n).unwrap_or(0);
@@ -1840,10 +1883,11 @@ fn compare(
         let label = Line::from(Span::styled(format!("{:<label_w$}", r.label), fg(KEY)));
         let hit = hits(query, [&r.label], typos).map_or(vec![], |[r]| r);
         let mut spans = lit(label, |_| hit.clone()).spans;
+        // The two cells between models are the right bar of the cursor on the one and its left
+        // bar on the next, blank off it, so a model's cells stay where they are.
+        let bar = |on: bool, bar: &'static str| if on { Span::styled(bar, EDGE) } else { Span::raw(" ") };
         for (i, c) in r.cells.into_iter().enumerate().skip(first).take(shown) {
-            let style = if i == sel {
-                Style::new().add_modifier(Modifier::REVERSED)
-            } else if r.best == Some(i) {
+            let style = if r.best == Some(i) {
                 fg(GOOD).add_modifier(BOLD)
             } else if muted[i] {
                 fg(MUTED)
@@ -1851,14 +1895,17 @@ fn compare(
                 Style::new()
             };
             if k == 0 && i == first && first > 0 {
-                spans.push(Span::styled("‹ ", edge));
+                spans.push(Span::styled("‹", edge));
             } else {
-                spans.push(Span::raw("  "));
+                spans.push(bar(i > first && i - 1 == sel, "▐"));
             }
+            spans.push(bar(i == sel, "▌"));
+            let style = if i == sel { style.bg(CURSOR) } else { style };
             spans.push(Span::styled(format!("{c:>w$}", w = widths[i]), style));
         }
+        spans.push(bar(first + shown == sel + 1, "▐"));
         if k == 0 && first + shown < n {
-            spans.push(Span::styled(" ›", edge));
+            spans.push(Span::styled("›", edge));
         }
         let line = Line::from(spans);
         if k == 0 {
@@ -2003,10 +2050,12 @@ mod tests {
             c => panic!("not a theme colour: {c:?}"),
         };
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
-            let marked = hex(wash(resolve(MARK, Some(p)), p.bg));
+            // A marked row's fill, or the cursor's when that leaves a colour harder to read.
+            let fills = [MARK, CURSOR].map(|c| hex(wash(resolve(c, Some(p)), p.bg)));
+            let on_fill = |c: u32| fills.iter().map(|f| ratio(c, *f)).fold(f64::MAX, f64::min);
             for c in p.accents.iter().chain([&p.text]) {
                 assert!(ratio(*c, p.bg) >= 3.0, "{name}: {c:06x} on the background, {:.1}:1", ratio(*c, p.bg));
-                assert!(ratio(*c, marked) >= 2.2, "{name}: {c:06x} on a marked row, {:.1}:1", ratio(*c, marked));
+                assert!(on_fill(*c) >= 2.2, "{name}: {c:06x} on a fill, {:.1}:1", on_fill(*c));
             }
             // Every colour the drawing code names, as text on the background and as a pill's fill.
             for c in [
@@ -2026,14 +2075,10 @@ mod tests {
                 let (text, fill) = (hex(resolve(c, Some(p))), hex(contrasting(c, p)));
                 assert!(ratio(text, p.bg) >= 3.0, "{name}: {c:?} as text, {:.1}:1", ratio(text, p.bg));
                 assert!(ratio(fill, p.bg) >= 3.0, "{name}: {c:?} as a pill, {:.1}:1", ratio(fill, p.bg));
-                assert!(ratio(text, marked) >= 2.2, "{name}: {c:?} on a marked row, {:.1}:1", ratio(text, marked));
+                assert!(on_fill(text) >= 2.2, "{name}: {c:?} on a fill, {:.1}:1", on_fill(text));
             }
             assert!(ratio(p.ansi[8], p.bg) >= 2.5, "{name}: muted text, {:.1}:1", ratio(p.ansi[8], p.bg));
-            assert!(
-                ratio(p.ansi[8], marked) >= 2.2,
-                "{name}: muted on a marked row, {:.1}:1",
-                ratio(p.ansi[8], marked)
-            );
+            assert!(on_fill(p.ansi[8]) >= 2.2, "{name}: muted on a fill, {:.1}:1", on_fill(p.ansi[8]));
         }
     }
 
@@ -2099,7 +2144,7 @@ mod tests {
         data.models[0].available = false;
         a.set_data(data);
         a.key(KeyCode::Char('a').into());
-        a.key(KeyCode::Char('G').into()); // off the bar, which keeps colours off
+        a.key(KeyCode::Char('G').into()); // off the cursor, which has a fill of its own
         let (buf, lines) = render(&mut a, 160, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap() as u16;
         let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
@@ -2218,8 +2263,8 @@ mod tests {
             lines[5]
         );
         assert_eq!(buf[(cell(&lines[5], "│"), 5)].fg, MUTED, "groups are split by a muted rule");
-        assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED), "row 0 is selected");
-        assert!((0..200).all(|x| buf[(x, 2)].fg == Color::Reset), "no colour breaks the selection bar");
+        assert!((0..200).all(|x| buf[(x, 2)].bg == CURSOR), "row 0 is under the cursor");
+        assert_eq!(buf[(cell(&lines[2], "anthropic"), 2)].fg, dev_color("anthropic"), "and keeps its colours");
         assert_eq!(buf[(0, 3)].fg, MUTED, "row numbers are muted");
         assert_eq!(buf[(cell(&lines[3], "flash"), 3)].fg, Color::Reset, "names are plain text");
         assert_eq!(buf[(cell(&lines[3], "☆"), 3)].fg, MUTED, "the empty ☆ is muted");
@@ -2246,17 +2291,18 @@ mod tests {
         let dev = cell(&lines[0], "Dev") as usize - 2;
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭────────────────╮"), "{}", lines[1]);
-        assert_eq!(&words(&lines[2])[5..9], ["│", "✓", "any", "2"], "any is ticked while nothing is picked");
+        assert_eq!(&words(&lines[2])[5..9], ["▌", "✓", "any", "2"], "any is ticked while nothing is picked");
         assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"]);
-        assert!(buf[(dev as u16 + 2, 2)].modifier.contains(Modifier::REVERSED), "any is selected");
-        assert!(buf[(dev as u16, 2)].modifier.contains(Modifier::REVERSED), "the bar runs through the border");
-        assert!(!buf[(dev as u16, 3)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buf[(dev as u16 + 2, 2)].bg, CURSOR, "any is under the cursor");
+        assert_eq!((buf[(dev as u16 + 2, 2)].fg, buf[(dev as u16 + 2, 3)].fg), (MARK, dev_color("anthropic")));
+        assert_eq!(buf[(dev as u16, 2)].bg, CURSOR, "the cursor runs through the border");
+        assert_ne!(buf[(dev as u16, 3)].bg, CURSOR);
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
         for c in "/anth".chars() {
             a.key(KeyCode::Char(c).into());
         }
         let (_, lines) = render(&mut a, 170, 8);
-        assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"], "only matches are listed");
+        assert_eq!(&words(&lines[3])[5..9], ["▌", "☐", "anthropic", "1"], "only matches are listed");
         assert!(from(&lines[4]).starts_with("╰"), "{}", lines[4]);
         assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
     }
@@ -2371,7 +2417,7 @@ mod tests {
         let mut a = app();
         a.store.toggle_favorite("coding", "opus");
         a.store.toggle_favorite("agentic", "flash");
-        a.key(KeyCode::Char('j').into()); // the bar is on flash, so opus keeps its colours
+        a.key(KeyCode::Char('j').into()); // the cursor is on flash, off opus
         let (buf, lines) = render(&mut a, 120, 5);
         // The cell where `pat` starts on line `y`; the lines hold wide glyphs before it.
         let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
@@ -2393,7 +2439,7 @@ mod tests {
         // With a task picked, the ★ is that task's favorite in that task's colour.
         a.task = fit::task("agentic");
         for k in ['k', 'j'] {
-            // Off flash: on the selection bar the ★ would be plain like everything else.
+            // Off flash, as the other checks are off the cursor.
             if a.current().unwrap().key == "flash" {
                 a.key(KeyCode::Char(k).into());
             }
@@ -2412,8 +2458,8 @@ mod tests {
         a.set_data(data);
         let lines = recommend(&a, 200);
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
-        let pill = spans.iter().find(|s| s.content == " coding ").unwrap();
-        assert_eq!(pill.style.fg, Some(task_color("coding")));
+        let name = spans.iter().find(|s| s.content == "coding").unwrap();
+        assert_eq!(name.style.fg, Some(task_color("coding")));
         let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert!(spans[star + 1].content.starts_with("opus "), "★ then the name: {:?}", spans[star + 1]);
         assert_eq!(spans[star + 1].style.fg, Some(LEVEL[level(5.0)]), "the name keeps its price level");
@@ -2560,12 +2606,17 @@ mod tests {
         let (back, first) = compare(&ms, 0, 1, 20, "", |_| false);
         assert!(row(&back).contains("opus") && !row(&back).contains("flash"));
         assert_eq!(first, 0);
-        assert!(row(&back).ends_with("opus ›") && !row(&back).contains('‹'), "› marks models off to the right");
+        assert!(row(&back).ends_with("opus▐›") && !row(&back).contains('‹'), "› marks models off to the right");
+        assert!(row(&back).contains('▌'), "the cursor's left bar, before the model's column");
+        // The model under the cursor keeps its colours on the fill, between the two bars.
+        let eci = back.iter().find(|l| l.to_string().starts_with("ECI")).unwrap();
+        let cur = eci.spans.iter().find(|s| s.style.bg == Some(CURSOR) && s.content.contains("150")).unwrap();
+        assert_eq!(cur.style.fg, Some(GOOD), "{eci:?}");
         let labels = |v: &Vec<Line>| {
             v.iter()
                 .map(Line::to_string)
-                .filter(|l| l.contains("  "))
-                .map(|l| l.split("  ").next().unwrap().trim().to_string())
+                .filter(|l| l.contains("  ") || l.contains('▌'))
+                .map(|l| l.split("  ").next().unwrap().split('▌').next().unwrap().trim().to_string())
                 .collect::<Vec<_>>()
         };
         let rule = full.iter().position(|l| l.to_string().starts_with("model ")).unwrap() + 1;
@@ -2621,10 +2672,13 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
         let mut a = app();
         let on = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
-            term.backend().buffer()[(x, y)].modifier.contains(Modifier::REVERSED)
+            term.backend().buffer()[(x, y)].bg == CURSOR
         };
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([on(&term, 0, 3), on(&term, 99, 3), on(&term, 0, 4)], [true, true, false]);
+        assert_eq!([on(&term, 0, 3), on(&term, 50, 3), on(&term, 99, 3), on(&term, 0, 4)], [true, true, true, false]);
+        let buf = term.backend().buffer();
+        assert_eq!((buf[(0, 3)].symbol(), buf[(99, 3)].symbol()), ("▌", "▐"), "the border is its two bars");
+        assert_eq!((buf[(0, 3)].fg, buf[(0, 4)].symbol()), (ACCENT, "│"));
         a.key(KeyCode::Char('v').into());
         a.key(KeyCode::Char('j').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
@@ -2633,9 +2687,18 @@ mod tests {
         a.key(KeyCode::Char('t').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         let buf = term.backend().buffer();
-        // The overlay's top-left corner; the bar is on the row under it, the first entry.
+        // The overlay's top-left corner; the cursor is on the row under it, the first entry.
         let (x, y) = (0..8).flat_map(|y| (1..100).map(move |x| (x, y))).find(|&p| buf[p].symbol() == "╭").unwrap();
-        assert!(on(&term, x, y + 1), "and the choice list's");
+        assert!(on(&term, x, y + 1) && buf[(x, y + 1)].symbol() == "▌", "and the choice list's");
+        // With the terminal's own colours and its background unknown, a reverse-video bar with
+        // colours off it; a pill in the accent stays one.
+        let mut buf = buf.clone();
+        buf[(x + 1, y)].set_fg(Color::Black).set_bg(ACCENT);
+        recolor(&mut buf, None, None);
+        let (end, text) = (&buf[(x, y + 1)], &buf[(x + 2, y + 1)]);
+        assert_eq!((end.symbol(), end.fg, end.bg), (" ", Color::Reset, Color::Reset));
+        assert!(end.modifier.contains(Modifier::REVERSED) && text.modifier.contains(Modifier::REVERSED));
+        assert_eq!((text.fg, text.bg, buf[(x + 1, y)].bg), (Color::Reset, Color::Reset, ACCENT));
     }
 
     #[test]
@@ -2674,10 +2737,10 @@ mod tests {
             term.backend().buffer()[(x, y)].symbol().to_string()
         };
         let marks = [edge(&term, 99, 1), edge(&term, 0, 2), edge(&term, 99, 2), edge(&term, 0, 3), edge(&term, 0, 5)];
-        assert_eq!(marks, ["›", "├", "┤", "│", "▼"], "the rule joins the frame");
+        assert_eq!(marks, ["›", "├", "┤", "▌", "▼"], "the rule joins the frame, the cursor's bar is on it");
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([edge(&term, 0, 3), edge(&term, 0, 5)], ["▲", "│"]);
+        assert_eq!([edge(&term, 0, 3), edge(&term, 0, 5)], ["▲", "▌"]);
         assert_eq!(term.backend().buffer()[(0, 3)].fg, ACCENT);
         // On a marked row's fill the ▲ is black as the row, where the accent would not read.
         a.store.marked = a.data.models.iter().map(|m| m.key.clone()).collect();
@@ -2736,12 +2799,12 @@ mod tests {
         let hits = lit_text(&help("THEME"));
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
-        let lines = choice_lines(&items, 0, "uv");
+        let lines = choice_lines(&items, "uv");
         assert_eq!(lit_text(&lines), ["uv"]);
-        // On the selection bar a hit is bold and underlined but gets no colour.
-        let lines = choice_lines(&items, 0, "gr");
+        // Under the cursor too a hit is yellow, as the cursor keeps colours.
+        let lines = choice_lines(&items, "gr");
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
-        assert_eq!(hit.style.fg, None);
+        assert_eq!(hit.style.fg, Some(MATCH));
     }
 
     #[test]
@@ -2760,7 +2823,7 @@ mod tests {
         );
         let names: Vec<&str> = text.iter().filter_map(|l| l.strip_prefix(' ')?.split_whitespace().next()).collect();
         assert_eq!(names[..2], ["overall", "use"], "overall comes first");
-        // The picked model on the cursor's task is a reverse-video bar; other tasks have none.
+        // The picked model on the cursor's task is under a cursor of its own; other tasks have none.
         let mut b = app();
         let mut data = std::mem::take(&mut b.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
@@ -2771,17 +2834,20 @@ mod tests {
         let bars: Vec<String> = recommend(&b, 200)
             .iter()
             .flat_map(|l| l.spans.iter())
-            .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+            .filter(|s| s.style.bg == Some(CURSOR))
             .map(|s| s.content.to_string())
             .collect();
-        assert_eq!(bars.len(), 2, "the task name and one model: {bars:?}");
-        assert!(bars[1].starts_with("opus "), "the best of overall: {bars:?}");
-        let vision = text.iter().position(|l| l.starts_with(" vision ")).unwrap();
+        assert_eq!(bars[..3], ["▌", "overall", "▐"], "the task name between its bars: {bars:?}");
+        assert!(bars.len() == 6 && bars[4].starts_with("opus "), "and the best of overall: {bars:?}");
+        let vision = text.iter().position(|l| l.starts_with("▌vision▐ ")).unwrap();
         let models = text[vision..].iter().position(|l| l.starts_with("  best per price:  "));
         assert!(models.is_some_and(|n| n <= 3), "every task lists its models: {:?}", &text[vision..vision + 4]);
         let long: Vec<&String> = text.iter().filter(|l| l.chars().count() > 60).collect();
         assert!(long.is_empty(), "wrapped to the width: {long:?}");
-        let cursor = lines[vision].spans.iter().find(|s| s.style.add_modifier.contains(Modifier::REVERSED)).unwrap();
-        assert_eq!(cursor.content, " vision ");
+        let cursor = &lines[vision].spans[1];
+        assert_eq!(
+            (cursor.content.as_ref(), cursor.style.fg, cursor.style.bg),
+            ("vision", Some(TASK[a.task_cur]), Some(CURSOR))
+        );
     }
 }
