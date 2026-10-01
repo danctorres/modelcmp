@@ -206,7 +206,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("s", "sort by the column; again reverses"),
             ("/", "filter models, compare rows, this help or a list"),
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
-            ("d", "dropdown on Dev, Price and Via (▾); space toggles several"),
+            ("d", "dropdown on Dev, Price and Via (▾); space enter toggle"),
             ("a", "all models, including ones you have no access to"),
             ("%", "Price with none of the input cached, or back to --cache"),
             ("c", "clear filters, bounds, task, M, F and E; the selection stays"),
@@ -786,7 +786,8 @@ impl App {
         self.data.models.iter().any(|m| self.is_fav(&m.key))
     }
 
-    /// Whether the open choice list is `f`'s tasks, where space ticks one and the list stays open.
+    /// Whether the open choice list is `f`'s tasks, where space or enter ticks one and the list
+    /// stays open.
     pub fn choosing_favs(&self) -> bool {
         matches!(&self.input, Input::Choose { items, .. } if matches!(items.first(), Some((_, Effect::Fav(..)))))
     }
@@ -1229,9 +1230,9 @@ impl App {
 
     /// The wheel scrolls whatever `j k` move and sideways moves the column cursor; a click
     /// selects a row, and again opens its details; a click on a header sorts by it, as `s`
-    /// does, and on its ▾ opens the dropdown. Where several entries can be picked (Dev, Via)
-    /// a click toggles one, as space does, and the dropdown stays open until a click outside;
-    /// elsewhere (Price, a choice list) a click picks the entry, as enter does.
+    /// does, and on its ▾ opens the dropdown. A click on an entry does what enter does: in a
+    /// dropdown and `f`'s tasks it toggles the entry and the list stays open until a click
+    /// outside; in the other choice lists it picks the entry.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
         let effect = self.on_mouse(m);
         self.follow();
@@ -1252,15 +1253,12 @@ impl App {
         if list {
             return match m {
                 Mouse::Item(n) => {
-                    let several =
-                        matches!(self.input, Input::Menu { col, .. } if col == 1 || col == VIA) || self.choosing_favs();
                     let (sel, len) = self.list()?;
                     if n >= len {
                         return None;
                     }
                     *sel = n;
-                    let key = if several { KeyCode::Char(' ') } else { KeyCode::Enter };
-                    self.input_key(key, KeyModifiers::NONE)
+                    self.input_key(KeyCode::Enter, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
                 // Outside, or anything else that is not an entry: close it.
@@ -1711,34 +1709,21 @@ impl App {
             Input::Menu { col, items, sel, query, cur, typing } => {
                 let rows = menu_rows(items, query);
                 let last = rows.len() - 1;
+                // Enter does what space does; while searching, space is typed.
+                let toggle = code == KeyCode::Enter || (code == KeyCode::Char(' ') && !*typing);
                 match code {
                     KeyCode::Down => *sel = (*sel + 1).min(last),
                     KeyCode::Up => *sel = sel.saturating_sub(1),
-                    KeyCode::Enter => {
-                        let (col, i) = (*col, rows[*sel]);
-                        let name = std::mem::take(&mut items[i].0);
-                        self.input = Input::None;
-                        if col == 1 || col == VIA {
-                            let list = if col == 1 { &mut self.dev } else { &mut self.via };
-                            list.clear();
-                            if i > 0 {
-                                list.push(name);
-                            }
-                        } else {
-                            self.set_price_level(i);
-                        }
-                        self.rebuild();
-                    }
-                    // On Price, space picks the level, or drops it when it is the picked one, and
-                    // keeps the dropdown open.
-                    KeyCode::Char(' ') if !*typing && *col == PRICE => {
+                    // On Price it picks the level, or drops it when it is the picked one, and keeps the
+                    // dropdown open.
+                    _ if toggle && *col == PRICE => {
                         let i = rows[*sel];
                         self.set_price_level(if self.price_level() == i.checked_sub(1) { 0 } else { i });
                         self.rebuild();
                     }
-                    // Space adds or drops the entry, as it marks a model, keeping the dropdown open; on
-                    // "any" it drops all. While searching, space is typed.
-                    KeyCode::Char(' ') if !*typing && (*col == 1 || *col == VIA) => {
+                    // On Dev and Via it adds or drops the entry, as space marks a model, keeping the
+                    // dropdown open; on "any" it drops all.
+                    _ if toggle => {
                         let i = rows[*sel];
                         let list = if *col == 1 { &mut self.dev } else { &mut self.via };
                         match list.iter().position(|d| *d == items[i].0) {
@@ -1766,9 +1751,11 @@ impl App {
                 // While searching, ↓ ↑ move the cursor, as in a dropdown.
                 KeyCode::Down if *typing => *sel = (*sel + 1).min(choice_rows(items, query).len().saturating_sub(1)),
                 KeyCode::Up if *typing => *sel = sel.saturating_sub(1),
-                // Space ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns.
-                // While searching, space is typed.
-                KeyCode::Char(' ') if !*typing => {
+                // Space ticks a task in f's list and keeps it open, as in the Dev and Via dropdowns,
+                // and so does enter. While searching, space is typed.
+                KeyCode::Char(' ') | KeyCode::Enter
+                    if (code == KeyCode::Enter || !*typing) && matches!(items.first(), Some((_, Effect::Fav(..)))) =>
+                {
                     let i = *choice_rows(items, query).get(*sel)?;
                     if let Some((_, Effect::Fav(key, task, tier))) = items.get(i) {
                         let (key, task, tier) = (key.clone(), *task, *tier);
@@ -1785,7 +1772,6 @@ impl App {
                     let (_, effect) = items.swap_remove(i);
                     self.input = Input::None;
                     match effect {
-                        Effect::Fav(key, task, tier) => return self.fav(&key, task, tier),
                         Effect::Theme(name) => {
                             self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
                             self.status = format!("theme {name}");
@@ -2041,12 +2027,15 @@ mod tests {
         press(&mut a, "2gg");
         assert!(matches!(a.input, Input::Menu { sel: 1, .. }), "a count picks the entry");
         code(&mut a, KeyCode::Enter);
+        assert!(matches!(a.input, Input::Menu { sel: 1, .. }), "enter toggles as space does: the dropdown stays open");
+        code(&mut a, KeyCode::Esc);
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
         press(&mut a, "ld");
         assert_eq!(menu(&a), [("any", 2), ("free", 0), ("≤$0.5", 0), ("≤$2", 1), ("≤$5", 1), ("≤$15", 2)]);
         press(&mut a, "jjj");
         code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Esc);
         assert_eq!(keys(&a), ["mini"]);
         // Reopening starts on the level in effect; esc leaves it alone, "any" drops it.
         press(&mut a, "d");
@@ -2055,6 +2044,7 @@ mod tests {
         assert_eq!(keys(&a), ["mini"]);
         press(&mut a, "dkkk");
         code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Esc);
         assert_eq!((a.bounds.len(), keys(&a).len()), (0, 2));
         // Space picks a level and keeps the dropdown open; again on it drops it.
         press(&mut a, "djjj ");
@@ -2062,8 +2052,8 @@ mod tests {
         assert!(matches!(a.input, Input::Menu { sel: 3, .. }));
         press(&mut a, "j ");
         assert_eq!((a.price_level(), keys(&a).len()), (Some(3), 1), "another level replaces it");
-        press(&mut a, " ");
-        assert_eq!((a.price_level(), keys(&a).len()), (None, 2));
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.price_level(), keys(&a).len()), (None, 2), "enter on the picked level drops it");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "c");
         assert_eq!((a.dev.len(), keys(&a).len()), (0, 3));
@@ -2078,6 +2068,8 @@ mod tests {
         assert_eq!(menu(&a), [("any", 3), ("codex", 2), ("opencode", 2), ("claude", 1)]);
         press(&mut a, "/cla");
         code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
         assert_eq!((a.via.as_slice(), keys(&a)), (&["claude".to_string()][..], vec!["opus5"]));
         press(&mut a, "c");
         assert_eq!((a.via.len(), keys(&a).len()), (0, 3));
@@ -2088,6 +2080,8 @@ mod tests {
         assert!(menu(&a).contains(&("not available", 1)), "{:?}", menu(&a));
         press(&mut a, "/not");
         code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
         assert_eq!(keys(&a), ["llama4"]);
     }
 
@@ -2137,7 +2131,10 @@ mod tests {
         press(&mut a, "ld/OPEN");
         assert!(matches!(&a.input, Input::Menu { query, sel: 1, typing: true, .. } if query == "OPEN"));
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.dev, ["openai"], "enter picks the first match");
+        assert_eq!(a.dev, ["openai"], "enter toggles the first match");
+        assert!(matches!(&a.input, Input::Menu { query, typing: true, .. } if query == "OPEN"), "and the search stays");
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
         press(&mut a, "d/anth");
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
@@ -2148,7 +2145,7 @@ mod tests {
         press(&mut a, "/zzz");
         assert!(matches!(a.input, Input::Menu { sel: 0, .. }), "no match leaves only any");
         code(&mut a, KeyCode::Enter);
-        assert!(a.dev.is_empty());
+        assert!(a.dev.is_empty(), "enter on any drops them all");
     }
 
     #[test]
@@ -2250,7 +2247,9 @@ mod tests {
         assert!(a.dev.is_empty(), "space on any drops them all");
         press(&mut a, "jj");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.dev.as_slice(), &a.input), (&["anthropic".to_string()][..], &Input::None), "enter picks one");
+        assert_eq!(a.dev, ["anthropic"], "enter toggles one");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "again drops it, the dropdown open");
     }
 
     #[test]
@@ -2601,6 +2600,11 @@ mod tests {
         assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len() * 4));
         press(&mut a, "4j");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert!(
+            matches!(&a.input, Input::Choose { items, .. } if items[4].0 == "✓ coding"),
+            "enter ticks as space does"
+        );
+        code(&mut a, KeyCode::Esc);
         assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
         assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
         // In recommend, f starts on the task under the cursor, so f enter toggles it.
@@ -2611,6 +2615,7 @@ mod tests {
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), Some("mini"));
         assert!(a.status.starts_with("★ mini"));
+        code(&mut a, KeyCode::Esc);
         // Space ticks and keeps the list open, its boxes following.
         press(&mut a, "f");
         assert_eq!(press(&mut a, " "), Some(Effect::Save));
@@ -2642,6 +2647,7 @@ mod tests {
         assert!(a.starred("llama4") && !a.starred("gpt55"));
         press(&mut a, "ggf");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save), "f starts on the picked task");
+        code(&mut a, KeyCode::Esc);
         assert_eq!(a.store.favorite("coding"), Some("gpt55"));
         assert_eq!(keys(&a), ["gpt55", "mini"], "llama4 leaves the line with the fav");
     }
@@ -3069,7 +3075,7 @@ mod tests {
         assert_eq!((a.input == Input::None, a.dev.as_slice()), (true, &["openai".to_string()][..]));
         a.mouse(Mouse::Menu(PRICE));
         a.mouse(Mouse::Item(2));
-        assert_eq!(a.input, Input::None, "Price is single-choice: a click picks and closes");
+        assert!(matches!(a.input, Input::Menu { .. }), "a click picks a Price level and keeps the dropdown open");
         assert_eq!(a.bounds, [(PRICE, f64::NEG_INFINITY, LEVELS[1])]);
     }
 

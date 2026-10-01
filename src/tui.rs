@@ -1531,8 +1531,10 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             Input::Choose { .. } => (true, true),
             _ => (false, true),
         };
+        let toggles = matches!(app.input, Input::Menu { .. }) || app.choosing_favs();
         let hint = match (menu, typing) {
-            (true, false) => "j k move  / search  enter pick  space toggle  esc close",
+            (true, false) => "j k move  / search  space enter toggle  esc close",
+            (true, true) if toggles => "↓ ↑ move  enter toggle  esc clear",
             (true, true) => "↓ ↑ move  enter pick  esc clear",
             _ => "enter apply  esc cancel",
         };
@@ -1651,7 +1653,7 @@ fn choice_lines(items: &[(String, Effect)], query: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(format!(" no entry matches {query} ")).style(fg(MUTED)));
     }
     let hint = match items.first() {
-        Some((_, Effect::Fav(..))) => " j k move · / search · space toggle · enter toggle and close · esc close",
+        Some((_, Effect::Fav(..))) => " j k move · / search · space enter toggle · esc close",
         Some((_, Effect::Theme(_))) => " j k preview · / search · enter saves · esc t close",
         Some((_, Effect::Source(_))) => " j k move · / search · enter picks · esc close",
         _ => " j k move · / search · enter opens",
