@@ -1106,6 +1106,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let top = top.min(app.rows.len().saturating_sub(height));
     *app.table.offset_mut() = top;
     let ext = app.ext;
+    // A glyph with the gap after it, short of the frame's border on a table too narrow for both.
+    let gap = |x: u16| usize::from(area.right().saturating_sub(x)).min(2);
     let faint = palette(app).is_some() || app.term_bg.is_some();
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + 2 + (k - top) as u16;
@@ -1149,7 +1151,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             // In the colour of the task at hand, as its name in recommend; gold with no task, as the ★
             // then stands for any of them. Bold so it stands out as much as the ✓.
             let star = tint(app.task_at_hand().map_or(STAR, |t| task_color(t.name)));
-            buf.set_stringn(star_x, y, "★", 1, star.add_modifier(BOLD));
+            // The gap after it takes the colour too: a font may draw the ★ wider than its cell,
+            // and a terminal paints what hangs over in the next cell's colour.
+            buf.set_stringn(star_x, y, "★ ", gap(star_x), star.add_modifier(BOLD));
         } else {
             buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
@@ -1192,7 +1196,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             buf.set_stringn(area.x + x, y, note, w as usize, text.add_modifier(Modifier::ITALIC));
         }
         if app.store.is_excluded(&m.key) {
-            buf.set_stringn(ex_x, y, "✗", 1, tint(BAD).add_modifier(BOLD));
+            buf.set_stringn(ex_x, y, "✗ ", gap(ex_x), tint(BAD).add_modifier(BOLD));
         } else {
             buf.set_stringn(ex_x, y, "·", 1, tint(MUTED));
         }
@@ -2450,6 +2454,7 @@ mod tests {
         assert!(!lines[opus].contains('★') && lines[flash].contains('★'), "only agentic's favorite: {lines:?}");
         let x = lines[flash][..lines[flash].find('★').unwrap()].chars().count() as u16;
         assert_eq!(buf[(x, flash as u16)].fg, task_color("agentic"));
+        assert_eq!(buf[(x + 1, flash as u16)].fg, task_color("agentic"), "and the gap, for a ★ wider than its cell");
         // The recommend panel: the task name and the favorite's ★ in the task's colour, the model in its price level's.
         let mut data = std::mem::take(&mut a.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
