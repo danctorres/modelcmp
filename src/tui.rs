@@ -31,7 +31,7 @@ use ratatui::{DefaultTerminal, Frame};
 use std::ops::Range;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Refresh = Receiver<Result<Data, String>>;
 
@@ -81,58 +81,94 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     res
 }
 
-const LOGO: [&str; 6] = [
-    "███╗   ███╗ ██████╗ ██████╗ ███████╗██╗      ██████╗███╗   ███╗██████╗ ",
-    "████╗ ████║██╔═══██╗██╔══██╗██╔════╝██║     ██╔════╝████╗ ████║██╔══██╗",
-    "██╔████╔██║██║   ██║██║  ██║█████╗  ██║     ██║     ██╔████╔██║██████╔╝",
-    "██║╚██╔╝██║██║   ██║██║  ██║██╔══╝  ██║     ██║     ██║╚██╔╝██║██╔═══╝ ",
-    "██║ ╚═╝ ██║╚██████╔╝██████╔╝███████╗███████╗╚██████╗██║ ╚═╝ ██║██║     ",
-    "╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝ ╚═════╝╚═╝     ╚═╝╚═╝     ",
+/// Half blocks, two square pixels to a cell.
+const LOGO: [&str; 8] = [
+    "                          ▄▄            ███                                ",
+    "                          ██             ██                                ",
+    "███████▄  ▄█████▄    ▄██████   ▄█████▄   ██    ▄█████▄   ███████▄ ██▄████▄ ",
+    "██ ██ ██ ██▀   ▀██  ██▀   ██  ██▀   ▀██  ██   ██▀   ▀██  ██ ██ ██ ██▀   ▀██",
+    "██ ██ ██ ██     ██  ██    ██  █████████  ██   ██         ██ ██ ██ ██     ██",
+    "██ ██ ██ ██▄   ▄██  ██▄   ██  ██▄   ▄▄▄  ██▄  ██▄   ▄██  ██ ██ ██ ███▄▄▄██▀",
+    "██ ██ ██  ▀█████▀    ▀████▀██  ▀█████▀    ▀██  ▀█████▀   ██ ██ ██ ██ ▀▀▀▀  ",
+    "                                                                  ▀▀       ",
 ];
+/// Under the wordmark, after a blank row.
+const TAGLINE: &str = "compare models, pick favorites, get recommendations";
 
-/// The first launch's intro: the wordmark dim, then a rainbow rolling across it on a diagonal,
-/// each cell running red to blue before it settles on the accent. Any key skips it, and is not
-/// passed on; a terminal too small for it skips it too.
+/// The first launch's intro: the wordmark dim, gliding up from below the screen and easing to a
+/// stop in the middle, then a rainbow rolling across it on a diagonal, each cell running red to
+/// blue before it settles on the accent, the tagline typing in under it as the rainbow passes. Any
+/// key skips it, and is not passed on; a terminal too small for it skips it too.
 fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     // The hue wheel up to the accent, so the last step into magenta is a small one.
     const RAINBOW: [Color; 5] = [Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue];
-    /// Frames each colour lasts in a cell, so the bands are this many columns wide.
+    /// Columns the rainbow crosses per frame.
+    const SPEED: usize = 2;
+    /// Frames each colour lasts in a cell, so the bands are `STEP * SPEED` columns wide.
     const STEP: usize = 3;
-    let (w, rows) = (LOGO[0].chars().count(), LOGO.len());
+    /// Frames the glide takes.
+    const SLIDE: usize = 20;
+    let (w, rows, tw) = (LOGO[0].chars().count(), LOGO.len(), TAGLINE.len());
     let palette = THEMES[crate::view::theme(&app.store.theme)].1.as_ref();
-    // The wave reaches a cell `c + 2 * (rows - 1 - r)` frames in, the bottom row first as cells are
-    // twice as tall as wide, and the last cell settles `RAINBOW.len() * STEP` frames after that.
-    let end = w + 2 * (rows - 1) + RAINBOW.len() * STEP;
-    for t in 0..=end {
-        let mut fits = true;
+    // The wave reaches a cell `SLIDE + (c + 2 * (rows - 1 - r)) / SPEED` frames in, the bottom row
+    // first as cells are twice as tall as wide, and the last cell settles `RAINBOW.len() * STEP`
+    // frames after that.
+    let end = SLIDE + (w + 2 * (rows - 1)).div_ceil(SPEED) + RAINBOW.len() * STEP;
+    // From 1, as frame 0 would put the wordmark just off the screen.
+    let mut t = 1;
+    while t <= end {
+        let (mut fits, mut landed) = (true, false);
         terminal.draw(|f| {
             let a = f.area();
             if usize::from(a.width) < w || usize::from(a.height) < rows {
                 fits = false;
                 return;
             }
-            let (x, y) = (a.x + (a.width - w as u16) / 2, a.y + (a.height - rows as u16) / 2);
+            // The wordmark, then a blank row and the tagline if there is room for them.
+            let tall = usize::from(a.height) >= rows + 2;
+            let h = if tall { rows + 2 } else { rows } as u16;
+            let (x, y) = (a.x + (a.width - w as u16) / 2, a.y + (a.height - h) / 2);
+            // Ease out: from the bottom edge, fast at first and slowing into place.
+            let left = 1.0 - (t.min(SLIDE) as f32 / SLIDE as f32);
+            let off = (f32::from(a.bottom() - y) * left * left * left).round() as u16;
+            landed = off == 0;
+            let y = y + off;
             let buf = f.buffer_mut();
             for (r, row) in LOGO.iter().enumerate() {
+                let yr = y + r as u16;
+                if yr >= a.bottom() {
+                    break;
+                }
                 for (c, ch) in row.chars().enumerate() {
-                    let style = match t.checked_sub(c + 2 * (rows - 1 - r)) {
+                    let style = match t.checked_sub(SLIDE + (c + 2 * (rows - 1 - r)) / SPEED) {
                         None => fg(MUTED),
                         Some(k) => fg(RAINBOW.get(k / STEP).copied().unwrap_or(ACCENT)).add_modifier(Modifier::BOLD),
                     };
-                    buf[(x + c as u16, y + r as u16)].set_char(ch).set_style(style);
+                    buf[(x + c as u16, yr)].set_char(ch).set_style(style);
                 }
+            }
+            // Each character as the wave's front passes over it.
+            if tall && t > SLIDE {
+                let typed = &TAGLINE[..((t - SLIDE) * SPEED).saturating_sub((w - tw) / 2).min(tw)];
+                buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows as u16 + 1, typed, fg(Color::Reset));
             }
             recolor(buf, palette);
         })?;
         if !fits {
             return Ok(());
         }
-        // A key skips it; a pointer move or a resize does not.
-        if event::poll(Duration::from_millis(if t == end { 600 } else { 15 }))?
-            && matches!(event::read()?, Event::Key(k) if k.kind == KeyEventKind::Press)
-        {
-            return Ok(());
+        if landed {
+            // Once it rounds into place, start the rainbow rather than hold it still.
+            t = t.max(SLIDE);
         }
+        // A key skips it; a pointer move or a resize does not, nor does it cut the frame short.
+        let until = Instant::now() + Duration::from_millis(if t == end { 750 } else { 15 });
+        while event::poll(until.saturating_duration_since(Instant::now()))? {
+            if matches!(event::read()?, Event::Key(k) if k.kind == KeyEventKind::Press) {
+                return Ok(());
+            }
+        }
+        t += 1;
     }
     Ok(())
 }
@@ -1772,6 +1808,7 @@ mod tests {
     fn the_logo_rows_line_up() {
         let w = LOGO[0].chars().count();
         assert!(LOGO.iter().all(|r| r.chars().count() == w), "centring and the band assume one width");
+        assert!(TAGLINE.is_ascii() && TAGLINE.len() <= w, "the intro slices it by byte and centres it in that width");
     }
 
     fn model(name: &str, dev: &str, eci: Option<f64>, price: f64) -> Model {

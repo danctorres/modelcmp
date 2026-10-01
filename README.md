@@ -1,6 +1,6 @@
 <h1 align="center"><img src="https://github.com/user-attachments/assets/175d7284-8b17-4ce4-bfd9-36790017ccca" alt="modelcmp" width="480"></h1>
 
-<p align="center"><b>Compare models by price and benchmarks, choose one per task or get a recommendation.</b></p>
+<p align="center"><b>Compare models, pick favorites, get recommendations.</b></p>
 
 <p align="center">
   <a href="https://github.com/danctorres/modelcmp/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danctorres/modelcmp/ci.yml?branch=main&event=push&label=ci" alt="CI"></a>
