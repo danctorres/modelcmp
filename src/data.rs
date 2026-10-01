@@ -411,9 +411,7 @@ impl Model {
     /// The model's page on models.dev if `o` is its developer's offer, as models.dev has model
     /// pages only under the lab (`openai/gpt-5.5`, not a reseller's).
     fn lab_page(&self, o: &Offer) -> Option<String> {
-        let dev = norm(&self.developer);
-        (!dev.is_empty() && norm(&short_org(&o.provider)) == dev)
-            .then(|| format!("https://models.dev/models/{}/{}/", o.provider, o.id))
+        is_lab(&o.provider, &self.developer).then(|| format!("https://models.dev/models/{}/{}/", o.provider, o.id))
     }
 
     /// Where models.dev shows the price you'd pay: the model's page when its developer is who
@@ -457,6 +455,10 @@ pub struct Data {
     /// `provider/*` stands for all of a provider's models.
     #[serde(default)]
     pub harness: BTreeMap<String, Vec<String>>,
+    /// The harnesses that gave no listing at the last refresh and kept the one before in
+    /// `harness`: kept once, so one silent again loses it.
+    #[serde(default)]
+    pub kept: Vec<String>,
     /// `fit::task_benches()` when fetched; a cache made with other benchmarks is stale.
     #[serde(default)]
     pub benches: Vec<String>,
@@ -601,15 +603,20 @@ fn keep_listed(
     (kept.map(|(ids, h)| (h, ids)).collect(), silent)
 }
 
-/// What the harnesses listed at the last refresh of `src`, whatever the cache's format.
-fn cached_harness(src: Source) -> BTreeMap<String, Vec<String>> {
+/// What the harnesses listed at the last refresh, from its cache whatever the format. Not the
+/// listings that refresh kept from the one before: a harness silent twice in a row, as one you
+/// logged out of, no longer has the models it once listed.
+fn cached_harness(cache: &[u8]) -> BTreeMap<String, Vec<String>> {
     #[derive(Deserialize, Default)]
     struct Listed {
         #[serde(default)]
         harness: BTreeMap<String, Vec<String>>,
+        #[serde(default)]
+        kept: Vec<String>,
     }
-    let bytes = std::fs::read(cache_path(src)).unwrap_or_default();
-    serde_json::from_slice::<Listed>(&bytes).unwrap_or_default().harness
+    let mut listed = serde_json::from_slice::<Listed>(cache).unwrap_or_default();
+    listed.harness.retain(|h, _| !listed.kept.contains(h));
+    listed.harness
 }
 
 /// The `provider/model` ids of a table under a `provider model ...` header, as `pi --list-models`
@@ -686,7 +693,10 @@ pub fn refresh() -> Result<Data, Failure> {
         aa_pages(&mut data.models, &String::from_utf8_lossy(&xml));
     }
     let silent;
-    (data.harness, silent) = keep_listed(listed, || cached_harness(src));
+    (data.harness, silent) =
+        keep_listed(listed, || cached_harness(&std::fs::read(cache_path(src)).unwrap_or_default()));
+    let lost;
+    (data.kept, lost) = silent.into_iter().partition(|h| data.harness.contains_key(h));
     // Only the update notice hangs on it, so without it the refresh still succeeds.
     data.latest = release
         .ok()
@@ -699,10 +709,11 @@ pub fn refresh() -> Result<Data, Failure> {
     let uncached = crate::store::write_atomic(&cache_path(src), &json)
         .err()
         .map(|e| format!("could not cache the data in {}: {e}", cache_path(src).display()));
-    let unlisted = (!silent.is_empty())
-        .then(|| format!("{} did not list its models: kept the ones from the last refresh", silent.join(", ")));
-    data.warning =
-        Some([unlisted, uncached].into_iter().flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
+    let unlisted = |hs: &[String], kept: &str| {
+        (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
+    };
+    let warnings = [unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
+    data.warning = Some(warnings.into_iter().flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
@@ -716,8 +727,8 @@ const GRACE: Duration = Duration::from_secs(10);
 
 /// The sources, downloaded in parallel and merged. It returns at the first failure of a download
 /// it cannot do without, models.dev's and the source's scores, leaving the others to end on
-/// their own: none is waited for once the refresh cannot finish, and those it can do without
-/// no longer than `GRACE` once it can.
+/// their own: none is waited for once the refresh cannot finish, and the links and the newest
+/// release no longer than `GRACE` once it can.
 fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
     const URLS: [&str; 5] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, RELEASE_URL];
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
@@ -733,8 +744,10 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
     }
     drop(tx);
     let mut got: [Result<Vec<u8>, Failure>; 5] = URLS.map(|url| Err(format!("{url}: no reply").into()));
-    // Once the needed ones are in, the rest get `GRACE` and no more.
-    let (mut missing, mut end) = (needed.len(), None::<Instant>);
+    // Once the first three that were asked for are in, the rest get `GRACE` and no more. Epoch's
+    // is among them under Artificial Analysis too, though not needed: its names decide which
+    // key a merged row keeps, and your favorites and notes hang on the key.
+    let (mut missing, mut end) = (2 + usize::from(key.is_some()), None::<Instant>);
     loop {
         let next = match end {
             None => rx.recv().ok(),
@@ -743,6 +756,8 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
         let Some((i, res)) = next else { break };
         if needed.contains(&i) {
             res.as_ref().map_err(Failure::clone)?;
+        }
+        if i < 3 {
             missing -= 1;
             if missing == 0 {
                 end = Some(Instant::now() + GRACE);
@@ -754,7 +769,8 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
     let data = match src {
         Source::Epoch => merge(&models?, &parse_epoch(&epoch?)?, None)?,
         Source::Aa => {
-            // Only links hang on it, so without it the refresh still succeeds, with no epoch.ai links.
+            // Without it the refresh still succeeds, with no epoch.ai links and Artificial
+            // Analysis's names deciding the keys.
             let ep = epoch.ok().and_then(|z| parse_epoch(&z).ok());
             let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref())?;
             if let Some(ep) = &ep {
@@ -1026,9 +1042,6 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
             t.reasoning |= m.reasoning;
             t.open_weights |= m.open_weights;
             t.vision |= m.vision;
-            if !m.release.is_empty() && (t.release.is_empty() || m.release < t.release) {
-                t.release = m.release;
-            }
             if t.knowledge.is_empty() {
                 t.knowledge = m.knowledge;
             }
@@ -1163,6 +1176,12 @@ struct AaEntry {
     scores: BTreeMap<String, f64>,
     /// (tokens/s, time to first token).
     speed: (Option<f64>, Option<f64>),
+}
+
+/// Whether `provider` is the developer itself, not a reseller of its models.
+fn is_lab(provider: &str, developer: &str) -> bool {
+    let dev = norm(developer);
+    !dev.is_empty() && norm(&short_org(provider)) == dev
 }
 
 /// Short developer names, the same whichever source named them.
@@ -1506,6 +1525,10 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     // Developer votes per model, one per offer: resellers prefix ids with their own names
     // ("@cf/meta/...", "novita/..."), so the first offer alone is not to be trusted.
     let mut dev_votes: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    // Release dates per model, (provider, date) of each offer: a reseller dates a model by its
+    // own listing (Kilo's "stealth" previews, Azure's later launch), so the first or earliest
+    // is not it.
+    let mut dates: HashMap<String, Vec<(&str, &str)>> = HashMap::new();
 
     let entries: Vec<(&String, &String, &MdModel, String)> = providers
         .iter()
@@ -1553,8 +1576,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         m.reasoning |= md.reasoning;
         m.open_weights |= md.open_weights;
         m.vision |= md.modalities.input.iter().any(|i| i == "image");
-        if !md.release_date.is_empty() && (m.release.is_empty() || md.release_date < m.release) {
-            m.release = md.release_date.clone();
+        if !md.release_date.is_empty() {
+            dates.entry(key.clone()).or_default().push((pid, &md.release_date));
         }
         if m.knowledge.is_empty() {
             m.knowledge = md.knowledge.clone();
@@ -1585,6 +1608,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         for (d, n) in dev_votes.remove(&from).unwrap_or_default() {
             *dev_votes.entry(to.clone()).or_default().entry(d).or_default() += n;
         }
+        let moved = dates.remove(&from).unwrap_or_default();
+        dates.entry(to.clone()).or_default().extend(moved);
     }
 
     let mut models: Vec<Model> = by_key.into_values().collect();
@@ -1595,6 +1620,13 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             d => Some(d.into()),
         }
         .unwrap_or_default();
+        // Its developer's own date, the earliest when it lists the model twice. Else the one
+        // most offers give, a month counting for a day in it, and the earliest on a tie.
+        let dates = dates.remove(&m.key).unwrap_or_default();
+        let votes = |d: &str| dates.iter().filter(|(_, v)| d.starts_with(v)).count();
+        let own = dates.iter().filter(|(p, _)| is_lab(p, &m.developer)).map(|(_, d)| *d).min();
+        let most = || dates.iter().map(|(_, d)| *d).max_by_key(|d| (votes(d), std::cmp::Reverse(*d)));
+        m.release = own.or_else(most).unwrap_or_default().to_string();
         // The model's OpenRouter page, or a search there when OpenRouter does not list it.
         // Else an offer with the same id as an OpenRouter model: Helicone's "llama-4-maverick"
         // is OpenRouter's, under whatever name Helicone gives it.
@@ -1692,6 +1724,9 @@ mod tests {
         assert_eq!(silent, ["opencode", "pi"]);
         let all = BTreeMap::from([("claude".to_string(), Some(ids("anthropic/*")))]);
         assert_eq!(keep_listed(all, || unreachable!("every harness answered")).1, [""; 0]);
+        // Kept once: what the last refresh itself kept is not there to keep again.
+        let cache = br#"{"harness": {"opencode": ["google/flash"], "pi": ["openai/gpt"]}, "kept": ["pi"]}"#;
+        assert_eq!(cached_harness(cache), BTreeMap::from([("opencode".to_string(), ids("google/flash"))]));
     }
 
     #[test]
@@ -1763,6 +1798,29 @@ mod tests {
         let d = merge(json, &Scores::default(), None).unwrap();
         let offers = |k: &str| d.models.iter().find(|m| m.key == k).map(|m| m.offers.len());
         assert_eq!((offers("gpt41"), offers("shisav2gpt41")), (Some(1), Some(1)));
+    }
+
+    #[test]
+    fn the_release_date_is_the_one_most_offers_give() {
+        let json = br#"{
+            "a": {"models": {"x-1": {"name": "X 1", "release_date": "2026-04-16"}, "y-1": {"release_date": "2026-02"}}},
+            "b": {"models": {"x-1": {"name": "X 1", "release_date": "2026-04-16"}, "y-1": {"release_date": "2026-01"}}},
+            "stealth": {"models": {"x-1": {"name": "X 1", "release_date": "2025-08-26"}, "z-1": {}}}
+        }"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        let date = |k: &str| d.models.iter().find(|m| m.key == k).unwrap().release.as_str();
+        assert_eq!(date("x1"), "2026-04-16", "not the earliest, one reseller's own");
+        assert_eq!((date("y1"), date("z1")), ("2026-01", ""), "the earliest on a tie, none when no offer has one");
+        let json = br#"{
+            "openai": {"models": {"gpt-9": {"release_date": "2026-04-16"}}},
+            "stealth": {"models": {"gpt-9": {"release_date": "2025-08-26"}, "w-1": {"release_date": "2026-01-05"}}},
+            "a": {"models": {"gpt-9": {"release_date": "2025-08-26"}, "w-1": {"release_date": "2026-02"}}},
+            "b": {"models": {"w-1": {"release_date": "2026-02-10"}}}
+        }"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        let date = |k: &str| d.models.iter().find(|m| m.key == k).unwrap().release.as_str();
+        assert_eq!(date("gpt9"), "2026-04-16", "its developer's own, whatever the resellers say");
+        assert_eq!(date("w1"), "2026-02-10", "a month counts for a day in it");
     }
 
     #[test]

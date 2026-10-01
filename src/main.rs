@@ -52,11 +52,11 @@ enum Cmd {
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
         #[arg(short, long, value_parser = PossibleValuesParser::new(app::COLS.map(|c| c.id)))]
         sort: Option<String>,
-        /// Keep models at or above a value, e.g. --min coding=155; columns as in --sort, ctx in thousands of tokens; repeatable (`>` in the TUI)
-        #[arg(long, value_parser = bound)]
+        /// Keep models at or above a value, e.g. --min coding=155; columns as in --sort, ctx in thousands of tokens, release as a date (2026-06); repeatable (`>` in the TUI)
+        #[arg(long, value_parser = |s: &str| bound(s, false))]
         min: Vec<(usize, f64)>,
-        /// Keep models at or below a value, e.g. --max price=2; repeatable (`<` in the TUI)
-        #[arg(long, value_parser = bound)]
+        /// Keep models at or below a value, e.g. --max price=2; a release up to the end of its month or year; repeatable (`<` in the TUI)
+        #[arg(long, value_parser = |s: &str| bound(s, true))]
         max: Vec<(usize, f64)>,
         /// Include models you have no access to
         #[arg(short, long)]
@@ -148,13 +148,13 @@ enum Cmd {
 }
 
 /// `coding=155` for --min and --max: the column's index in `app::COLS` and the value.
-fn bound(s: &str) -> Result<(usize, f64), String> {
+fn bound(s: &str, max: bool) -> Result<(usize, f64), String> {
     let ids = || app::COLS.map(|c| c.id).join(", ");
     let (id, v) =
         s.split_once('=').ok_or_else(|| format!("expected column=value, e.g. coding=155; columns: {}", ids()))?;
     let col =
         app::COLS.iter().position(|c| c.id == id).ok_or_else(|| format!("no column '{id}'; columns: {}", ids()))?;
-    let v = v.parse().ok().filter(|x: &f64| !x.is_nan()).ok_or_else(|| format!("'{v}' is not a number"))?;
+    let v = (app::COLS[col].read)(v, max).ok_or_else(|| format!("'{v}' is not a value for {id}"))?;
     Ok((col, v))
 }
 

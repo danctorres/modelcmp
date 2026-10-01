@@ -21,8 +21,12 @@ pub struct Col {
     /// What the column means, for the top border and `?`; read through `about`.
     about: &'static str,
     pub lower_better: bool,
+    /// Whether one end of its values is the better one: a release date has no best or worst.
+    pub ranked: bool,
     pub get: fn(&Model) -> Option<f64>,
     pub show: fn(f64) -> String,
+    /// A bound as typed, a maximum when the flag is set; none when it is not a value of the column.
+    pub read: fn(&str, bool) -> Option<f64>,
     /// Only Artificial Analysis measures it: hidden with any other source (`hidden`).
     pub aa_only: bool,
 }
@@ -51,16 +55,63 @@ impl Col {
 }
 
 const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(&Model) -> Option<f64>) -> Col {
-    Col { name, id, about, lower_better: false, get, show: |v| score(Some(v)), aa_only: false }
+    Col {
+        name,
+        id,
+        about,
+        lower_better: false,
+        ranked: true,
+        get,
+        show: |v| score(Some(v)),
+        read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()),
+        aa_only: false,
+    }
 }
 
 fn positive(x: f64) -> Option<f64> {
     (x > 0.0).then_some(x)
 }
 
-/// Prices from the offer you'd pay, then the source's overall index, the task scores and
-/// Code/$, then speed when Artificial Analysis measures it.
-pub const COLS: [Col; 12] = [
+/// "2026-09-18" as 20260918 and "2026-09" as 20260900, typed with `-` or `.` and with or without
+/// leading zeros; none when it is not a date.
+fn ymd(text: &str) -> Option<u32> {
+    let mut parts = text.split(['-', '.']);
+    let year = parts.next()?.parse::<u32>().ok().filter(|y| *y < 10000)?;
+    let mut part = |max| parts.next().map_or(Some(0), |p| p.parse().ok().filter(|n| (1..=max).contains(n)));
+    let (month, day) = (part(12)?, part(31)?);
+    parts.next().is_none().then_some(year * 10000 + month * 100 + day)
+}
+
+/// "2026-09-18" as 2026.0918: sorted by the day, shown by the month (`month`).
+fn released(m: &Model) -> Option<f64> {
+    ymd(&m.release).map(|d| f64::from(d) / 1e4)
+}
+
+/// A bound on Released, typed as the column reads: a maximum runs to the end of the year or
+/// the month it names, so `<` `2026-06` keeps June's models.
+fn release_bound(text: &str, max: bool) -> Option<f64> {
+    let d = ymd(text)?;
+    let end = match (d / 100 % 100, d % 100) {
+        _ if !max => 0,
+        (0, _) => 1231,
+        (_, 0) => 31,
+        _ => 0,
+    };
+    Some(f64::from(d + end) / 1e4)
+}
+
+/// 2026.0918 as "2026-09", and a bound on the year alone, 2026, as "2026".
+fn month(v: f64) -> String {
+    let date = (v * 1e4).round() as u32;
+    match date / 100 % 100 {
+        0 => (date / 10000).to_string(),
+        m => format!("{}-{m:02}", date / 10000),
+    }
+}
+
+/// Prices from the offer you'd pay, context and release, then the source's overall index, the
+/// task scores and Code/$, then speed when Artificial Analysis measures it.
+pub const COLS: [Col; 13] = [
     Col {
         lower_better: true,
         show: money,
@@ -89,6 +140,12 @@ pub const COLS: [Col; 12] = [
         show: |v| ctx((v * 1000.0) as u64),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
+    Col {
+        ranked: false,
+        show: month,
+        read: release_bound,
+        ..col("Released", "release", "release date, year and month", released)
+    },
     // Named by the source in use: `Col::text`.
     col("", "eci", "", |m| m.eci),
     col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
@@ -116,9 +173,9 @@ pub const PRICE: usize = TEXT;
 /// index (ECI or AAII), best first. The cursor starts on that column too.
 const DEFAULT_SORT: (usize, bool) = (ECI, true);
 /// Column index of ECI.
-pub const ECI: usize = TEXT + 5;
+pub const ECI: usize = TEXT + 6;
 /// Column index of Tok/s.
-pub const SPEED: usize = TEXT + 10;
+pub const SPEED: usize = TEXT + 11;
 /// First column of each group: names, price and context, benchmarks, speed, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, SPEED, VIA];
 /// Column index of where you have access.
@@ -391,16 +448,21 @@ pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
     (0..items.len()).filter(|&i| i == 0 || items[i].0.to_lowercase().contains(&q)).collect()
 }
 
-/// Indices of the choice list entries whose label contains `query`, any case; empty when none
-/// match, which the overlay says. `f`'s tasks match by their name alone: a tick rewrites the
-/// rest of the label, and the entry would leave the list from under the cursor.
+/// The part of a choice's label that `/` searches and marks. `f`'s tasks match by their name
+/// alone, the word after the box: a tick rewrites the rest of the label, and the entry would
+/// leave the list from under the cursor.
+pub fn searched((label, effect): &(String, Effect)) -> &str {
+    match effect {
+        Effect::Fav(..) => label.split(' ').nth(1).unwrap_or(label),
+        _ => label,
+    }
+}
+
+/// Indices of the choice list entries whose searched part contains `query`, any case; empty
+/// when none match, which the overlay says.
 pub fn choice_rows(items: &[(String, Effect)], query: &str) -> Vec<usize> {
     let q = query.to_lowercase();
-    let hit = |(label, effect): &(String, Effect)| match effect {
-        Effect::Fav(_, task, tier) => slot(task, *tier).contains(&q),
-        _ => label.to_lowercase().contains(&q),
-    };
-    (0..items.len()).filter(|&i| hit(&items[i])).collect()
+    (0..items.len()).filter(|&i| searched(&items[i]).to_lowercase().contains(&q)).collect()
 }
 
 /// Index `i` moved by `n` in a list of `len`: a move stops at an end, and one that starts
@@ -582,7 +644,7 @@ pub struct App {
     pub vals: Vec<[Option<f64>; COLS.len()]>,
     /// Widest shown value of each column over every model, so the layout holds when filtering.
     pub widths: [usize; COLS.len()],
-    /// Best and worst value of each column among `rows`; none when they all agree.
+    /// Best and worst value of each column among `rows`; none when they all agree, or it is not ranked.
     pub ext: [Option<(f64, f64)>; COLS.len()],
     pub store: Store,
     pub all: bool,
@@ -990,6 +1052,9 @@ impl App {
         }
         // Among the models to use: a muted row is grey throughout, so it holds no extreme.
         self.ext = std::array::from_fn(|c| {
+            if !COLS[c].ranked {
+                return None;
+            }
             let mut it = rows.iter().filter(|&&r| !self.muted(&ms[r])).filter_map(|&r| self.vals[r][c]);
             let first = it.next()?;
             let (lo, hi) = it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
@@ -1020,8 +1085,9 @@ impl App {
         match res {
             Ok(mut d) => {
                 // An error still standing, as the start's of an unreadable user.json, is not
-                // replaced by the news that the refresh went well.
+                // replaced by the news that the refresh went well, nor by its warning.
                 match d.warning.take() {
+                    Some(w) if self.failed => self.status = format!("{}; {w}", self.status),
                     Some(w) => self.report(Err(w)),
                     None if !self.failed => self.report(Ok("data refreshed".into())),
                     None => {}
@@ -1070,7 +1136,7 @@ impl App {
         self.first_start = false;
         crate::data::set_source(src);
         self.store.source = src.id().to_string();
-        self.status = format!("benchmarks from {} · B to change", src.label());
+        self.report(Ok(format!("benchmarks from {} · B to change", src.label())));
         Some(Effect::Source(src))
     }
 
@@ -1175,10 +1241,10 @@ impl App {
         let name = self.data.models.iter().find(|m| m.key == key)?.name.clone();
         let task = &slot(task, tier);
         self.store.toggle_favorite(task, key);
-        self.status = match self.store.favorite(task) == Some(key) {
+        self.report(Ok(match self.store.favorite(task) == Some(key) {
             true => format!("★ {name} favorite for {task}"),
             false => format!("{name} no longer the favorite for {task}"),
-        };
+        }));
         // With the list still open (m), its boxes follow.
         if self.choosing_favs()
             && let (fresh, Input::Choose { items, .. }) = (self.fav_items(key), &mut self.input)
@@ -1844,16 +1910,21 @@ impl App {
             },
             Input::Bound { col, min, text, cur } => match code {
                 KeyCode::Esc => self.input = Input::None,
-                _ if edit(text, cur, code, mods, |c| matches!(c, '0'..='9' | '.')) => {}
+                // `-` for a date typed as Released shows it.
+                _ if edit(text, cur, code, mods, |c| matches!(c, '0'..='9' | '.' | '-')) => {}
                 KeyCode::Enter => {
-                    if let Ok(v) = text.parse::<f64>() {
-                        let (col, lo, hi) =
-                            (*col, if *min { v } else { f64::NEG_INFINITY }, if *min { f64::INFINITY } else { v });
-                        // A new bound on a column replaces the old one of the same kind.
-                        self.bounds.retain(|&(c, l, _)| c != col || l.is_finite() != lo.is_finite());
-                        self.bounds.push((col, lo, hi));
-                    }
+                    let (col, min, text) = (*col, *min, std::mem::take(text));
                     self.input = Input::None;
+                    match numeric(col).and_then(|c| (c.read)(&text, !min)) {
+                        Some(v) => {
+                            let (lo, hi) = if min { (v, f64::INFINITY) } else { (f64::NEG_INFINITY, v) };
+                            // A new bound on a column replaces the old one of the same kind.
+                            self.bounds.retain(|&(c, l, _)| c != col || l.is_finite() != lo.is_finite());
+                            self.bounds.push((col, lo, hi));
+                        }
+                        None if text.is_empty() => {}
+                        None => self.report(Err(format!("{text} is not a value for {}", col_name(col)))),
+                    }
                     self.rebuild();
                 }
                 _ => {}
@@ -1904,7 +1975,7 @@ impl App {
                         match effect {
                             Effect::Theme(name) => {
                                 self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
-                                self.status = format!("theme {name}");
+                                self.report(Ok(format!("theme {name}")));
                                 return Some(Effect::Save);
                             }
                             // Asked once: a key it turns down is asked for again (`refreshed`), and
@@ -2544,6 +2615,36 @@ mod tests {
         assert!(col_about(0).contains("Via"));
         assert!(col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
+    }
+
+    #[test]
+    fn a_release_date_sorts_and_bounds_as_it_reads() {
+        let on = |d: &str| released(&Model { release: d.into(), ..Default::default() });
+        assert_eq!(on("").or(on("soon")), None, "no date, no value");
+        assert_eq!(on("2026-06"), Some(2026.06), "a bound typed 2026.06 keeps June's models");
+        assert!(on("2026-10-02") > on("2026-09-18") && on("2026-09-18") > on("2026-09"));
+        assert_eq!(on("2026-09-18").map(month).as_deref(), Some("2026-09"));
+        assert_eq!((month(2026.06), month(2026.0)), ("2026-06".to_string(), "2026".to_string()));
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        (data.models[0].release, data.models[1].release) = ("2026-09".into(), "2025-01".into());
+        a.set_data(data);
+        let col = COLS.iter().position(|c| c.id == "release").unwrap();
+        assert!(a.vals[0][col] > a.vals[1][col] && a.ext[col].is_none(), "dated, but no best or worst to colour");
+        // A maximum keeps the month or the year it names; a date is typed as the column shows it.
+        let read = COLS[col].read;
+        assert!(on("2026-06-15") <= read("2026-06", true) && on("2026-07-01") > read("2026.06", true));
+        assert!(on("2025-12-31") <= read("2025", true) && on("2026-01") > read("2025", true));
+        assert_eq!((read("2026-6", false), read("2026.06.15", true)), (on("2026-06"), on("2026-06-15")));
+        assert_eq!(read("2026-60", false).or(read("202606", false)).or(read("2026-06-15-1", false)), None);
+        (a.col, a.sort_col) = (col + TEXT, 0);
+        press(&mut a, "<2026-09");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.rows.len(), month(a.bounds[0].2)), (2, "2026-09".to_string()), "September's stays");
+        press(&mut a, ">2026.60");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.failed && a.bounds.len() == 1, "{}", a.status);
+        assert_eq!(a.status, "2026.60 is not a value for Released");
     }
 
     #[test]
@@ -3229,6 +3330,12 @@ mod tests {
         a.report(Err("user.json is not valid".into()));
         a.refreshed(Ok(Data::default()));
         assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");
+        a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }));
+        assert_eq!(a.status, "user.json is not valid; pi did not list its models", "nor by a warning");
+        // A message set under an open list is no error, whatever stood before it.
+        a.first_start = true;
+        a.switch(crate::data::source());
+        assert!(!a.failed && a.status.starts_with("benchmarks from"));
         a.report(Ok("done".into()));
         assert!(!a.failed);
     }

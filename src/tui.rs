@@ -58,7 +58,8 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
         Some(None) => {
             eprintln!("downloading model data (models.dev + {})…", data::source().label());
             match data::load(true) {
-                // The warning is of a cache that cannot be written: every start downloads.
+                // The warning is of a cache that cannot be written, so every start downloads,
+                // or of a harness that did not list its models.
                 Ok((d, w)) => {
                     warning = w;
                     (d, true, None)
@@ -1739,6 +1740,9 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
         .iter()
         .map(|&k| {
             let (label, effect) = &items[k];
+            // Where `/` looks: all of the label, or in `f`'s list up to the end of the task.
+            let key = crate::app::searched(&items[k]);
+            let hits = |s: &str| found(&s[..s.find(key).map_or(0, |i| i + key.len())], query);
             // f's tasks in their colours, harnesses and sites in theirs.
             let color = match effect {
                 Effect::Fav(_, t, _) => task_color(t),
@@ -1746,15 +1750,15 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
             };
             // A ticked box in the mark's colour, as in the table and the dropdowns; the rest of
             // the label keeps the task's or the harness's own.
-            match label.strip_prefix('✓') {
+            let line = match label.strip_prefix('✓') {
                 Some(rest) => Line::from(vec![
                     Span::styled(" ✓", fg(MARK).add_modifier(BOLD)),
                     Span::styled(format!("{rest} "), fg(color)),
                 ]),
                 _ => Line::from(format!(" {label} ")).style(fg(color)),
-            }
+            };
+            lit(line, hits)
         })
-        .map(|l| lit(l, |s| found(s, query)))
         .collect();
     // What `/` left, said as the dropdowns say it.
     if rows.is_empty() {
@@ -2433,8 +2437,8 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 206, 6);
-        let header = "# ✓ ★ ✗ Model Dev ▾ │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding Agentic Reason \
-                      Code/$ │ Via ▾ Notes";
+        let header = "# ✓ ★ ✗ Model Dev ▾ │ Price ▾ $in $cache $out Ctx Released │ ▼ECI Coding Agentic \
+                      Reason Code/$ │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 3, "{}", lines[1]);
@@ -2610,7 +2614,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
         assert_eq!(hit(&a, area, click(col("Price"), 1)), Some(Mouse::Header(2)));
         assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(2)), "the ▾ after Price");
-        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(8)));
+        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(9)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
         let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.find("opencode")?))).unwrap();
@@ -2618,7 +2622,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(x + 7, y)), Some(Mouse::Harness(k - 2, 0)), "a harness in Via");
         assert_eq!(hit(&a, area, click(x + 8, y)), Some(Mouse::Row(k - 2)), "past its name: the row");
         assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
-        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 8)), "a benchmark score");
+        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 9)), "a benchmark score");
         assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Cell(1, PRICE)), "a price");
         assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Row(1)), "the notes open nothing");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
@@ -2817,7 +2821,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         status(&mut buf, Rect::new(0, 0, 40, 1), &a);
         assert_eq!((0..15).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  $in ≥ 4");
-        a.input = Input::Bound { col: ECI - 1, min: true, text: "200".into(), cur: 3 };
+        a.input = Input::Bound { col: ECI - 2, min: true, text: "200".into(), cur: 3 };
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
         assert_eq!(status(&mut buf, Rect::new(0, 0, 60, 1), &a), Some(8 + 6 + 3), "the k is after the cursor");
         assert_eq!((0..18).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  Ctx ≥ 200k", "in thousands");
@@ -3098,6 +3102,9 @@ mod tests {
         let lines = choice_lines(Kind::Theme, &items, &search("gr"));
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
+        // f's list marks what it searches, the task, not the model that holds it now.
+        let items = vec![("☐ coding:low  (now Solo)".to_string(), Effect::Fav("k".into(), "coding", Some("low")))];
+        assert_eq!(lit_text(&choice_lines(Kind::Fav, &items, &search("lo"))), ["lo"]);
     }
 
     #[test]
