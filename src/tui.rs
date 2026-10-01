@@ -20,8 +20,8 @@ use crate::view::{
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Margin, Rect};
@@ -90,16 +90,17 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     }
     let mut terminal =
         ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}); see modelcmp --help"))?;
-    // ratatui's panic hook restores the terminal but leaves mouse reporting on.
+    // ratatui's panic hook restores the terminal but leaves mouse reporting on, and bracketed
+    // paste, which keeps pasted text (ctrl+v in some terminals) from arriving as keys.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
         hook(info);
     }));
-    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     let res = if ask { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
         .and_then(|()| event_loop(&mut app, &mut terminal, rx));
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     res
 }
@@ -296,6 +297,10 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
                         Some(m) => Some(Err(double(&mut click, m, Instant::now()))),
                         None => continue,
                     }
+                }
+                Event::Paste(text) => {
+                    app.paste(&text);
+                    None
                 }
                 // A resize redraws; a key release, a pointer move and the like do nothing.
                 Event::Resize(..) => None,

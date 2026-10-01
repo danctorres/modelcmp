@@ -1235,6 +1235,12 @@ impl App {
         self.store.is_favorite(self.task_at_hand(), key)
     }
 
+    /// `f`'s list of tasks for the model `key`, starting on the task at hand, so f enter toggles it.
+    fn ask_fav(&mut self, key: &str) {
+        let sel = self.task_at_hand().and_then(|t| slots().position(|s| s == (t.name, None))).unwrap_or(0);
+        self.input = Input::choose("favorite for which tasks?", Kind::Fav, self.fav_items(key), sel);
+    }
+
     /// `f`: favorite the model `key` for the task or one tier of it, or unfavorite it when it
     /// already is.
     fn fav(&mut self, key: &str, task: &'static str, tier: Option<&'static str>) -> Option<Effect> {
@@ -1349,6 +1355,29 @@ impl App {
         let effect = self.on_key(k);
         self.follow();
         effect
+    }
+
+    /// Text pasted in the terminal: typed into the search, note or bound being written, and
+    /// nothing anywhere else, where its letters would run as keys.
+    pub fn paste(&mut self, text: &str) {
+        if matches!(self.input, Input::None | Input::Quit) || self.open_list().is_some_and(|l| !l.typing) {
+            self.report(Ok("nothing to paste into: / searches, n writes a note".into()));
+            return;
+        }
+        // No line breaks, which would be enter.
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        // A search takes it in one go, so the table is filtered once and not at every letter.
+        if let Input::Search { cur, .. } = &mut self.input {
+            let at = std::mem::replace(cur, *cur + text.len());
+            self.search_target().insert_str(at, &text);
+            if !self.overlay_search() {
+                self.rebuild();
+            }
+            return;
+        }
+        for c in text.chars() {
+            self.input_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
     }
 
     /// The table's cursor follows the model picked in compare and recommend, so after esc you are
@@ -1502,7 +1531,10 @@ impl App {
             Mouse::Star(n) if n < self.rows.len() => {
                 self.deselect();
                 self.select(n);
-                return self.table_key(KeyCode::Char('f'), 1);
+                // Only the clicked row, even on a selected one, where `f` refuses several.
+                let key = self.current()?.key.clone();
+                self.ask_fav(&key);
+                return None;
             }
             // Only the clicked row, even on a mark, where `e` takes every mark.
             Mouse::Exclude(n) if n < self.rows.len() => {
@@ -1730,10 +1762,14 @@ impl App {
                 return self.flag(Store::is_excluded, Store::toggle_excluded, ["excluded", "unexcluded"]);
             }
             KeyCode::Char('f') if row => {
-                // Starting on the task at hand, so f enter toggles it.
-                let items = self.fav_items(&self.current()?.key);
-                let sel = self.task_at_hand().and_then(|t| slots().position(|s| s == (t.name, None))).unwrap_or(0);
-                self.input = Input::choose("favorite for which tasks?", Kind::Fav, items, sel);
+                // A task has one favorite, so f says so rather than quietly take the cursor's model.
+                let keys = self.targets();
+                if let [key] = &keys[..] {
+                    self.ask_fav(key);
+                } else if let n @ 2.. = keys.len() {
+                    let what = if self.selecting() { "highlighted" } else { "selected" };
+                    self.status = format!("a task has one favorite: f takes one model, {n} are {what}");
+                }
             }
             KeyCode::Char('v') if table => {
                 if self.selecting() {
@@ -2739,7 +2775,16 @@ mod tests {
     #[test]
     fn search_filters_and_esc_clears() {
         let mut a = app();
-        press(&mut a, "/opus");
+        // A paste is text for what is being typed; in the table its letters are not keys.
+        a.paste("f\nq");
+        assert_eq!((&a.input, a.status.as_str()), (&Input::None, "nothing to paste into: / searches, n writes a note"));
+        // Nor at the quit prompt, where the first letter would cancel and the rest run.
+        press(&mut a, "q");
+        a.paste("xe");
+        assert_eq!((&a.input, a.store.excluded.len()), (&Input::Quit, 0));
+        press(&mut a, "x");
+        press(&mut a, "/");
+        a.paste("op\nus");
         assert_eq!(a.input, Input::Search { cur: 4, was: String::new() });
         assert_eq!(a.rows.len(), 1);
         code(&mut a, KeyCode::Enter);
@@ -3244,6 +3289,25 @@ mod tests {
         assert_eq!(a.mouse(Mouse::Item(4)), Some(Effect::Save));
         assert!(a.choosing_favs(), "a click ticks a task and keeps the list open");
         assert_eq!(a.store.favorite("coding"), Some("opus5"));
+        code(&mut a, KeyCode::Esc);
+        // A task has one favorite: with several selected or highlighted, f says so and asks nothing.
+        a.mouse(Mouse::Box(1));
+        a.mouse(Mouse::Box(2));
+        assert_eq!((press(&mut a, "f"), a.choosing_favs()), (None, false));
+        assert_eq!(a.status, "a task has one favorite: f takes one model, 2 are selected");
+        press(&mut a, "ggvjf");
+        assert!(!a.choosing_favs() && a.status.ends_with("2 are highlighted"), "{}", a.status);
+        a.mouse(Mouse::Star(2));
+        assert!(a.choosing_favs(), "a click on the ☆ is for its row alone");
+        code(&mut a, KeyCode::Esc);
+        // One highlighted row is the one f takes, as e does, wherever the cursor went.
+        a.mouse(Mouse::Pick(1));
+        press(&mut a, "jf");
+        assert!(
+            matches!(&a.input, Input::Choose { items, .. } if matches!(&items[0].1, Effect::Fav(k, ..) if k == "mini")),
+            "{:?}",
+            a.input
+        );
     }
 
     #[test]
