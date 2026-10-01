@@ -1019,17 +1019,24 @@ fn layout(width: u16, app: &App) -> Layout {
     let room = width.saturating_sub(x) + GAP;
     let first = match app.col.checked_sub(2) {
         Some(s) => {
-            // Each column brought in on the left costs its width and gap, and the one it
-            // displaces as first its `│`; hidden ones cost nothing and are never first.
-            let (mut lo, mut used) = (s, ws[s] + GAP);
-            for k in (0..s).rev().filter(|&k| ws[k] > 0) {
-                let cost = ws[k] + GAP + sep(lo);
-                if used + cost > room {
-                    break;
+            // The leftmost first column that still shows column `s`. Each column brought in on
+            // the left costs its width and gap, and the one it displaces as first its `│`;
+            // hidden ones cost nothing and are never first.
+            let reach = |s: usize| {
+                let (mut lo, mut used) = (s, ws[s] + GAP);
+                for k in (0..s).rev().filter(|&k| ws[k] > 0) {
+                    let cost = ws[k] + GAP + sep(lo);
+                    if used + cost > room {
+                        break;
+                    }
+                    (lo, used) = (k, used + cost);
                 }
-                (lo, used) = (k, used + cost);
-            }
-            app.hscroll.clamp(lo, s)
+                lo
+            };
+            // Never scrolled further than it takes to show the last column, so a wider
+            // window brings back the columns on the left.
+            let last = ws.iter().rposition(|&w| w > 0).unwrap_or(s);
+            app.hscroll.clamp(reach(s), s).min(reach(last))
         }
         None => 0,
     };
@@ -2527,6 +2534,7 @@ mod tests {
         );
         assert!(layout(46, &a).more, "columns cut off on the right");
         assert!(!layout(400, &a).more, "all columns fit");
+        assert_eq!(layout(400, &a).first, 0, "a window made wide again shows the columns scrolled off on the left");
         // Rows above or below the window are reported for the frame's ▲ ▼.
         let mut data = std::mem::take(&mut a.data);
         data.models.push(model("mini", "openai", Some(100.0), 0.5));
