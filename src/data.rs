@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
@@ -529,8 +529,8 @@ pub fn load_cache() -> Option<Data> {
 }
 
 /// Ask each installed harness which models it can use. A missing, failing or hung harness
-/// reports nothing, so a refresh always finishes.
-fn harness_models() -> BTreeMap<String, Vec<String>> {
+/// reports nothing, so a refresh always finishes; so does one still running when `stop` is set.
+fn harness_models(stop: &AtomicBool) -> BTreeMap<String, Vec<String>> {
     let on_path =
         |bin: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()));
     HARNESSES
@@ -539,10 +539,10 @@ fn harness_models() -> BTreeMap<String, Vec<String>> {
             let ids = match probe {
                 Probe::Provider(p) => on_path(bin).then(|| vec![format!("{p}/*")])?,
                 Probe::List(args) => {
-                    let out = run(bin, args, Duration::from_secs(30))?;
+                    let out = run(bin, args, Duration::from_secs(30), stop)?;
                     out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect()
                 }
-                Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30))?)?,
+                Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?)?,
             };
             Some((bin.to_string(), ids))
         })
@@ -560,8 +560,8 @@ fn table_ids(out: &str) -> Option<Vec<String>> {
     Some(lines.filter(|f| f.len() == cols).map(|f| format!("{}/{}", f[0], f[1])).collect())
 }
 
-/// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit`.
-fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
+/// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit` or on `stop`.
+fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<String> {
     use std::process::{Command, Stdio};
     let mut child =
         Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
@@ -577,7 +577,7 @@ fn run(bin: &str, args: &[&str], limit: Duration) -> Option<String> {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(Some(_)) | Err(_) => return None,
-            Ok(None) if start.elapsed() >= limit => {
+            Ok(None) if start.elapsed() >= limit || stop.load(Relaxed) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
@@ -598,14 +598,17 @@ pub fn refresh() -> Result<Data, String> {
             Some(aa_key().ok_or_else(|| format!("{AA_MISSING}: set {AA_KEY_ENV}, or pick it with B in the TUI"))?)
         }
     };
+    let stop = AtomicBool::new(false);
     let (models, epoch, api, aa, harness, release) = std::thread::scope(|s| {
         let a = s.spawn(|| fetch(MODELS_URL, None));
         let b = s.spawn(|| fetch(EPOCH_URL, None));
         let c = s.spawn(|| key.as_deref().map(|k| fetch(AA_API_URL, Some(k))));
         let d = s.spawn(|| fetch(AA_URL, None));
-        let e = s.spawn(harness_models);
+        let e = s.spawn(|| harness_models(&stop));
         let f = s.spawn(|| fetch(RELEASE_URL, None));
         let (a, b, c) = (a.join().unwrap(), b.join().unwrap(), c.join().unwrap());
+        // Without a download the refresh cannot do without, the harnesses are killed, not waited for.
+        stop.store(a.is_err() || c.as_ref().map_or(b.is_err(), |c| c.is_err()), Relaxed);
         (a, b, c, d.join().unwrap(), e.join().unwrap(), f.join().unwrap())
     });
     let mut data = match api {
@@ -1450,13 +1453,15 @@ mod tests {
 
     #[test]
     fn run_returns_output_and_gives_up_on_hangs() {
-        assert_eq!(run("sh", &["-c", "echo a/b"], Duration::from_secs(5)).as_deref(), Some("a/b\n"));
-        assert_eq!(run("sh", &["-c", "exit 1"], Duration::from_secs(5)), None, "a failure reports nothing");
-        let big = run("sh", &["-c", "head -c 200000 /dev/zero | tr '\\0' a"], Duration::from_secs(5));
+        let go = &AtomicBool::new(false);
+        assert_eq!(run("sh", &["-c", "echo a/b"], Duration::from_secs(5), go).as_deref(), Some("a/b\n"));
+        assert_eq!(run("sh", &["-c", "exit 1"], Duration::from_secs(5), go), None, "a failure reports nothing");
+        let big = run("sh", &["-c", "head -c 200000 /dev/zero | tr '\\0' a"], Duration::from_secs(5), go);
         assert_eq!(big.map(|s| s.len()), Some(200_000), "more than a pipe holds");
-        assert_eq!(run("no-such-binary-xyz", &[], Duration::from_secs(5)), None, "so does a missing harness");
+        assert_eq!(run("no-such-binary-xyz", &[], Duration::from_secs(5), go), None, "so does a missing harness");
         let t = Instant::now();
-        assert_eq!(run("sleep", &["10"], Duration::from_millis(200)), None, "a hang is killed");
+        assert_eq!(run("sleep", &["10"], Duration::from_millis(200), go), None, "a hang is killed");
+        assert_eq!(run("sleep", &["10"], Duration::from_secs(10), &AtomicBool::new(true)), None, "so is a stopped one");
         assert!(t.elapsed() < Duration::from_secs(5));
     }
 
