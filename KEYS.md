@@ -19,11 +19,11 @@ commands and JSON.
 | Key | Action |
 |-----|--------|
 | `j` `k` | move the cursor: a faint fill in the accent colour between two bars `▌` `▐`, on which the row keeps its colours; the same in dropdowns and lists, on a model's column in compare and on a name in recommend. A count repeats, as in `3j`; past the last row back to the first. The arrow keys work as `h` `j` `k` `l`, `PgDn` `PgUp` move a page, `Home` `End` go to the top / bottom |
-| `h` `l` | pick a column, scrolling the ones right of Dev; `‹` `›` mark columns off screen, `▲` `▼` on the left border rows above or below; in compare and recommend, pick a model for `space` `o` `x` `y` `f` `e` `n`, with the same marks for models off screen |
+| `h` `l` | pick a column, scrolling the ones right of Dev; `‹` `›` mark columns off screen, `▲` `▼` on the left border rows above or below; in compare and recommend, pick a model for `o` `x` `y` `f` `e` `n` (and `space` in recommend), with the same marks for models off screen |
 | `0` `_` `$` `w` `b` | first / last column; next / previous group: names, prices, benchmarks, speed (Artificial Analysis), Via; in compare and recommend, `0` `_` `$` pick the first / last model |
 | `gg` `G` `3gg` | top / bottom / row 3; a number before `gg` goes to that row, as `12gg` to row 12, in dropdowns and lists too |
-| `(` `)` `^d` `^u` | half a page up / down; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
-| `v` | highlight a range of rows: move to extend it, then `space` `e` or `C` act on all of it (`C` compares just the range); `esc` cancels |
+| `(` `)` `^u` `^d` | half a page up / down, stopping at the first / last row as `PgUp` `PgDn` and the wheel do; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
+| `v` | highlight a range of rows: move to extend it, then `space` `e` or `C` act on all of it (`C` compares just the range); `v` again or `esc` cancels |
 
 ## Filter and sort
 
@@ -67,14 +67,14 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 
 | Key | Action |
 |-----|--------|
-| `enter` | details: every benchmark, price per provider |
+| `enter` | details: every benchmark, price per provider; `space` `f` `e` `n` `o` `x` `y` act on the model there too |
 | `C` | compare 2+ selected models: cheapest, best coder, most coding per $; `h` `l` pick a model, and the table's cursor follows it; `C` again or `esc` closes it |
-| `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `o` `x` `y` `f` `e` `n`, and the table's cursor follows it, so `esc` lands on it; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
+| `R` | recommend: the best model per price for each task, what it measures and when to use it; `h` `l` pick a model on the task's line for `space` `o` `x` `y` `f` `e` `n`, and the table's cursor follows it, so `R` again or `esc` lands on it; `enter` shows the task's models in the table, best first, each row cheaper and scoring lower |
 | `t` | theme panel: `j` `k` preview, `/` searches, `enter` saves, `esc` or `t` closes. `terminal` (its own colours, the default), then the dark `gruvbox`, `nord`, `catppuccin`, `dracula`, `tokyonight`, `kanagawa`, `monokai`, `github`, `solarized`, `synthwave` and `cyberpunk`, the light `github-light` and `sepia`, and the retro `amber`, `phosphor`, `c64` and `gameboy`; saved in `user.json`. A theme sets the 16 terminal colours, the text colour and 6 to 14 colours for developers, each of which has to read on that theme's background and stay apart from the others. Every theme paints its own background, so a dark one stays dark on a light terminal; only `terminal` keeps a transparent background, but for a selected row's fill and the cursor's |
 
 ## Input and mouse
 
 | Key | Action |
 |-----|--------|
-| typing | `←` `→` `^a` `^e` move, `alt-b` `alt-f` `^←` `^→` by word; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
+| typing | `←` `→` `^b` `^f` move, `^a` `^e` `Home` `End` to the start / end, `alt-b` `alt-f` `^←` `^→` `alt-←` `alt-→` by word; `↓` `↑` move the table's cursor under a `/` search; `^w` `alt-d` delete a word, `^u` `^k` to the start / end |
 | mouse | click a row to highlight it; a double click opens what its cell shows: the name or developer the details, a harness in Via that harness, as `x` does, and a number its page in the browser, which is models.dev for a price or the context (the model's page when its developer is who you'd pay, else the provider's), the benchmark source for the index to Code/$ and Artificial Analysis for Tok/s and TTFT; an empty cell opens nothing; ctrl click adds or removes it from the highlight, shift click or a drag highlights a range, a plain click drops the highlight, right click selects it, a click on its `☐` toggles the selection, on its `☆` picks its tasks, on its `✗` box excludes it; a click on the `#` header goes to the first row, on the `✓` header shows selected models only, on the `★` header favorites only, on the `✗` header excluded only; a header sorts, its ▾ opens the dropdown, where clicks toggle entries until a click elsewhere; a click on a key hint in the status bar presses that key; the wheel scrolls, sideways moves the column, or the model in compare and recommend |

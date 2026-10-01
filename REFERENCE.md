@@ -25,7 +25,7 @@ say, using Epoch's difficulty and slope for each benchmark, with guessing counte
 moves it a little, many that agree move it more. A model without an ECI starts from a fit to
 all its scores.
 
-`modelcmp recommend` prints the same lists. In the TUI, move the column cursor and the
+`modelcmp recommend --json` gives the same lists as `benchmarks`. In the TUI, move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
 column.
 
@@ -56,10 +56,10 @@ tokens), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$), an
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
 model from the task's list: `low` the cheapest in the top half of the models the source
 evaluated, `mid` the cheapest in the top quarter, `high` the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
-tier's pick. Every favorite of the task sits on the task's list marked `★` whether or not it is on the frontier or has a score for
+tier's pick. Every favorite of the task sits on the task's list, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
-`list` prints every match unless `-n` limits it, and then says how many it left out.
+`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` with no match is an error (exit code 1), so a harness is never started on an empty model.
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name

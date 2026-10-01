@@ -69,7 +69,7 @@ Picks run cheapest first. Each shows the name, key, $ per 1M tokens and the task
 ECI points with Epoch AI) in parentheses.
 
 In the TUI, `R` recommends, `space` selects models, `C` compares them and `/` filters. `esc`
-goes back, `q` quits and `?` lists every key. [KEYS.md](KEYS.md) covers keys and mouse,
+goes back, `q` quits and `?` lists the keys. [KEYS.md](KEYS.md) covers keys and mouse,
 [REFERENCE.md](REFERENCE.md) the columns, commands and JSON fields, and `modelcmp --help` the
 flags.
 
