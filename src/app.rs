@@ -569,6 +569,9 @@ pub struct App {
     /// The TUI opened on the `B` chooser, with no data, as no source was ever picked: closing it
     /// picks the default. Not so with `--source`, which picked one for the run.
     pub first_start: bool,
+    /// The terminal's background colour, when it told at start (`tui::terminal_bg`): with the
+    /// terminal's own colours, what a marked row's faint fill is mixed from.
+    pub term_bg: Option<u32>,
 }
 
 impl App {
@@ -617,6 +620,7 @@ impl App {
             cache_on: 0.0,
             cache_hint: "",
             first_start: false,
+            term_bg: None,
         };
         let start = crate::data::cached();
         app.cache_on = if start > 0.0 { start } else { crate::data::AGENT_CACHED };

@@ -4,7 +4,8 @@
 //!
 //! The table is drawn straight into the buffer: one pass over the visible rows, no widget
 //! allocations per frame. Colours come from the terminal's 16-colour palette, so a themed
-//! terminal themes modelcmp too, and nothing paints a background over a transparent one.
+//! terminal themes modelcmp too, and nothing paints a background over a transparent one but a
+//! marked row's fill.
 
 use crate::app::{
     App, COLS, ECI, Effect, GROUPS, HELP, Input, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows, col_about,
@@ -67,6 +68,8 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
         rx = Some(spawn_refresh());
     }
     let mut terminal = ratatui::init();
+    // Before the mouse reports, so none of them mixes into the reply.
+    app.term_bg = cfg!(unix).then(terminal_bg).flatten();
     // ratatui's panic hook restores the terminal but leaves mouse reporting on.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -79,6 +82,33 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     res
+}
+
+/// The terminal's background colour, for a marked row's faint fill with the terminal's own
+/// colours. It is asked for with OSC 11, then for the cursor position, which every terminal
+/// answers: replies come in the order asked, so once the position is in, the colour's either is
+/// queued or is not coming, with no wait to guess at and no late reply read as keys. crossterm
+/// knows no OSC reply, so it comes through as the keys that spell it.
+fn terminal_bg() -> Option<u32> {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    out.write_all(b"\x1b]11;?\x07").and_then(|()| out.flush()).ok()?;
+    ratatui::crossterm::cursor::position().ok()?;
+    let mut reply = String::new();
+    while event::poll(Duration::ZERO).ok()? {
+        if let Event::Key(k) = event::read().ok()?
+            && let KeyCode::Char(c) = k.code
+        {
+            reply.push(c);
+        }
+    }
+    parse_bg(&reply)
+}
+
+/// The colour in an OSC 11 reply, `]11;rgb:1e1e/1e1e/2e2e`: the high byte of each channel.
+fn parse_bg(reply: &str) -> Option<u32> {
+    let mut rgb = reply.split_once("rgb:")?.1.split('/').map(|c| u32::from_str_radix(c.get(..2)?, 16).ok());
+    Some(rgb.next()?? << 16 | rgb.next()?? << 8 | rgb.next()??)
 }
 
 /// Half blocks, two square pixels to a cell.
@@ -153,7 +183,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                 let typed = &TAGLINE[..((t - SLIDE) * SPEED + 4).saturating_sub((w - tw) / 2).min(tw)];
                 buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows as u16 + 1, typed, fg(Color::Reset));
             }
-            recolor(buf, palette);
+            recolor(buf, palette, app.term_bg);
         })?;
         if !fits {
             return Ok(());
@@ -162,12 +192,12 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
             // Once it rounds into place, start the rainbow rather than hold it still.
             t = t.max(SLIDE);
         }
-        // A key skips it; a pointer move or a resize does not, nor does it cut the frame short
-        // or, by stopping at the deadline with events still queued, stretch it.
+        // A key skips it; a pointer move or a resize does not, nor does it cut the frame short.
+        // Past the deadline the wait is zero, so what is still queued is read and a key behind
+        // a burst of pointer moves is not left for the table.
         let until = Instant::now() + Duration::from_millis(if t == end { 750 } else { 15 });
         loop {
-            let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() || !event::poll(left)? {
+            if !event::poll(until.saturating_duration_since(Instant::now()))? {
                 break;
             }
             if matches!(event::read()?, Event::Key(k) if k.kind == KeyEventKind::Press) {
@@ -194,8 +224,7 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
             terminal
                 .draw(|f| {
                     draw(app, f);
-                    let name = app.theme_preview().unwrap_or(&app.store.theme);
-                    recolor(f.buffer_mut(), THEMES[crate::view::theme(name)].1.as_ref());
+                    recolor(f.buffer_mut(), palette(app), app.term_bg);
                 })
                 .map_err(|e| e.to_string())?;
         }
@@ -622,18 +651,24 @@ fn stale(app: &App) -> bool {
     !app.refreshing && app.data.age() > data::MAX_AGE
 }
 
+/// The theme in effect: the one under the bar in the theme panel, else the saved one.
+fn palette(app: &App) -> Option<&'static Palette> {
+    THEMES[crate::view::theme(app.theme_preview().unwrap_or(&app.store.theme))].1.as_ref()
+}
+
 // The terminal's own palette, so the colours are whatever the rice set. Text stays the default foreground.
 const ACCENT: Color = Color::Magenta;
 const KEY: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
-/// A marked row's ✓ and model name. Light blue, and the only thing drawn in it, so a palette's slot 12 is
-/// free to be whatever parts from the muted ☐ (`the_mark_parts_from_an_empty_box`).
+/// A marked row's fill and its ✓, the ✓ of a ticked entry in a list and the count in the
+/// status bar. Light blue, and nothing else is drawn in it, so a palette's slot 12 is free to
+/// be whatever parts from the muted ☐ (`the_mark_parts_from_an_empty_box`).
 const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
 const STAR: Color = Color::Yellow;
-/// One colour per task in `TASKS` order: the ★ of its favorite and its name in recommend. Off the mark colour (✓ light blue), the key hints' cyan, the worst
+/// One colour per task in `TASKS` order: the ★ of its favorite and its name in recommend. Off the mark colour (light blue), the key hints' cyan, the worst
 /// value's red and yellow for a match; 16 colours leave no room to also skip the best's green.
 const TASK: [Color; 6] =
     [Color::LightCyan, Color::Green, Color::LightGreen, Color::Blue, Color::LightMagenta, Color::LightYellow];
@@ -644,11 +679,20 @@ const DEVS: [Color; 6] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magent
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
+/// The share of the mark colour in a marked row's fill, in percent, the rest being the theme's
+/// background: faint, as the row's colours are read on it.
+/// ponytail: text on it reads at 2.2:1 or better, not the 3:1 it has on the background; past
+/// that the palettes need retuning (`every_theme_reads_on_its_own_background`).
+const WASH: u32 = 12;
+/// The mark colour in that fill with the terminal's own colours, which do not tell their slot 12.
+/// ponytail: one blue for a dark and a light terminal; ask for slot 12 (OSC 4) to follow the rice.
+const TERM_MARK: u32 = 0x5c9cff;
 
 /// Swap the terminal colours for the theme's after drawing, so the drawing code keeps naming
 /// terminal colours: the 16, default text, and a developer's placeholder (see `dev_color`).
 /// Backgrounds with no colour get the theme's; with the terminal's own colours they stay transparent.
-fn recolor(buf: &mut Buffer, palette: Option<&Palette>) {
+/// `term_bg` is the terminal's background, if it told (`terminal_bg`).
+fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>) {
     let bg = palette.map(|p| Color::from_u32(p.bg));
     for cell in &mut buf.content {
         // A pill is the only black text (see `pill`), and the dim half of a palette is too close
@@ -663,9 +707,13 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>) {
             (Color::Reset, Some(p)) => Color::from_u32(p.text),
             (c, p) => resolve(c, p),
         };
-        cell.bg = match (cell.bg, bg) {
-            (Color::Reset, Some(b)) => b,
-            (c, _) => resolve(c, palette),
+        // Any other text on a colour is a marked row's: the fill is faint, so the text reads on
+        // it. The terminal's own colours have a faint one only when its background is known.
+        cell.bg = match (cell.bg, palette, term_bg) {
+            (Color::Reset, ..) => bg.unwrap_or(Color::Reset),
+            (c, Some(p), _) => wash(resolve(c, palette), p.bg),
+            (_, None, Some(b)) if cell.fg != Color::Black => wash(Color::from_u32(TERM_MARK), b),
+            (c, None, _) => c,
         };
     }
 }
@@ -678,6 +726,14 @@ fn contrasting(c: Color, p: &Palette) -> Color {
     let Some(i) = ansi(c) else { return resolve(c, Some(p)) };
     let (dim, bright) = (p.ansi[i % 8], p.ansi[i % 8 + 8]);
     Color::from_u32(if (lum(dim) - lum(p.bg)).abs() > (lum(bright) - lum(p.bg)).abs() { dim } else { bright })
+}
+
+/// The theme's background with `WASH` percent of `c` in it.
+fn wash(c: Color, bg: u32) -> Color {
+    let Color::Rgb(r, g, b) = c else { return c };
+    let [_, x, y, z] = bg.to_be_bytes();
+    let mix = |c: u8, bg: u8| ((u32::from(c) * WASH + u32::from(bg) * (100 - WASH)) / 100) as u8;
+    Color::Rgb(mix(r, x), mix(g, y), mix(b, z))
 }
 
 /// A drawn colour in the theme's palette, or the terminal's own.
@@ -1028,25 +1084,39 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let top = top.min(app.rows.len().saturating_sub(height));
     *app.table.offset_mut() = top;
     let ext = app.ext;
+    let faint = palette(app).is_some() || app.term_bg.is_some();
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + 2 + (k - top) as u16;
         let m = &app.data.models[r];
         // The selection, or the visual range, is a reverse-video bar through the frame's border;
         // colours stay off it so it reads as one.
         let on = k == sel || app.is_selected(k);
-        let base = if on { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
-        let tint = |c: Color| if on { base } else { fg(c) };
         // A model excluded or out of reach has its row muted: the text and the developer, harness
         // and price level colours go grey, as every row has those, while the ✓, ★, ✗, best and
         // worst keep theirs, as a column would else lose its extremes.
         let dim = app.muted(m);
+        // A marked row off the bar is filled through the border, as the bar is. The fill is
+        // faint (`WASH`), so the row keeps its colours on it. The terminal's own 16 have no
+        // faint one, so with them it takes a terminal that told its background; else the fill
+        // is solid like a pill, with colours off it as on the bar, a muted row's grey included,
+        // and the filled ★ and the ✗ say favorite and excluded by their shape.
+        let marked = app.store.is_marked(&m.key);
+        let fill = !on && marked;
+        let solid = fill && !faint;
+        let base = match (on, fill) {
+            (true, _) => Style::new().add_modifier(Modifier::REVERSED),
+            (_, true) if solid => fg(Color::Black).bg(MARK),
+            (_, true) => Style::new().bg(MARK),
+            _ => Style::new(),
+        };
+        let tint = |c: Color| if on || solid { base } else { fg(c) };
         let text = if dim { tint(MUTED) } else { base };
         let soft = |c: Color| if dim { text } else { tint(c) };
         buf.set_style(Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
-        match app.store.is_marked(&m.key) {
-            // Bold as well as blue: on the selection bar, which keeps colours off, that is
-            // all the mark has left to show itself with.
+        match marked {
+            // Bold as well as blue: on the selection bar and a solid fill, which keep colours
+            // off, that is all the mark has left to show itself with.
             true => buf.set_stringn(box_x, y, "✓", 1, tint(MARK).add_modifier(BOLD)),
             false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
         };
@@ -1058,11 +1128,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         } else {
             buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
         }
-        // A marked model's name is light blue and bold, as the ✓; on the bar, bold only. On a
-        // muted row it stays muted, with the bold still showing the mark; out of reach, its Via
-        // says so.
+        // A marked model's name is bold, as the ✓, which is all the bar leaves of the mark, and
+        // takes no colour: the fill says the row is marked. Out of reach, its Via says so.
         let reach = app.accessible(m);
-        let name = if app.store.is_marked(&m.key) { soft(MARK).add_modifier(BOLD) } else { text };
+        let name = if marked { text.add_modifier(BOLD) } else { text };
         buf.set_stringn(name_x, y, &m.name, nw, name);
         buf.set_stringn(dev_x, y, &m.developer, dw, soft(dev_color(&m.developer)));
         for &(i, x, w) in &cols {
@@ -1105,11 +1174,12 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         for &x in &seps {
             buf.set_stringn(area.x + x, y, "│", 1, tint(MUTED));
         }
-        // What the search matched, underlined in bold; Notes may be scrolled off.
+        // What the search matched, underlined in bold; Notes may be scrolled off. On a solid
+        // fill the yellow is behind the hit, as yellow text would not read there.
         // ponytail: a char is taken as one cell; wide chars would shift the underline.
         // Via is drawn as its harnesses joined by ", ", so the hits line up; out of reach, it is not.
         if let Some(hits) = hits(&app.query, [&m.name, &m.developer, &m.via.join(", "), note], app.typos) {
-            let style = tint(MATCH).add_modifier(BOLD | Modifier::UNDERLINED);
+            let style = if solid { base.bg(MATCH) } else { tint(MATCH) }.add_modifier(BOLD | Modifier::UNDERLINED);
             let [via, note] = [via.filter(|_| reach), notes].map(|c| c.map(|(x, w)| (area.x + x, w as usize)));
             for (field, ranges) in [Some((name_x, nw)), Some((dev_x, dw)), via, note].into_iter().zip(hits) {
                 let Some((x, w)) = field else { continue };
@@ -1212,14 +1282,19 @@ fn dropdown(
 }
 
 /// `▲` and `▼` on the left border column `x`, at the first and last content row, for rows
-/// scrolled off above or below. Every scrolling list uses these, as `‹` `›` mark columns.
+/// scrolled off above or below. Every scrolling list uses these, as `‹` `›` mark columns. On a
+/// marked row's solid fill, which runs through the border, the accent would not read, so the
+/// mark is black as the rest of that row.
 fn vmarks(buf: &mut Buffer, x: u16, top: u16, bottom: u16, above: bool, below: bool) {
-    let edge = fg(ACCENT).add_modifier(BOLD);
+    let mut put = |y: u16, glyph: &str| {
+        let solid = buf.cell((x, y)).is_some_and(|c| c.fg == Color::Black);
+        buf.set_stringn(x, y, glyph, 1, fg(if solid { Color::Black } else { ACCENT }).add_modifier(BOLD));
+    };
     if above {
-        buf.set_stringn(x, top, "▲", 1, edge);
+        put(top, "▲");
     }
     if below {
-        buf.set_stringn(x, bottom, "▼", 1, edge);
+        put(bottom, "▼");
     }
 }
 
@@ -1704,6 +1779,7 @@ fn compare(
     muted: impl Fn(&Model) -> bool,
 ) -> (Vec<Line<'static>>, usize) {
     let mut rows = compare_rows(models);
+    let muted: Vec<bool> = models.iter().map(|m| muted(m)).collect();
     // The model row is the header; `query` filters the rest, forgiving a typo when nothing matches.
     let mut typos = false;
     if !query.trim().is_empty() {
@@ -1769,7 +1845,7 @@ fn compare(
                 Style::new().add_modifier(Modifier::REVERSED)
             } else if r.best == Some(i) {
                 fg(GOOD).add_modifier(BOLD)
-            } else if muted(models[i]) {
+            } else if muted[i] {
                 fg(MUTED)
             } else {
                 Style::new()
@@ -1886,18 +1962,32 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
         buf[(0, 0)].set_fg(Color::Black).set_bg(Color::LightBlue);
         buf[(1, 0)].set_fg(Color::Reset);
-        recolor(&mut buf, THEMES[crate::view::theme("nord")].1.as_ref());
+        buf[(2, 0)].set_fg(BAD).set_bg(Color::LightBlue);
+        recolor(&mut buf, THEMES[crate::view::theme("nord")].1.as_ref(), None);
+        // A marked row's ✗: nord's red, on its background with a little of the light blue in it.
+        assert_eq!((buf[(2, 0)].fg, buf[(2, 0)].bg), (Color::from_u32(0xbf616a), Color::from_u32(0x3c4654)));
         // A pill: nord's background as the text, and the light blue kept, being the half of blue
         // that stands furthest from it.
         assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (Color::from_u32(0x2e3440), Color::from_u32(0xa3d0e8)));
         assert_eq!((buf[(1, 0)].fg, buf[(1, 0)].bg), (Color::from_u32(0xd8dee9), Color::from_u32(0x2e3440)));
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
-        recolor(&mut buf, None);
+        recolor(&mut buf, None, None);
         assert_eq!(buf[(0, 0)].bg, Color::Reset, "the terminal's own colours keep its background");
+        // A marked row with them: a solid fill, or a faint one mixed from the terminal's
+        // background once it told it, which leaves a pill as it is.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        buf[(0, 0)].set_fg(BAD).set_bg(MARK);
+        buf[(1, 0)].set_fg(Color::Black).set_bg(MARK);
+        recolor(&mut buf, None, None);
+        assert_eq!(buf[(0, 0)].bg, MARK);
+        recolor(&mut buf, None, parse_bg("]11;rgb:1e1e/1e1e/2e2eg"));
+        assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (BAD, Color::from_u32(0x252d47)));
+        assert_eq!(buf[(1, 0)].bg, MARK);
+        assert_eq!([parse_bg(""), parse_bg("rgb:ff/00")], [None, None], "no reply, or half of one");
     }
 
     /// Text a theme paints must be legible on what is behind it: the WCAG ratio for bold text,
-    /// 3:1, for every colour a row or a pill can take.
+    /// 3:1, for every colour a row or a pill can take, and 2.2:1 on a marked row's faint fill.
     #[test]
     fn every_theme_reads_on_its_own_background() {
         let lum = |c: u32| {
@@ -1913,8 +2003,10 @@ mod tests {
             c => panic!("not a theme colour: {c:?}"),
         };
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
+            let marked = hex(wash(resolve(MARK, Some(p)), p.bg));
             for c in p.accents.iter().chain([&p.text]) {
                 assert!(ratio(*c, p.bg) >= 3.0, "{name}: {c:06x} on the background, {:.1}:1", ratio(*c, p.bg));
+                assert!(ratio(*c, marked) >= 2.2, "{name}: {c:06x} on a marked row, {:.1}:1", ratio(*c, marked));
             }
             // Every colour the drawing code names, as text on the background and as a pill's fill.
             for c in [
@@ -1934,8 +2026,14 @@ mod tests {
                 let (text, fill) = (hex(resolve(c, Some(p))), hex(contrasting(c, p)));
                 assert!(ratio(text, p.bg) >= 3.0, "{name}: {c:?} as text, {:.1}:1", ratio(text, p.bg));
                 assert!(ratio(fill, p.bg) >= 3.0, "{name}: {c:?} as a pill, {:.1}:1", ratio(fill, p.bg));
+                assert!(ratio(text, marked) >= 2.2, "{name}: {c:?} on a marked row, {:.1}:1", ratio(text, marked));
             }
             assert!(ratio(p.ansi[8], p.bg) >= 2.5, "{name}: muted text, {:.1}:1", ratio(p.ansi[8], p.bg));
+            assert!(
+                ratio(p.ansi[8], marked) >= 2.2,
+                "{name}: muted on a marked row, {:.1}:1",
+                ratio(p.ansi[8], marked)
+            );
         }
     }
 
@@ -1964,8 +2062,8 @@ mod tests {
         ((2.0 + rm / 256.0) * dr * dr + 4.0 * dg * dg + (3.0 - rm / 256.0) * db * db).sqrt()
     }
 
-    /// A marked row shows it by the colour of its ✓, so that colour cannot look like the muted
-    /// ☐ beside it. Slot 12 is the mark's and slot 8 the muted one's.
+    /// A ticked entry in a list shows it by the colour of its ✓, so that colour cannot look like
+    /// a muted ☐. Slot 12 is the mark's and slot 8 the muted one's.
     #[test]
     fn the_mark_parts_from_an_empty_box() {
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
@@ -1992,15 +2090,11 @@ mod tests {
         let row = |m: &str| lines.iter().position(|l| l.contains(m)).unwrap() as u16;
         let (opus, flash) = (row("opus"), row("flash"));
         assert!(lines[flash as usize].contains('✓') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
-        let box_x = cell(&lines[flash as usize], "✓");
-        assert_eq!(buf[(box_x, flash)].fg, MARK, "the ✓ is in the mark colour");
-        assert!((0..120).all(|x| buf[(x, flash)].bg != MARK), "no fill, so the values keep their colours");
-        let name_x = cell(&lines[flash as usize], "flash");
-        assert_eq!(buf[(name_x, flash)].fg, MARK, "the name is in the mark colour");
-        assert!(buf[(name_x, flash)].modifier.contains(BOLD));
-        assert_ne!(buf[(cell(&lines[opus as usize], "opus"), opus)].fg, MARK);
-        // Marked but out of reach: muted as any unavailable model, so that still shows.
-        a.store.marked.push("opus".into());
+        let filled = |y: u16| (0..120).all(|x| buf[(x, y)].bg == MARK && buf[(x, y)].fg == Color::Black);
+        assert!(filled(flash), "the row is filled through the border, black on the mark colour");
+        assert!((0..120).all(|x| buf[(x, opus)].bg != MARK), "and only that row");
+        assert!(buf[(cell(&lines[flash as usize], "flash"), flash)].modifier.contains(BOLD));
+        // Out of reach and not marked: the row is muted, but for what says the same on every row.
         let mut data = std::mem::take(&mut a.data);
         data.models[0].available = false;
         a.set_data(data);
@@ -2008,16 +2102,42 @@ mod tests {
         a.key(KeyCode::Char('G').into()); // off the bar, which keeps colours off
         let (buf, lines) = render(&mut a, 160, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap() as u16;
-        let name_x = cell(&lines[opus as usize], "opus");
-        assert_eq!(buf[(name_x, opus)].fg, MUTED, "{lines:?}");
-        assert!(buf[(name_x, opus)].modifier.contains(BOLD));
-        assert!(lines[opus as usize].contains("not available"), "{lines:?}");
-        // The rest of its row is muted too, but for what says the same on every row.
         let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
+        assert_eq!(at("opus"), MUTED, "{lines:?}");
         assert_eq!(at("anthropic"), MUTED, "the developer's colour gives way");
-        assert_eq!(at("✓"), MARK, "the ✓ keeps the mark colour");
         assert_eq!(at("5.0"), MUTED, "and so does the price level's");
-        // In compare its column is muted as well.
+        // Marked as well, a favorite and excluded: filled all the same. With the terminal's own
+        // colours the fill is solid, so the ★ and the ✗ are black too.
+        a.store.marked.push("opus".into());
+        a.store.toggle_favorite("coding", "opus");
+        a.store.toggle_excluded("opus");
+        let (buf, lines) = render(&mut a, 160, 5);
+        assert!(lines[opus as usize].contains('★') && lines[opus as usize].contains('✗'), "{lines:?}");
+        assert!((0..160).all(|x| buf[(x, opus)].bg == MARK && buf[(x, opus)].fg == Color::Black), "{lines:?}");
+        assert!(buf[(cell(&lines[opus as usize], "opus"), opus)].modifier.contains(BOLD));
+        assert!(lines[opus as usize].contains("not available"), "{lines:?}");
+        // A search hit on the fill has the yellow behind it, still black.
+        a.query = "opus".into();
+        let (buf, lines) = render(&mut a, 160, 5);
+        let hit = &buf[(cell(&lines[opus as usize], "opus"), opus)];
+        assert_eq!((hit.fg, hit.bg), (Color::Black, MATCH), "{lines:?}");
+        // A theme's fill is faint (`recolor`), so there the row keeps its colours on it.
+        a.store.theme = "nord".into();
+        let (buf, lines) = render(&mut a, 160, 5);
+        let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
+        assert!((0..160).all(|x| buf[(x, opus)].bg == MARK), "{lines:?}");
+        assert_eq!([at("✓"), at("★"), at("✗"), at("opus")], [MARK, STAR, BAD, MATCH], "{lines:?}");
+        a.query.clear();
+        let (buf, lines) = render(&mut a, 160, 5);
+        let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
+        assert_eq!([at("opus"), at("anthropic")], [MUTED, MUTED], "muted as off the fill: {lines:?}");
+        a.store.theme.clear();
+        // And so with the terminal's own colours, once it told its background.
+        a.term_bg = Some(0);
+        let (buf, lines) = render(&mut a, 160, 5);
+        assert_eq!(buf[(cell(&lines[opus as usize], "★"), opus)].fg, STAR, "{lines:?}");
+        a.term_bg = None;
+        // In compare its column is muted.
         let rows = compare(&a.marked_models(), 0, 0, 200, "", |m| a.muted(m)).0;
         let names = rows.iter().find(|l| l.to_string().starts_with("model ")).unwrap();
         let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
@@ -2558,6 +2678,13 @@ mod tests {
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         assert_eq!([edge(&term, 0, 3), edge(&term, 0, 5)], ["▲", "│"]);
+        assert_eq!(term.backend().buffer()[(0, 3)].fg, ACCENT);
+        // On a marked row's fill the ▲ is black as the row, where the accent would not read.
+        a.store.marked = a.data.models.iter().map(|m| m.key.clone()).collect();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let top = &term.backend().buffer()[(0, 3)];
+        assert_eq!((top.symbol(), top.fg, top.bg), ("▲", Color::Black, MARK));
+        a.store.marked.clear();
         // A tall overlay stops above the status bar, which shows its keys.
         a.key(KeyCode::Char('?').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
