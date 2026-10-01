@@ -243,6 +243,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: overlay, highlight, filter, M, F, E, task"),
             ("q", "quit; asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
+            ("u", "upgrade modelcmp when a newer version is out; asks first"),
             ("B", "benchmarks from Epoch AI or Artificial Analysis"),
         ],
     ),
@@ -356,6 +357,8 @@ pub enum Input {
     },
     /// `q` asks before quitting.
     Quit,
+    /// `u` asks before upgrading.
+    Upgrade,
     /// A choice of what to do, `list.sel` under the cursor: `x` on a model several harnesses
     /// have launches one, `o` opens one of the model's pages. Each item is its label and effect.
     Choose {
@@ -550,6 +553,8 @@ pub fn edit(
 #[derive(PartialEq, Debug)]
 pub enum Effect {
     Quit,
+    /// Leave the TUI, upgrade modelcmp to the newer release and start that one.
+    Upgrade,
     Save,
     Open(String),
     Copy(String),
@@ -796,6 +801,10 @@ impl App {
             }
         }
         self.data = data;
+        // A refresh that could not ask for the newest release leaves nothing to upgrade to.
+        if self.input == Input::Upgrade && self.data.update().is_none() {
+            self.input = Input::None;
+        }
         self.compare_sel = self.compare_sel.min(self.marked_models().len().saturating_sub(1));
         self.rebuild();
     }
@@ -1360,7 +1369,9 @@ impl App {
     /// Text pasted in the terminal: typed into the search, note or bound being written, and
     /// nothing anywhere else, where its letters would run as keys.
     pub fn paste(&mut self, text: &str) {
-        if matches!(self.input, Input::None | Input::Quit) || self.open_list().is_some_and(|l| !l.typing) {
+        if matches!(self.input, Input::None | Input::Quit | Input::Upgrade)
+            || self.open_list().is_some_and(|l| !l.typing)
+        {
             self.report(Ok("nothing to paste into: / searches, n writes a note".into()));
             return;
         }
@@ -1722,6 +1733,13 @@ impl App {
                 self.rebuild();
             }
             KeyCode::Char('q') => self.input = Input::Quit,
+            KeyCode::Char('u') if self.data.update().is_some() => self.input = Input::Upgrade,
+            KeyCode::Char('u') if self.data.latest.is_empty() => {
+                self.status = "the newest version is not known: r asks again".into();
+            }
+            KeyCode::Char('u') => {
+                self.status = concat!("no newer version: this is modelcmp v", env!("CARGO_PKG_VERSION")).into();
+            }
             KeyCode::Esc => {
                 if self.overlay_search() && !self.overlay_query.is_empty() {
                     self.overlay_query.clear();
@@ -2045,6 +2063,12 @@ impl App {
                     return Some(Effect::Quit);
                 }
                 self.input = Input::None;
+            }
+            Input::Upgrade => {
+                self.input = Input::None;
+                if code == KeyCode::Char('u') {
+                    return Some(Effect::Upgrade);
+                }
             }
             Input::None => {}
         }
@@ -3525,6 +3549,24 @@ mod tests {
         assert_eq!((press(&mut a, "y"), &a.input), (None, &Input::None), "only q confirms");
         assert_eq!(press(&mut a, "qq"), Some(Effect::Quit));
         assert_eq!(ctrl(&mut a, 'c'), Some(Effect::Quit), "ctrl-c quits at once");
+    }
+
+    #[test]
+    fn u_upgrades_only_to_a_newer_release() {
+        let mut a = app();
+        assert_eq!((press(&mut a, "u"), &a.input), (None, &Input::None), "nothing newer: nothing to ask");
+        assert!(a.status.contains("not known"), "{}", a.status);
+        a.data.latest = env!("CARGO_PKG_VERSION").into();
+        press(&mut a, "u");
+        assert!(a.status.contains("no newer version"), "{}", a.status);
+        a.data.latest = "99.0.0".into();
+        assert_eq!((press(&mut a, "u"), &a.input), (None, &Input::Upgrade), "u asks");
+        assert_eq!((press(&mut a, "q"), &a.input), (None, &Input::None), "any other key cancels");
+        assert_eq!(press(&mut a, "uu"), Some(Effect::Upgrade));
+        assert_eq!(a.input, Input::None, "the TUI stays open when there is no command to run");
+        press(&mut a, "u");
+        a.set_data(Data::default());
+        assert_eq!(a.input, Input::None, "a refresh that lost the release takes the question back");
     }
 
     #[test]

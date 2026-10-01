@@ -37,6 +37,9 @@ pub struct Store {
     /// A `data::Source` id, picked with `B`; empty is Epoch AI, never picked: the TUI asks.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub source: String,
+    /// The version the TUI last opened as: a different one plays the intro again.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub seen: String,
 }
 
 /// The `favorite` key of a task, or of one `--tier` of it: `coding`, `coding:low`.
@@ -287,6 +290,7 @@ mod tests {
         s.toggle_favorite("coding", "gpt55");
         s.toggle_favorite("agentic", "gpt55");
         s.toggle_favorite("agentic", "gpt55");
+        s.seen = "0.1.0".into();
         s.save().unwrap();
         let back = Store::load_from(p.clone());
         assert_eq!(back, s);

@@ -12,6 +12,7 @@ commands and JSON.
 | `esc` | back: closes an overlay, drops the highlight, clears the `/` filter, leaves `M`, then `F`, then `E`, then a task picked in recommend back to recommend |
 | `qq` `^c` | quit; the first `q` asks, `^c` does not |
 | `r` | refresh data now |
+| `uu` | upgrade modelcmp when the frame's bottom left says a newer version is available; the first `u` asks. It closes the TUI, runs `brew upgrade` on a Homebrew install or `cargo install` of the new release on a cargo one, and starts the new version, keeping your selection. A binary installed by hand gets the release's page opened instead |
 | `B` | benchmarks from Epoch AI (the default, no API key needed) or Artificial Analysis (needs an API key); the TUI's first start asks, and `esc` there picks Epoch AI. Artificial Analysis asks for its API key when none is saved and `ARTIFICIAL_ANALYSIS_API_KEY` is not set, and again if it rejects the key; picking it again while it is the source changes the saved key, which is kept in `aa_key` next to `user.json`, readable by you alone. Each source has its own cache, so switching back needs no download |
 
 ## Move

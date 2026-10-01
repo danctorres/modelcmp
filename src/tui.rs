@@ -39,11 +39,21 @@ type Refresh = Receiver<Result<Data, data::Failure>>;
 
 /// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
 /// no data until one is picked.
-pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
+pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // Run by an agent or a script there is no terminal to draw on: say so before any download or
     // harness is started, not after.
     if !std::io::stdout().is_terminal() {
         return Err("the TUI needs a terminal; see modelcmp --help".into());
+    }
+    // The first start of a version, so the first ever or the first after an upgrade, plays the
+    // intro. Noted now, while the store is fresh from the file.
+    let new = store.seen != env!("CARGO_PKG_VERSION");
+    if new {
+        let _lock = crate::store::lock(&crate::store::path());
+        store.reload_if_changed();
+        store.seen = env!("CARGO_PKG_VERSION").into();
+        // Unsaved, it plays again at the next start; the store's own warning says why.
+        let _ = store.save();
     }
     // Asked first, before a download keys may be typed during: reading the reply takes whatever
     // else is queued with it, and here that is nothing.
@@ -98,11 +108,73 @@ pub fn run(store: Store, force: bool, ask: bool) -> Result<(), String> {
         hook(info);
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
-    let res = if ask { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
+    let res = if ask || new { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
         .and_then(|()| event_loop(&mut app, &mut terminal, rx));
     let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
-    res
+    let Some(cmds) = res? else { return Ok(()) };
+    // On the terminal's own screen, where the upgrade's output shows. One that fails has still
+    // closed the TUI.
+    upgrade(&cmds).inspect_err(|_| {
+        let _lock = crate::store::lock(&crate::store::path());
+        let _ = close(&mut app.store);
+    })
+}
+
+/// The selection is the shortlist of one session: closing the TUI clears it.
+fn close(store: &mut Store) -> Result<(), String> {
+    store.reload_if_changed();
+    if store.marked.is_empty() {
+        return Ok(());
+    }
+    store.marked.clear();
+    store.save().map_err(|e| format!("could not save: {e}"))
+}
+
+const REPO: &str = "https://github.com/danctorres/modelcmp";
+
+/// The commands that upgrade the binary at `exe` to release `new`, by what installed it: Homebrew
+/// keeps it in its Cellar, cargo in its `bin`. None for one put there by hand.
+fn upgrade_cmds(exe: &std::path::Path, new: &str) -> Option<Vec<Vec<String>>> {
+    let exe = exe.to_string_lossy();
+    let tag = format!("v{new}");
+    let cmds: &[&[&str]] = if exe.contains("/Cellar/") {
+        // `upgrade` alone goes by a list of formulae up to a day old.
+        &[&["brew", "update"], &["brew", "upgrade", "danctorres/tap/modelcmp"]]
+    } else if exe.contains("/.cargo/bin/") {
+        &[&["cargo", "install", "--git", REPO, "--tag", &tag]]
+    } else {
+        return None;
+    };
+    Some(cmds.iter().map(|c| c.iter().map(|a| (*a).to_string()).collect()).collect())
+}
+
+/// Run the upgrade, then start the new modelcmp in this one's place: its intro shows the version.
+fn upgrade(cmds: &[Vec<String>]) -> Result<(), String> {
+    for cmd in cmds {
+        let line = cmd.join(" ");
+        eprintln!("$ {line}");
+        match Command::new(&cmd[0]).args(&cmd[1..]).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => return Err(format!("{line}: {s}")),
+            Err(e) => return Err(format!("{line}: {e}")),
+        }
+    }
+    // By the name it was started with, not this binary's path: Homebrew's holds the version.
+    let mut args = std::env::args_os();
+    let name = args.next().unwrap_or_else(|| "modelcmp".into());
+    // Homebrew's formula follows the release by some minutes: until then its upgrade does nothing
+    // and says so here, where starting the same modelcmp again would wipe it off the screen.
+    let version = Command::new(&name).arg("--version").output().map(|o| o.stdout).unwrap_or_default();
+    if String::from_utf8_lossy(&version).trim() == concat!("modelcmp ", env!("CARGO_PKG_VERSION")) {
+        return Err(concat!("still modelcmp v", env!("CARGO_PKG_VERSION"), ": try again in a while").into());
+    }
+    let mut new = Command::new(name);
+    new.args(args);
+    #[cfg(unix)]
+    return Err(format!("upgraded, but could not start it: {}", std::os::unix::process::CommandExt::exec(&mut new)));
+    #[cfg(not(unix))]
+    new.status().map(|_| ()).map_err(|e| format!("upgraded, but could not start it: {e}"))
 }
 
 /// The terminal's background colour, for a marked row's faint fill with the terminal's own
@@ -167,10 +239,11 @@ const LOGO: [&str; 8] = [
 /// Under the wordmark, after a blank row.
 const TAGLINE: &str = "compare models, pick favorites, get recommendations";
 
-/// The first launch's intro: the wordmark dim, gliding up from below the screen and easing to a
-/// stop in the middle, then a rainbow rolling across it on a diagonal, each cell running red to
-/// blue before it settles on the accent, the tagline typing in under it as the rainbow passes. Any
-/// key skips it, and is not passed on; a terminal too small for it skips it too.
+/// The intro of the first launch, and of the first after an upgrade: the wordmark dim, gliding up
+/// from below the screen and easing to a stop in the middle, then a rainbow rolling across it on a
+/// diagonal, each cell running red to blue before it settles on the accent, the tagline typing in
+/// under it as the rainbow passes and the version showing under that once it is whole. Any key
+/// skips it, and is not passed on; a terminal too small for it skips it too.
 fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     // The hue wheel up to the accent, so the last step into magenta is a small one.
     const RAINBOW: [Color; 5] = [Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue];
@@ -196,9 +269,14 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                 fits = false;
                 return;
             }
-            // The wordmark, then a blank row and the tagline if there is room for them.
-            let tall = usize::from(a.height) >= rows + 2;
-            let h = if tall { rows + 2 } else { rows } as u16;
+            // Under the wordmark a blank row and the tagline, then the version, as far as there is
+            // room for them.
+            let under = match usize::from(a.height) - rows {
+                0 | 1 => 0,
+                2 => 2,
+                _ => 3,
+            };
+            let h = (rows + under) as u16;
             let (x, y) = (a.x + (a.width - w as u16) / 2, a.y + (a.height - h) / 2);
             // Ease out: from the bottom edge, fast at first and slowing into place.
             let left = 1.0 - (t.min(SLIDE) as f32 / SLIDE as f32);
@@ -221,9 +299,13 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
             }
             // Each character as the wave's front passes over it: two rows under the bottom one,
             // so 4 columns ahead of the front there.
-            if tall && t > SLIDE {
+            if under > 0 && t > SLIDE {
                 let typed = &TAGLINE[..((t - SLIDE) * SPEED + 4).saturating_sub((w - tw) / 2).min(tw)];
                 buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows as u16 + 1, typed, fg(Color::Reset));
+                if under == 3 && typed.len() == tw {
+                    let v = concat!("v", env!("CARGO_PKG_VERSION"));
+                    buf.set_string(a.x + (a.width - v.len() as u16) / 2, y + rows as u16 + 2, v, fg(MUTED));
+                }
             }
             recolor(buf, theme, app.term_bg);
         })?;
@@ -259,7 +341,12 @@ fn spawn_refresh() -> Refresh {
     rx
 }
 
-fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refresh>) -> Result<(), String> {
+/// Returns at a quit, or with the commands of an upgrade to run once the screen is restored.
+fn event_loop(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    mut rx: Option<Refresh>,
+) -> Result<Option<Vec<Vec<String>>>, String> {
     let mut dirty = true;
     // The last press on a cell, which a second one makes a double click (`double`), and the
     // screen row of the last press on a table row, which a drag extends from (`dragged`).
@@ -319,14 +406,21 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal, mut rx: Option<Refr
             };
             {
                 match effect {
-                    // The selection is the shortlist of one session: closing the TUI clears it.
-                    Some(Effect::Quit) => {
-                        app.store.reload_if_changed();
-                        if app.store.marked.is_empty() {
-                            return Ok(());
+                    Some(Effect::Quit) => return close(&mut app.store).map(|()| None),
+                    // The selection stays: the new modelcmp starts where this one stops.
+                    Some(Effect::Upgrade) => {
+                        // Unresolved when it cannot be, as replaced under a running TUI it cannot:
+                        // its path still says what installed it.
+                        let exe = std::env::current_exe().map(|p| p.canonicalize().unwrap_or(p)).unwrap_or_default();
+                        if let Some(cmds) = app.data.update().and_then(|new| upgrade_cmds(&exe, new)) {
+                            return Ok(Some(cmds));
                         }
-                        app.store.marked.clear();
-                        return app.store.save().map_err(|e| format!("could not save: {e}"));
+                        // Not Homebrew's nor cargo's to replace: the release's page has the binaries.
+                        let url = format!("{REPO}/releases/latest");
+                        app.report(match open::that_detached(&url) {
+                            Ok(()) => Ok(format!("installed by hand: opened {url}")),
+                            Err(e) => Err(format!("could not open {url}: {e}")),
+                        });
                     }
                     Some(Effect::Save) => {
                         if let Err(e) = app.store.save() {
@@ -954,7 +1048,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         .title_top(Line::from(about).style(fg(MUTED)).centered())
         .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
         .title_bottom(match app.data.update() {
-            Some(new) => Line::from(format!(" modelcmp v{new} available ")).style(fg(Color::Yellow)),
+            Some(new) => Line::from(format!(" modelcmp v{new} available: u upgrades ")).style(fg(Color::Yellow)),
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         })
         .title_bottom(
@@ -1028,10 +1122,16 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
         overlay(buf, body, &title, lines, &mut app.scroll);
     }
-    if app.input == Input::Quit {
-        let keys = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
-        let lines = vec![Line::from(vec![keys("q"), Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, "quit?", lines, &mut 0);
+    // `q` and `u` ask first: the same box, confirmed by the same key again.
+    let ask = match app.input {
+        Input::Quit => Some(("q", "quit?".to_string())),
+        Input::Upgrade => app.data.update().map(|new| ("u", format!("upgrade to v{new}?"))),
+        _ => None,
+    };
+    if let Some((key, title)) = ask {
+        let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
+        let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
+        overlay(buf, body, &title, lines, &mut 0);
     }
     if let Input::Choose { title, kind, items, list } = &mut app.input {
         let lines = choice_lines(*kind, items, list);
@@ -1575,6 +1675,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
+        (Input::Upgrade, _) => ("UPGRADE", Color::Yellow),
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
@@ -1600,7 +1701,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let (mode, color) = mode(app);
     let end = pill(buf, area.x, area.y, mode, color, area.width);
     let mut x = end + 1;
-    if matches!(&app.input, Input::Quit | Input::Choose { list: List { typing: false, .. }, .. }) {
+    if matches!(&app.input, Input::Quit | Input::Upgrade | Input::Choose { list: List { typing: false, .. }, .. }) {
         // The question is in a box in the middle of the screen.
         return None;
     }
@@ -1627,7 +1728,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             _ => (format!("{} ▾ /", col_name(*col)), &list.query, list.cur),
         }),
         Input::Choose { title, list, .. } => Some((format!("{title} /"), &list.query, list.cur)),
-        Input::Quit | Input::None => None,
+        Input::Quit | Input::Upgrade | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
         // Ctx is bounded in thousands of tokens, as its cells read: `Ctx ≥ 200k`.
@@ -2108,6 +2209,18 @@ mod tests {
     use crate::app::ECI;
     use crate::data::Offer;
     use ratatui::crossterm::event::KeyCode;
+
+    #[test]
+    fn the_upgrade_is_the_installer_s() {
+        let cmd = |exe: &str| upgrade_cmds(std::path::Path::new(exe), "0.2.0").map(|c| c.last().unwrap().join(" "));
+        let brew = Some("brew upgrade danctorres/tap/modelcmp".to_string());
+        assert_eq!(cmd("/opt/homebrew/Cellar/modelcmp/0.1.0/bin/modelcmp"), brew);
+        assert_eq!(cmd("/home/linuxbrew/.linuxbrew/Cellar/modelcmp/0.1.0/bin/modelcmp"), brew);
+        let cargo = format!("cargo install --git {REPO} --tag v0.2.0");
+        assert_eq!(cmd("/home/you/.cargo/bin/modelcmp"), Some(cargo));
+        assert_eq!(cmd("/usr/local/bin/modelcmp"), None, "put there by hand: nothing to run");
+        assert_eq!(cmd(""), None, "the path is not known");
+    }
 
     #[test]
     fn the_logo_rows_line_up() {
