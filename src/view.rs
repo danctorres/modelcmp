@@ -635,22 +635,25 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         }
     }
     v.push(String::new());
-    v.push("  providers (model id, $ per 1M tokens in / cached in / out):".into());
+    v.push("  providers ($ per 1M tokens in / cached in / out, model id):".into());
     let mut offers: Vec<&Offer> = m.offers.iter().collect();
     // Available first, then cheapest; unknown price ("-") last.
     let cost = |o: &Offer| if o.unpriced { f64::MAX } else { o.blended() };
     offers.sort_by(|a, b| b.available.cmp(&a.available).then(cost(a).total_cmp(&cost(b))));
     for o in offers {
-        v.push(format!(
-            "    {} {:<20}{:<34}{:>8} {:>8} {:>8}  {}",
+        // The prices before the id, which is what a panel 80 columns wide cuts.
+        let line = format!(
+            "    {} {:<20}{:>8} {:>8} {:>8}  {:<34}{}",
             if o.available { "●" } else { " " },
             truncate(&o.provider_name, 19),
-            truncate(&o.id, 33),
             if o.unpriced { "-".into() } else { money(o.input) },
             o.cache_read.map_or("-".into(), money),
             if o.unpriced { "-".into() } else { money(o.output) },
+            truncate(&o.id, 33),
             o.via.join(", ")
-        ));
+        );
+        // No padding left after an id without a harness, for a terminal to wrap.
+        v.push(line.trim_end().to_string());
     }
     v
 }

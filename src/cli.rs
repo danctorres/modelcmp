@@ -440,7 +440,7 @@ pub fn fav(
                 println!("no favorites; modelcmp fav <task> <model> sets one");
             }
             for (t, k) in &store.favorite {
-                println!("{t:<18}{}", line(store, t, k));
+                println!("{t:<18} {}", line(store, t, k));
             }
         }
         (Some(t), None, false) => match store.favorite(t) {

@@ -19,6 +19,7 @@ use crate::view::{
     detail_lines, frontier_legend, hits, level, level_label, money, priced, truncate, verdict,
 };
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode,
     KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -82,10 +83,11 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     let mut terminal =
         ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}); see modelcmp --help"))?;
     // ratatui's panic hook restores the terminal but leaves mouse reporting on, and bracketed
-    // paste, which keeps pasted text (ctrl+v in some terminals) from arriving as keys.
+    // paste, which keeps pasted text (ctrl+v in some terminals) from arriving as keys. And the
+    // cursor hidden, which only its terminal's drop shows again: a release build aborts instead.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, Show);
         hook(info);
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
@@ -1126,6 +1128,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
         };
+        // A state still too long would run over the version: the source goes, which `B` shows too.
+        let source = if state.chars().count() > room { String::new() } else { source };
         let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, col_name(app.sort_col));
         // What the column under the cursor means, centred and cut to clear the sort on either side.
         let side = sort.chars().count() + 2;
@@ -1202,6 +1206,13 @@ fn draw(app: &mut App, f: &mut Frame) {
             if let Some(start) = start {
                 let end = lines[start..].iter().position(|l| l.width() == 0).map_or(lines.len(), |n| start + n);
                 let shown = body.height.saturating_sub(2) as usize;
+                // No cursor goes to the lines above the first block and under the last: they
+                // show with it, where they fit.
+                let (first, last) = (app.task_cur == 0, app.task_cur + 1 >= app.task_count());
+                let (start, end) = (
+                    if first && end <= shown { 0 } else { start },
+                    if last && lines.len() - start <= shown { lines.len() } else { end },
+                );
                 let lo = end.saturating_sub(shown).min(start);
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
@@ -1226,8 +1237,11 @@ fn draw(app: &mut App, f: &mut Frame) {
         let (sel, top) = (&list.sel, &mut list.top);
         let shown = usize::from(rect.height.saturating_sub(2));
         // At the last entry every line to the end, so the key hint below them shows too, unless
-        // that would scroll the cursor's line off.
-        let from = if *sel + 1 >= rows { lines.len().saturating_sub(shown) } else { *top };
+        // that would scroll the cursor's line off. And at an entry being written, whose keys or
+        // error that line has.
+        // ponytail: an entry more than a box's height from the end keeps it out of view; the
+        // error on the line under the entry if it bites.
+        let from = if *sel + 1 >= rows || list.edit.is_some() { lines.len().saturating_sub(shown) } else { *top };
         let mut scroll = list_top(from, *sel, shown) as u16;
         // Under the wordmark the box is muted, as the table's frame; over the table it has
         // the text's colour, as every box there, which parts it from that frame.
@@ -1241,7 +1255,9 @@ fn draw(app: &mut App, f: &mut Frame) {
             cursor_ends(buf, rect.x, rect.right() - 1, y);
             // An entry being written has the text cursor, after what `edit_line` draws before it.
             if let (Some(e), Some((label, _))) = (&list.edit, items.get(*sel)) {
-                let before = Span::raw(edit_prefix(label, e)).width() + Span::raw(&e.text[..e.cur]).width();
+                let prefix = Span::raw(edit_prefix(label, e)).width();
+                let start = scrolled(prefix, &e.text, e.cur, edit_room(within));
+                let before = prefix + Span::raw(&e.text[start..e.cur]).width();
                 cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
             }
             let inner = rect.inner(Margin::new(1, 1));
@@ -1293,9 +1309,9 @@ fn layout(width: u16, app: &App) -> Layout {
         .max()
         .unwrap_or(0)
         .clamp(6, 24) as u16;
-    let notes_w =
-        ms.iter().filter_map(|m| app.store.note(&m.key)).map(|s| s.chars().count()).max().unwrap_or(0).clamp(6, 40)
-            as u16;
+    // As wide as drawn: a CJK character or an emoji takes two cells.
+    let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(|s| Span::raw(s).width()).max().unwrap_or(0);
+    let notes_w = notes_w.clamp(6, 40) as u16;
     let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
     // Row numbers as wide as the last one, a space, then the checkbox, the ☆ and the ✗ box,
     // each with a spare cell: some terminals draw them two cells wide, and the
@@ -1808,7 +1824,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     if matches!(&app.input, Input::Quit | Input::Upgrade | Input::Choose { list: List { typing: false, .. }, .. }) {
         // The question is in a box in the middle of the screen. Under the first start's, the
         // start's warning shows until the pick reports it.
-        if let Some(w) = &app.store.warning {
+        // And what a pick could not save, which the next key clears.
+        if let Some(w) = app.store.warning.as_deref().or(app.failed.then_some(app.status.as_str())) {
             buf.set_stringn(x, area.y, w, usize::from(area.right().saturating_sub(x)), fg(BAD));
         }
         return None;
@@ -1862,10 +1879,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         let hx = if fits { area.right() - (width(hint) as u16 + 1) } else { area.right() };
         // Text too long for the room scrolls sideways, so the cursor stays in view.
         let room = usize::from(hx.saturating_sub(x));
-        let mut start = 0;
-        while start < cur && width(&label) + width(&typed[start..cur]) >= room {
-            start += typed[start..].chars().next().map_or(1, char::len_utf8);
-        }
+        let start = scrolled(width(&label), typed, cur, room);
         let text = format!("{label}{}{unit}", &typed[start..]);
         buf.set_stringn(x, area.y, &text, room, Style::new());
         if fits {
@@ -1957,22 +1971,24 @@ fn edit_prefix(label: &str, e: &Edit) -> String {
 }
 
 /// An entry of `f`'s list while it is written in place: `edit_prefix`, then the text, or in
-/// grey what to write while there is none.
-fn edit_line(label: &str, e: &Edit, color: Color) -> Line<'static> {
+/// grey what to write while there is none. Text too long for `room` cells scrolls sideways.
+fn edit_line(label: &str, e: &Edit, color: Color, room: usize) -> Line<'static> {
+    let prefix = edit_prefix(label, e);
     let empty = match e.what {
         What::About(_) => "what it is about",
         What::New | What::Rename(_) => "its name",
     };
     let text = match e.text.is_empty() {
         true => Span::styled(format!("{empty} "), fg(MUTED)),
-        false => Span::raw(format!("{} ", e.text)),
+        false => Span::raw(format!("{} ", &e.text[scrolled(Span::raw(&prefix).width(), &e.text, e.cur, room)..])),
     };
-    Line::from(vec![Span::styled(edit_prefix(label, e), fg(color)), text])
+    Line::from(vec![Span::styled(prefix, fg(color)), text])
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `first`: the first start's question, where esc picks the default and `B` asks again later.
-fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool) -> Vec<Line<'static>> {
+/// `room`: the cells an entry being written has for its text.
+fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool, room: usize) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
@@ -1992,7 +2008,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
                 _ => Color::Reset,
             };
             if let (Some(e), true) = (&list.edit, i == list.sel) {
-                return edit_line(label, e, color);
+                return edit_line(label, e, color, room);
             }
             // A name, then what follows it muted: a source and what it takes, a harness and
             // the command that opens it.
@@ -2035,7 +2051,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
                 .iter()
                 .any(|(_, e)| matches!(e, Effect::Fav(_, s) if !s.contains(':') && fit::task(s).is_none())) =>
         {
-            " j k move · / search · space enter toggle · r rename, a about your task · esc close"
+            " j k move · / search · space enter toggle · r rename · a about · esc close"
         }
         Kind::Fav => " j k move · / search · space enter toggle · esc close",
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
@@ -2064,7 +2080,22 @@ fn list_top(top: usize, sel: usize, shown: usize) -> usize {
 fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
     let Input::Choose { kind, items, list, .. } = &app.input else { return None };
     let within = splash(app, area).map_or(Rect { height: area.height - 1, ..area }, |s| s.1);
-    Some((within, choice_lines(*kind, items, list, app.first_start)))
+    Some((within, choice_lines(*kind, items, list, app.first_start, edit_room(within))))
+}
+
+/// The cells a line has in a box as wide as `within`, between its borders and their margins.
+fn edit_room(within: Rect) -> usize {
+    usize::from(within.width).saturating_sub(4)
+}
+
+/// Where text too long for `room` cells starts, `before` cells in, so that the cursor at byte
+/// `cur` stays in view: the byte offset of the first character shown.
+fn scrolled(before: usize, text: &str, cur: usize, room: usize) -> usize {
+    let mut start = 0;
+    while start < cur && before + Span::raw(&text[start..cur]).width() >= room {
+        start += text[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    start
 }
 
 /// Where an overlay with these lines sits: centred, as wide as its widest line or title.
@@ -3298,6 +3329,26 @@ mod tests {
         let (_, lines) = render(&mut a, 50, 7);
         let bar = lines.last().unwrap();
         assert!(bar.contains("PICK") && bar.contains("Dev ▾"), "the prompt wins over its key hint: {bar}");
+        assert_eq!(scrolled(4, "abcdefgh", 8, 8), 5, "text past its room starts where the cursor still shows");
+        assert_eq!(scrolled(4, "abc", 3, 8), 0, "and text that fits, at its start");
+        // Recommend's legend and its last lines have no cursor: they show with the first and
+        // the last task.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+        let mut a = app();
+        let mut screen = |a: &mut App, keys: &str| {
+            keys.chars().for_each(|c| drop(a.key(KeyCode::Char(c).into())));
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            (0..16).map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        };
+        let last = screen(&mut a, "RG");
+        assert!(last.contains("CLI: modelcmp recommend"), "{last}");
+        let first = screen(&mut a, "gg");
+        assert!(first.contains("best per price: the top model"), "{first}");
+        // f's hints fit a terminal 80 columns wide, with a task of your own too.
+        let items = vec![("☐ debugging".to_string(), Effect::Fav("k".into(), "debugging".into()))];
+        let hint = choice_lines(Kind::Fav, &items, &List::default(), false, 80).pop().unwrap();
+        assert!(hint.width() <= 76 && hint.to_string().contains("r rename"), "{hint}");
     }
 
     #[test]
@@ -3507,7 +3558,7 @@ mod tests {
     #[test]
     fn a_list_colours_what_the_table_does() {
         let fgs = |kind, label: &str, effect| {
-            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), false);
+            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), false, 80);
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
         assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
@@ -3530,19 +3581,19 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), false);
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), false, 80);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &search("gr"), false);
+        let lines = choice_lines(Kind::Theme, &items, &search("gr"), false, 80);
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's list marks what it searches, the task, not the model that holds it now.
         let items = vec![("☐ coding:low  (now Solo)".to_string(), Effect::Fav("k".into(), "coding:low".into()))];
-        assert_eq!(lit_text(&choice_lines(Kind::Fav, &items, &search("lo"), false)), ["lo"]);
+        assert_eq!(lit_text(&choice_lines(Kind::Fav, &items, &search("lo"), false, 80)), ["lo"]);
         // An entry being written shows its box, the text and how to leave; a name not taken, why.
         let text = |what: What, text: &str, err: Option<&str>| {
             let edit = Some(Edit { what, text: text.into(), cur: 0, err: err.map(String::from) });
-            let lines = choice_lines(Kind::Fav, &items, &List { edit, ..Default::default() }, false);
+            let lines = choice_lines(Kind::Fav, &items, &List { edit, ..Default::default() }, false, 80);
             lines.iter().map(ToString::to_string).collect::<Vec<_>>()
         };
         let wide = " j k move · / search · space enter toggle · esc close".chars().count();

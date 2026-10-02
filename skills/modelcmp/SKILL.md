@@ -25,7 +25,7 @@ Done when you hold one model `key` and can say which task and frontier entry it 
 opencode -m "$(modelcmp list --task coding --tier mid --id)"
 ```
 
-`low` is the cheapest entry in the top half of the models the source evaluated, `mid` the cheapest in the top quarter, `high` the best. The tier's favorite, else the task's, wins over the tier's pick. A custom task takes `--task` and `--tier` too: the tier's model, else the task's.
+`low` is the cheapest entry in the top half of the models the source evaluated, `mid` the cheapest in the top quarter, `high` the best. The tier's favorite, else the task's, wins over the tier's pick. A custom task takes `--task` and `--tier` too: the tier's model, else the task's. With neither it exits 1 and prints no id: take the model from `recommend --json` instead.
 
 ## Reading the numbers
 

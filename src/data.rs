@@ -544,6 +544,10 @@ impl Data {
     /// name matches the models you have first, and all of them only if none of yours match.
     pub fn find(&self, query: &str) -> Result<&Model, Vec<&Model>> {
         let q = norm(query);
+        // "--" or "日本" has nothing a key is made of, and an empty string is part of every key.
+        if q.is_empty() {
+            return Err(vec![]);
+        }
         // By key, or by a provider's id for it, bare or as `list --id` prints it:
         // "granite-4.0-h-micro" or "openrouter/ibm-granite/granite-4.0-h-micro" is "Granite 4.0 Micro".
         let by_id = |m: &&Model| {
@@ -807,7 +811,9 @@ pub fn refresh(steps: &Steps) -> Result<Data, Failure> {
     let unlisted = |hs: &[String], kept: &str| {
         (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
     };
-    let warnings = [unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
+    let renamed = data.warning.take();
+    let warnings =
+        [renamed, unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
     let warnings = warnings.into_iter().chain(unpaged);
     data.warning = Some(warnings.flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
@@ -884,10 +890,14 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         Source::Aa => {
             // Without it the refresh still succeeds, with fewer epoch.ai links and Artificial
             // Analysis's names deciding the keys.
-            let ep = epoch.ok().and_then(|z| parse_epoch(&z).ok());
-            let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref())?;
-            if let Some(ep) = &ep {
-                epoch_named(&mut data.models, ep);
+            let ep = epoch.and_then(|z| Ok(parse_epoch(&z)?));
+            let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref().ok())?;
+            match &ep {
+                Ok(ep) => epoch_named(&mut data.models, ep),
+                // Said, as a favorite or a note on a key that changed is not found until the next refresh.
+                Err(e) => {
+                    data.warning = Some(format!("epoch.ai's names did not come ({e}): some models go by another key"))
+                }
             }
             data
         }
@@ -1613,7 +1623,10 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         }
         let Some(rows) = csv_rows(&mut zip, file) else { continue };
         for r in &rows {
-            let (Some(v), Some(s)) = (r.get("Model version"), r.get(score_col)) else { continue };
+            // A row without a version is no model's: together they would be one that outscores most.
+            let (Some(v), Some(s)) = (r.get("Model version").filter(|v| !v.is_empty()), r.get(score_col)) else {
+                continue;
+            };
             let Some(s) = s.trim_end_matches('%').parse::<f64>().ok().filter(|s| s.is_finite()) else { continue };
             let g = group_of(v);
             // Any benchmark result may give the model a page on Epoch; only a task's scores it.
@@ -1823,7 +1836,10 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     let moved = merge_same_ids(&mut by_key, |k| {
         openrouter.contains_key(k) || names.groups.contains_key(k) || names.alias.contains_key(k)
     });
+    // The keys each row absorbed: the source may score the model under one of them.
+    let mut absorbed: HashMap<String, Vec<String>> = HashMap::new();
     for (from, to) in moved {
+        absorbed.entry(to.clone()).or_default().push(from.clone());
         if let Some(id) = openrouter.remove(&from) {
             openrouter.entry(to.clone()).or_insert(id);
         }
@@ -1837,6 +1853,10 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         }
     }
 
+    // A reply in another shape parses as no providers, and must not replace a cache that has them.
+    if by_key.is_empty() {
+        return Err("models.dev: no models found".into());
+    }
     let mut models: Vec<Model> = by_key.into_values().collect();
     let plain = plain(&models);
     for m in &mut models {
@@ -1891,7 +1911,11 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         m.openrouter = or_id.map(|id| standard(id).unwrap_or(id).clone());
         // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
         let aa = (ep.source == Source::Aa).then(|| aa_words(&m.name, true).join("-"));
-        let gk = ep.group(&m.key).or(aa.as_ref().filter(|k| ep.groups.contains_key(*k))).map(String::as_str);
+        let gk = ep
+            .group(&m.key)
+            .or_else(|| absorbed.get(&m.key)?.iter().find_map(|k| ep.group(k)))
+            .or(aa.as_ref().filter(|k| ep.groups.contains_key(*k)))
+            .map(String::as_str);
         // A reasoning model of its own is not the model it is named after, unless Artificial
         // Analysis lists it as that model's reasoning setting.
         let reasons = |k: &&str| ep.settings.get(*k).is_some_and(|all| all.iter().any(|e| e.setting.0 == Some(true)));
@@ -2033,6 +2057,19 @@ mod tests {
         assert_eq!(moved, [("granite40hmicro".to_string(), "granite40micro".to_string())], "the known row absorbs");
         assert_eq!(by_key["granite40micro"].offers.len(), 2);
         assert_eq!(by_key.len(), 7, "no merge on generic ids, one mislabelled offer, or a tie");
+    }
+
+    #[test]
+    fn a_model_scored_under_an_absorbed_key_keeps_its_scores() {
+        // One id, so one row, under the shorter key as OpenRouter knows it; Epoch names the longer.
+        let json = br#"{"openrouter": {"models": {"google/gemma-9-it": {"name": "Gemma 9"}}},
+                        "b": {"models": {"gemma-9-it": {"name": "Gemma 9 IT"}}}}"#;
+        let mut ep = Scores::default();
+        ep.groups.insert("gemma9it".into(), ("Gemma 9 IT".into(), Some(140.0), BTreeMap::new()));
+        let d = merge(json, &ep, None).unwrap();
+        let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.eci)).collect();
+        assert_eq!(rows, [("gemma9", Some(140.0))]);
+        assert!(merge(b"{}", &ep, None).is_err(), "no models is a reply in another shape, not data");
     }
 
     #[test]
@@ -2276,6 +2313,7 @@ mod tests {
             "as list --id prints"
         );
         assert!(d.find("nope").unwrap_err().is_empty());
+        assert!(d.find("--").unwrap_err().is_empty(), "nothing to match by is no match, not every model");
         let mine = |k: &str| Model { available: true, ..mk(k) };
         let d = Data {
             models: vec![

@@ -940,7 +940,7 @@ impl App {
     }
 
     /// How many tasks recommend lists: the built-in ones and your own.
-    fn task_count(&self) -> usize {
+    pub fn task_count(&self) -> usize {
         TASKS.len() + self.store.custom_tasks().len()
     }
 
@@ -1882,7 +1882,10 @@ impl App {
     fn table_key(&mut self, code: KeyCode, n: isize) -> Option<Effect> {
         let table = self.view == View::Table;
         // Keys that act on the current model, which only help hides.
-        let row = table || matches!(self.view, View::Detail | View::Compare | View::Recommend);
+        // Compare shows none with fewer than 2 selected, and then has no current model to act on.
+        let row = table
+            || matches!(self.view, View::Detail | View::Recommend)
+            || (self.view == View::Compare && self.marked_models().len() >= 2);
         // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
         let across = matches!(self.view, View::Compare | View::Recommend);
         match code {
@@ -2096,13 +2099,24 @@ impl App {
             KeyCode::Char('B') => self.ask_source(),
             KeyCode::Enter if self.view == View::Recommend => {
                 let Some(t) = self.cur_task() else {
-                    // A task of your own has one model and no line to rank: the table, on that
-                    // model, where `follow` left the cursor.
-                    let said = self.custom_at().map(|task| match self.current() {
-                        Some(m) => Ok(format!("{}, your model for {task}", m.name)),
-                        None => Err(format!("the model of {task} is not one you can use")),
+                    // A task of your own has one model and no line to rank: the table, on that model.
+                    let key = self.current().map(|m| m.key.clone());
+                    // A built-in task picked before would keep the table to its line, as esc undoes.
+                    if self.task.take().is_some() {
+                        (self.sort_col, self.descending) = DEFAULT_SORT;
+                        self.rebuild();
+                    }
+                    let row = key.and_then(|k| self.rows.iter().position(|&i| self.data.models[i].key == k));
+                    let said = self.custom_at().map(|task| match (self.current(), row) {
+                        (Some(m), Some(_)) => Ok(format!("{}, your model for {task}", m.name)),
+                        (Some(m), None) => Err(format!("{}, your model for {task}, is filtered out: c clears", m.name)),
+                        (None, _) => Err(format!("the model of {task} is not one you can use")),
                     });
                     self.view = View::Table;
+                    if let Some(n) = row {
+                        self.deselect();
+                        self.select(n);
+                    }
                     if let Some(said) = said {
                         self.report(said);
                     }
@@ -3280,6 +3294,29 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_task_of_your_own_lands_on_its_model_or_says_why() {
+        let mut a = app();
+        a.store.toggle_favorite("debugging", "opus5");
+        a.rebuild();
+        // After a built-in task's line, which its model is not on.
+        press(&mut a, "R2gg");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "RG");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.task.is_none(), a.current().map(|m| m.key.as_str())), (true, Some("opus5")));
+        // Filtered out, it says so rather than name the row the cursor is on.
+        press(&mut a, "/gpt");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "RG");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.failed && a.status.contains("filtered out"), "{}", a.status);
+        // Compare with one selected shows no model, so a model's keys act on none.
+        let mut a = app();
+        press(&mut a, "j ggC");
+        assert_eq!((press(&mut a, "e"), a.store.excluded.is_empty()), (None, true));
+    }
+
+    #[test]
     fn a_task_of_your_own_has_the_model_you_give_it() {
         let mut a = app();
         let on = a.current().unwrap().key.clone();
@@ -3365,9 +3402,10 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.task_cur, a.store.favorite("tool-dispatch")), (TASKS.len() - 1, None));
         // An empty name names no task.
-        press(&mut a, "fG");
+        press(&mut a, "2ggfG");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((code(&mut a, KeyCode::Enter), a.store.custom_tasks().len()), (None, 0));
+        assert_eq!(edit(&a), Some(("New".into(), String::new())));
+        assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.custom_tasks().len()), (None, None, 0));
         code(&mut a, KeyCode::Esc);
         // A tier of it takes a model of its own, as a built-in task's: its entries follow the
         // task's in the list, and both models are on its line, cheapest first.

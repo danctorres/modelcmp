@@ -47,7 +47,7 @@ modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosi
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp fav coding 3.7-flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
-modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"  # a task of your own: its model and what it is about; --rm removes it
+modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"  # a task of your own: its model and what it is about; --rm clears the model
 modelcmp fav debugging --about "bugs and flaky tests"               # rewrite what it is about; "" clears it
 modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --task debugging --tier low returns it
 modelcmp list --task debugging --id            # that model's provider/model
