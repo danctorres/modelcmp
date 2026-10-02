@@ -592,6 +592,7 @@ pub fn load_cache() -> Option<Data> {
 
 /// What each installed harness says it can use: its ids, or none when its listing failed, hung
 /// or was cut short by `stop`, so a refresh always finishes. One not installed is left out.
+/// All are asked at once, so the slowest is the wait.
 fn harness_models(stop: &AtomicBool) -> BTreeMap<String, Option<Vec<String>>> {
     let on_path =
         |bin: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()));
@@ -603,7 +604,14 @@ fn harness_models(stop: &AtomicBool) -> BTreeMap<String, Option<Vec<String>>> {
         }
         Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?),
     };
-    HARNESSES.iter().filter(|(bin, _)| on_path(bin)).map(|(bin, probe)| (bin.to_string(), ids(bin, probe))).collect()
+    std::thread::scope(|s| {
+        let asked: Vec<_> = HARNESSES
+            .iter()
+            .filter(|(bin, _)| on_path(bin))
+            .map(|(bin, probe)| (bin, s.spawn(move || ids(bin, probe))))
+            .collect();
+        asked.into_iter().map(|(bin, ids)| (bin.to_string(), ids.join().ok().flatten())).collect()
+    })
 }
 
 /// The listings a refresh keeps, and the harnesses that gave none: one that did not answer

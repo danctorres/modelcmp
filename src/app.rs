@@ -1098,12 +1098,15 @@ impl App {
             Ok(mut d) => {
                 // An error still standing, as the start's of an unreadable user.json, is not
                 // replaced by the news that the refresh went well, nor by its warning. Why a
-                // key did nothing is.
+                // key did nothing is. The news replaces no other message either: what a switch
+                // of source said, `B to change`, stays when its download ends.
                 let standing = self.failed && !self.refused;
                 match d.warning.take() {
                     Some(w) if standing => self.status = format!("{}; {w}", self.status),
                     Some(w) => self.report(Err(w)),
-                    None if !standing => self.report(Ok("data refreshed".into())),
+                    None if self.status.is_empty() || (self.failed && self.refused) => {
+                        self.report(Ok("data refreshed".into()));
+                    }
                     None => {}
                 }
                 self.set_data(d);
@@ -1144,8 +1147,7 @@ impl App {
         let items =
             Source::ALL.iter().map(|s| (format!("{:<20} {}", s.label(), s.about()), Effect::Source(*s))).collect();
         let sel = Source::ALL.iter().position(|s| *s == crate::data::source()).unwrap_or(0);
-        let title = if self.first_start { "benchmarks? B changes it later" } else { "benchmarks?" };
-        self.input = Input::choose(title, Kind::Source, items, sel);
+        self.input = Input::choose("benchmarks?", Kind::Source, items, sel);
     }
 
     /// Use benchmarks from `src` from now on; the shell loads its data (`switched`). The first
@@ -1509,6 +1511,8 @@ impl App {
                     self.input_key(KeyCode::Enter, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
+                // The first start's question stays open: closing it would pick the default.
+                _ if self.first_start && matches!(self.input, Input::Choose { kind: Kind::Source, .. }) => None,
                 // Outside, or anything else that is not an entry: close it. A search takes an
                 // esc of its own first.
                 _ => {
@@ -1824,9 +1828,12 @@ impl App {
             KeyCode::Char('o') if row => {
                 let m = self.current()?;
                 let items: Vec<_> = m.links().into_iter().map(|(site, url)| (site.into(), Effect::Open(url))).collect();
-                match m.url() {
-                    Err(none) => self.refuse(none),
-                    Ok(_) => self.input = Input::choose("open on which site?", Kind::Open, items, 0),
+                if items.is_empty() {
+                    // Worded by `url`, as for the CLI.
+                    let none = m.url().err().unwrap_or_default();
+                    self.refuse(none);
+                } else {
+                    self.input = Input::choose("open on which site?", Kind::Open, items, 0);
                 }
             }
             // A list even of one, as `o`'s.
@@ -2277,6 +2284,7 @@ mod tests {
         crate::data::set_source(Source::Epoch);
         a.first_start = true;
         a.ask_source();
+        assert!(a.mouse(Mouse::Outside).is_none() && matches!(a.input, Input::Choose { .. }), "a click beside it");
         let label = |a: &App, i: usize| match &a.input {
             Input::Choose { items, .. } => items[i].0.clone(),
             _ => String::new(),
@@ -3446,6 +3454,12 @@ mod tests {
         a.refreshed(Ok(Data::default()));
         assert!(!a.refresh_failed, "until one succeeds");
         assert_eq!(a.status, "data refreshed");
+        // Nor after a refusal a key has since cleared.
+        press(&mut a, "U");
+        press(&mut a, "j");
+        a.status = "benchmarks from Epoch AI · B to change".into();
+        a.refreshed(Ok(Data::default()));
+        assert!(a.status.ends_with("B to change"), "what a switch said outlasts its download");
         a.report(Err("user.json is not valid".into()));
         a.refreshed(Ok(Data::default()));
         assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");

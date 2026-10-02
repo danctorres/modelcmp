@@ -55,47 +55,27 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
         // Unsaved, it plays again at the next start; the store's own warning says why.
         let _ = store.save();
     }
-    // Asked first, before a download keys may be typed during: reading the reply takes whatever
-    // else is queued with it, and here that is nothing.
+    // Asked first: reading the reply takes whatever else is queued with it, and here that is
+    // nothing.
     let term_bg = cfg!(unix).then(terminal_bg).flatten();
-    // Start from the cache however old, and refresh behind the table (`--refresh` too, so a
-    // failure shows in the frame); only a first run, with no cache, waits for the download.
-    let mut warning = None;
-    let (data, fresh, failed) = match (!ask).then(data::load_cache) {
-        None => (Data::default(), true, None),
-        Some(Some(d)) => (d, false, None),
-        // No cache, so no stale copy to fall back on.
-        Some(None) => {
-            eprintln!("downloading model data (models.dev + {})…", data::source().label());
-            match data::load(true) {
-                // The warning is of a cache that cannot be written, so every start downloads,
-                // or of a harness that did not list its models.
-                Ok((d, w)) => {
-                    warning = w;
-                    (d, true, None)
-                }
-                // A wrong or missing key: open anyway, so `B` can fix it or go back to Epoch.
-                Err(e) if data::source() == data::Source::Aa => (Data::default(), true, Some(e)),
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-    };
-    let mut app = App::new(data, store);
+    // Start from the cache however old, or with no cache from an empty table, and download behind
+    // the intro and the table (`--refresh` too), so nothing waits for it and a failure shows in
+    // the frame.
+    let mut app = App::new((!ask).then(data::load_cache).flatten().unwrap_or_default(), store);
     app.term_bg = term_bg;
+    let (mut rx, mut pre) = (None, None);
     if ask {
         app.first_start = true;
         app.ask_source();
-    }
-    if let Some(e) = failed {
-        app.refreshed(Err(e));
-    }
-    let mut rx = None;
-    if !fresh && (force || app.data.stale()) && app.refresh().is_some() {
+        // No source is picked yet: the default's download starts under the intro, for the pick
+        // to take up, unless the CLI has left a cache that will do.
+        pre = data::load_cache().is_none_or(|d| d.stale()).then(spawn_refresh);
+    } else if (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
-    // After the refresh starts, which clears the status. The store's last: it is your marks and
-    // notes that are at stake.
-    for w in [warning, app.store.warning.take()].into_iter().flatten() {
+    // After the refresh starts, which clears the status: it is your marks and notes that are at
+    // stake. The first start keeps it for the pick, as a key under its question clears the status.
+    if !ask && let Some(w) = app.store.warning.take() {
         app.report(Err(w));
     }
     let mut terminal =
@@ -109,7 +89,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     let res = if ask || new { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
-        .and_then(|()| event_loop(&mut app, &mut terminal, rx));
+        .and_then(|()| event_loop(&mut app, &mut terminal, rx, pre));
     let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     let Some(cmds) = res? else { return Ok(()) };
@@ -239,11 +219,74 @@ const LOGO: [&str; 8] = [
 /// Under the wordmark, after a blank row.
 const TAGLINE: &str = "compare models, pick favorites, get recommendations";
 
+/// Where the wordmark goes in `a`: its corner, and the rows under it that the tagline and the
+/// version take, as far as there is room for them (0, 2 or 3). It is centred with `below` more
+/// rows kept free under those. None in an area too small.
+fn logo_at(a: Rect, below: u16) -> Option<(u16, u16, u16)> {
+    let (w, rows) = (LOGO[0].chars().count() as u16, LOGO.len() as u16);
+    if a.width < w || a.height < rows + below {
+        return None;
+    }
+    // A blank row and the tagline, then the version.
+    let under = match a.height - rows - below {
+        0 | 1 => 0,
+        2 => 2,
+        _ => 3,
+    };
+    Some((a.x + (a.width - w) / 2, a.y + (a.height - rows - under - below) / 2, under))
+}
+
+/// The first start asks for the benchmarks under the wordmark, where the intro leaves it: where
+/// the wordmark is (`logo_at`), and the rows under it that the question's box is centred in. None
+/// once a source is picked, on a screen too small for both, which asks over the table, and with
+/// neither the question nor its API key prompt open, as when the key could not be saved.
+fn splash(app: &App, area: Rect) -> Option<((u16, u16, u16), Rect)> {
+    if !app.first_start || !matches!(app.input, Input::Choose { kind: Kind::Source, .. } | Input::Key { .. }) {
+        return None;
+    }
+    // Above the status bar, where a search of the list and an API key are typed.
+    let body = Rect { height: area.height.checked_sub(1)?, ..area };
+    // A blank row, then the box: its border, a line per source and the key hint.
+    let ask = data::Source::ALL.len() as u16 + 4;
+    let at = logo_at(body, ask)?;
+    Some((at, Rect { y: at.1 + LOGO.len() as u16 + at.2 + 1, height: ask - 1, ..body }))
+}
+
+/// The wordmark with its corner at `(x, y)`, each cell in the style its column and row give, and
+/// under it, where `under` leaves them room (`logo_at`), the first `typed` bytes of the tagline
+/// and, once that is whole, the version. Rows past the end of `a` are left out.
+fn wordmark(
+    buf: &mut Buffer,
+    a: Rect,
+    (x, y, under): (u16, u16, u16),
+    typed: usize,
+    style: impl Fn(usize, usize) -> Style,
+) {
+    for (r, row) in LOGO.iter().enumerate() {
+        let yr = y + r as u16;
+        if yr >= a.bottom() {
+            break;
+        }
+        for (c, ch) in row.chars().enumerate() {
+            buf[(x + c as u16, yr)].set_char(ch).set_style(style(c, r));
+        }
+    }
+    let (rows, tw) = (LOGO.len() as u16, TAGLINE.len());
+    if under > 0 && typed > 0 {
+        buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows + 1, &TAGLINE[..typed], fg(Color::Reset));
+        if under == 3 && typed == tw {
+            let v = concat!("v", env!("CARGO_PKG_VERSION"));
+            buf.set_string(a.x + (a.width - v.len() as u16) / 2, y + rows + 2, v, fg(MUTED));
+        }
+    }
+}
+
 /// The intro of the first launch, and of the first after an upgrade: the wordmark dim, gliding up
 /// from below the screen and easing to a stop in the middle, then a rainbow rolling across it on a
 /// diagonal, each cell running red to blue before it settles on the accent, the tagline typing in
 /// under it as the rainbow passes and the version showing under that once it is whole. Any key
-/// skips it, and is not passed on; a terminal too small for it skips it too.
+/// skips it, and is not passed on; a terminal too small for it skips it too. On the first start
+/// it stops above the question that follows (`splash`), and stays.
 fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     // The hue wheel up to the accent, so the last step into magenta is a small one.
     const RAINBOW: [Color; 5] = [Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue];
@@ -262,51 +305,29 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     // From 1, as frame 0 would put the wordmark just off the screen.
     let mut t = 1;
     while t <= end {
-        let (mut fits, mut landed) = (true, false);
+        let (mut fits, mut landed, mut asks) = (true, false, false);
         terminal.draw(|f| {
             let a = f.area();
-            if usize::from(a.width) < w || usize::from(a.height) < rows {
+            let at = splash(app, a).map(|s| s.0);
+            asks = at.is_some();
+            let Some((x, y, under)) = at.or_else(|| logo_at(a, 0)) else {
                 fits = false;
                 return;
-            }
-            // Under the wordmark a blank row and the tagline, then the version, as far as there is
-            // room for them.
-            let under = match usize::from(a.height) - rows {
-                0 | 1 => 0,
-                2 => 2,
-                _ => 3,
             };
-            let h = (rows + under) as u16;
-            let (x, y) = (a.x + (a.width - w as u16) / 2, a.y + (a.height - h) / 2);
             // Ease out: from the bottom edge, fast at first and slowing into place.
             let left = 1.0 - (t.min(SLIDE) as f32 / SLIDE as f32);
             let off = (f32::from(a.bottom() - y) * left * left * left).round() as u16;
             landed = off == 0;
-            let y = y + off;
-            let buf = f.buffer_mut();
-            for (r, row) in LOGO.iter().enumerate() {
-                let yr = y + r as u16;
-                if yr >= a.bottom() {
-                    break;
-                }
-                for (c, ch) in row.chars().enumerate() {
-                    let style = match t.checked_sub(SLIDE + (c + 2 * (rows - 1 - r)) / SPEED) {
-                        None => fg(MUTED),
-                        Some(k) => fg(RAINBOW.get(k / STEP).copied().unwrap_or(ACCENT)).add_modifier(Modifier::BOLD),
-                    };
-                    buf[(x + c as u16, yr)].set_char(ch).set_style(style);
-                }
-            }
             // Each character as the wave's front passes over it: two rows under the bottom one,
             // so 4 columns ahead of the front there.
-            if under > 0 && t > SLIDE {
-                let typed = &TAGLINE[..((t - SLIDE) * SPEED + 4).saturating_sub((w - tw) / 2).min(tw)];
-                buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows as u16 + 1, typed, fg(Color::Reset));
-                if under == 3 && typed.len() == tw {
-                    let v = concat!("v", env!("CARGO_PKG_VERSION"));
-                    buf.set_string(a.x + (a.width - v.len() as u16) / 2, y + rows as u16 + 2, v, fg(MUTED));
+            let typed = if t > SLIDE { ((t - SLIDE) * SPEED + 4).saturating_sub((w - tw) / 2).min(tw) } else { 0 };
+            let buf = f.buffer_mut();
+            wordmark(buf, a, (x, y + off, under), typed, |c, r| {
+                match t.checked_sub(SLIDE + (c + 2 * (rows - 1 - r)) / SPEED) {
+                    None => fg(MUTED),
+                    Some(k) => fg(RAINBOW.get(k / STEP).copied().unwrap_or(ACCENT)).add_modifier(BOLD),
                 }
-            }
+            });
             recolor(buf, theme, app.term_bg);
         })?;
         if !fits {
@@ -318,8 +339,9 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         }
         // A key skips it; a pointer move or a resize does not, nor does it cut the frame short.
         // Past the deadline the wait is zero, so what is still queued is read and a key behind
-        // a burst of pointer moves is not left for the table.
-        let until = Instant::now() + Duration::from_millis(if t == end { 750 } else { 15 });
+        // a burst of pointer moves is not left for the table. The whole wordmark is held before
+        // the table takes its place; the first start's question shows under it at once.
+        let until = Instant::now() + Duration::from_millis(if t == end && !asks { 1100 } else { 25 });
         loop {
             if !event::poll(until.saturating_duration_since(Instant::now()))? {
                 break;
@@ -342,16 +364,29 @@ fn spawn_refresh() -> Refresh {
 }
 
 /// Returns at a quit, or with the commands of an upgrade to run once the screen is restored.
+/// `pre`: the first start's download for the default source, held until a source is picked.
 fn event_loop(
     app: &mut App,
     terminal: &mut DefaultTerminal,
     mut rx: Option<Refresh>,
+    mut pre: Option<Refresh>,
 ) -> Result<Option<Vec<Vec<String>>>, String> {
     let mut dirty = true;
     // The last press on a cell, which a second one makes a double click (`double`), and the
     // screen row of the last press on a table row, which a drag extends from (`dragged`).
     let (mut click, mut press) = (None, None);
     loop {
+        // Before the draw, so one that ended under the intro is in the first frame.
+        let done = rx.as_ref().and_then(|r| match r.try_recv() {
+            Ok(res) => Some(res),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err("refresh thread died".into())),
+        });
+        if let Some(res) = done {
+            rx = None;
+            app.refreshed(res);
+            dirty = true;
+        }
         if dirty {
             terminal
                 .draw(|f| {
@@ -449,27 +484,23 @@ fn event_loop(
                             }
                         });
                     }
-                    Some(Effect::Source(_)) => {
+                    Some(Effect::Source(src)) => {
                         if let Err(e) = app.store.save() {
                             app.report(Err(format!("could not save: {e}")));
                         }
                         // A refresh under way is for the other source: drop it, or it lands here.
-                        rx = app.switched(data::load_cache()).then(spawn_refresh);
+                        // The first start's is for the default: picked, it is the one to wait for.
+                        let pre = pre.take().filter(|_| src == data::Source::default());
+                        rx = app.switched(data::load_cache()).then(|| pre.unwrap_or_else(spawn_refresh));
+                        // The start's warning, kept while the first start's question was open.
+                        if let Some(w) = app.store.warning.take() {
+                            app.report(Err(w));
+                        }
                     }
                     // The app applies its own chooser items before they get here.
                     Some(Effect::Fav(..) | Effect::Theme(_)) | None => {}
                 }
             }
-            dirty = true;
-        }
-        let done = rx.as_ref().and_then(|r| match r.try_recv() {
-            Ok(res) => Some(res),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Err("refresh thread died".into())),
-        });
-        if let Some(res) = done {
-            rx = None;
-            app.refreshed(res);
             dirty = true;
         }
     }
@@ -504,9 +535,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             let rows = menu_rows(items, &list.query);
             menu_box(inner, menu_x(inner, &l, *col), items, rows.len()).map(|(b, _)| (b, list.top, rows.len()))
         }
-        Input::Choose { title, kind, items, list } => {
-            let (rows, lines) = (choice_rows(items, &list.query).len(), choice_lines(*kind, items, list));
-            Some((overlay_rect(Rect { height: area.height - 1, ..area }, title, &lines), list.top, rows))
+        Input::Choose { title, items, list, .. } => {
+            let (within, lines) = chooser(app, area)?;
+            Some((overlay_rect(within, title, &lines), list.top, choice_rows(items, &list.query).len()))
         }
         _ => None,
     };
@@ -1030,52 +1061,59 @@ fn draw(app: &mut App, f: &mut Frame) {
     }
     let body = Rect { height: area.height - 1, ..area };
     let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
-    // The refresh state is always in view: under way, failed, or how old the data is.
-    let age = format!("{} ", data_age(&app.data));
-    let (state, color) = match (app.refreshing, app.refresh_failed, app.data.stale()) {
-        (true, ..) => ("⟳ refreshing ".to_string(), Color::Yellow),
-        (_, true, _) => (format!("refresh failed · {age}"), BAD),
-        (_, _, true) => (age, BAD),
-        _ => (age, MUTED),
-    };
-    let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, col_name(app.sort_col));
-    // What the column under the cursor means, centred and cut to clear the sort on either side.
-    let side = sort.chars().count() + 2;
-    let room = (body.width as usize).saturating_sub(2 * side).max(1);
-    let about = truncate(&format!(" {}: {} ", col_name(app.col), col_about(app.col)), room);
-    let frame = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(fg(MUTED))
-        .title_top(Line::from(about).style(fg(MUTED)).centered())
-        .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
-        .title_bottom(match app.data.update() {
-            Some(new) => Line::from(format!(" modelcmp v{new} available: u upgrades ")).style(fg(Color::Yellow)),
-            None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
-        })
-        .title_bottom(
-            Line::from(vec![
-                Span::styled(format!(" models.dev + {} · ", data::source().label()), fg(MUTED)),
-                Span::styled(state, fg(color)),
-            ])
-            .right_aligned(),
-        );
-    let inner = frame.inner(body);
-    app.page = inner.height.saturating_sub(2);
+    // The first start asks its question under the wordmark, settled as the intro leaves it.
+    let splash = splash(app, area);
+    if let Some((at, _)) = splash {
+        wordmark(f.buffer_mut(), area, at, TAGLINE.len(), |_, _| fg(ACCENT).add_modifier(BOLD));
+    } else {
+        // The refresh state is always in view: under way, failed, or how old the data is.
+        let age = format!("{} ", data_age(&app.data));
+        let (state, color) = match (app.refreshing, app.refresh_failed, app.data.stale()) {
+            (true, ..) => ("⟳ refreshing ".to_string(), Color::Yellow),
+            (_, true, _) => (format!("refresh failed · {age}"), BAD),
+            (_, _, true) => (age, BAD),
+            _ => (age, MUTED),
+        };
+        let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, col_name(app.sort_col));
+        // What the column under the cursor means, centred and cut to clear the sort on either side.
+        let side = sort.chars().count() + 2;
+        let room = (body.width as usize).saturating_sub(2 * side).max(1);
+        let about = truncate(&format!(" {}: {} ", col_name(app.col), col_about(app.col)), room);
+        let frame = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(fg(MUTED))
+            .title_top(Line::from(about).style(fg(MUTED)).centered())
+            .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
+            .title_bottom(match app.data.update() {
+                Some(new) => Line::from(format!(" modelcmp v{new} available: u upgrades ")).style(fg(Color::Yellow)),
+                None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
+            })
+            .title_bottom(
+                Line::from(vec![
+                    Span::styled(format!(" models.dev + {} · ", data::source().label()), fg(MUTED)),
+                    Span::styled(state, fg(color)),
+                ])
+                .right_aligned(),
+            );
+        let inner = frame.inner(body);
+        app.page = inner.height.saturating_sub(2);
+        let buf = f.buffer_mut();
+        frame.render(body, buf);
+        let (right, above, below) = table(buf, inner, app);
+        if right {
+            // Columns cut off on the right: `l` scrolls to them.
+            buf.set_stringn(body.right() - 1, inner.y, "›", 1, fg(ACCENT).add_modifier(BOLD));
+        }
+        if inner.height > 1 {
+            // The rule under the header runs into the frame.
+            buf.set_stringn(body.x, inner.y + 1, "├", 1, fg(MUTED));
+            buf.set_stringn(body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
+        }
+        if inner.height > 2 {
+            vmarks(buf, body.x, inner.y + 2, inner.bottom() - 1, above, below);
+        }
+    }
     let buf = f.buffer_mut();
-    frame.render(body, buf);
-    let (right, above, below) = table(buf, inner, app);
-    if right {
-        // Columns cut off on the right: `l` scrolls to them.
-        buf.set_stringn(body.right() - 1, inner.y, "›", 1, fg(ACCENT).add_modifier(BOLD));
-    }
-    if inner.height > 1 {
-        // The rule under the header runs into the frame.
-        buf.set_stringn(body.x, inner.y + 1, "├", 1, fg(MUTED));
-        buf.set_stringn(body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
-    }
-    if inner.height > 2 {
-        vmarks(buf, body.x, inner.y + 2, inner.bottom() - 1, above, below);
-    }
     let cursor = status(buf, bar, app);
     let lines = match app.view {
         View::Table => None,
@@ -1121,7 +1159,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        overlay(buf, body, &title, lines, &mut app.scroll);
+        overlay(buf, body, &title, lines, &mut app.scroll, ACCENT);
     }
     // `q` and `u` ask first: the same box, confirmed by the same key again.
     let ask = match app.input {
@@ -1132,11 +1170,11 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some((key, title)) = ask {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0);
+        overlay(buf, body, &title, lines, &mut 0, ACCENT);
     }
-    if let Input::Choose { title, kind, items, list } = &mut app.input {
-        let lines = choice_lines(*kind, items, list);
-        let rect = overlay_rect(body, title, &lines);
+    let chooser = chooser(app, area);
+    if let (Some((within, lines)), Input::Choose { title, items, list, .. }) = (chooser, &mut app.input) {
+        let rect = overlay_rect(within, title, &lines);
         let rows = choice_rows(items, &list.query).len();
         let (sel, top) = (&list.sel, &mut list.top);
         let shown = usize::from(rect.height.saturating_sub(2));
@@ -1144,7 +1182,9 @@ fn draw(app: &mut App, f: &mut Frame) {
         // that would scroll the cursor's line off.
         let from = if *sel + 1 >= rows { lines.len().saturating_sub(shown) } else { *top };
         let mut scroll = list_top(from, *sel, shown) as u16;
-        let (above, below) = overlay(buf, body, title, lines, &mut scroll);
+        // Under the wordmark, which has the accent, the box takes the keys' colour.
+        let color = if splash.is_some() { KEY } else { ACCENT };
+        let (above, below) = overlay(buf, within, title, lines, &mut scroll, color);
         *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
@@ -1703,7 +1743,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let end = pill(buf, area.x, area.y, mode, color, area.width);
     let mut x = end + 1;
     if matches!(&app.input, Input::Quit | Input::Upgrade | Input::Choose { list: List { typing: false, .. }, .. }) {
-        // The question is in a box in the middle of the screen.
+        // The question is in a box in the middle of the screen. Under the first start's, the
+        // start's warning shows until the pick reports it.
+        if let Some(w) = &app.store.warning {
+            buf.set_stringn(x, area.y, w, usize::from(area.right().saturating_sub(x)), fg(BAD));
+        }
         return None;
     }
     // The prompt's label, the text being typed and the cursor's byte offset in it.
@@ -1840,7 +1884,8 @@ fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> L
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
-fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line<'static>> {
+/// `first`: the first start's question, where esc picks the default and `B` asks again later.
+fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
@@ -1877,6 +1922,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
         _ if typing => " ↓ ↑ move · enter pick · esc clear",
         Kind::Fav => " j k move · / search · space enter toggle · esc close",
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
+        Kind::Source if first => " j k move · / search · enter picks · esc default · B changes it later",
         Kind::Source => " j k move · / search · enter picks · esc close",
         Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
     };
@@ -1889,6 +1935,14 @@ fn list_top(top: usize, sel: usize, shown: usize) -> usize {
     top.clamp(sel.saturating_sub(shown.max(1) - 1), sel)
 }
 
+/// An open chooser's lines and the area its box is centred in, for `draw` and `hit` alike: the
+/// screen above the status bar, or on the first start the rows under the wordmark (`splash`).
+fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
+    let Input::Choose { kind, items, list, .. } = &app.input else { return None };
+    let within = splash(app, area).map_or(Rect { height: area.height - 1, ..area }, |s| s.1);
+    Some((within, choice_lines(*kind, items, list, app.first_start)))
+}
+
 /// Where an overlay with these lines sits: centred, as wide as its widest line or title.
 fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
@@ -1897,9 +1951,16 @@ fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
 
-/// A centred rounded box showing `lines` from `scroll` on, which is clamped to the content.
-/// Returns whether lines are scrolled off above and below.
-fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>, scroll: &mut u16) -> (bool, bool) {
+/// A centred rounded box in `color` showing `lines` from `scroll` on, which is clamped to the
+/// content. Returns whether lines are scrolled off above and below.
+fn overlay(
+    buf: &mut Buffer,
+    area: Rect,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    scroll: &mut u16,
+    color: Color,
+) -> (bool, bool) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
     let shown = h.saturating_sub(2) as usize;
@@ -1912,8 +1973,8 @@ fn overlay(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'static>>,
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(fg(ACCENT))
-        .title_top(Line::from(format!(" {title} ")).style(fg(ACCENT).add_modifier(BOLD)))
+        .border_style(fg(color))
+        .title_top(Line::from(format!(" {title} ")).style(fg(color).add_modifier(BOLD)))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     let inner = block.inner(rect);
     Clear.render(rect, buf);
@@ -2228,6 +2289,40 @@ mod tests {
         let w = LOGO[0].chars().count();
         assert!(LOGO.iter().all(|r| r.chars().count() == w), "centring and the band assume one width");
         assert!(TAGLINE.is_ascii() && TAGLINE.len() <= w, "the intro slices it by byte and centres it in that width");
+    }
+
+    #[test]
+    fn the_first_start_asks_under_the_wordmark() {
+        let screen = |a: &mut App, w: u16, h: u16| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
+        };
+        let row = |lines: &[String], pat: &str| lines.iter().position(|l| l.contains(pat)).map(|y| y as u16);
+        let mut a = app();
+        a.first_start = true;
+        a.ask_source();
+        a.store.warning = Some("user.json is not valid".into());
+        let lines = screen(&mut a, 120, 30);
+        assert!(lines[29].contains("user.json is not valid"), "the start's warning shows under it");
+        assert_eq!(row(&lines, "Model"), None, "no table behind the question");
+        let (tagline, ask) = (row(&lines, TAGLINE).unwrap(), row(&lines, "benchmarks?").unwrap());
+        assert!(tagline < ask, "the question is under the wordmark");
+        // A click lands on the entry where it is drawn.
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 60,
+            row: row(&lines, "Artificial Analysis").unwrap(),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), click), Some(Mouse::Item(1)));
+        // Too small for both: over the table, as `B` asks later.
+        let lines = screen(&mut a, 120, 12);
+        assert!(row(&lines, "Model").is_some() && row(&lines, TAGLINE).is_none());
+        // The key could not be saved: the table, where the status bar says so.
+        a.input = Input::None;
+        assert_eq!(row(&screen(&mut a, 120, 30), TAGLINE), None);
     }
 
     fn model(name: &str, dev: &str, eci: Option<f64>, price: f64) -> Model {
@@ -3175,13 +3270,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT);
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, ACCENT);
         assert_eq!(scroll as usize, help("").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT);
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         let a = app();
         let text: Vec<String> = detail(&a.data.models[0], &a.store).1.iter().map(ToString::to_string).collect();
@@ -3215,15 +3310,15 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"));
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), false);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &search("gr"));
+        let lines = choice_lines(Kind::Theme, &items, &search("gr"), false);
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's list marks what it searches, the task, not the model that holds it now.
         let items = vec![("☐ coding:low  (now Solo)".to_string(), Effect::Fav("k".into(), "coding", Some("low")))];
-        assert_eq!(lit_text(&choice_lines(Kind::Fav, &items, &search("lo"))), ["lo"]);
+        assert_eq!(lit_text(&choice_lines(Kind::Fav, &items, &search("lo"), false)), ["lo"]);
     }
 
     #[test]

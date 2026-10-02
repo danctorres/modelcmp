@@ -109,6 +109,7 @@ struct ModelOut<'a> {
 }
 
 fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
+    let links = m.links();
     ModelOut {
         key: &m.key,
         name: &m.name,
@@ -128,8 +129,8 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         open_weights: m.open_weights,
         release: &m.release,
         knowledge: &m.knowledge,
-        url: m.url().ok(),
-        pages: full.then(|| m.links().into_iter().collect()),
+        url: links.first().map(|(_, url)| url.clone()),
+        pages: full.then(|| links.into_iter().collect()),
         eci: m.eci,
         source: crate::data::source().id(),
         tasks: TASKS
