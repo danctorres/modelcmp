@@ -165,7 +165,8 @@ fn upgrade(cmds: &[Vec<String>]) -> Result<(), String> {
 /// knows no OSC reply, so it comes through as the keys that spell it. The fill is a 24-bit
 /// colour, which the 16 never were, so a terminal that does not say it draws those is not asked:
 /// one may answer here and still garble them. It says so in `COLORTERM`, or, as `ssh` and `sudo`
-/// drop that, with a `TERM` only a terminal that draws them sets.
+/// drop that, with a `TERM` only a terminal that draws them sets. Under WSL neither is set, and
+/// every Windows console that runs it draws them.
 /// ponytail: one that never answers the position costs crossterm's 2 s at each start, and a reply
 /// later than that is read as keys; read the tty here with a wait of our own if one turns up.
 fn terminal_bg() -> Option<u32> {
@@ -174,6 +175,7 @@ fn terminal_bg() -> Option<u32> {
     let term = std::env::var("TERM").unwrap_or_default();
     if !matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor" | "24bit"))
         && !["kitty", "alacritty", "ghostty", "foot", "wezterm", "direct"].iter().any(|t| term.contains(t))
+        && std::env::var_os("WSL_DISTRO_NAME").is_none()
     {
         return None;
     }
@@ -945,23 +947,25 @@ const DEVS: [Color; 6] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magent
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
-/// The cursor's fill, on a row, a column of compare or a name in recommend: the accent, faint
-/// as a marked row's fill, so what is under the cursor keeps its colours, between two bars of
-/// the accent that say where it is (`cursor_ends`, `cursor`).
+/// The cursor's fill, on a row, a column of compare or a name in recommend, between two bars of
+/// the accent that say where it is (`cursor_ends`, `cursor`). Drawn as the accent, which tells it
+/// from a marked row's, and painted as a faint grey (`fill`): a hue on a row says something of
+/// it, as a marked row's blue does, and the accent's is a developer's and a price level's too.
 const CURSOR: Color = ACCENT;
 const FILL: Style = Style::new().bg(CURSOR);
 /// The bars at the cursor's two ends.
 const EDGE: Style = Style::new().fg(ACCENT).bg(CURSOR).add_modifier(BOLD);
-/// The share of the mark colour in a marked row's fill, and of the accent in the cursor's, in
-/// percent, the rest being the theme's background: faint, as the row's colours are read on it.
+/// The share of the mark colour in a marked row's fill, in percent, the rest being the theme's
+/// background: faint, as the row's colours are read on it.
 /// ponytail: text on it reads at 2.2:1 or better, not the 3:1 it has on the background; past
 /// that the palettes need retuning (`every_theme_reads_on_its_own_background`).
 const WASH: u32 = 12;
+/// And of the text colour in the cursor's: the most that every theme reads on and tells from a
+/// marked row's fill (`roles_are_told_apart`), about what an editor's cursor line has.
+const CURSOR_WASH: u32 = 8;
 /// The mark colour in that fill with the terminal's own colours, which do not tell their slot 12.
 /// ponytail: one blue for a dark and a light terminal; ask for slot 12 (OSC 4) to follow the rice.
 const TERM_MARK: u32 = 0x5c9cff;
-/// And the accent in the cursor's fill there.
-const TERM_ACCENT: u32 = 0xc678dd;
 
 /// Swap the terminal colours for the theme's after drawing, so the drawing code keeps naming
 /// terminal colours: the 16, default text, and a developer's placeholder (see `dev_color`).
@@ -998,10 +1002,12 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>) {
         // is known.
         cell.bg = match (cell.bg, palette, term_bg) {
             (Color::Reset, ..) => bg.unwrap_or(Color::Reset),
-            (c, Some(p), _) => wash(resolve(c, palette), p.bg),
-            (c, None, Some(b)) if cell.fg != Color::Black => {
-                wash(Color::from_u32(if c == CURSOR { TERM_ACCENT } else { TERM_MARK }), b)
+            (c, Some(p), _) => fill(c, p),
+            // The terminal does not tell its text colour: white on a dark background, else black.
+            (CURSOR, None, Some(b)) if cell.fg != Color::Black => {
+                wash(Color::from_u32(if lum(b) < 128.0 { 0xffffff } else { 0 }), b, CURSOR_WASH)
             }
+            (_, None, Some(b)) if cell.fg != Color::Black => wash(Color::from_u32(TERM_MARK), b, WASH),
             (c, None, _) => c,
         };
     }
@@ -1010,18 +1016,30 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>) {
 /// The brighter or the dimmer half of a drawn colour, whichever is furthest from the theme's
 /// background in perceived brightness, so a solid fill reads in a dark and a light theme alike.
 fn contrasting(c: Color, p: &Palette) -> Color {
-    let lum =
-        |c: u32| 0.2126 * f64::from((c >> 16) & 255) + 0.7152 * f64::from((c >> 8) & 255) + 0.0722 * f64::from(c & 255);
     let Some(i) = ansi(c) else { return resolve(c, Some(p)) };
     let (dim, bright) = (p.ansi[i % 8], p.ansi[i % 8 + 8]);
     Color::from_u32(if (lum(dim) - lum(p.bg)).abs() > (lum(bright) - lum(p.bg)).abs() { dim } else { bright })
 }
 
-/// The theme's background with `WASH` percent of `c` in it.
-fn wash(c: Color, bg: u32) -> Color {
+/// Perceived brightness, 0 to 255.
+fn lum(c: u32) -> f64 {
+    0.2126 * f64::from((c >> 16) & 255) + 0.7152 * f64::from((c >> 8) & 255) + 0.0722 * f64::from(c & 255)
+}
+
+/// A fill in a theme: a marked row's is the mark colour, the cursor's the text colour, each
+/// faint on the background.
+fn fill(c: Color, p: &Palette) -> Color {
+    match c {
+        CURSOR => wash(Color::from_u32(p.text), p.bg, CURSOR_WASH),
+        c => wash(resolve(c, Some(p)), p.bg, WASH),
+    }
+}
+
+/// The background `bg` with `share` percent of `c` in it.
+fn wash(c: Color, bg: u32, share: u32) -> Color {
     let Color::Rgb(r, g, b) = c else { return c };
     let [_, x, y, z] = bg.to_be_bytes();
-    let mix = |c: u8, bg: u8| ((u32::from(c) * WASH + u32::from(bg) * (100 - WASH)) / 100) as u8;
+    let mix = |c: u8, bg: u8| ((u32::from(c) * share + u32::from(bg) * (100 - share)) / 100) as u8;
     Color::Rgb(mix(r, x), mix(g, y), mix(b, z))
 }
 
@@ -2454,6 +2472,14 @@ mod tests {
         recolor(&mut buf, None, parse_bg("]11;rgb:1e1e/1e1e/2e2eg"));
         assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (BAD, Color::from_u32(0x252d47)));
         assert_eq!(buf[(1, 0)].bg, MARK);
+        // The cursor's is a grey: white in a dark background, black in a light one, or the
+        // theme's text colour in its background.
+        for (theme, bg, fill) in [(None, 0x1e1e2e, 0x30303e), (None, 0xffffff, 0xeaeaea), (Some("nord"), 0, 0x3b414d)] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+            buf[(0, 0)].set_bg(CURSOR);
+            recolor(&mut buf, theme.and_then(|t| THEMES[crate::view::theme(t)].1.as_ref()), Some(bg));
+            assert_eq!(buf[(0, 0)].bg, Color::from_u32(fill), "{theme:?} on {bg:06x}");
+        }
         assert_eq!([parse_bg(""), parse_bg("rgb:ff/00")], [None, None], "no reply, or half of one");
     }
 
@@ -2471,7 +2497,7 @@ mod tests {
         let ratio = |a: u32, b: u32| (lum(a).max(lum(b)) + 0.05) / (lum(a).min(lum(b)) + 0.05);
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
             // A marked row's fill, or the cursor's when that leaves a colour harder to read.
-            let fills = [MARK, CURSOR].map(|c| hex(wash(resolve(c, Some(p)), p.bg)));
+            let fills = [MARK, CURSOR].map(|c| hex(fill(c, p)));
             let on_fill = |c: u32| fills.iter().map(|f| ratio(c, *f)).fold(f64::MAX, f64::min);
             for c in p.accents.iter().chain([&p.text]) {
                 assert!(ratio(*c, p.bg) >= 3.0, "{name}: {c:06x} on the background, {:.1}:1", ratio(*c, p.bg));
@@ -2564,7 +2590,7 @@ mod tests {
                 far("a task and muted", x, of(MUTED), 60.0);
             }
             p.accents.iter().for_each(|&x| far("a developer and muted", x, of(MUTED), 60.0));
-            let [mark, cursor] = [MARK, CURSOR].map(|c| hex(wash(resolve(c, Some(p)), p.bg)));
+            let [mark, cursor] = [MARK, CURSOR].map(|c| hex(fill(c, p)));
             far("the fills", mark, cursor, 14.0);
         }
     }
