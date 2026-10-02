@@ -5,7 +5,8 @@ use crate::data::{Data, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::{Store, slot, slots};
 use crate::view::{
-    LEVELS, THEMES, by_value, ctx, hits, in_reach, level_label, money, score, shown_via, task_line, task_score,
+    LEVELS, NO_ACCESS, THEMES, by_value, ctx, hits, in_reach, level_label, money, score, shown_via, task_line,
+    task_score,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -1231,6 +1232,11 @@ impl App {
         in_reach(m, self.all, self.any_available)
     }
 
+    /// Whether access to no model was found, so every model shows; not so before the data is in.
+    pub fn no_access(&self) -> bool {
+        !self.data.models.is_empty() && !self.any_available
+    }
+
     /// Whether `m` is drawn muted: excluded, or one you have no access to.
     pub fn muted(&self, m: &Model) -> bool {
         self.store.is_excluded(&m.key) || !self.accessible(m)
@@ -1912,6 +1918,8 @@ impl App {
                     self.rebuild();
                 }
             }
+            // With access to none every model shows already.
+            KeyCode::Char('a') if table && self.no_access() => self.refuse(NO_ACCESS),
             KeyCode::Char('a') if table => {
                 self.all = !self.all;
                 self.rebuild();

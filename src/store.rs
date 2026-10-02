@@ -171,7 +171,10 @@ impl Store {
             Err(e) => e.kind() == std::io::ErrorKind::NotFound,
         };
         if parses {
+            // The start's warning is still to be said.
+            let warning = self.warning.take();
             *self = Store::load_from(std::mem::take(&mut self.path));
+            self.warning = warning;
         } else {
             self.mtime = now;
         }
@@ -323,6 +326,7 @@ mod tests {
     fn another_writer_is_picked_up() {
         let p = tmp("reload");
         let mut tui = Store::load_from(p.clone());
+        tui.warning = Some("said at the start".into());
         tui.toggle_marked("a");
         tui.save().unwrap();
         assert!(!tui.reload_if_changed(), "its own save is not a change");
@@ -332,6 +336,7 @@ mod tests {
         agent.save().unwrap();
         assert!(tui.reload_if_changed());
         assert_eq!(tui.marked, ["a", "b"]);
+        assert_eq!(tui.warning.as_deref(), Some("said at the start"), "a warning not yet said is kept");
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 

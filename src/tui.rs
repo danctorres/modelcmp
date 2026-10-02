@@ -15,8 +15,8 @@ use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
-    OUT_OF_REACH, Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level, level_label, money,
-    priced, truncate, verdict,
+    NO_ACCESS, OUT_OF_REACH, Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level,
+    level_label, money, priced, truncate, verdict,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -490,15 +490,20 @@ fn event_loop(
                         }
                         // A refresh under way is for the other source: drop it, or it lands here.
                         // The first start's is for the default: picked, it is the one to wait for.
+                        // One that ended before the pick is taken up all the same, for its warning.
                         let pre = pre.take().filter(|_| src == data::Source::default());
-                        rx = app.switched(data::load_cache()).then(|| pre.unwrap_or_else(spawn_refresh));
-                        // The start's warning, kept while the first start's question was open.
-                        if let Some(w) = app.store.warning.take() {
-                            app.report(Err(w));
-                        }
+                        let fetch = app.switched(data::load_cache());
+                        rx = pre.or_else(|| fetch.then(spawn_refresh));
                     }
                     // The app applies its own chooser items before they get here.
                     Some(Effect::Fav(..) | Effect::Theme(_)) | None => {}
+                }
+                // The start's warning, kept while the first start's question was open, is said
+                // once it closes, however it does, after an error the closing gave.
+                if matches!(app.input, Input::None)
+                    && let Some(w) = app.store.warning.take()
+                {
+                    app.report(Err(if app.failed { format!("{}; {w}", app.status) } else { w }));
                 }
             }
             dirty = true;
@@ -527,6 +532,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let pos = ratatui::layout::Position::new(m.column, m.row);
     let inner = Rect::new(1, 1, area.width - 2, area.height - 3);
     let l = layout(inner.width, app);
+    let head = head(app);
     // An open list first: a click on an entry acts on it, on its frame nothing, and any click
     // outside closes it.
     let list = match &app.input {
@@ -561,21 +567,21 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     // A drag past the table's edges still extends the range to its nearest row.
     if extend {
-        if inner.height < 3 {
+        if inner.height <= head {
             return None;
         }
-        let y = m.row.clamp(inner.y + 2, inner.bottom() - 1);
-        return Some(Mouse::Extend(app.table.offset() + (y - inner.y - 2) as usize));
+        let y = m.row.clamp(inner.y + head, inner.bottom() - 1);
+        return Some(Mouse::Extend(app.table.offset() + (y - inner.y - head) as usize));
     }
     if !inner.contains(pos) {
         return None;
     }
-    // The rule under the header.
-    if m.row == inner.y + 1 {
+    // The rule under the header, and the line `head` counts.
+    if m.row > inner.y && m.row < inner.y + head {
         return None;
     }
     if m.row > inner.y {
-        let n = app.table.offset() + (m.row - inner.y - 2) as usize;
+        let n = app.table.offset() + (m.row - inner.y - head) as usize;
         // The checkbox right of the row number toggles the mark, the ☆ after it picks the
         // tasks, and the ✗ box after that excludes the model.
         let (num_w, x) = (l.name_x - 7, m.column - inner.x);
@@ -785,7 +791,10 @@ fn hints(app: &App) -> Vec<&'static str> {
             } else if !app.store.excluded.is_empty() {
                 view.push("E excluded only");
             }
-            view.push(if app.all { "a yours only" } else { "a all" });
+            // With access to none every model shows already, so `a` has nothing to change.
+            if !app.no_access() {
+                view.push(if app.all { "a yours only" } else { "a all" });
+            }
             // On the price columns, or anywhere while it is off the default.
             let cached = data::cached() > 0.0;
             if (PRICE..ECI).contains(&app.col) || !cached {
@@ -1096,7 +1105,8 @@ fn draw(app: &mut App, f: &mut Frame) {
                 .right_aligned(),
             );
         let inner = frame.inner(body);
-        app.page = inner.height.saturating_sub(2);
+        let head = head(app);
+        app.page = inner.height.saturating_sub(head);
         let buf = f.buffer_mut();
         frame.render(body, buf);
         let (right, above, below) = table(buf, inner, app);
@@ -1109,8 +1119,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             buf.set_stringn(body.x, inner.y + 1, "├", 1, fg(MUTED));
             buf.set_stringn(body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
         }
-        if inner.height > 2 {
-            vmarks(buf, body.x, inner.y + 2, inner.bottom() - 1, above, below);
+        if inner.height > head {
+            vmarks(buf, body.x, inner.y + head, inner.bottom() - 1, above, below);
         }
     }
     let buf = f.buffer_mut();
@@ -1308,6 +1318,12 @@ fn layout(width: u16, app: &App) -> Layout {
     Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, seps }
 }
 
+/// Lines of the table above its first row: the header, the rule and, with access to no model,
+/// `NO_ACCESS`.
+fn head(app: &App) -> u16 {
+    2 + u16::from(app.no_access())
+}
+
 /// Header plus as many rows as fit in `area`, scrolled so the selection stays in view. Says
 /// whether columns are cut off on the right and rows above and below, for the caller's border.
 fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
@@ -1378,7 +1394,11 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         }
     }
 
-    let height = (area.height as usize).saturating_sub(2);
+    let head = head(app);
+    if head > 2 && area.height > 2 {
+        buf.set_stringn(name_x, y + 2, NO_ACCESS, room(name_x, u16::MAX), fg(Color::Yellow));
+    }
+    let height = usize::from(area.height.saturating_sub(head));
     let sel = app.table.selected().unwrap_or(0).min(app.rows.len().saturating_sub(1));
     // Keep the selection in view, and never leave rows blank below while some are hidden above.
     let top = app.table.offset().clamp(sel.saturating_sub(height.saturating_sub(1)), sel);
@@ -1389,7 +1409,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let gap = |x: u16| usize::from(area.right().saturating_sub(x)).min(2);
     let faint = palette(app).is_some() || app.term_bg.is_some();
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
-        let y = area.y + 2 + (k - top) as u16;
+        let y = area.y + head + (k - top) as u16;
         let m = &app.data.models[r];
         // The cursor, or the visual range, is a faint fill through the frame's border, which
         // becomes its two bars; the row keeps its colours on it.
@@ -1501,7 +1521,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     }
     if let Some((x, w)) = cur {
         let drawn = app.rows.len().saturating_sub(top).min(height) as u16;
-        buf.set_style(Rect::new(x, area.y + 2, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
+        buf.set_style(Rect::new(x, area.y + head, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
     }
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
     if let Input::Menu { col, items, list } = &mut app.input {
@@ -2609,6 +2629,30 @@ mod tests {
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         assert!(lines[opus].contains("not available"), "{lines:?}");
         assert!(lines[4].starts_with(" NORMAL  1 available + 1 not available"), "{}", lines[4]);
+    }
+
+    #[test]
+    fn access_to_no_model_says_so_above_the_first_row() {
+        let mut a = app();
+        assert!(!render(&mut a, 120, 6).1.concat().contains(NO_ACCESS));
+        let mut data = std::mem::take(&mut a.data);
+        data.models.iter_mut().for_each(|m| m.available = false);
+        a.set_data(data);
+        let (buf, lines) = render(&mut a, 120, 6);
+        assert!(lines[2].contains(NO_ACCESS) && buf[(cell(&lines[2], "no harness"), 2)].fg == Color::Yellow);
+        assert!(lines[3].contains("opus") && lines[5].starts_with(" NORMAL  2 all (no access found)"), "{lines:?}");
+        assert!(!lines[5].contains("a all") && !lines[5].contains("a yours only"), "nothing for a to do: {}", lines[5]);
+        a.key(KeyCode::Char('a').into());
+        assert!(!a.all && a.status == NO_ACCESS, "and the key says so: {}", a.status);
+        // The clicks on the rows start under it too; the frame puts them one line further down.
+        let click = |row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let on = |row| hit(&a, Rect::new(0, 0, 120, 9), click(row));
+        assert_eq!((on(3), on(4)), (None, Some(Mouse::Cell(0, 0))));
     }
 
     /// The cell where `pat` starts on `line`, which may hold multi-byte glyphs before it.

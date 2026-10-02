@@ -196,7 +196,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         eprintln!("warning: {w}");
     }
     if !data.any_available() {
-        eprintln!("note: no harness models or provider API keys found, showing all models");
+        eprintln!("note: {}", view::NO_ACCESS);
     }
     // A command that saves holds the lock from load to save.
     let _lock = matches!(cmd, Cmd::Select { .. } | Cmd::Exclude { .. } | Cmd::Note { .. } | Cmd::Fav { .. })

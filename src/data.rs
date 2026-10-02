@@ -426,8 +426,7 @@ impl Model {
     /// Where models.dev shows the price you'd pay: the model's page, else the provider's, which
     /// lists its models with their prices.
     pub fn price_page(&self) -> Option<String> {
-        let o = self.price()?;
-        self.md_page().or_else(|| Some(format!("https://models.dev/providers/{}/", o.provider)))
+        self.md_page().or_else(|| Some(format!("https://models.dev/providers/{}/", self.price()?.provider)))
     }
 
     /// The model's page on a benchmark source, when it has one there (`epoch`, `aa`).
@@ -792,12 +791,13 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
     let (tx, rx) = std::sync::mpsc::channel();
     for (i, url) in URLS.into_iter().enumerate() {
         // Artificial Analysis's scores are asked for only with its key.
-        let key = if i == 2 { key.map(String::from) } else { None };
-        if i == 2 && key.is_none() {
+        let key = if url == AA_API_URL { key.map(String::from) } else { None };
+        if url == AA_API_URL && key.is_none() {
             continue;
         }
         let tx = tx.clone();
-        std::thread::spawn(move || tx.send((i, if i == 4 { epoch_pages(url) } else { fetch(url, key.as_deref()) })));
+        let pages = url == EPOCH_PAGES_URL;
+        std::thread::spawn(move || tx.send((i, if pages { epoch_pages(url) } else { fetch(url, key.as_deref()) })));
     }
     drop(tx);
     let mut got: [Result<Vec<u8>, Failure>; 6] = URLS.map(|url| Err(format!("{url}: no reply").into()));
@@ -2066,6 +2066,9 @@ mod tests {
         m.offers = vec![paid("anthropic", 5.0), paid("302ai", 1.0)];
         let page = "https://models.dev/models/anthropic/claude-opus-5-5/";
         assert_eq!(m.price_page().as_deref(), Some(page), "the model's page lists every provider's price");
+        let offers = std::mem::take(&mut m.offers);
+        assert_eq!(m.price_page().as_deref(), Some(page), "with no offer to pay too");
+        m.offers = offers;
         m.md = None;
         let page = "https://models.dev/providers/302ai/";
         assert_eq!(m.price_page().as_deref(), Some(page), "without one, the page of the provider you'd pay");

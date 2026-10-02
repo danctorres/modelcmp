@@ -526,6 +526,9 @@ fn one_typo(a: &[u8], b: &[u8]) -> bool {
 /// Via of a model you have no access to.
 pub const OUT_OF_REACH: &str = "not available";
 
+/// Said with access to no model, when every model is shown instead.
+pub const NO_ACCESS: &str = "no harness models or provider API keys found, showing all models";
+
 /// Whether `m` is one to use: any with `all`, else the ones you have access to, or every model
 /// when you have access to none (`any` is whether you have access to one).
 pub fn in_reach(m: &Model, all: bool, any: bool) -> bool {
