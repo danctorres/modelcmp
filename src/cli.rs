@@ -5,8 +5,8 @@ use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
-    TIERS, by_value, compare_rows, detail_lines, frontier_legend, pick, priced, shown_via, task_line, truncate,
-    verdict, visible,
+    CUSTOM_ABOUT, CUSTOM_WHEN, TIERS, by_value, compare_rows, custom_line, custom_priced, detail_lines,
+    frontier_legend, pick, priced, shown_via, task_line, truncate, verdict, visible,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -202,6 +202,8 @@ fn resolve<'a>(data: &'a Data, q: &str) -> Result<&'a Model> {
 
 pub struct ListOpts {
     pub task: Option<&'static Task>,
+    /// A task of your own instead of a built-in one: its model.
+    pub custom: Option<String>,
     /// `low`, `mid` or `high`: one model from the task's frontier.
     pub tier: Option<String>,
     /// Index into `COLS`.
@@ -224,6 +226,13 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     let any = data.any_available();
     check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, any)))?;
     let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
+    // A usage error, as when clap knew every task's name.
+    if let Some(c) = o.custom.as_deref().filter(|c| !store.custom_tasks().contains(c)) {
+        let tasks = [fit::task_names().collect(), store.custom_tasks()].concat().join(", ");
+        let msg = format!("no task '{c}': there are {tasks}; modelcmp fav {c} <model> makes it one of your own");
+        return Err(Exit { code: 2, msg });
+    }
+    let task = o.task.is_some() || o.custom.is_some();
     // A task's frontier is a recommendation, so models you cannot use stay out of it.
     let mut models: Vec<&Model> = visible(data, store, o.all, o.selected)
         .map(|(_, m)| m)
@@ -231,10 +240,22 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             (o.dev.is_empty() || has(&o.dev, &m.developer))
                 && (o.via.is_empty() || shown_via(m, any).iter().any(|v| has(&o.via, v)))
                 && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
-                && !(o.task.is_some() && store.is_excluded(&m.key))
+                && !(task && store.is_excluded(&m.key))
         })
         .collect();
-    if let Some(t) = o.task {
+    if let Some(c) = &o.custom {
+        // A task of your own has no ranking: the models you gave it, or with a tier that
+        // tier's, else the task's.
+        let line = custom_line(models.iter().copied(), store, c);
+        models = match &o.tier {
+            Some(tier) => store
+                .tier_favorites(c, tier)
+                .find_map(|k| line.iter().find(|m| m.key == k).copied())
+                .into_iter()
+                .collect(),
+            None => line,
+        };
+    } else if let Some(t) = o.task {
         let (front, off) = task_line(models.iter().copied(), models.iter().copied(), store, t);
         // The tier picks on merit: a favorite appended to the line is neither best nor good enough.
         let merit: Vec<_> = front.iter().copied().filter(|(m, _)| !off.contains(&m.key.as_str())).collect();
@@ -367,7 +388,16 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     Ok(())
 }
 
-/// Show the favorite model of every task, of one, or set or clear one.
+/// Give a task of your own another name.
+pub fn rename(store: &mut Store, task: &str, new: &str) -> Result {
+    store.rename_task(task, new)?;
+    store.save()?;
+    println!("{task} renamed to {new}");
+    Ok(())
+}
+
+/// Show the favorite model of every task, of one, or set or clear one; with `about`, write what
+/// a task of your own is about, alone or with its model.
 pub fn fav(
     data: &Data,
     store: &mut Store,
@@ -375,17 +405,34 @@ pub fn fav(
     tier: Option<&str>,
     q: Option<&str>,
     rm: bool,
+    about: Option<&str>,
 ) -> Result {
     let model = |key: &str| data.models.iter().find(|m| m.key == key);
     // A favorite the task cannot score still makes its line, unranked.
     let unscored =
         |s: &str, m: &Model| fit::task(s.split(':').next().unwrap_or(s)).is_some_and(|t| fit::fit(m, t).is_none());
+    if let (Some(t), Some(text)) = (task, about) {
+        if fit::task(t).is_some() {
+            return Err(format!("{t} is built in: --about is for a task of your own").into());
+        }
+        if q.is_none() && !store.custom_tasks().contains(&t) {
+            return Err(format!("no task {t} of your own: modelcmp fav {t} <model> --about ... makes it").into());
+        }
+        store.set_about(t, text);
+        // With a model, saved with it below.
+        if q.is_none() {
+            store.save()?;
+            println!("{t}: {}", store.about(t).unwrap_or("no about"));
+            return Ok(());
+        }
+    }
     let task = task.map(|t| slot(t, tier));
     let task = task.as_deref();
-    let line = |t: &str, k: &str| {
+    let line = |store: &Store, t: &str, k: &str| {
         let m = model(k);
         let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score)" } else { "" };
-        format!("★ {} [{k}]{skipped}", m.map_or(k, |m| m.name.as_str()))
+        let about = store.about(t).map_or(String::new(), |a| format!("  {a}"));
+        format!("★ {} [{k}]{skipped}{about}", m.map_or(k, |m| m.name.as_str()))
     };
     match (task, q, rm) {
         (None, ..) => {
@@ -393,11 +440,11 @@ pub fn fav(
                 println!("no favorites; modelcmp fav <task> <model> sets one");
             }
             for (t, k) in &store.favorite {
-                println!("{t:<18}{}", line(t, k));
+                println!("{t:<18}{}", line(store, t, k));
             }
         }
         (Some(t), None, false) => match store.favorite(t) {
-            Some(k) => println!("{}", line(t, k)),
+            Some(k) => println!("{}", line(store, t, k)),
             None => println!("no favorite for {t}"),
         },
         (Some(t), None, true) => {
@@ -407,9 +454,12 @@ pub fn fav(
         }
         (Some(t), Some(q), _) => {
             let m = resolve(data, q)?;
+            // Said, as a mistyped task makes one of your own too.
+            let name = t.split(':').next().unwrap_or(t);
+            let new = fit::task(name).is_none() && !store.custom_tasks().contains(&name);
             store.favorite.insert(t.to_string(), m.key.clone());
             store.save()?;
-            println!("★ {t}: {}", m.name);
+            println!("★ {t}{}: {}", if new { " (new task)" } else { "" }, m.name);
         }
     }
     Ok(())
@@ -433,32 +483,55 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
 /// The frontier among the models you have and can use, as `list --task` gives it, and the
 /// favorites on it only for being favorites.
 fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
-    let usable = || visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key));
-    task_line(usable(), usable(), store, t)
+    task_line(usable(data, store), usable(data, store), store, t)
 }
 
-/// `recommend --json`: what agents read to choose a task and its model.
+/// The models you have and can use: only they are recommended.
+fn usable<'a>(data: &'a Data, store: &'a Store) -> impl Iterator<Item = &'a Model> {
+    visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key))
+}
+
+/// A task's favorite and its tiers', the ones `on` its line: one excluded or out of reach is
+/// off it, so agents are not pointed at it either.
+fn favorites<'a>(
+    store: &'a Store,
+    task: &str,
+    on: impl Fn(&str) -> bool,
+) -> (Option<&'a str>, BTreeMap<&'static str, &'a str>) {
+    let fav = |s: &str| store.favorite(s).filter(|k| on(k));
+    (fav(task), TIERS.iter().filter_map(|x| Some((x.0, fav(&slot(task, Some(x.0)))?))).collect())
+}
+
+/// A model on a task's line in `recommend --json`; a `score` the task does not have is NaN, so null.
+fn entry(m: &Model, store: &Store, score: f64, recommended: bool) -> serde_json::Value {
+    let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (score * 10.0).round() / 10.0, "recommended": recommended});
+    if let Some(n) = store.note(&m.key) {
+        e["note"] = n.into();
+    }
+    e
+}
+
+/// `recommend --json`: what agents read to choose a task and its model. Your own tasks come
+/// after the built-in ones, in their shape and marked `custom`.
 fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
+    let custom = store.custom_tasks().into_iter().map(|t| {
+        let line = custom_line(usable(data, store), store, t);
+        let front: Vec<_> = line.iter().map(|m| entry(m, store, f64::NAN, false)).collect();
+        let (fav, tier_favs) = favorites(store, t, |k| line.iter().any(|m| m.key == k));
+        serde_json::json!({"name": t, "custom": true, "about": store.about(t).unwrap_or(CUSTOM_ABOUT), "when": CUSTOM_WHEN, "benchmarks": [], "favorite": fav, "tier_favorites": tier_favs, "frontier": front})
+    });
     TASKS
         .iter()
         .map(|t| {
             let (line, off) = front(data, store, t);
             let front: Vec<_> = line
                 .iter()
-                .map(|&(m, s)| {
-                    let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (fit::shown(m, t, s) * 10.0).round() / 10.0, "recommended": !off.contains(&m.key.as_str())});
-                    if let Some(n) = store.note(&m.key) {
-                        e["note"] = n.into();
-                    }
-                    e
-                })
+                .map(|&(m, s)| entry(m, store, fit::shown(m, t, s), !off.contains(&m.key.as_str())))
                 .collect();
-            // A favorite excluded or out of reach is off the line, so agents are not pointed at it either.
-            let fav = |s: &str| store.favorite(s).filter(|k| line.iter().any(|(m, _)| m.key == *k));
-            let tier_favs: BTreeMap<&str, &str> =
-                TIERS.iter().filter_map(|x| Some((x.0, fav(&slot(t.name, Some(x.0)))?))).collect();
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": fav(t.name), "tier_favorites": tier_favs, "frontier": front})
+            let (fav, tier_favs) = favorites(store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": fav, "tier_favorites": tier_favs, "frontier": front})
         })
+        .chain(custom)
         .collect()
 }
 
@@ -480,6 +553,14 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
             })
             .collect();
         println!("  best per price:  {}", if front.is_empty() { "no data".into() } else { front.join(" · ") });
+        println!();
+    }
+    for t in store.custom_tasks() {
+        println!("{t}  {}  (modelcmp list --task {t})", store.about(t).unwrap_or(CUSTOM_ABOUT));
+        println!("  use for:         {CUSTOM_WHEN}");
+        let line = custom_line(usable(data, store), store, t);
+        let line: Vec<String> = line.iter().map(|m| custom_priced(m, store, t, true)).collect();
+        println!("  your model:      {}", if line.is_empty() { "no data".into() } else { line.join(" · ") });
         println!();
     }
     Ok(())
@@ -521,6 +602,7 @@ mod tests {
         // With --all, Via reads "not available" for it, and filters by that too.
         let o = ListOpts {
             task: None,
+            custom: None,
             tier: None,
             sort: None,
             bounds: vec![],
@@ -625,5 +707,36 @@ mod tests {
         assert_eq!(t["tier_favorites"], serde_json::json!({}), "nor as a favorite");
         store.toggle_favorite("coding", "gone");
         assert_eq!(coding(&recommend_json(&data, &store))["favorite"], Value::Null, "nor one you do not have");
+        // A task of your own comes last, in a built-in one's shape, with the model you gave it.
+        store.toggle_favorite("debugging", "gpt55");
+        let all = recommend_json(&data, &store);
+        let own = all.last().unwrap();
+        let fields = ["about", "benchmarks", "custom", "favorite", "frontier", "name", "tier_favorites", "when"];
+        assert_eq!((keys(own), all.len()), (fields.to_vec(), TASKS.len() + 1));
+        assert_eq!(
+            (&own["name"], &own["favorite"], names(own)),
+            (&"debugging".into(), &"gpt55".into(), vec!["gpt55".into()])
+        );
+        assert_eq!(own["frontier"][0]["score"], Value::Null, "no benchmark scores it");
+        // What it is about is yours to write; agents pick it over a built-in task that fits too.
+        assert_eq!((&own["about"], &own["when"]), (&CUSTOM_ABOUT.into(), &CUSTOM_WHEN.into()));
+        store.set_about("debugging", "finding and fixing a bug");
+        assert_eq!(recommend_json(&data, &store).last().unwrap()["about"], "finding and fixing a bug");
+        // A tier of it has a model of its own, as a built-in task's: both on its line, cheapest first.
+        store.toggle_excluded("mini");
+        store.toggle_favorite("debugging:low", "mini");
+        let all = recommend_json(&data, &store);
+        let own = all.last().unwrap();
+        assert_eq!(
+            (names(own), &own["tier_favorites"]),
+            (vec!["mini".into(), "gpt55".into()], &serde_json::json!({"low": "mini"}))
+        );
+        let line = custom_line(data.models.iter(), &store, "debugging");
+        let said: Vec<String> = line.iter().map(|m| custom_priced(m, &store, "debugging", false)).collect();
+        assert_eq!(said, ["★ mini $1.0 (low)", "★ gpt55 $10"], "the tier it is for, unless the task's");
+        store.toggle_excluded("gpt55");
+        let all = recommend_json(&data, &store);
+        let own = all.last().unwrap();
+        assert_eq!((&own["favorite"], names(own)), (&Value::Null, vec!["mini".into()]), "excluded");
     }
 }

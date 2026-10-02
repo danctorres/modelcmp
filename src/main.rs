@@ -11,10 +11,6 @@ use clap::{Parser, Subcommand};
 use cli::Exit;
 use store::Store;
 
-fn tasks() -> PossibleValuesParser {
-    PossibleValuesParser::new(fit::task_names())
-}
-
 /// Pick the right LLM: prices (models.dev) + benchmarks (Epoch AI, or Artificial Analysis), filtered to the
 /// models you can already use: the ones your harnesses list (opencode models, pi --list-models;
 /// claude, codex and gemini give their own provider's), plus providers you have API keys for.
@@ -43,10 +39,10 @@ enum Cmd {
     /// List models you have access to (all with --all): rank, bound and sort them
     #[command(alias = "ls")]
     List {
-        /// Best model per price level for a task: cheapest first, each row costing more and scoring higher; excluded models are left out (`R` then `enter` in the TUI)
-        #[arg(short, long, value_parser = tasks(), conflicts_with = "sort")]
+        /// Best model per price level for a task (overall, coding, value, agentic, reasoning, vision): cheapest first, each row costing more and scoring higher; excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
+        #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, else for the task; else low = cheapest in the top half, mid = cheapest in the top quarter, high = the best, or the best when none reaches the floor
+        /// One model from the task's list: your favorite for the tier, else for the task; else low = cheapest in the top half, mid = cheapest in the top quarter, high = the best, or the best when none reaches the floor; a task of your own gives the tier's model, else the task's
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -129,16 +125,23 @@ enum Cmd {
     },
     /// Your favorite model for a task, or for one tier of it: --tier picks it and recommend marks it ★; alone, shows them (`f` in the TUI)
     Fav {
-        #[arg(value_parser = tasks())]
+        /// overall, coding, value, agentic, reasoning or vision; any other name is a task of your own, e.g. debugging, which has only the models you give it
+        #[arg(value_parser = store::task_name)]
         task: Option<String>,
         #[arg(requires = "task", conflicts_with = "rm")]
         model: Option<String>,
         /// Only for `list --tier` with this tier, e.g. a cheap model for low and a strong one for the task
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
-        /// Clear the task's favorite, or with --tier the tier's
+        /// Clear the task's favorite, or with --tier the tier's; a task of your own is gone with its last model
         #[arg(long, requires = "task")]
         rm: bool,
+        /// Give a task of your own this name instead; its models stay
+        #[arg(long, value_name = "NAME", requires = "task", conflicts_with_all = ["model", "tier", "rm"], value_parser = store::task_name)]
+        rename: Option<String>,
+        /// What a task of your own is about, in your words: agents pick the task by it, and over a built-in task that fits too; "" clears it
+        #[arg(long, value_name = "TEXT", requires = "task", conflicts_with_all = ["tier", "rm", "rename"])]
+        about: Option<String>,
     },
     /// The best model per price for each task, what the task measures and when to use it (`R` in the TUI)
     Recommend {
@@ -205,8 +208,6 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         .map_err(|e| Exit::from(format!("cannot lock {}: {e}", store::path().display())))?;
     // Loaded after the download, which can take a minute: what the TUI or an agent saved meanwhile is kept.
     let mut store = Store::load();
-    // clap has already validated task names against fit::TASKS.
-    let task = |t: Option<String>| t.and_then(|t| fit::task(&t));
     match cmd {
         Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id } => {
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
@@ -224,7 +225,10 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
                 .map(|(c, v)| (c, v, f64::INFINITY))
                 .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
                 .collect();
-            let opts = cli::ListOpts { task: task(t), tier, sort, bounds, all, selected, dev, via, limit, json, id };
+            // A name that is no built-in task is one of your own.
+            let task = t.as_deref().and_then(fit::task);
+            let custom = t.filter(|_| task.is_none());
+            let opts = cli::ListOpts { task, custom, tier, sort, bounds, all, selected, dev, via, limit, json, id };
             cli::list(&data, &store, &opts)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
@@ -233,8 +237,10 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
-        Cmd::Fav { task, model, tier, rm } => {
-            cli::fav(&data, &mut store, task.as_deref(), tier.as_deref(), model.as_deref(), rm)
+        Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),
+        Cmd::Fav { task, model, tier, rm, about, .. } => {
+            let (task, tier, model) = (task.as_deref(), tier.as_deref(), model.as_deref());
+            cli::fav(&data, &mut store, task, tier, model, rm, about.as_deref())
         }
         Cmd::Recommend { json } => cli::recommend(&data, &store, json),
     }

@@ -8,15 +8,15 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, Effect, GROUPS, HELP, Input, Kind, List, Mouse, NCOLS, NOTES, PRICE, VIA, View, choice_rows,
-    col_about, col_name, has_menu, hidden, menu_rows,
+    App, COLS, ECI, Edit, Effect, GROUPS, HELP, Input, Kind, List, Mouse, NCOLS, NOTES, PRICE, VIA, View, What,
+    choice_rows, col_about, col_name, has_menu, hidden, menu_rows,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
-    NO_ACCESS, OUT_OF_REACH, Palette, THEMES, age, compare_rows, detail_lines, frontier_legend, hits, level,
-    level_label, money, priced, truncate, verdict,
+    CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, age, compare_rows, custom_priced,
+    detail_lines, frontier_legend, hits, level, level_label, money, priced, truncate, verdict,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -508,7 +508,7 @@ fn event_loop(
                         app.refreshing = rx.is_some();
                     }
                     // The app applies its own chooser items before they get here.
-                    Some(Effect::Fav(..) | Effect::Theme(_)) | None => {}
+                    Some(Effect::Fav(..) | Effect::NewTask(_) | Effect::Theme(_)) | None => {}
                 }
                 if matches!(app.input, Input::None) {
                     // The first start's download is for its question: closed without a pick of
@@ -1088,10 +1088,11 @@ fn dev_color(dev: &str) -> Color {
     Color::Indexed(k.unwrap_or_else(|| dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)
 }
 
-/// A task's colour, or its tier's (`coding:low`), which is the task's.
+/// A task's colour, or its tier's (`coding:low`), which is the task's; a task of your own is
+/// gold, as the ★ of any task.
 fn task_color(task: &str) -> Color {
     let task = task.split(':').next().unwrap_or(task);
-    TASK[TASKS.iter().position(|t| t.name == task).unwrap_or(0)]
+    TASKS.iter().position(|t| t.name == task).map_or(STAR, |i| TASK[i])
 }
 
 fn draw(app: &mut App, f: &mut Frame) {
@@ -1159,7 +1160,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
     }
     let buf = f.buffer_mut();
-    let cursor = status(buf, bar, app);
+    // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
+    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y));
     let lines = match app.view {
         View::Table => None,
         View::Help => Some(("keys".to_string(), help(&app.overlay_query))),
@@ -1237,12 +1239,17 @@ fn draw(app: &mut App, f: &mut Frame) {
             // its bar, as there.
             let y = (rect.y + 1 + *sel as u16 - scroll).min(rect.bottom() - 1);
             cursor_ends(buf, rect.x, rect.right() - 1, y);
+            // An entry being written has the text cursor, after what `edit_line` draws before it.
+            if let (Some(e), Some((label, _))) = (&list.edit, items.get(*sel)) {
+                let before = Span::raw(edit_prefix(label, e)).width() + Span::raw(&e.text[..e.cur]).width();
+                cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
+            }
             let inner = rect.inner(Margin::new(1, 1));
             vmarks(buf, rect.x, inner.y, inner.bottom() - 1, above, below);
         }
     }
-    if let Some(x) = cursor {
-        f.set_cursor_position((x, bar.y));
+    if let Some(at) = cursor {
+        f.set_cursor_position(at);
     }
 }
 
@@ -1939,6 +1946,30 @@ fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> L
     line
 }
 
+/// What stays of an entry of `f`'s list before the text written on it: its box or `+`, and for
+/// what a task is about its name too.
+fn edit_prefix(label: &str, e: &Edit) -> String {
+    let mark = label.chars().next().unwrap_or(' ');
+    match &e.what {
+        What::About(task) => format!(" {mark} {task}  "),
+        What::New | What::Rename(_) => format!(" {mark} "),
+    }
+}
+
+/// An entry of `f`'s list while it is written in place: `edit_prefix`, then the text, or in
+/// grey what to write while there is none.
+fn edit_line(label: &str, e: &Edit, color: Color) -> Line<'static> {
+    let empty = match e.what {
+        What::About(_) => "what it is about",
+        What::New | What::Rename(_) => "its name",
+    };
+    let text = match e.text.is_empty() {
+        true => Span::styled(format!("{empty} "), fg(MUTED)),
+        false => Span::raw(format!("{} ", e.text)),
+    };
+    Line::from(vec![Span::styled(edit_prefix(label, e), fg(color)), text])
+}
+
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `first`: the first start's question, where esc picks the default and `B` asks again later.
 fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool) -> Vec<Line<'static>> {
@@ -1946,16 +1977,21 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
         .iter()
-        .map(|&k| {
+        .enumerate()
+        .map(|(i, &k)| {
             let (label, effect) = &items[k];
             // Where `/` looks: all of the label, or in `f`'s list up to the end of the task.
             let key = crate::app::searched(&items[k]);
             let hits = |s: &str| found(&s[..s.find(key).map_or(0, |i| i + key.len())], query);
             // f's tasks in their colours, harnesses, sites and themes in theirs.
             let color = match effect {
-                Effect::Fav(_, t, _) => task_color(t),
+                Effect::Fav(_, slot) => task_color(slot),
+                Effect::NewTask(_) => STAR,
                 _ => dev_color(label.split(' ').next().unwrap_or_default()),
             };
+            if let (Some(e), true) = (&list.edit, i == list.sel) {
+                return edit_line(label, e, color);
+            }
             // A source's name in the text's colour and what it takes muted: the colour its name
             // gives is the box's own or the wordmark's.
             if let Effect::Source(src) = effect {
@@ -1986,13 +2022,28 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
         // While searching the letters are typed, as the status bar says.
         Kind::Fav if typing => " ↓ ↑ move · enter toggle · esc clear",
         _ if typing => " ↓ ↑ move · enter pick · esc clear",
+        // `r` is said once there is a task of your own to rename.
+        Kind::Fav
+            if items
+                .iter()
+                .any(|(_, e)| matches!(e, Effect::Fav(_, s) if !s.contains(':') && fit::task(s).is_none())) =>
+        {
+            " j k move · / search · space enter toggle · r rename, a about your task · esc close"
+        }
         Kind::Fav => " j k move · / search · space enter toggle · esc close",
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
         Kind::Source if first => " j k move · / search · enter picks · esc default · B changes it later",
         Kind::Source => " j k move · / search · enter picks · esc close",
         Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
     };
-    lines.push(Line::from(hint).style(fg(MUTED)));
+    // An entry being written takes every key; a name enter did not take says why. As wide as
+    // the hint it stands for, so the box keeps its width.
+    let width = hint.chars().count();
+    lines.push(match &list.edit {
+        Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
+        Some(_) => Line::from(format!("{:<width$}", " enter apply · esc cancel")).style(fg(MUTED)),
+        None => Line::from(hint).style(fg(MUTED)),
+    });
     lines
 }
 /// The first line in view of a list `shown` lines tall with the cursor on `sel`: where it was,
@@ -2090,11 +2141,12 @@ fn help(query: &str) -> Vec<Line<'static>> {
 
 /// One block per task: what it is, when to pick a model high on it and its best models per
 /// price, wrapped to `width`. The cursor's block is highlighted; enter
-/// ranks the table by it.
+/// ranks the table by it. Your own tasks follow, each with the model you gave it.
 fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
     let cur = app.current().map(|m| m.key.clone());
-    let name = |i: usize, s: &'static str| {
-        let mut name = cursor(i == app.task_cur, vec![Span::styled(s, fg(TASK[i]).add_modifier(BOLD))]);
+    let name = |i: usize, s: &str| {
+        let style = fg(task_color(s)).add_modifier(BOLD);
+        let mut name = cursor(i == app.task_cur, vec![Span::styled(s.to_string(), style)]);
         name.push(Span::raw(" "));
         name
     };
@@ -2117,6 +2169,31 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
             &Span::styled("·", fg(MUTED)),
             width,
         ));
+    }
+    for (i, t) in app.store.custom_tasks().into_iter().enumerate() {
+        v.push(Line::default());
+        v.extend(wrapped(name(TASKS.len() + i, t), words(app.store.about(t).unwrap_or(CUSTOM_ABOUT)), &space, width));
+        v.extend(wrapped(label("  use for:         "), words(CUSTOM_WHEN), &space, width));
+        // No benchmark ranks it, so its line is the models you gave it, each with the tier it
+        // is for and no score.
+        let picked = (TASKS.len() + i == app.task_cur).then_some(cur.as_deref()).flatten();
+        let mut line: Vec<Line> = app
+            .custom_line(t)
+            .iter()
+            .map(|m| {
+                let said = custom_priced(m, &app.store, t, false);
+                let price = fg(m.cost().map_or(MUTED, |c| LEVEL[level(c)]));
+                let spans = vec![
+                    Span::styled("★ ", fg(STAR).add_modifier(BOLD)),
+                    Span::styled(said.trim_start_matches("★ ").to_string(), price),
+                ];
+                Line::from(cursor(picked == Some(m.key.as_str()), spans))
+            })
+            .collect();
+        if line.is_empty() {
+            line.push(Line::from(cursor(false, vec![Span::styled("no data", fg(MUTED))])));
+        }
+        v.extend(wrapped(label("  your model:     "), line, &Span::styled("·", fg(MUTED)), width));
     }
     v.push(Line::default());
     let cli = words(
@@ -3436,8 +3513,26 @@ mod tests {
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's list marks what it searches, the task, not the model that holds it now.
-        let items = vec![("☐ coding:low  (now Solo)".to_string(), Effect::Fav("k".into(), "coding", Some("low")))];
+        let items = vec![("☐ coding:low  (now Solo)".to_string(), Effect::Fav("k".into(), "coding:low".into()))];
         assert_eq!(lit_text(&choice_lines(Kind::Fav, &items, &search("lo"), false)), ["lo"]);
+        // An entry being written shows its box, the text and how to leave; a name not taken, why.
+        let text = |what: What, text: &str, err: Option<&str>| {
+            let edit = Some(Edit { what, text: text.into(), cur: 0, err: err.map(String::from) });
+            let lines = choice_lines(Kind::Fav, &items, &List { edit, ..Default::default() }, false);
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        let wide = " j k move · / search · space enter toggle · esc close".chars().count();
+        assert_eq!(
+            text(What::Rename("x".into()), "y", None),
+            [" ☐ y ".to_string(), format!("{:<wide$}", " enter apply · esc cancel")],
+            "as wide as the hint it stands for"
+        );
+        assert_eq!(
+            text(What::About("x".into()), "", Some("no")),
+            [" ☐ x  what it is about ".to_string(), format!("{:<wide$}", " no")]
+        );
+        let new = Edit { what: What::New, text: String::new(), cur: 0, err: None };
+        assert_eq!(edit_prefix("+ new task", &new), " + ");
     }
 
     #[test]
@@ -3482,5 +3577,24 @@ mod tests {
             (cursor.content.as_ref(), cursor.style.fg, cursor.style.bg),
             ("vision", Some(TASK[a.task_cur]), Some(CURSOR))
         );
+        // A task of your own is the last block, gold: its name, what you wrote it is about, that
+        // it is picked over a built-in task, and the model you gave it.
+        a.store.toggle_favorite("debugging", "opus");
+        a.store.set_about("debugging", "finding and fixing a bug");
+        (a.view, a.task_cur) = (View::Recommend, TASKS.len());
+        let lines = recommend(&a, 80);
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        let own = text.iter().position(|l| l.starts_with("▌debugging▐ finding and fixing a bug")).unwrap();
+        assert_eq!(
+            (lines[own].spans[1].style.fg, text[own + 3].as_str()),
+            (Some(STAR), ""),
+            "a built-in task's three lines, the last block"
+        );
+        assert_eq!(text[own + 1], format!("  use for:         {CUSTOM_WHEN}"));
+        assert!(text[own + 2].starts_with("  your model:     ▌★ opus $5.0▐"), "{}", text[own + 2]);
+        // A tier's model joins the line, cheapest first, and says its tier.
+        a.store.toggle_favorite("debugging:low", "flash");
+        let text: Vec<String> = recommend(&a, 80).iter().map(ToString::to_string).collect();
+        assert_eq!(text[own + 2], "  your model:     ▌★ flash $0.10 (low)▐· ★ opus $5.0 ");
     }
 }

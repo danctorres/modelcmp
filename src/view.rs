@@ -2,7 +2,7 @@
 
 use crate::data::{Data, Model, Offer, norm};
 use crate::fit::{self, TASKS};
-use crate::store::Store;
+use crate::store::{Store, slot};
 use std::ops::Range;
 
 pub fn money(x: f64) -> String {
@@ -403,6 +403,25 @@ pub fn task_line<'a>(
     task_frontier(models, t, &fav)
 }
 
+/// The line of a task of your own: the models you gave it and its tiers, the ones among
+/// `pool`, cheapest first as a built-in task's line.
+pub fn custom_line<'a>(pool: impl Iterator<Item = &'a Model>, store: &Store, task: &str) -> Vec<&'a Model> {
+    let favs = store.task_favorites(task);
+    let mut v: Vec<&Model> = pool.filter(|m| favs.contains(&m.key.as_str())).collect();
+    v.sort_by(|a, b| a.cost().partial_cmp(&b.cost()).unwrap_or(std::cmp::Ordering::Equal));
+    v
+}
+
+/// An entry of that line: `★ name $price`, `★ name [key] $price` with `keyed`, then the tiers
+/// the model is for, `(low, mid)`, unless it is the task's, which every tier without one takes.
+pub fn custom_priced(m: &Model, store: &Store, task: &str, keyed: bool) -> String {
+    let is = |x: Option<&str>| store.favorite(&slot(task, x)) == Some(m.key.as_str());
+    let tiers: Vec<&str> = TIERS.iter().map(|t| t.0).filter(|x| is(Some(x))).collect();
+    let tiers = if is(None) || tiers.is_empty() { String::new() } else { format!(" ({})", tiers.join(", ")) };
+    let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
+    format!("★ {}{key} {}{tiers}", m.name, m.cost().map_or("-".into(), usd))
+}
+
 /// Two values of a column in order, the highest first with `desc`: blanks last either way.
 pub fn by_value(x: Option<f64>, y: Option<f64>, desc: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering::{Equal, Greater, Less};
@@ -440,6 +459,12 @@ pub fn frontier_legend(keyed: bool) -> String {
         if keyed { " [key]" } else { "" }
     )
 }
+
+/// What a task of your own says of itself, where a built-in one says what it measures.
+pub const CUSTOM_ABOUT: &str = "your own task";
+
+/// When a task of your own is the one to pick, where a built-in one has its `when`.
+pub const CUSTOM_WHEN: &str = "work that fits it, even when a built-in task fits too";
 
 /// `name $price (score)` for a frontier entry, `name [key] $price (score)` with `keyed`,
 /// `★ name ...` when it is your favorite for the task, `(-)` for a favorite with no score.

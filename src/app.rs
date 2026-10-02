@@ -3,10 +3,10 @@
 
 use crate::data::{Data, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
-use crate::store::{Store, slot, slots};
+use crate::store::Store;
 use crate::view::{
-    LEVELS, NO_ACCESS, THEMES, by_value, ctx, hits, in_reach, level_label, money, score, shown_via, task_line,
-    task_score,
+    LEVELS, NO_ACCESS, THEMES, by_value, ctx, custom_line, hits, in_reach, level_label, money, score, shown_via,
+    task_line, task_score, truncate,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -278,7 +278,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("★", "favorite: your pick for a task; always in its recommendation"),
             ("✗", "excluded: you have it but cannot use it; recommendations skip it"),
             ("space", "select the model; C compares the selected"),
-            ("f", "favorite the model for a task, or a tier of one"),
+            ("f", "favorite the model for a task, a tier of one, or a task you name"),
+            ("r a", "in f's list: rename a task you named, write what it is about"),
             ("e", "exclude the model"),
             ("U", "deselect every model"),
             ("M F E", "selected / favorite / excluded only; again: every model"),
@@ -398,11 +399,53 @@ pub struct List {
     pub cur: usize,
     /// Typing into `query`, after `/`.
     pub typing: bool,
+    /// The entry under the cursor being written in place, in `f`'s list.
+    pub edit: Option<Edit>,
+}
+
+/// An entry of `f`'s list written where it is, the list staying open: a task of your own being
+/// named, renamed or described.
+#[derive(PartialEq, Debug)]
+pub struct Edit {
+    pub what: What,
+    pub text: String,
+    /// The cursor's byte offset in `text`.
+    pub cur: usize,
+    /// Why enter did not take the text, said under the list.
+    pub err: Option<String>,
+}
+
+/// What an `Edit` writes.
+#[derive(PartialEq, Debug)]
+pub enum What {
+    /// The name of a new task, on `+ new task`.
+    New,
+    /// Another name for this task.
+    Rename(String),
+    /// What this task is about.
+    About(String),
+}
+
+impl Edit {
+    /// Starting from `text`, the cursor at its end.
+    fn new(what: What, text: String) -> Self {
+        Edit { what, cur: text.len(), text, err: None }
+    }
 }
 
 impl List {
     fn at(sel: usize) -> Self {
         List { sel, ..Default::default() }
+    }
+
+    /// Whether its keys move and pick: nothing is being typed, a search or an entry.
+    fn idle(&self) -> bool {
+        !self.typing && self.edit.is_none()
+    }
+
+    /// Write `edit` on entry `at`, among them all: a search is dropped, as it could hide it.
+    fn write(&mut self, at: usize, edit: Edit) {
+        *self = List { sel: at, top: self.top, edit: Some(edit), ..Default::default() };
     }
 
     /// The keys a list takes whatever it lists: `/` starts a search, and while searching ↓ ↑
@@ -452,12 +495,15 @@ pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
     (0..items.len()).filter(|&i| i == 0 || items[i].0.to_lowercase().contains(&q)).collect()
 }
 
+/// The last entry of `f`'s list: it asks the name of a task of your own.
+const NEW_TASK: &str = "+ new task";
+
 /// The part of a choice's label that `/` searches and marks. `f`'s tasks match by their name
-/// alone, the word after the box: a tick rewrites the rest of the label, and the entry would
+/// alone, the slot after the box: a tick rewrites the rest of the label, and the entry would
 /// leave the list from under the cursor.
 pub fn searched((label, effect): &(String, Effect)) -> &str {
     match effect {
-        Effect::Fav(..) => label.split(' ').nth(1).unwrap_or(label),
+        Effect::Fav(_, slot) => slot,
         _ => label,
     }
 }
@@ -562,9 +608,12 @@ pub enum Effect {
     Refresh,
     /// Run this command in a new terminal window.
     Launch(Vec<String>),
-    /// Favorite the current model for the task, or for one tier of it; the `f` chooser's items,
-    /// applied by `App` itself.
-    Fav(String, &'static str, Option<&'static str>),
+    /// Favorite the model for the slot: a task, one tier of it, or a task of your own; the `f`
+    /// chooser's items, applied by `App` itself.
+    Fav(String, String),
+    /// Ask the name of a new task of your own for the model; the last of the `f` chooser's
+    /// items, applied by `App` itself.
+    NewTask(String),
     /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
     /// The `B` chooser's items; out of it, the source was switched and its data must be loaded.
@@ -854,7 +903,12 @@ impl App {
             return marked.get(self.compare_sel.min(marked.len().saturating_sub(1))).copied();
         }
         if self.view == View::Recommend {
-            let front = self.task_frontier(&TASKS[self.task_cur]);
+            // A task of your own has no line but its model.
+            let Some(t) = self.cur_task() else {
+                let line = self.custom_line(self.custom_at()?);
+                return line.get(self.task_sel.min(line.len().saturating_sub(1))).copied();
+            };
+            let front = self.task_frontier(t);
             return front.get(self.task_sel.min(front.len().saturating_sub(1))).map(|&(m, _)| m);
         }
         if self.view == View::Detail {
@@ -867,8 +921,33 @@ impl App {
     fn across_len(&self) -> usize {
         match self.view {
             View::Compare => self.marked_models().len(),
-            _ => self.task_frontier(&TASKS[self.task_cur]).len(),
+            _ => match (self.cur_task(), self.custom_at()) {
+                (Some(t), _) => self.task_frontier(t).len(),
+                (None, Some(t)) => self.custom_line(t).len(),
+                (None, None) => 0,
+            },
         }
+    }
+
+    /// The built-in task under recommend's cursor, which runs over `TASKS` and then your own.
+    fn cur_task(&self) -> Option<&'static Task> {
+        TASKS.get(self.task_cur)
+    }
+
+    /// The task of your own under recommend's cursor.
+    pub fn custom_at(&self) -> Option<&str> {
+        self.store.custom_tasks().get(self.task_cur.checked_sub(TASKS.len())?).copied()
+    }
+
+    /// How many tasks recommend lists: the built-in ones and your own.
+    fn task_count(&self) -> usize {
+        TASKS.len() + self.store.custom_tasks().len()
+    }
+
+    /// The line of a task of your own in recommend: the models you gave it and its tiers that
+    /// are ones to use, cheapest first.
+    pub fn custom_line(&self, task: &str) -> Vec<&Model> {
+        custom_line(self.data.models.iter().filter(|m| self.usable(m)), &self.store, task)
     }
 
     /// The sideways model cursor of the open overlay: compare's, else recommend's.
@@ -976,16 +1055,27 @@ impl App {
         }
     }
 
-    /// `f`'s list for the model `key`: every task and each of its tiers, ticked where it is the
-    /// favorite. The key, not the current model, since a tick can move the rows under the list.
-    fn fav_items(&self, key: &str) -> Vec<(String, Effect)> {
+    /// A slot's entry in `f`'s list for the model `key`, ticked where it is the favorite.
+    fn fav_label(&self, key: &str, slot: &str) -> String {
         let name = |k: &str| self.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
-        let item = |s: String| match self.store.favorite(&s) {
-            Some(k) if k == key => format!("✓ {s}"),
-            Some(k) => format!("☐ {s}  (now {})", name(k)),
-            None => format!("☐ {s}"),
-        };
-        slots().map(|(t, x)| (item(slot(t, x)), Effect::Fav(key.to_string(), t, x))).collect()
+        // What a task of your own is about, cut where a long one would stretch the list.
+        let about = self.store.about(slot).map_or(String::new(), |a| format!("  {}", truncate(a, 48)));
+        match self.store.favorite(slot) {
+            Some(k) if k == key => format!("✓ {slot}{about}"),
+            Some(k) => format!("☐ {slot}  (now {}){about}", name(k)),
+            None => format!("☐ {slot}{about}"),
+        }
+    }
+
+    /// `f`'s list for the model `key`: every task and each of its tiers, your own tasks, and
+    /// the entry that names a new one. The key, not the current model, since a tick can move
+    /// the rows under the list.
+    fn fav_items(&self, key: &str) -> Vec<(String, Effect)> {
+        self.store
+            .all_slots()
+            .map(|s| (self.fav_label(key, &s), Effect::Fav(key.to_string(), s)))
+            .chain([(NEW_TASK.to_string(), Effect::NewTask(key.to_string()))])
+            .collect()
     }
 
     /// Models passing every filter but the frontier, ignoring the ones on column `skip` except a
@@ -1035,6 +1125,8 @@ impl App {
             self.typos = true;
             rows = matching(self);
         }
+        // A task of your own is gone with its model, from under recommend's cursor too.
+        self.task_cur = self.task_cur.min(self.task_count() - 1);
         // Before a task keeps only its line: the models every task's line is drawn from.
         self.fronts = TASKS.iter().map(|t| self.front(t, &rows)).collect();
         let ms = &self.data.models;
@@ -1256,9 +1348,9 @@ impl App {
     }
 
     /// The task `f` and the ★ mark refer to: the one under the cursor in recommend, else the
-    /// picked one.
+    /// picked one. None on a task of your own, whose ★ is that of any task.
     pub fn task_at_hand(&self) -> Option<&'static Task> {
-        if self.view == View::Recommend { Some(&TASKS[self.task_cur]) } else { self.task }
+        if self.view == View::Recommend { self.cur_task() } else { self.task }
     }
 
     /// Whether the model's row shows a ★: it is the favorite for the task at hand, or with no
@@ -1269,28 +1361,132 @@ impl App {
 
     /// `f`'s list of tasks for the model `key`, starting on the task at hand, so f enter toggles it.
     fn ask_fav(&mut self, key: &str) {
-        let sel = self.task_at_hand().and_then(|t| slots().position(|s| s == (t.name, None))).unwrap_or(0);
-        self.input = Input::choose("favorite for which tasks?", Kind::Fav, self.fav_items(key), sel);
+        let items = self.fav_items(key);
+        let own = if self.view == View::Recommend { self.custom_at() } else { None };
+        let at = self.task_at_hand().map(|t| t.name).or(own);
+        let sel = items.iter().position(|(_, e)| matches!(e, Effect::Fav(_, s) if Some(s.as_str()) == at));
+        self.input = Input::choose("favorite for which tasks?", Kind::Fav, items, sel.unwrap_or(0));
     }
 
-    /// `f`: favorite the model `key` for the task or one tier of it, or unfavorite it when it
-    /// already is.
-    fn fav(&mut self, key: &str, task: &'static str, tier: Option<&'static str>) -> Option<Effect> {
+    /// `f`: favorite the model `key` for the slot, a task, one tier of it or a task of your own,
+    /// or unfavorite it when it already is.
+    fn fav(&mut self, key: &str, task: &str) -> Option<Effect> {
         let name = self.data.models.iter().find(|m| m.key == key)?.name.clone();
-        let task = &slot(task, tier);
+        let on = self.custom_at().map(String::from);
         self.store.toggle_favorite(task, key);
+        self.back_on(on);
         self.report(Ok(match self.store.favorite(task) == Some(key) {
             true => format!("★ {name} favorite for {task}"),
             false => format!("{name} no longer the favorite for {task}"),
         }));
-        // With the list still open (m), its boxes follow.
-        if self.choosing_favs()
-            && let (fresh, Input::Choose { items, .. }) = (self.fav_items(key), &mut self.input)
-        {
-            *items = fresh;
+        // With the list still open, its boxes follow. Each entry stays: a task of your own is
+        // gone once unticked, and would leave the list from under the cursor.
+        let mut input = std::mem::replace(&mut self.input, Input::None);
+        if let Input::Choose { kind: Kind::Fav, items, .. } = &mut input {
+            for (label, effect) in items {
+                if let Effect::Fav(_, slot) = effect {
+                    *label = self.fav_label(key, slot);
+                }
+            }
         }
+        self.input = input;
         self.rebuild_in_place();
         Some(Effect::Save)
+    }
+
+    /// Recommend's cursor back on the task of your own it was `on`, after a change to them: they
+    /// are in order of name, so one added, renamed or gone moves the others.
+    fn back_on(&mut self, on: Option<String>) {
+        if let Some(at) = on.and_then(|t| self.store.custom_tasks().iter().position(|x| *x == t)) {
+            self.task_cur = TASKS.len() + at;
+        }
+    }
+
+    /// `f`'s open list made again for the model `key`, with the cursor on the entry of `slot`,
+    /// where `edit` goes on writing.
+    fn relist(&mut self, key: &str, slot: &str, edit: Option<Edit>) {
+        let fresh = self.fav_items(key);
+        let at = fresh.iter().position(|(_, e)| matches!(e, Effect::Fav(_, s) if s == slot)).unwrap_or(0);
+        if let Input::Choose { kind: Kind::Fav, items, list, .. } = &mut self.input {
+            *items = fresh;
+            *list = List { sel: at, top: list.top, edit, ..Default::default() };
+        }
+    }
+
+    /// Whether an entry of `f`'s list is being written, when every key is its text's.
+    fn editing(&self) -> bool {
+        self.open_list().is_some_and(|l| l.edit.is_some())
+    }
+
+    /// Keys while an entry of `f`'s list is written in place.
+    fn edit_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
+        let Input::Choose { items, list, .. } = &mut self.input else { return None };
+        match code {
+            KeyCode::Esc => list.edit = None,
+            KeyCode::Enter => {
+                // The model the list is for, which its last entry holds.
+                let Some((_, Effect::NewTask(key))) = items.last() else { return None };
+                let (key, e) = (key.clone(), list.edit.take()?);
+                return self.edited(&key, e);
+            }
+            _ => {
+                let e = list.edit.as_mut()?;
+                e.err = None;
+                // `:` sets a tier apart, so no name has one.
+                let about = matches!(e.what, What::About(_));
+                edit(&mut e.text, &mut e.cur, code, mods, |c| about || c != ':');
+            }
+        }
+        None
+    }
+
+    /// Enter on an entry written in `f`'s list for the model `key`: the task is named, renamed
+    /// or described, and the list stays open on it.
+    fn edited(&mut self, key: &str, e: Edit) -> Option<Effect> {
+        let name = crate::store::task_name(&e.text);
+        match e.what {
+            What::New => {
+                // No name names no task.
+                let name = name.ok()?;
+                // A name the model already has would be toggled off.
+                let saved = if self.store.favorite(&name) == Some(key) { None } else { self.fav(key, &name) };
+                // What it is about is asked next, on its entry: agents pick the task by it.
+                let about = self.store.about(&name).unwrap_or("").to_string();
+                let next = crate::fit::task(&name).is_none().then(|| Edit::new(What::About(name.clone()), about));
+                self.relist(key, &name, next);
+                saved
+            }
+            What::Rename(was) => {
+                let name = name.ok().filter(|n| *n != was)?;
+                let on = self.custom_at().map(|t| if t == was { name.clone() } else { t.to_string() });
+                if let Err(err) = self.store.rename_task(&was, &name) {
+                    // Said under the list, the name still there to change.
+                    if let Input::Choose { list, .. } = &mut self.input {
+                        list.edit = Some(Edit { what: What::Rename(was), err: Some(err), ..e });
+                    }
+                    return None;
+                }
+                self.back_on(on);
+                self.report(Ok(format!("{was} renamed to {name}")));
+                self.relist(key, &name, None);
+                Some(Effect::Save)
+            }
+            What::About(task) => {
+                let was = self.store.about(&task).unwrap_or("").to_string();
+                self.store.set_about(&task, &e.text);
+                let now = self.store.about(&task).unwrap_or("").to_string();
+                if now == was {
+                    return None;
+                }
+                self.report(Ok(if now.is_empty() {
+                    format!("{task} has no about now")
+                } else {
+                    format!("{task}: {now}")
+                }));
+                self.relist(key, &task, None);
+                Some(Effect::Save)
+            }
+        }
     }
 
     /// The open dropdown's or choice list's cursor and search.
@@ -1322,7 +1518,7 @@ impl App {
         } else if self.view == View::Table {
             self.select(go(self.selected(), self.rows.len()));
         } else if self.view == View::Recommend {
-            (self.task_cur, self.task_sel) = (go(self.task_cur, TASKS.len()), 0);
+            (self.task_cur, self.task_sel) = (go(self.task_cur, self.task_count()), 0);
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
         }
@@ -1334,7 +1530,7 @@ impl App {
         } else if self.view == View::Table {
             self.select(row);
         } else if self.view == View::Recommend {
-            (self.task_cur, self.task_sel) = (row.min(TASKS.len() - 1), 0);
+            (self.task_cur, self.task_sel) = (row.min(self.task_count() - 1), 0);
         } else {
             self.scroll = row.min(u16::MAX as usize) as u16;
         }
@@ -1392,8 +1588,7 @@ impl App {
     /// Text pasted in the terminal: typed into the search, note or bound being written, and
     /// nothing anywhere else, where its letters would run as keys.
     pub fn paste(&mut self, text: &str) {
-        if matches!(self.input, Input::None | Input::Quit | Input::Upgrade)
-            || self.open_list().is_some_and(|l| !l.typing)
+        if matches!(self.input, Input::None | Input::Quit | Input::Upgrade) || self.open_list().is_some_and(List::idle)
         {
             self.refuse("nothing to paste into: / searches, n writes a note");
             return;
@@ -1432,7 +1627,7 @@ impl App {
             return Some(Effect::Quit);
         }
         // A dropdown not being searched and a choice list take counts and motions too.
-        let list = self.open_list().is_some_and(|l| !l.typing);
+        let list = self.open_list().is_some_and(List::idle);
         if self.input != Input::None && !list {
             return self.input_key(k.code, k.modifiers);
         }
@@ -1495,6 +1690,13 @@ impl App {
     fn on_mouse(&mut self, m: Mouse) -> Option<Effect> {
         if let Mouse::Key(code) = m {
             return self.on_key(code.into());
+        }
+        // An entry being written keeps the wheel still, and a click anywhere leaves it as esc does.
+        if self.editing() {
+            return match m {
+                Mouse::Scroll(_) | Mouse::Cols(_) => None,
+                _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
+            };
         }
         let typing = self.open_list().is_some_and(|l| l.typing);
         let list = self.open_list().is_some();
@@ -1893,7 +2095,19 @@ impl App {
             }
             KeyCode::Char('B') => self.ask_source(),
             KeyCode::Enter if self.view == View::Recommend => {
-                let t = &TASKS[self.task_cur];
+                let Some(t) = self.cur_task() else {
+                    // A task of your own has one model and no line to rank: the table, on that
+                    // model, where `follow` left the cursor.
+                    let said = self.custom_at().map(|task| match self.current() {
+                        Some(m) => Ok(format!("{}, your model for {task}", m.name)),
+                        None => Err(format!("the model of {task} is not one you can use")),
+                    });
+                    self.view = View::Table;
+                    if let Some(said) = said {
+                        self.report(said);
+                    }
+                    return None;
+                };
                 self.task = Some(t);
                 // On the frontier the priciest is the best: each row down is cheaper and scores lower.
                 (self.sort_col, self.descending) = (PRICE, true);
@@ -1944,6 +2158,9 @@ impl App {
 
     /// Keys while typing a search, a note or a bound.
     fn input_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
+        if self.editing() {
+            return self.edit_key(code, mods);
+        }
         match &mut self.input {
             Input::Search { cur, was } => {
                 let overlay = matches!(self.view, View::Compare | View::Help);
@@ -2057,9 +2274,30 @@ impl App {
                     KeyCode::Char(' ') | KeyCode::Enter
                         if *kind == Kind::Fav && (code == KeyCode::Enter || !list.typing) =>
                     {
-                        if let Some((_, Effect::Fav(key, task, tier))) = items.get(at?) {
-                            let (key, task, tier) = (key.clone(), *task, *tier);
-                            return self.fav(&key, task, tier);
+                        match items.get(at?) {
+                            Some((_, Effect::Fav(key, slot))) => {
+                                let (key, slot) = (key.clone(), slot.clone());
+                                return self.fav(&key, &slot);
+                            }
+                            // The name of a new task is written right there, the list open.
+                            Some((_, Effect::NewTask(_))) => list.write(at?, Edit::new(What::New, String::new())),
+                            _ => {}
+                        }
+                    }
+                    // `r` renames the task of your own under the cursor and `a` writes what it is
+                    // about, both on its entry, not on a tier's; a built-in one keeps both.
+                    KeyCode::Char(c @ ('r' | 'a')) if *kind == Kind::Fav && !list.typing => {
+                        if let Some((_, Effect::Fav(_, slot))) = items.get(at?)
+                            && self.store.custom_tasks().contains(&slot.as_str())
+                        {
+                            let task = slot.clone();
+                            let edit = if c == 'r' {
+                                Edit::new(What::Rename(task.clone()), task)
+                            } else {
+                                let about = self.store.about(&task).unwrap_or("").to_string();
+                                Edit::new(What::About(task), about)
+                            };
+                            list.write(at?, edit);
                         }
                     }
                     KeyCode::Enter => {
@@ -3042,11 +3280,123 @@ mod tests {
     }
 
     #[test]
+    fn a_task_of_your_own_has_the_model_you_give_it() {
+        let mut a = app();
+        let on = a.current().unwrap().key.clone();
+        // The last entry of f's list takes the name of a new task right there, the list open.
+        press(&mut a, "fG");
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        let edit =
+            |a: &App| a.open_list().and_then(|l| l.edit.as_ref().map(|e| (format!("{:?}", e.what), e.text.clone())));
+        let under = |a: &App| match &a.input {
+            Input::Choose { items, list, .. } => items[list.sel].0.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(edit(&a), Some(("New".into(), String::new())));
+        a.paste("Tool Dispatch:");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.favorite("tool-dispatch"), Some(on.as_str()), "no : in it");
+        // The list is on the new task, where what it is about is written next; left empty,
+        // nothing is saved.
+        assert_eq!(
+            (under(&a).as_str(), edit(&a)),
+            ("✓ tool-dispatch", Some((r#"About("tool-dispatch")"#.into(), String::new())))
+        );
+        assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.about("tool-dispatch")), (None, None, None));
+        assert!(a.choosing_favs(), "the list is open still");
+        // a on it writes it, starting from what it says, and its entry shows it.
+        press(&mut a, "a");
+        a.paste("routing tool calls");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(
+            (a.store.about("tool-dispatch"), under(&a).as_str()),
+            (Some("routing tool calls"), "✓ tool-dispatch  routing tool calls")
+        );
+        // While writing, the keys that move are text, the wheel is still and esc leaves the entry alone.
+        press(&mut a, "ajk");
+        a.mouse(Mouse::Scroll(-3));
+        assert_eq!(edit(&a), Some((r#"About("tool-dispatch")"#.into(), "routing tool callsjk".into())));
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(
+            (edit(&a), a.choosing_favs(), a.store.about("tool-dispatch")),
+            (None, true, Some("routing tool calls"))
+        );
+        // Unticked it is gone, but keeps its entry while the list is open.
+        press(&mut a, " ");
+        assert_eq!((a.store.custom_tasks().len(), under(&a).as_str()), (0, "☐ tool-dispatch  routing tool calls"));
+        press(&mut a, " ");
+        assert_eq!(under(&a), "✓ tool-dispatch  routing tool calls");
+        // r writes another name on it, starting from its own; one a task has is said under the
+        // list, the name still there to change.
+        press(&mut a, "r");
+        assert_eq!(edit(&a), Some((r#"Rename("tool-dispatch")"#.into(), "tool-dispatch".into())));
+        ctrl(&mut a, 'u');
+        a.paste("coding");
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        let err = |a: &App| a.open_list().and_then(|l| l.edit.as_ref()?.err.clone());
+        assert_eq!(
+            (err(&a).as_deref(), edit(&a).unwrap().1.as_str()),
+            (Some("there is a task coding already"), "coding")
+        );
+        ctrl(&mut a, 'u');
+        a.paste("Dispatch");
+        assert_eq!((err(&a), code(&mut a, KeyCode::Enter)), (None, Some(Effect::Save)));
+        assert_eq!((a.store.custom_tasks(), under(&a).as_str()), (vec!["dispatch"], "✓ dispatch  routing tool calls"));
+        assert_eq!(a.status, "tool-dispatch renamed to dispatch");
+        press(&mut a, "ggra");
+        assert_eq!(edit(&a), None, "overall is built in");
+        code(&mut a, KeyCode::Esc);
+        a.store.rename_task("dispatch", "tool-dispatch").unwrap();
+        // Recommend lists it after the built-in tasks, its model under the cursor; enter goes to
+        // the table, on that model.
+        press(&mut a, "RG");
+        assert_eq!((a.task_cur, a.custom_at(), a.task_at_hand().is_none()), (TASKS.len(), Some("tool-dispatch"), true));
+        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()));
+        press(&mut a, "l");
+        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "one model on its line");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, on.as_str()));
+        assert!(a.status.ends_with("your model for tool-dispatch"), "{}", a.status);
+        // f on its block starts on it; without its model the task is gone, and the cursor is on
+        // the task before.
+        press(&mut a, "RGf");
+        assert_eq!(under(&a), "✓ tool-dispatch  routing tool calls");
+        press(&mut a, " ");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.task_cur, a.store.favorite("tool-dispatch")), (TASKS.len() - 1, None));
+        // An empty name names no task.
+        press(&mut a, "fG");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((code(&mut a, KeyCode::Enter), a.store.custom_tasks().len()), (None, 0));
+        code(&mut a, KeyCode::Esc);
+        // A tier of it takes a model of its own, as a built-in task's: its entries follow the
+        // task's in the list, and both models are on its line, cheapest first.
+        a.store.toggle_favorite("tool-dispatch", &on);
+        a.store.toggle_favorite("tool-dispatch:low", "mini");
+        a.rebuild();
+        press(&mut a, "G");
+        assert_eq!((&a.view, a.current().map(|m| m.key.as_str())), (&View::Recommend, Some("mini")));
+        press(&mut a, "l");
+        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "h l move along its line");
+        press(&mut a, "fj");
+        assert_eq!(under(&a), "☐ tool-dispatch:low  (now mini)");
+        press(&mut a, "ra");
+        assert_eq!(edit(&a), None, "a tier has the task's name and about");
+        press(&mut a, "3j");
+        assert_eq!(under(&a), "+ new task", "after its three tiers");
+        // A task named before it in the order leaves recommend's cursor on its own.
+        code(&mut a, KeyCode::Enter);
+        a.paste("api");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.store.custom_tasks(), a.custom_at()), (vec!["api", "tool-dispatch"], Some("tool-dispatch")));
+    }
+
+    #[test]
     fn f_favorites_a_model_for_the_task_at_hand() {
         let mut a = app();
         // No task in context: f asks which, listing every task, each followed by its tiers.
         assert_eq!(press(&mut a, "f"), None);
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len() * 4));
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len() * 4 + 1));
         press(&mut a, "4j");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert!(

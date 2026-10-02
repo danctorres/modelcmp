@@ -28,9 +28,13 @@ pub struct Store {
     pub excluded: BTreeSet<String>,
     pub notes: BTreeMap<String, String>,
     /// `slot` -> your favorite model for it: the task's, or one `--tier`'s of it, which `--tier`
-    /// picks over the task's and both over the computed one.
+    /// picks over the task's and both over the computed one. A key that is no built-in task
+    /// is a task of your own (`custom_tasks`).
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
+    /// What each task of your own is about, in your words, by its name: agents choose it by that.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub about: BTreeMap<String, String>,
     /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub theme: String,
@@ -52,6 +56,24 @@ pub fn slots() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
     crate::fit::TASKS.iter().flat_map(|t| {
         std::iter::once(None).chain(crate::view::TIERS.iter().map(|x| Some(x.0))).map(move |x| (t.name, x))
     })
+}
+
+/// The slots of one task: its own, then one per tier.
+pub fn task_slots(task: &str) -> impl Iterator<Item = String> {
+    std::iter::once(None).chain(crate::view::TIERS.iter().map(|x| Some(x.0))).map(move |x| slot(task, x))
+}
+
+/// A task's name as `fav` and `--task` take it: lowercase with `-` for spaces, so that it needs
+/// no quoting. One that is no built-in task is a task of your own (`Store::custom_tasks`).
+pub fn task_name(s: &str) -> Result<String, String> {
+    let name = s.split_whitespace().collect::<Vec<_>>().join("-").to_lowercase();
+    if name.is_empty() {
+        Err("a task needs a name".into())
+    } else if name.contains(':') {
+        Err("a task's name takes no ':', which sets a tier apart".into())
+    } else {
+        Ok(name)
+    }
 }
 
 /// mtime and inode: each save renames a new file in, so the inode tells two saves apart
@@ -141,8 +163,13 @@ impl Store {
                 s.marked.push(k);
             }
         }
-        // Favorites of removed tasks (long-context) could not be cleared: the CLI rejects the name.
-        s.favorite.retain(|k, _| crate::fit::task(k.split(':').next().unwrap_or(k)).is_some());
+        // A slot of no tier is a task of your own with no model to show, and could not be cleared.
+        let tier = |x: &str| crate::view::TIERS.iter().any(|t| t.0 == x);
+        s.favorite.retain(|k, _| k.split_once(':').is_none_or(|(_, x)| tier(x)));
+        // A task gone with its models leaves what it was about, in case one comes back before
+        // the file is closed; no longer than that.
+        let tasks: Vec<String> = s.custom_tasks().into_iter().map(String::from).collect();
+        s.about.retain(|t, _| tasks.contains(t));
         s.mtime = mtime(&path);
         s.path = path;
         s
@@ -221,7 +248,7 @@ impl Store {
     /// Every model that is a favorite of the task or of one of its tiers: all join its line.
     pub fn task_favorites(&self, task: &str) -> Vec<&str> {
         let mut v: Vec<&str> = Vec::new();
-        for k in slots().filter(|s| s.0 == task).filter_map(|(t, x)| self.favorite(&slot(t, x))) {
+        for k in task_slots(task).filter_map(|s| self.favorite(&s)) {
             if !v.contains(&k) {
                 v.push(k);
             }
@@ -229,9 +256,44 @@ impl Store {
         v
     }
 
-    /// The slots the model is the favorite for, in `slots` order, as its ★s are drawn.
+    /// Your own tasks, by name: the favorites, of the task or a tier of it, of no built-in
+    /// task. One has no ranking, only the models you gave it, and is gone when they are cleared.
+    pub fn custom_tasks(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.favorite.keys().map(|k| k.split(':').next().unwrap_or(k)).collect();
+        v.retain(|t| crate::fit::task(t).is_none());
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Give a task of your own another name, which no task has yet; its models stay.
+    pub fn rename_task(&mut self, old: &str, new: &str) -> Result<(), String> {
+        if !self.custom_tasks().contains(&old) {
+            return Err(format!("{old} is not a task of your own"));
+        }
+        if crate::fit::task(new).is_some() || self.custom_tasks().contains(&new) {
+            return Err(format!("there is a task {new} already"));
+        }
+        for (from, to) in task_slots(old).zip(task_slots(new)) {
+            if let Some(model) = self.favorite.remove(&from) {
+                self.favorite.insert(to, model);
+            }
+        }
+        if let Some(about) = self.about.remove(old) {
+            self.about.insert(new.to_string(), about);
+        }
+        Ok(())
+    }
+
+    /// Every favorite slot there is: the built-in tasks' in `slots` order, then those of your
+    /// own tasks, each task before its tiers.
+    pub fn all_slots(&self) -> impl Iterator<Item = String> {
+        slots().map(|(t, x)| slot(t, x)).chain(self.custom_tasks().into_iter().flat_map(task_slots))
+    }
+
+    /// The slots the model is the favorite for, in `all_slots` order, as its ★s are drawn.
     pub fn favorite_for(&self, key: &str) -> Vec<String> {
-        slots().map(|(t, x)| slot(t, x)).filter(|s| self.favorite(s) == Some(key)).collect()
+        self.all_slots().filter(|s| self.favorite(s) == Some(key)).collect()
     }
 
     /// Whether the model is a favorite of the task or its tiers, or with no task of any.
@@ -254,12 +316,27 @@ impl Store {
 
     /// Empty text deletes the note.
     pub fn set_note(&mut self, key: &str, text: &str) {
-        let text = text.trim();
-        if text.is_empty() {
-            self.notes.remove(key);
-        } else {
-            self.notes.insert(key.to_string(), text.to_string());
-        }
+        set_text(&mut self.notes, key, text);
+    }
+
+    /// What a task of your own is about, once you wrote it.
+    pub fn about(&self, task: &str) -> Option<&str> {
+        self.about.get(task).map(String::as_str)
+    }
+
+    /// Empty text deletes it.
+    pub fn set_about(&mut self, task: &str, text: &str) {
+        set_text(&mut self.about, task, text);
+    }
+}
+
+/// `text` trimmed as the entry of `key`, or no entry when it is empty.
+fn set_text(map: &mut BTreeMap<String, String>, key: &str, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        map.remove(key);
+    } else {
+        map.insert(key.to_string(), text.to_string());
     }
 }
 
@@ -309,10 +386,35 @@ mod tests {
         assert_eq!(s.task_favorites("coding"), ["gpt55", "flash"], "each model once");
         assert_eq!(s.favorite_for("gpt55"), ["coding", "coding:high"]);
         // Files written before the renames call favorites "preferred" and pins "favorites".
-        std::fs::write(&p, br#"{"preferred":{"coding":"old","long-context":"x"},"favorites":["old"]}"#).unwrap();
+        let file = br#"{"preferred":{"coding":"old","debugging":"old","debugging:fast":"x","long-context:low":"x"},"favorites":["old"]}"#;
+        std::fs::write(&p, file).unwrap();
         let old = Store::load_from(p.clone());
         assert!(old.favorite("coding") == Some("old") && old.is_marked("old"));
-        assert_eq!(old.favorite("long-context"), None, "a removed task's favorite is dropped");
+        // A task that is not built in is your own, whether its model is the task's or a tier's.
+        assert_eq!(old.custom_tasks(), ["debugging", "long-context"]);
+        assert_eq!(old.favorite_for("old"), ["coding", "debugging"], "after the built-in ones");
+        assert_eq!(
+            (old.favorite_for("x"), old.favorite("debugging:fast")),
+            (vec!["long-context:low".to_string()], None)
+        );
+        assert_eq!(task_name(" Tool  Dispatch ").as_deref(), Ok("tool-dispatch"), "typed without quotes");
+        // A task of your own takes another name, one no task has; a built-in one keeps its own.
+        let mut old = old;
+        assert!(old.rename_task("coding", "code").is_err() && old.rename_task("debugging", "coding").is_err());
+        old.set_about("debugging", " finding and fixing a bug ");
+        old.favorite.remove("long-context:low");
+        old.toggle_favorite("debugging:low", "flash");
+        assert_eq!(old.rename_task("debugging", "bug-hunt"), Ok(()));
+        assert_eq!((old.custom_tasks(), old.favorite("bug-hunt")), (vec!["bug-hunt"], Some("old")));
+        assert_eq!(old.tier_favorites("bug-hunt", "low").collect::<Vec<_>>(), ["flash", "old"], "its tiers go with it");
+        old.toggle_favorite("bug-hunt:low", "flash");
+        assert_eq!((old.about("bug-hunt"), old.about("debugging")), (Some("finding and fixing a bug"), None));
+        // What a task was about goes with it, the next time the file is read.
+        old.toggle_favorite("bug-hunt", "old");
+        old.save().unwrap();
+        assert_eq!(Store::load_from(p.clone()).about("bug-hunt"), None);
+        assert!(old.rename_task("debugging", "x").is_err(), "gone under its old name");
+        assert!(task_name(" ").is_err() && task_name("a:b").is_err());
         // Pins were dropped: they load as marks, once each, and are not written back.
         std::fs::write(&p, br#"{"pinned":["a","c"],"marked":["a","b"]}"#).unwrap();
         let mut both = Store::load_from(p.clone());

@@ -47,11 +47,24 @@ modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosi
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp fav coding 3.7-flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
+modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"  # a task of your own: its model and what it is about; --rm removes it
+modelcmp fav debugging --about "bugs and flaky tests"               # rewrite what it is about; "" clears it
+modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --task debugging --tier low returns it
+modelcmp list --task debugging --id            # that model's provider/model
+modelcmp fav debugging --rename triage         # another name for a task of your own; its models stay
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
 modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
 ```
 
 Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`. For a large prompt, bound the context instead: `--min ctx=200`.
+Any other name given to `fav` is a task of your own (`debugging`, `"Tool Dispatch"` is stored as
+`tool-dispatch`). No benchmark ranks it: it has the models you give it, one for the task and one
+per tier if you like. `--task` lists them, cheapest first, and with `--tier` returns that tier's,
+else the task's, leaving out one you excluded or lost access to. `recommend` lists it after the
+built-in tasks, with what you wrote it is about and each model's tier, `(low)`. It is the task to
+pick for work that fits it, even when a built-in task fits too: for a bug, your `debugging` over
+`coding`. It is gone when its last model is cleared, and `--rename` gives it another name, one no
+task has yet.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `cache`, `out`, `ctx` (thousands of
 tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$), and with Artificial Analysis `tps` and `ttft`. `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
@@ -91,3 +104,7 @@ for, and `task:tier` for a tier's), `price` (with the provider's model `id`, whi
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
 same as `tasks`. A favorite that is on the line only as
 the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, and the user's `note` when the model has one.
+A task of your own follows the built-in ones in `recommend --json` with the same fields and
+`"custom": true`: its `about` is what the user wrote (`your own task` when nothing), its `when`
+says it wins over a built-in task that fits too, its `favorite` and `tier_favorites` are the
+models the user gave it, and its `frontier` lists them, cheapest first, with a null `score`.
