@@ -171,10 +171,10 @@ impl Store {
             Err(e) => e.kind() == std::io::ErrorKind::NotFound,
         };
         if parses {
-            // The start's warning is still to be said.
+            // The start's warning is still to be said, unless the reload has one of its own.
             let warning = self.warning.take();
             *self = Store::load_from(std::mem::take(&mut self.path));
-            self.warning = warning;
+            self.warning = self.warning.take().or(warning);
         } else {
             self.mtime = now;
         }

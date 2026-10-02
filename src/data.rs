@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
@@ -592,7 +592,7 @@ pub fn load_cache() -> Option<Data> {
 /// What each installed harness says it can use: its ids, or none when its listing failed, hung
 /// or was cut short by `stop`, so a refresh always finishes. One not installed is left out.
 /// All are asked at once, so the slowest is the wait.
-fn harness_models(stop: &AtomicBool) -> BTreeMap<String, Option<Vec<String>>> {
+fn harness_models(stop: &AtomicBool, steps: &Steps) -> BTreeMap<String, Option<Vec<String>>> {
     let on_path =
         |bin: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()));
     let ids = |bin: &str, probe: &Probe| match probe {
@@ -607,7 +607,11 @@ fn harness_models(stop: &AtomicBool) -> BTreeMap<String, Option<Vec<String>>> {
         let asked: Vec<_> = HARNESSES
             .iter()
             .filter(|(bin, _)| on_path(bin))
-            .map(|(bin, probe)| (bin, s.spawn(move || ids(bin, probe))))
+            .map(|(bin, probe)| {
+                step(steps, bin);
+                let ids = &ids;
+                (bin, s.spawn(move || (ids(bin, probe), answered(steps, bin)).0))
+            })
             .collect();
         asked.into_iter().map(|(bin, ids)| (bin.to_string(), ids.join().ok().flatten())).collect()
     })
@@ -713,8 +717,44 @@ fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<S
     }
 }
 
-/// Download the sources and ask the harnesses in parallel, merge, write cache.
-pub fn refresh() -> Result<Data, Failure> {
+/// The steps of a refresh, its downloads and its harnesses: how many, and the ones still awaited.
+pub type Steps = Arc<Mutex<(usize, Vec<&'static str>)>>;
+
+/// Counts `name` as a step, awaited until `answered`.
+fn step(steps: &Steps, name: &'static str) {
+    let mut s = steps.lock().unwrap_or_else(PoisonError::into_inner);
+    s.0 += 1;
+    s.1.push(name);
+}
+
+fn answered(steps: &Steps, name: &str) {
+    let mut s = steps.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(i) = s.1.iter().position(|n| *n == name) {
+        s.1.remove(i);
+    }
+}
+
+/// How far the refresh counting in `steps` is, as `progress_text`; empty before it has any.
+pub fn progress(steps: &Steps) -> String {
+    let s = steps.lock().unwrap_or_else(PoisonError::into_inner);
+    if s.0 == 0 { String::new() } else { progress_text(s.0, &s.1) }
+}
+
+/// The steps answered of `total`, and with one or two left what is `awaited`: `7/9, waiting for opencode`.
+fn progress_text(total: usize, awaited: &[&str]) -> String {
+    let mut names: Vec<&str> = vec![];
+    for n in awaited {
+        if !names.contains(n) {
+            names.push(n);
+        }
+    }
+    let count = format!("{}/{total}", total - awaited.len());
+    if names.is_empty() || names.len() > 2 { count } else { format!("{count}, waiting for {}", names.join(", ")) }
+}
+
+/// Download the sources and ask the harnesses in parallel, merge, write cache. `steps` counts
+/// them for `progress`.
+pub fn refresh(steps: &Steps) -> Result<Data, Failure> {
     let src = source();
     let key = match src {
         Source::Epoch => None,
@@ -722,10 +762,10 @@ pub fn refresh() -> Result<Data, Failure> {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let harness = {
-        let stop = Arc::clone(&stop);
-        std::thread::spawn(move || harness_models(&stop))
+        let (stop, steps) = (Arc::clone(&stop), Arc::clone(steps));
+        std::thread::spawn(move || harness_models(&stop, &steps))
     };
-    let res = download(src, key.as_deref());
+    let res = download(src, key.as_deref(), steps);
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
     let listed = harness.join().unwrap_or_default();
@@ -785,19 +825,28 @@ const GRACE: Duration = Duration::from_secs(10);
 /// it cannot do without, models.dev's and the source's scores, leaving the others to end on
 /// their own: none is waited for once the refresh cannot finish, and the links and the newest
 /// release no longer than `GRACE` once it can.
-fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
+fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded, Failure> {
     const URLS: [&str; 6] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, EPOCH_PAGES_URL, RELEASE_URL];
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
     let (tx, rx) = std::sync::mpsc::channel();
+    let mut sites = vec![];
     for (i, url) in URLS.into_iter().enumerate() {
         // Artificial Analysis's scores are asked for only with its key.
         let key = if url == AA_API_URL { key.map(String::from) } else { None };
         if url == AA_API_URL && key.is_none() {
             continue;
         }
-        let tx = tx.clone();
+        let (tx, steps) = (tx.clone(), Arc::clone(steps));
         let pages = url == EPOCH_PAGES_URL;
-        std::thread::spawn(move || tx.send((i, if pages { epoch_pages(url) } else { fetch(url, key.as_deref()) })));
+        // Counted under its site's name, as the warnings name it.
+        let site = url.split('/').nth(2).unwrap_or(url).trim_start_matches("api.");
+        step(&steps, site);
+        sites.push(site);
+        std::thread::spawn(move || {
+            let res = if pages { epoch_pages(url) } else { fetch(url, key.as_deref()) };
+            answered(&steps, site);
+            tx.send((i, res))
+        });
     }
     drop(tx);
     let mut got: [Result<Vec<u8>, Failure>; 6] = URLS.map(|url| Err(format!("{url}: no reply").into()));
@@ -822,6 +871,8 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
         }
         got[i] = res;
     }
+    // A download not waited for is awaited no more, before the merge and not after it.
+    sites.into_iter().for_each(|site| answered(steps, site));
     let [models, epoch, api, aa, epoch_pages, release] = got;
     let data = match src {
         Source::Epoch => {
@@ -848,7 +899,7 @@ fn download(src: Source, key: Option<&str>) -> Result<Downloaded, Failure> {
 pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
-        cached => match refresh() {
+        cached => match refresh(&Steps::default()) {
             Ok(mut d) => {
                 let w = d.warning.take();
                 Ok((d, w))
@@ -2350,6 +2401,22 @@ mod tests {
         assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("u", None));
         let m = Model { offers: vec![unknown, free], ..Default::default() };
         assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("f", Some(0.0)), "a free offer is priced");
+    }
+
+    #[test]
+    fn progress_counts_steps_and_names_the_last_ones() {
+        assert_eq!(progress_text(9, &["models.dev", "epoch.ai", "pi"]), "6/9");
+        assert_eq!(progress_text(9, &["epoch.ai", "epoch.ai", "pi"]), "6/9, waiting for epoch.ai, pi", "a site once");
+        assert_eq!(progress_text(9, &[]), "9/9");
+        let steps = Steps::default();
+        ["opencode", "pi", "pi"].into_iter().for_each(|n| step(&steps, n));
+        answered(&steps, "pi");
+        answered(&steps, "codex");
+        assert_eq!(*steps.lock().unwrap(), (3, vec!["opencode", "pi"]), "one answer ends one step");
+        assert_eq!(
+            (progress(&steps), progress(&Steps::default())),
+            ("1/3, waiting for opencode, pi".into(), String::new())
+        );
     }
 
     #[test]

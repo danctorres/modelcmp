@@ -35,7 +35,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-type Refresh = Receiver<Result<Data, data::Failure>>;
+/// A refresh under way: where its result comes, and its steps for the frame's count.
+type Refresh = (Receiver<Result<Data, data::Failure>>, data::Steps);
 
 /// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
 /// no data until one is picked.
@@ -69,7 +70,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
         app.ask_source();
         // No source is picked yet: the default's download starts under the intro, for the pick
         // to take up, unless the CLI has left a cache that will do.
-        pre = data::load_cache().is_none_or(|d| d.stale()).then(spawn_refresh);
+        pre = (force || data::load_cache().is_none_or(|d| d.stale())).then(spawn_refresh);
     } else if (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
@@ -357,10 +358,12 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
 
 fn spawn_refresh() -> Refresh {
     let (tx, rx) = mpsc::channel();
+    let steps = data::Steps::default();
+    let counted = steps.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(data::refresh());
+        let _ = tx.send(data::refresh(&counted));
     });
-    rx
+    (rx, steps)
 }
 
 /// Returns at a quit, or with the commands of an upgrade to run once the screen is restored.
@@ -377,7 +380,7 @@ fn event_loop(
     let (mut click, mut press) = (None, None);
     loop {
         // Before the draw, so one that ended under the intro is in the first frame.
-        let done = rx.as_ref().and_then(|r| match r.try_recv() {
+        let done = rx.as_ref().and_then(|r| match r.0.try_recv() {
             Ok(res) => Some(res),
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => Some(Err("refresh thread died".into())),
@@ -385,6 +388,12 @@ fn event_loop(
         if let Some(res) = done {
             rx = None;
             app.refreshed(res);
+            dirty = true;
+        }
+        // The count of a refresh under way moves on its own, with no key pressed.
+        let progress = rx.as_ref().map_or_else(String::new, |r| data::progress(&r.1));
+        if progress != app.progress {
+            app.progress = progress;
             dirty = true;
         }
         if dirty {
@@ -494,16 +503,20 @@ fn event_loop(
                         let pre = pre.take().filter(|_| src == data::Source::default());
                         let fetch = app.switched(data::load_cache());
                         rx = pre.or_else(|| fetch.then(spawn_refresh));
+                        app.refreshing = rx.is_some();
                     }
                     // The app applies its own chooser items before they get here.
                     Some(Effect::Fav(..) | Effect::Theme(_)) | None => {}
                 }
-                // The start's warning, kept while the first start's question was open, is said
-                // once it closes, however it does, after an error the closing gave.
-                if matches!(app.input, Input::None)
-                    && let Some(w) = app.store.warning.take()
-                {
-                    app.report(Err(if app.failed { format!("{}; {w}", app.status) } else { w }));
+                if matches!(app.input, Input::None) {
+                    // The first start's download is for its question: closed without a pick of
+                    // the default, a later pick would put its old result over newer data.
+                    pre = None;
+                    // The start's warning, kept while the question was open, is said once it
+                    // closes, however it does, after an error the closing gave.
+                    if let Some(w) = app.store.warning.take() {
+                        app.report(Err(if app.failed { format!("{}; {w}", app.status) } else { w }));
+                    }
                 }
             }
             dirty = true;
@@ -1077,8 +1090,19 @@ fn draw(app: &mut App, f: &mut Frame) {
     } else {
         // The refresh state is always in view: under way, failed, or how old the data is.
         let age = format!("{} ", data_age(&app.data));
+        let version = match app.data.update() {
+            Some(new) => Line::from(format!(" modelcmp v{new} available: u upgrades ")).style(fg(Color::Yellow)),
+            None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
+        };
+        let source = format!(" models.dev + {} · ", data::source().label());
+        // Where the count and what it waits for would run over the version, the count goes alone.
+        let room = usize::from(body.width).saturating_sub(2 + version.width() + source.chars().count());
+        let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
         let (state, color) = match (app.refreshing, app.refresh_failed, app.data.stale()) {
-            (true, ..) => ("⟳ refreshing ".to_string(), Color::Yellow),
+            (true, ..) if refreshing(&app.progress).chars().count() > room => {
+                (refreshing(app.progress.split(',').next().unwrap_or_default()), Color::Yellow)
+            }
+            (true, ..) => (refreshing(&app.progress), Color::Yellow),
             (_, true, _) => (format!("refresh failed · {age}"), BAD),
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
@@ -1093,16 +1117,9 @@ fn draw(app: &mut App, f: &mut Frame) {
             .border_style(fg(MUTED))
             .title_top(Line::from(about).style(fg(MUTED)).centered())
             .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
-            .title_bottom(match app.data.update() {
-                Some(new) => Line::from(format!(" modelcmp v{new} available: u upgrades ")).style(fg(Color::Yellow)),
-                None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
-            })
+            .title_bottom(version)
             .title_bottom(
-                Line::from(vec![
-                    Span::styled(format!(" models.dev + {} · ", data::source().label()), fg(MUTED)),
-                    Span::styled(state, fg(color)),
-                ])
-                .right_aligned(),
+                Line::from(vec![Span::styled(source, fg(MUTED)), Span::styled(state, fg(color))]).right_aligned(),
             );
         let inner = frame.inner(body);
         let head = head(app);
@@ -3159,6 +3176,26 @@ mod tests {
         let (_, lines) = render(&mut a, 50, 7);
         let bar = lines.last().unwrap();
         assert!(bar.contains("PICK") && bar.contains("Dev ▾"), "the prompt wins over its key hint: {bar}");
+    }
+
+    #[test]
+    fn frame_counts_the_steps_of_a_refresh() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 8)).unwrap();
+        let mut a = app();
+        a.refreshing = true;
+        let mut border = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            (0..120).map(|x| buf[(x, 6)].symbol()).collect::<String>()
+        };
+        assert!(border(&mut a).contains("· ⟳ refreshing ╯"), "before the first count");
+        a.progress = "7/9, waiting for opencode".into();
+        assert!(border(&mut a).contains("· ⟳ refreshing 7/9, waiting for opencode ╯"));
+        // Too long for the border with the version in it, the count goes alone.
+        a.progress = format!("7/9, waiting for {}", "artificialanalysis.ai, epoch.ai, and a very long name of a site");
+        let line = border(&mut a);
+        assert!(line.contains(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{line}");
+        assert!(line.contains("· ⟳ refreshing 7/9 ╯"), "{line}");
     }
 
     #[test]

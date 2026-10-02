@@ -714,6 +714,8 @@ pub struct App {
     /// The status says why a key or a click did nothing (`refuse`): red, but no error to keep.
     refused: bool,
     pub refreshing: bool,
+    /// How far the refresh under way is (`data::progress`), for the frame.
+    pub progress: String,
     /// The last refresh failed; stays in the frame until one succeeds.
     pub refresh_failed: bool,
     /// The share `%` turns back on: `--cache`, or an agent's when that was 0.
@@ -772,6 +774,7 @@ impl App {
             failed: false,
             refused: false,
             refreshing: false,
+            progress: String::new(),
             refresh_failed: false,
             cache_on: 0.0,
             cache_hint: "",

@@ -69,7 +69,8 @@ than an empty list.
 
 ## Data age
 
-The TUI's bottom border always shows the refresh state: `⟳ refreshing`, `refresh failed` in red
+The TUI's bottom border always shows the refresh state: `⟳ refreshing 7/9, waiting for opencode` (the downloads
+and harnesses that answered, and the last one or two still awaited), `refresh failed` in red
 with the age of the data still shown, or the data age alone, red once it is past 24h; then
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
