@@ -1206,7 +1206,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        overlay(buf, body, &title, lines, &mut app.scroll, ACCENT, ACCENT);
+        overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset);
     }
     // `q` and `u` ask first: the same box, confirmed by the same key again.
     let ask = match app.input {
@@ -1217,7 +1217,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some((key, title)) = ask {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0, ACCENT, ACCENT);
+        overlay(buf, body, &title, lines, &mut 0, Color::Reset);
     }
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, items, list, .. }) = (chooser, &mut app.input) {
@@ -1229,10 +1229,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         // that would scroll the cursor's line off.
         let from = if *sel + 1 >= rows { lines.len().saturating_sub(shown) } else { *top };
         let mut scroll = list_top(from, *sel, shown) as u16;
-        // Under the wordmark, which has the accent, the box is the table's frame: muted, with
-        // the question in the text's colour.
-        let (color, border) = if splash.is_some() { (Color::Reset, MUTED) } else { (ACCENT, ACCENT) };
-        let (above, below) = overlay(buf, within, title, lines, &mut scroll, color, border);
+        // Under the wordmark the box is muted, as the table's frame; over the table it has
+        // the text's colour, as every box there, which parts it from that frame.
+        let border = if splash.is_some() { MUTED } else { Color::Reset };
+        let (above, below) = overlay(buf, within, title, lines, &mut scroll, border);
         *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
@@ -1615,7 +1615,7 @@ fn dropdown(
     let (query, sel, top) = (list.query.as_str(), list.sel, &mut list.top);
     let rows = &menu_rows(items, query);
     let Some((rect, (label_w, n_w))) = menu_box(area, x, items, rows.len()) else { return };
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(ACCENT));
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(Color::Reset));
     let inner = block.inner(rect);
     Clear.render(rect, buf);
     block.render(rect, buf);
@@ -1983,22 +1983,29 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // Where `/` looks: all of the label, or in `f`'s list up to the end of the task.
             let key = crate::app::searched(&items[k]);
             let hits = |s: &str| found(&s[..s.find(key).map_or(0, |i| i + key.len())], query);
-            // f's tasks in their colours, harnesses, sites and themes in theirs.
+            // What has a colour in the table keeps it here: f's tasks and a harness. A site, a
+            // theme and a source have none, so they take the text's and not one their name gives.
             let color = match effect {
                 Effect::Fav(_, slot) => task_color(slot),
                 Effect::NewTask(_) => STAR,
-                _ => dev_color(label.split(' ').next().unwrap_or_default()),
+                Effect::Launch(_) => dev_color(label.split(' ').next().unwrap_or_default()),
+                _ => Color::Reset,
             };
             if let (Some(e), true) = (&list.edit, i == list.sel) {
                 return edit_line(label, e, color);
             }
-            // A source's name in the text's colour and what it takes muted: the colour its name
-            // gives is the box's own or the wordmark's.
-            if let Effect::Source(src) = effect {
-                let (name, about) = label.split_at(label.len() - src.about().len());
+            // A name, then what follows it muted: a source and what it takes, a harness and
+            // the command that opens it.
+            let name = match effect {
+                Effect::Source(src) => Some((label.len() - src.about().len(), Style::new().add_modifier(BOLD))),
+                Effect::Launch(_) => Some((label.find(' ').unwrap_or(label.len()), fg(color))),
+                _ => None,
+            };
+            if let Some((end, style)) = name {
+                let (name, rest) = label.split_at(end);
                 let line = Line::from(vec![
-                    Span::styled(format!(" {name}"), Style::new().add_modifier(BOLD)),
-                    Span::styled(format!("{about} "), fg(MUTED)),
+                    Span::styled(format!(" {name}"), style),
+                    Span::styled(format!("{rest} "), fg(MUTED)),
                 ]);
                 return lit(line, |s| found(s, query));
             }
@@ -2068,15 +2075,15 @@ fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
 
-/// A centred rounded box in `border`, its title in `color`, showing `lines` from `scroll` on,
-/// which is clamped to the content. Returns whether lines are scrolled off above and below.
+/// A centred rounded box in `border`, its title bold in the text's colour, showing `lines` from
+/// `scroll` on, which is clamped to the content: the accent is left to the table's headers and
+/// the cursor. Returns whether lines are scrolled off above and below.
 fn overlay(
     buf: &mut Buffer,
     area: Rect,
     title: &str,
     lines: Vec<Line<'static>>,
     scroll: &mut u16,
-    color: Color,
     border: Color,
 ) -> (bool, bool) {
     let rect = overlay_rect(area, title, &lines);
@@ -2092,7 +2099,7 @@ fn overlay(
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(fg(border))
-        .title_top(Line::from(format!(" {title} ")).style(fg(color).add_modifier(BOLD)))
+        .title_top(Line::from(format!(" {title} ")).style(Style::new().add_modifier(BOLD)))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     let inner = block.inner(rect);
     Clear.render(rect, buf);
@@ -2106,7 +2113,7 @@ fn overlay(
 }
 
 fn heading(text: &str) -> Line<'static> {
-    Line::from(text.to_string()).style(fg(ACCENT).add_modifier(BOLD))
+    Line::from(text.to_string()).style(Style::new().add_modifier(BOLD))
 }
 
 fn help(query: &str) -> Vec<Line<'static>> {
@@ -3466,13 +3473,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT, ACCENT);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, Color::Reset);
         assert_eq!(buf[(0, 0)].symbol(), "╭");
-        assert_eq!(buf[(0, 0)].fg, ACCENT);
+        assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
         assert_eq!(scroll as usize, help("").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT, ACCENT);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, Color::Reset);
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         let a = app();
         let text: Vec<String> = detail(&a.data.models[0], &a.store).1.iter().map(ToString::to_string).collect();
@@ -3493,6 +3500,23 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert_eq!(text, ["a", "b"], "a space at a break is dropped");
+    }
+
+    /// An entry of a list has a colour where the table has one for it: a harness, and not a
+    /// site, a theme or a source, whose names would give one that says nothing.
+    #[test]
+    fn a_list_colours_what_the_table_does() {
+        let fgs = |kind, label: &str, effect| {
+            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), false);
+            lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
+        };
+        assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
+        assert_eq!(fgs(Kind::Open, "epoch.ai", Effect::Open(String::new())), [Some(Color::Reset)]);
+        let pi = fgs(Kind::Launch, "pi --model x", Effect::Launch(vec![]));
+        assert_eq!(pi, [Some(dev_color("pi")), Some(MUTED)], "the harness as in Via, its command muted");
+        let src = data::Source::Epoch;
+        let label = format!("{:<20} {}", src.label(), src.about());
+        assert_eq!(fgs(Kind::Source, &label, Effect::Source(src)), [None, Some(MUTED)], "what it takes muted");
     }
 
     #[test]
