@@ -1281,12 +1281,12 @@ struct Layout {
     /// Where the "Via" and "Notes" columns start and their widths, if there is room.
     via: Option<(u16, u16)>,
     notes: Option<(u16, u16)>,
-    /// The first column right of Dev shown (0 is Price, the last Notes), for `App::hscroll`.
+    /// The first column right of Dev shown (0 is Released, the last Notes), for `App::hscroll`.
     first: usize,
     /// Columns cut off on the right; `‹` after Dev and `›` on the frame say where to scroll.
     more: bool,
-    /// Where a `│` parts two groups of columns (`GROUPS`): after Dev, and before each group
-    /// that starts right of it.
+    /// Where a `│` parts two groups of columns (`GROUPS`): after Dev when scrolled, and before
+    /// each group that starts right of it.
     seps: Vec<u16>,
 }
 
@@ -1320,8 +1320,8 @@ fn layout(width: u16, app: &App) -> Layout {
     // The columns right of Dev scroll sideways: only as far as it takes to show the selected
     // one, keeping the last position otherwise. Model and Dev stay put.
     let ws: Vec<u16> = widths.into_iter().chain([via_w, notes_w]).collect();
-    // A column starting a group has a `│` in its gap, one cell wider; the first shown always
-    // has one, parting it from Dev.
+    // A column starting a group has a `│` in its gap, one cell wider; so does the first shown
+    // when scrolled, parting it from Dev. Released, in Dev's group, has the cell but no `│`.
     let sep = |k: usize| u16::from(GROUPS.contains(&(k + 2)));
     // A column the source does not measure takes no room at all.
     let ws: Vec<u16> = ws.into_iter().enumerate().map(|(k, w)| if hidden(k + 2) { 0 } else { w }).collect();
@@ -1356,7 +1356,7 @@ fn layout(width: u16, app: &App) -> Layout {
     let (mut cols, mut tail, mut more, mut seps) = (Vec::with_capacity(COLS.len()), [None; 2], false, vec![]);
     let mut started = false;
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
-        let part = !started || sep(k) == 1;
+        let part = if started { sep(k) == 1 } else { k > 0 };
         if started {
             x += sep(k);
         }
@@ -2865,7 +2865,7 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 206, 6);
-        let header = "# ✓ ★ ✗ Model Dev ▾ │ Price ▾ $in $cache $out Ctx Released │ ▼ECI Coding Agentic \
+        let header = "# ✓ ★ ✗ Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding Agentic \
                       Reason Code/$ │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
@@ -2879,10 +2879,10 @@ mod tests {
             dev_color("opencode"),
             "harnesses are coloured"
         );
-        assert_eq!(&words(&lines[2])[..11], ["1", "☐", "☆", "·", "opus", "anthropic", "│", "5.0", "5.0", "5.0", "5.0"]);
+        assert_eq!(&words(&lines[2])[..11], ["1", "☐", "☆", "·", "opus", "anthropic", "-", "│", "5.0", "5.0", "5.0"]);
         assert_eq!(
             &words(&lines[3])[..11],
-            ["2", "☐", "☆", "·", "flash", "google", "│", "0.10", "0.10", "0.10", "0.10"]
+            ["2", "☐", "☆", "·", "flash", "google", "-", "│", "0.10", "0.10", "0.10"]
         );
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
@@ -3040,8 +3040,8 @@ mod tests {
         assert_eq!(hit(&a, area, click(3, 2)), None, "the rule under the header");
         assert_eq!(hit(&a, area, click(col("Dev"), 1)), Some(Mouse::Header(1)));
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
-        assert_eq!(hit(&a, area, click(col("Price"), 1)), Some(Mouse::Header(2)));
-        assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(2)), "the ▾ after Price");
+        assert_eq!(hit(&a, area, click(col("Price"), 1)), Some(Mouse::Header(PRICE)));
+        assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(PRICE)), "the ▾ after Price");
         assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(9)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
@@ -3193,8 +3193,8 @@ mod tests {
         let (_, lines) = render(&mut a, 54, 4);
         assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Code/$"], "{}", lines[0]);
         a.col = 0;
-        let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "│", "Price", "▾"]);
+        let (_, lines) = render(&mut a, 48, 4);
+        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");
         for (w, h) in [(1, 1), (3, 2), (0, 0), (30, 3), (12, 1)] {
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);
@@ -3245,11 +3245,11 @@ mod tests {
         assert_eq!(line, " SEARCH  /gem ");
         a.input = Input::Search { cur: 1, was: String::new() };
         assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 2), "the cursor sits inside the text");
-        a.input = Input::Bound { col: 3, min: true, text: "4".into(), cur: 1 };
+        a.input = Input::Bound { col: PRICE + 1, min: true, text: "4".into(), cur: 1 };
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         status(&mut buf, Rect::new(0, 0, 40, 1), &a);
         assert_eq!((0..15).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  $in ≥ 4");
-        a.input = Input::Bound { col: ECI - 2, min: true, text: "200".into(), cur: 3 };
+        a.input = Input::Bound { col: ECI - 1, min: true, text: "200".into(), cur: 3 };
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
         assert_eq!(status(&mut buf, Rect::new(0, 0, 60, 1), &a), Some(8 + 6 + 3), "the k is after the cursor");
         assert_eq!((0..18).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  Ctx ≥ 200k", "in thousands");

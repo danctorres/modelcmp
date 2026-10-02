@@ -21,7 +21,7 @@ commands and JSON.
 |-----|--------|
 | `j` `k` | move the cursor: a faint grey fill between two bars `▌` `▐` in the accent colour, on which the row keeps its colours; the same in dropdowns and lists, on a model's column in compare and on a name in recommend. A count repeats, as in `3j`; past the last row back to the first. The arrow keys work as `h` `j` `k` `l`, `PgDn` `PgUp` move a page, `Home` `End` go to the top / bottom |
 | `h` `l` | pick a column, scrolling the ones right of Dev; `‹` `›` mark columns off screen, `▲` `▼` on the left border rows above or below; in compare and recommend, pick a model for `o` `x` `y` `f` `e` `n` (and `space` in recommend), with the same marks for models off screen |
-| `0` `_` `$` `w` `b` | first / last column; next / previous group: names, prices, benchmarks, speed (Artificial Analysis), Via; in compare and recommend, `0` `_` `$` pick the first / last model |
+| `0` `_` `$` `w` `b` | first / last column; next / previous group: names and release, prices, benchmarks, speed (Artificial Analysis), Via; in compare and recommend, `0` `_` `$` pick the first / last model |
 | `gg` `G` `3gg` | top / bottom / row 3; a number before `gg` goes to that row, as `12gg` to row 12, in dropdowns and lists too |
 | `(` `)` `^u` `^d` | half a page up / down, stopping at the first / last row as `PgUp` `PgDn` and the wheel do; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
 | `v` | highlight a range of rows: move to extend it, then `space` `e` or `C` act on all of it (`C` compares just the range); `v` again or `esc` cancels |

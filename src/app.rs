@@ -110,9 +110,15 @@ fn month(v: f64) -> String {
     }
 }
 
-/// Prices from the offer you'd pay, context and release, then the source's overall index, the
-/// task scores and Code/$, then speed when Artificial Analysis measures it.
+/// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
+/// index, the task scores and Code/$, then speed when Artificial Analysis measures it.
 pub const COLS: [Col; 13] = [
+    Col {
+        ranked: false,
+        show: month,
+        read: release_bound,
+        ..col("Released", "release", "release date, year and month", released)
+    },
     Col {
         lower_better: true,
         show: money,
@@ -141,12 +147,6 @@ pub const COLS: [Col; 13] = [
         show: |v| ctx((v * 1000.0) as u64),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    Col {
-        ranked: false,
-        show: month,
-        read: release_bound,
-        ..col("Released", "release", "release date, year and month", released)
-    },
     // Named by the source in use: `Col::text`.
     col("", "eci", "", |m| m.eci),
     col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
@@ -169,7 +169,7 @@ pub const COLS: [Col; 13] = [
 /// Text columns before the numbers: 0 is the model name, 1 its developer. `VIA` follows them.
 pub const TEXT: usize = 2;
 /// Column index of the blended price, the frontier's sort.
-pub const PRICE: usize = TEXT;
+pub const PRICE: usize = TEXT + 1;
 /// The sort the table starts with, and that `c` and leaving a task go back to: the source's
 /// index (ECI or AAII), best first. The cursor starts on that column too.
 const DEFAULT_SORT: (usize, bool) = (ECI, true);
@@ -177,7 +177,7 @@ const DEFAULT_SORT: (usize, bool) = (ECI, true);
 pub const ECI: usize = TEXT + 6;
 /// Column index of Tok/s.
 pub const SPEED: usize = TEXT + 11;
-/// First column of each group: names, price and context, benchmarks, speed, your own.
+/// First column of each group: names and release, price and context, benchmarks, speed, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, SPEED, VIA];
 /// Column index of where you have access.
 pub const VIA: usize = TEXT + COLS.len();
@@ -1809,8 +1809,8 @@ impl App {
                 // An empty cell, as Notes, has nothing to open.
                 self.val(self.rows[n], col)?;
                 let m = self.current()?;
-                // The groups of `GROUPS` and where each comes from: prices and context, benchmarks,
-                // then speed, which only Artificial Analysis measures.
+                // The groups of `GROUPS` and where each comes from: the release, prices and context,
+                // benchmarks, then speed, which only Artificial Analysis measures.
                 let (site, page) = if col < ECI {
                     ("models.dev", m.price_page())
                 } else {
@@ -2640,7 +2640,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
-        press(&mut a, "ld");
+        press(&mut a, "lld");
         assert_eq!(menu(&a), [("any", 2), ("free", 0), ("≤$0.5", 0), ("≤$2", 1), ("≤$5", 1), ("≤$15", 2)]);
         press(&mut a, "jjj");
         code(&mut a, KeyCode::Enter);
@@ -2952,7 +2952,7 @@ mod tests {
         assert_eq!(keys(&a), ["opus5", "gpt55", "mini"], "by developer, names breaking ties");
         press(&mut a, "s");
         assert_eq!(keys(&a), ["mini", "gpt55", "opus5"]);
-        press(&mut a, "ls");
+        press(&mut a, "lls");
         assert_eq!(numeric(a.col).unwrap().name, "Price");
         assert!(!a.descending, "prices cheapest first");
         assert_eq!(keys(&a), ["mini", "opus5", "gpt55"]);
