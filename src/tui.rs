@@ -1204,7 +1204,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        overlay(buf, body, &title, lines, &mut app.scroll, ACCENT);
+        overlay(buf, body, &title, lines, &mut app.scroll, ACCENT, ACCENT);
     }
     // `q` and `u` ask first: the same box, confirmed by the same key again.
     let ask = match app.input {
@@ -1215,7 +1215,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some((key, title)) = ask {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0, ACCENT);
+        overlay(buf, body, &title, lines, &mut 0, ACCENT, ACCENT);
     }
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, items, list, .. }) = (chooser, &mut app.input) {
@@ -1227,9 +1227,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         // that would scroll the cursor's line off.
         let from = if *sel + 1 >= rows { lines.len().saturating_sub(shown) } else { *top };
         let mut scroll = list_top(from, *sel, shown) as u16;
-        // Under the wordmark, which has the accent, the box takes the keys' colour.
-        let color = if splash.is_some() { KEY } else { ACCENT };
-        let (above, below) = overlay(buf, within, title, lines, &mut scroll, color);
+        // Under the wordmark, which has the accent, the box is the table's frame: muted, with
+        // the question in the text's colour.
+        let (color, border) = if splash.is_some() { (Color::Reset, MUTED) } else { (ACCENT, ACCENT) };
+        let (above, below) = overlay(buf, within, title, lines, &mut scroll, color, border);
         *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
@@ -1950,11 +1951,21 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // Where `/` looks: all of the label, or in `f`'s list up to the end of the task.
             let key = crate::app::searched(&items[k]);
             let hits = |s: &str| found(&s[..s.find(key).map_or(0, |i| i + key.len())], query);
-            // f's tasks in their colours, harnesses and sites in theirs.
+            // f's tasks in their colours, harnesses, sites and themes in theirs.
             let color = match effect {
                 Effect::Fav(_, t, _) => task_color(t),
                 _ => dev_color(label.split(' ').next().unwrap_or_default()),
             };
+            // A source's name in the text's colour and what it takes muted: the colour its name
+            // gives is the box's own or the wordmark's.
+            if let Effect::Source(src) = effect {
+                let (name, about) = label.split_at(label.len() - src.about().len());
+                let line = Line::from(vec![
+                    Span::styled(format!(" {name}"), Style::new().add_modifier(BOLD)),
+                    Span::styled(format!("{about} "), fg(MUTED)),
+                ]);
+                return lit(line, |s| found(s, query));
+            }
             // A ticked box in the mark's colour, as in the table and the dropdowns; the rest of
             // the label keeps the task's or the harness's own.
             let line = match label.strip_prefix('✓') {
@@ -2006,8 +2017,8 @@ fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
 
-/// A centred rounded box in `color` showing `lines` from `scroll` on, which is clamped to the
-/// content. Returns whether lines are scrolled off above and below.
+/// A centred rounded box in `border`, its title in `color`, showing `lines` from `scroll` on,
+/// which is clamped to the content. Returns whether lines are scrolled off above and below.
 fn overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -2015,6 +2026,7 @@ fn overlay(
     lines: Vec<Line<'static>>,
     scroll: &mut u16,
     color: Color,
+    border: Color,
 ) -> (bool, bool) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
@@ -2028,7 +2040,7 @@ fn overlay(
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(fg(color))
+        .border_style(fg(border))
         .title_top(Line::from(format!(" {title} ")).style(fg(color).add_modifier(BOLD)))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     let inner = block.inner(rect);
@@ -3377,13 +3389,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT, ACCENT);
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, ACCENT);
         assert_eq!(scroll as usize, help("").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT);
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, ACCENT, ACCENT);
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         let a = app();
         let text: Vec<String> = detail(&a.data.models[0], &a.store).1.iter().map(ToString::to_string).collect();
