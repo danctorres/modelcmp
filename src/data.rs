@@ -711,8 +711,8 @@ fn table_ids(out: &str) -> Option<Vec<String>> {
 
 /// The `github-copilot/model` ids Copilot's CLI takes on your plan, asked of GitHub as it
 /// does, which has no command for it. With the tokens that takes from the environment,
-/// then the one `gh` stored: the first GitHub answers, as a token set for something else may
-/// not reach Copilot.
+/// then the one `gh` stored: the first GitHub answers with a model, as a token set for
+/// something else may not reach Copilot, or reach an account with none.
 fn copilot_ids(stop: &AtomicBool) -> Option<Vec<String>> {
     let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
     let host = env("COPILOT_GH_HOST").or_else(|| env("GH_HOST")).unwrap_or_else(|| "github.com".into());
@@ -722,10 +722,22 @@ fn copilot_ids(stop: &AtomicBool) -> Option<Vec<String>> {
     let tokens = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"].into_iter().filter_map(env).chain(gh);
     // All of them in the time any other harness has, however many GitHub leaves unanswered.
     let end = Instant::now() + Duration::from_secs(30);
-    tokens.take_while(|_| Instant::now() < end).find_map(|token| {
+    first_listing(tokens.take_while(|_| Instant::now() < end).filter_map(|token| {
         let host = host.clone();
         unless_stopped(stop, end, move || copilot_models(&host, token.trim()))
-    })
+    }))
+}
+
+/// The first answer with a model in it, else an empty one if there was any answer.
+fn first_listing(answers: impl Iterator<Item = Vec<String>>) -> Option<Vec<String>> {
+    let mut empty = None;
+    for a in answers {
+        if !a.is_empty() {
+            return Some(a);
+        }
+        empty = Some(a);
+    }
+    empty
 }
 
 /// Copilot's `models` answer for the account of `token`, from the API host GitHub names for
@@ -2151,6 +2163,10 @@ mod tests {
         let ids = ["github-copilot/gpt-5-mini", "github-copilot/claude-haiku-4.5"].map(String::from).to_vec();
         assert_eq!(copilot_enabled(&models), Some(ids), "enabled by a policy is not offered by the picker");
         assert_eq!(copilot_enabled(&serde_json::json!({"message": "Bad credentials"})), None, "not a listing");
+        // A token that answers with no model does not stop the next one from being asked.
+        let (none, some) = (vec![], vec!["github-copilot/gpt".to_string()]);
+        assert_eq!(first_listing([none.clone(), some.clone()].into_iter()), Some(some));
+        assert_eq!((first_listing([none.clone()].into_iter()), first_listing([].into_iter())), (Some(none), None));
     }
 
     #[test]
