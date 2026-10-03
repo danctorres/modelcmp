@@ -5,8 +5,8 @@ use crate::data::{Data, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::Store;
 use crate::view::{
-    LEVELS, NO_ACCESS, THEMES, by_value, ctx, custom_line, hits, in_reach, level_label, money, score, shown_via,
-    task_line, task_score, truncate,
+    LEVELS, NO_ACCESS, NO_SELECTED, THEMES, by_value, ctx, custom_line, hits, in_reach, level_label, money, score,
+    shown_via, task_line, task_score, truncate,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -733,6 +733,10 @@ pub struct App {
     /// draws them all.
     fronts: Vec<Front>,
     pub table: TableState,
+    /// How many marks are of models the data has: the ones `M`, `C` and `U` act on, as a
+    /// refresh or a source switch can drop a selected model while its mark stays. Set by
+    /// `rebuild`, so a frame does not scan every model for it.
+    pub marked_shown: usize,
     pub only_marked: bool,
     pub only_fav: bool,
     /// `E`: show excluded models only.
@@ -806,6 +810,7 @@ impl App {
             rows: vec![],
             fronts: vec![],
             table: TableState::default().with_selected(0),
+            marked_shown: 0,
             only_marked: false,
             only_fav: false,
             only_excluded: false,
@@ -889,8 +894,8 @@ impl App {
 
     /// Moves the cursor to the `n`th row below it whose model `hit` holds for, up for a negative
     /// `n`: as `step` does, a move stops at the last such row, and one that starts there wraps
-    /// around to the first. False when the cursor stays.
-    fn jump(&mut self, n: isize, hit: impl Fn(&Self, &Model) -> bool) -> bool {
+    /// around to the first. When the cursor stays, says no other `what` model is shown.
+    fn jump(&mut self, n: isize, what: &str, hit: impl Fn(&Self, &Model) -> bool) {
         let (cur, len, count) = (self.selected(), self.rows.len(), n.unsigned_abs());
         let holds = |r: &usize| hit(self, &self.data.models[self.rows[*r]]);
         let to = if n > 0 {
@@ -899,11 +904,11 @@ impl App {
             (0..cur).rev().filter(&holds).take(count).last().or_else(|| (0..len).rev().find(&holds))
         };
         match to {
-            Some(r) if r != cur => {
-                self.select(r);
-                true
+            Some(r) if r != cur => self.select(r),
+            _ => {
+                let other = if self.current().is_some_and(|m| hit(self, m)) { "other " } else { "" };
+                self.refuse(format!("no {other}{what} model is shown"));
             }
-            _ => false,
         }
     }
 
@@ -942,7 +947,7 @@ impl App {
     /// How many models the open overlay's sideways cursor moves over.
     fn across_len(&self) -> usize {
         match self.view {
-            View::Compare => self.marked_models().len(),
+            View::Compare => self.marked_shown,
             _ => match (self.cur_task(), self.custom_at()) {
                 (Some(t), _) => self.task_frontier(t).len(),
                 (None, Some(t)) => self.custom_line(t).len(),
@@ -1042,9 +1047,10 @@ impl App {
         self.store.marked.iter().filter_map(|k| self.data.models.iter().find(|m| m.key == *k)).collect()
     }
 
-    /// Whether any model is marked, so `M` has something to show.
+    /// Whether any model is marked, so `M` has something to show: a kept mark of a model the
+    /// data no longer has is none.
     pub fn any_marked(&self) -> bool {
-        !self.store.marked.is_empty()
+        self.marked_shown > 0
     }
 
     /// Whether the table row shows a ★, so `F` keeps it: `starred` without recommend's cursor,
@@ -1130,7 +1136,9 @@ impl App {
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
-        // Unmarking the last marked model leaves M (and unfavoriting the last, F) for every model rather than an empty table.
+        self.marked_shown = self.data.models.iter().filter(|m| self.store.is_marked(&m.key)).count();
+        // Unmarking the last marked model, or a refresh dropping it, leaves M (and unfavoriting
+        // the last, F) for every model rather than an empty table.
         self.only_marked &= self.any_marked();
         self.only_fav &= self.any_fav();
         self.only_excluded &= !self.store.excluded.is_empty();
@@ -1907,7 +1915,7 @@ impl App {
         // Compare shows none with fewer than 2 selected, and then has no current model to act on.
         let row = table
             || matches!(self.view, View::Detail | View::Recommend)
-            || (self.view == View::Compare && self.marked_models().len() >= 2);
+            || (self.view == View::Compare && self.marked_shown >= 2);
         // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
         let across = matches!(self.view, View::Compare | View::Recommend);
         match code {
@@ -1948,9 +1956,7 @@ impl App {
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the Dev, Price and Via columns"),
-            KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => {
-                self.refuse("no selected models: space selects the one under the cursor");
-            }
+            KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => self.refuse(NO_SELECTED),
             KeyCode::Char('M') if table => {
                 self.only_marked = !self.only_marked;
                 self.rebuild();
@@ -1969,35 +1975,24 @@ impl App {
                 self.only_excluded = !self.only_excluded;
                 self.rebuild();
             }
+            KeyCode::Char(']' | '[') if table && !self.any_marked() => self.refuse(NO_SELECTED),
             KeyCode::Char(c @ (']' | '[')) if table => {
-                if !self.jump(if c == ']' { n } else { -n }, |a, m| a.store.is_marked(&m.key)) {
-                    self.refuse(if self.current().is_some_and(|m| self.store.is_marked(&m.key)) {
-                        "no other selected model is shown"
-                    } else if self.any_marked() {
-                        "no selected model is shown"
-                    } else {
-                        "no selected models: space selects the one under the cursor"
-                    });
-                }
+                self.jump(if c == ']' { n } else { -n }, "selected", |a, m| a.store.is_marked(&m.key));
             }
+            KeyCode::Char('}' | '{') if table && self.no_access() => self.refuse(NO_ACCESS),
             KeyCode::Char(c @ ('}' | '{')) if table => {
-                if self.no_access() {
-                    self.refuse(NO_ACCESS);
-                } else if !self.jump(if c == '}' { n } else { -n }, |a, m| a.accessible(m)) {
-                    self.refuse(if self.current().is_some_and(|m| self.accessible(m)) {
-                        "no other available model is shown"
-                    } else {
-                        "no available model is shown"
-                    });
-                }
+                self.jump(if c == '}' { n } else { -n }, "available", |a, m| a.accessible(m));
             }
-            KeyCode::Char('U') if table && self.store.marked.is_empty() => {
-                self.refuse("no selected models: space selects the one under the cursor");
-            }
+            KeyCode::Char('U') if table && !self.any_marked() => self.refuse(NO_SELECTED),
+            // A mark of a model the data no longer has goes too, else nothing in the TUI clears it.
             KeyCode::Char('U') if table => {
-                let n = std::mem::take(&mut self.store.marked).len();
+                let n = self.marked_shown;
+                let gone = std::mem::take(&mut self.store.marked).len() - n;
                 self.rebuild_in_place();
-                self.status = format!("deselected {n}");
+                self.status = match gone {
+                    0 => format!("deselected {n}"),
+                    _ => format!("deselected {n}, and {gone} no longer listed"),
+                };
                 return Some(Effect::Save);
             }
             KeyCode::Char('c') if table => {
@@ -3595,6 +3590,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, "mini"), "esc lands on it");
         a.store.marked = vec!["gpt55".into(), "mini".into()];
+        a.rebuild();
         press(&mut a, "Cl");
         assert_eq!(a.selected(), row(&a, "mini"), "compare's too");
         press(&mut a, "h");
@@ -3672,7 +3668,7 @@ mod tests {
             "unmarking every marked model leaves M for every model"
         );
         press(&mut a, "U");
-        assert_eq!(a.status, "no selected models: space selects the one under the cursor");
+        assert_eq!(a.status, NO_SELECTED);
         press(&mut a, "gg j M");
         assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
         assert_eq!((a.store.marked.len(), a.only_marked, a.rows.len()), (0, false, 3), "U unmarks all and leaves M");
@@ -3681,8 +3677,26 @@ mod tests {
     #[test]
     fn brackets_jump_between_selected_models() {
         let mut a = app();
-        press(&mut a, "]");
-        assert_eq!(a.status, "no selected models: space selects the one under the cursor");
+        a.store.toggle_marked("gone");
+        a.rebuild();
+        for k in ["]", "M", "U"] {
+            press(&mut a, k);
+            assert_eq!(a.status, NO_SELECTED, "{k}: a model gone is none");
+        }
+        a.store.toggle_marked("opus5");
+        a.rebuild();
+        assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U clears the gone model's mark too");
+        assert_eq!((a.store.marked.len(), a.status.as_str()), (0, "deselected 1, and 1 no longer listed"));
+        a.store.toggle_marked("opus5");
+        a.store.toggle_marked("gpt55");
+        a.rebuild();
+        press(&mut a, "M");
+        a.data.models.retain(|m| m.key != "gpt55");
+        a.rebuild();
+        assert!(a.only_marked, "a refresh that drops one selected model keeps M");
+        press(&mut a, "gg ");
+        assert!(!a.only_marked, "unmarking the last one shown leaves M though a gone one's mark stays");
+        a = app();
         press(&mut a, "a");
         assert_eq!(keys(&a), ["gpt55", "mini", "llama4", "opus5"]);
         for k in ["gpt55", "llama4", "opus5"] {
@@ -3738,10 +3752,7 @@ mod tests {
     fn esc_backs_out_of_views_and_toggles_close_what_they_open() {
         let mut a = app();
         press(&mut a, "M");
-        assert_eq!(
-            (a.only_marked, a.status.as_str()),
-            (false, "no selected models: space selects the one under the cursor")
-        );
+        assert_eq!((a.only_marked, a.status.as_str()), (false, NO_SELECTED));
         press(&mut a, " M/x");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);

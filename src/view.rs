@@ -554,6 +554,9 @@ pub const OUT_OF_REACH: &str = "not available";
 /// Said with access to no model, when every model is shown instead.
 pub const NO_ACCESS: &str = "no harness models or provider API keys found, showing all models";
 
+/// Said by a key that acts on the selected models when none is.
+pub const NO_SELECTED: &str = "no selected models: space selects the one under the cursor";
+
 /// Whether `m` is one to use: any with `all`, else the ones you have access to, or every model
 /// when you have access to none (`any` is whether you have access to one).
 pub fn in_reach(m: &Model, all: bool, any: bool) -> bool {

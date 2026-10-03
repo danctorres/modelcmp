@@ -790,7 +790,7 @@ fn hints(app: &App) -> Vec<&'static str> {
                 view.push("d dropdown");
             }
             view.push("R recommend");
-            if app.marked_models().len() >= 2 {
+            if app.marked_shown >= 2 {
                 view.push("C compare");
             }
             if app.only_marked {
@@ -842,7 +842,7 @@ fn hints(app: &App) -> Vec<&'static str> {
         View::Detail => vec![vec!["j k scroll"], actions("x o y space f e n"), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
         View::Help => vec![vec!["j k scroll"], vec!["/ search"], vec!["esc back", "q quit"]],
-        View::Compare if app.marked_models().len() < 2 => vec![BACK.to_vec()],
+        View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
         View::Compare => {
             vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("x o y f e n"), BACK.to_vec()]
         }
@@ -1173,9 +1173,9 @@ fn draw(app: &mut App, f: &mut Frame) {
             Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(130))))
         }
         View::Detail => app.current().map(|m| detail(m, &app.store)),
-        View::Compare if app.marked_models().len() < 2 => {
+        View::Compare if app.marked_shown < 2 => {
             let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
-            let n = app.marked_models().len();
+            let n = app.marked_shown;
             let lines = vec![
                 Line::from(format!("compare needs 2 or more selected models, {n} now")),
                 Line::from(""),
@@ -1731,8 +1731,9 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     if stale(app) {
         parts.push(part(data_age(&app.data), BAD));
     }
+    // The marks of models the data has, as M, C and U count them.
     if app.any_marked() {
-        let n = app.store.marked.len();
+        let n = app.marked_shown;
         parts.push(part(format!("{n} selected{}", if app.only_marked { " only" } else { "" }), MARK));
     }
     if app.only_fav {
@@ -3161,6 +3162,12 @@ mod tests {
         assert!(layout(46, &a).more, "columns cut off on the right");
         assert!(!layout(400, &a).more, "all columns fit");
         assert_eq!(layout(400, &a).first, 0, "a window made wide again shows the columns scrolled off on the left");
+        for w in 46..400 {
+            let l = layout(w, &a);
+            assert!(l.name_w == NAME_MIN || !l.more, "names are cut only so every column fits: {w}");
+        }
+        let l = layout(400, &a);
+        assert_eq!(l.cols[0].1, l.name_x + l.name_w + GAP + l.dev_w + GAP, "Released a gap after Dev, as in a group");
         // Rows above or below the window are reported for the frame's ▲ ▼.
         for w in 46..400 {
             let l = layout(w, &a);
