@@ -1605,10 +1605,19 @@ impl App {
         } else if self.view == View::Table {
             self.select(go(self.selected(), self.rows.len()));
         } else if self.view == View::Recommend {
-            (self.task_cur, self.task_sel) = (go(self.task_cur, self.task_count()), 0);
+            let t = go(self.task_cur, self.task_count());
+            self.task_to(t);
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
         }
+    }
+
+    /// Recommend's cursor to task `t`. On a model it stays on one: the same stop of that line,
+    /// or its last. Past the end of a line emptied it is on the name, and stays there.
+    fn task_to(&mut self, t: usize) {
+        let sel = self.task_sel.min(self.across_len() - 1);
+        self.task_cur = t;
+        self.task_sel = sel.min(self.across_len() - 1);
     }
 
     fn go_to(&mut self, row: usize) {
@@ -1617,7 +1626,7 @@ impl App {
         } else if self.view == View::Table {
             self.select(row);
         } else if self.view == View::Recommend {
-            (self.task_cur, self.task_sel) = (row.min(self.task_count() - 1), 0);
+            self.task_to(row.min(self.task_count() - 1));
         } else {
             self.scroll = row.min(u16::MAX as usize) as u16;
         }
@@ -3543,7 +3552,7 @@ mod tests {
         a.store.toggle_favorite("tool-dispatch", &on);
         a.store.toggle_favorite("tool-dispatch:low", "mini");
         a.rebuild();
-        press(&mut a, "Gl");
+        press(&mut a, "G0l");
         assert_eq!((&a.view, a.current().map(|m| m.key.as_str())), (&View::Recommend, Some("mini")));
         press(&mut a, "l");
         assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "h l move along its line");
@@ -3663,6 +3672,16 @@ mod tests {
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Recommend, "mini"), "esc goes back");
         press(&mut a, "0$");
         assert_eq!(a.current().unwrap().key, "gpt55");
+        // j k stay on a model: the same stop of the next line, or its last.
+        a.store.toggle_favorite(TASKS[2].name, "mini");
+        a.rebuild();
+        press(&mut a, "j");
+        assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (2, "mini"), "the last of a shorter line");
+        press(&mut a, "k");
+        assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "mini"), "the same stop going back");
+        a.store.toggle_favorite(TASKS[2].name, "mini");
+        a.rebuild();
+        press(&mut a, "$");
         press(&mut a, "oG");
         assert_eq!(
             code(&mut a, KeyCode::Enter),
@@ -3675,8 +3694,8 @@ mod tests {
         assert_eq!(press(&mut a, "e"), Some(Effect::Save));
         assert!(a.current().is_none(), "an emptied line leaves the cursor on the name");
         assert!(press(&mut a, "o").is_none() && a.failed, "where the row keys say so");
-        press(&mut a, "$j");
-        assert_eq!((a.task_cur, a.task_sel), (2, 0), "j k move between tasks and land on the name");
+        press(&mut a, "j");
+        assert_eq!((a.task_cur, a.task_sel), (2, 0), "from the name of a line emptied, j k land on the name");
         press(&mut a, "k$RR");
         assert_eq!(a.task_sel, 0, "so does reopening");
     }

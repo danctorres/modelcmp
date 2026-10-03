@@ -36,7 +36,6 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-/// A refresh under way: where its result comes, and its steps for the frame's count.
 /// What a refresh sends: the data before its slow harnesses, when it has any to wait for, then
 /// its outcome.
 enum Refreshed {
@@ -44,6 +43,7 @@ enum Refreshed {
     Done(Result<Data, data::Failure>),
 }
 
+/// A refresh under way: where its result comes, and its steps for the frame's count.
 type Refresh = (Receiver<Refreshed>, data::Steps);
 
 /// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
