@@ -780,6 +780,9 @@ pub struct App {
     /// `task_sel - 1` on its line; past the end of an emptied line it is on the name too.
     pub task_cur: usize,
     pub task_sel: usize,
+    /// The stop `task_to` wants when a shorter line gave less; none once the cursor is moved
+    /// any other way, which then says where it is wanted.
+    task_wanted: Option<usize>,
     pub query: String,
     /// The query matched nothing as typed, so it is matched allowing a typo per word.
     pub typos: bool,
@@ -864,6 +867,7 @@ impl App {
             task: None,
             task_cur: 0,
             task_sel: 0,
+            task_wanted: None,
             query: String::new(),
             typos: false,
             rows: vec![],
@@ -1045,7 +1049,11 @@ impl App {
 
     /// The sideways model cursor of the open overlay: compare's, else recommend's.
     fn across_sel(&mut self) -> &mut usize {
-        if self.view == View::Compare { &mut self.compare_sel } else { &mut self.task_sel }
+        if self.view == View::Compare {
+            return &mut self.compare_sel;
+        }
+        self.task_wanted = None;
+        &mut self.task_sel
     }
 
     /// Rows of the visual range, in order.
@@ -1622,12 +1630,16 @@ impl App {
         }
     }
 
-    /// Recommend's cursor to task `t`. On a model it stays on one: the same stop of that line,
-    /// or its last. Past the end of a line emptied it is on the name, and stays there.
+    /// Recommend's cursor to task `t`. On a model it stays on one: the stop it was last moved
+    /// to sideways, or the line's last, so a shorter line on the way does not take it. Past the
+    /// end of a line emptied it is on the name, and stays there.
     fn task_to(&mut self, t: usize) {
         let sel = self.task_sel.min(self.across_len() - 1);
+        // Not one a line that lost models under the cursor no longer reaches.
+        let wanted = self.task_wanted.filter(|_| sel == self.task_sel).unwrap_or(sel);
         self.task_cur = t;
-        self.task_sel = sel.min(self.across_len() - 1);
+        self.task_sel = wanted.min(self.across_len() - 1);
+        self.task_wanted = Some(wanted);
     }
 
     fn go_to(&mut self, row: usize) {
@@ -1850,7 +1862,9 @@ impl App {
         if let (Input::None, Mouse::Model(s) | Mouse::Open(s) | Mouse::MarkModel(s)) = (&self.input, m) {
             match (s, &self.view) {
                 (Stop::Compare(i), View::Compare) => self.compare_sel = i,
-                (Stop::Recommend(t, i), View::Recommend) => (self.task_cur, self.task_sel) = (t, i),
+                (Stop::Recommend(t, i), View::Recommend) => {
+                    (self.task_cur, self.task_sel, self.task_wanted) = (t, i, None);
+                }
                 _ => return None,
             }
             // Compare leaves out `space`: it would drop the model from the view.
@@ -2149,7 +2163,7 @@ impl App {
             }
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
-                self.task_sel = 0;
+                (self.task_sel, self.task_wanted) = (0, None);
             }
             KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y' | ' ') if self.view == View::Recommend && !row => {
                 self.refuse("the cursor is on a task: l picks a model");
@@ -3682,13 +3696,16 @@ mod tests {
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Recommend, "mini"), "esc goes back");
         press(&mut a, "0$");
         assert_eq!(a.current().unwrap().key, "gpt55");
-        // j k stay on a model: the same stop of the next line, or its last.
+        // j k stay on a model: the same stop of the next line, or its last, which does not
+        // become the stop wanted.
         a.store.toggle_favorite(TASKS[2].name, "mini");
         a.rebuild();
         press(&mut a, "j");
         assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (2, "mini"), "the last of a shorter line");
         press(&mut a, "k");
-        assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "mini"), "the same stop going back");
+        assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "gpt55"), "the stop it left going back");
+        press(&mut a, "j0lk");
+        assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "mini"), "unless moved sideways since");
         a.store.toggle_favorite(TASKS[2].name, "mini");
         a.rebuild();
         press(&mut a, "$");
