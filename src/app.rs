@@ -1604,9 +1604,10 @@ impl App {
         in_reach(m, self.all, self.any_available)
     }
 
-    /// Whether access to no model was found, so every model shows; not so before the data is in.
+    /// Whether access to no model was found, so every model shows; not so before the data is
+    /// in, nor while a harness with no listing yet is still asked for its models.
     pub fn no_access(&self) -> bool {
-        !self.data.models.is_empty() && !self.any_available
+        !self.data.models.is_empty() && !self.any_available && !self.data.listing
     }
 
     /// Whether `m` is drawn muted: excluded, or one you have no access to.
@@ -4312,6 +4313,9 @@ mod tests {
         a.any_available = false;
         press(&mut a, "}");
         assert_eq!(a.status, NO_ACCESS, "as a says with access to no model");
+        // A refresh's early data, a harness yet to list its models: too soon to say so.
+        a.data.listing = true;
+        assert!(!a.no_access());
     }
 
     #[test]

@@ -499,6 +499,10 @@ pub struct Data {
     /// What went wrong in a refresh that still gave data, for the caller to show.
     #[serde(skip)]
     pub warning: Option<String>,
+    /// A harness still asked for its models has no listing, not even the cache's: a refresh's
+    /// early data, too soon to say that there is access to no model.
+    #[serde(skip)]
+    pub listing: bool,
 }
 
 impl Data {
@@ -924,6 +928,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         // whether or not the last refresh kept it: its marks do not go to come back.
         let mut shown = was.harness(true);
         first.harness.extend(awaited.iter().filter_map(|h| Some((h.to_string(), shown.remove(*h)?))));
+        first.listing = awaited.iter().any(|h| !first.harness.contains_key(*h));
         first.apply_available();
         early(first);
     }
