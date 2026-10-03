@@ -1680,11 +1680,15 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             cursor_ends(buf, area.x - 1, area.right(), y);
         }
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
+        // Off, a mark is its own glyph in grey, as the ☆ is the ★'s, so it says what a click on
+        // it does. Where colours are off (the reverse-video cursor, a solid fill) a grey one
+        // would read as on, so there off is a shape of its own.
+        let (unmarked, included) = if faint { ("✓", "✗") } else { ("☐", "·") };
         match marked {
             // Bold as well as blue: on a solid fill, which keeps colours off, that is all the
             // mark has left to show itself with.
             true => buf.set_stringn(box_x, y, "✓", 1, tint(MARK).add_modifier(BOLD)),
-            false => buf.set_stringn(box_x, y, "☐", 1, tint(MUTED)),
+            false => buf.set_stringn(box_x, y, unmarked, 1, tint(MUTED)),
         };
         if app.starred(&m.key) {
             // In the colour of the task at hand, as its name in recommend; gold with no task, as the ★
@@ -1739,7 +1743,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         if excluded {
             buf.set_stringn(ex_x, y, "✗ ", gap(ex_x), tint(BAD).add_modifier(BOLD));
         } else {
-            buf.set_stringn(ex_x, y, "·", 1, tint(MUTED));
+            buf.set_stringn(ex_x, y, included, 1, tint(MUTED));
         }
         for &x in &seps {
             buf.set_stringn(area.x + x, y, "│", 1, tint(MUTED));
@@ -3164,6 +3168,13 @@ mod tests {
         assert_eq!(buf[(0, 3)].fg, MUTED, "row numbers are muted");
         assert_eq!(buf[(cell(&lines[3], "flash"), 3)].fg, Color::Reset, "names are plain text");
         assert_eq!(buf[(cell(&lines[3], "☆"), 3)].fg, MUTED, "the empty ☆ is muted");
+        // Where colours show, an off mark is its own glyph in grey, as the ☆.
+        a.term_bg = Some(0);
+        let (buf, lines) = render(&mut a, 200, 6);
+        assert_eq!(&words(&lines[3])[..4], ["2", "✓", "☆", "✗"]);
+        assert_eq!([buf[(cell(&lines[3], "✓"), 3)].fg, buf[(cell(&lines[3], "✗"), 3)].fg], [MUTED, MUTED]);
+        a.term_bg = None;
+        let (buf, lines) = render(&mut a, 200, 6);
         assert_eq!(buf[(lines[3].find("google").unwrap() as u16, 3)].fg, dev_color("google"));
         // Screen column of a byte offset: `▾` takes several bytes.
         let x = |i: usize| lines[3][..i].chars().count() as u16;
