@@ -597,14 +597,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let head = head(app);
     // A tab on the first two lines, or the edge left of it, over recommend too.
     let on_tabs = m.row <= area.y + 1 && !mark && !pick && !extend;
-    let mut end = 1;
-    let tab = TABS
-        .iter()
-        .position(|&(name, ..)| {
-            end += tab_width(name) as u16;
-            on_tabs && (1..end).contains(&m.column)
-        })
-        .map(Mouse::Tab);
+    let tab = tab_ends().position(|end| on_tabs && (1..end).contains(&usize::from(m.column))).map(Mouse::Tab);
     // An open list first: a click on an entry acts on it, on its frame nothing, and any click
     // outside closes it.
     let list = match &app.input {
@@ -905,9 +898,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
     // drops last. Off the table only the panels', whose keys work there. `? help` goes after
     // the way back, so it is the last to go.
-    let (mut end, mut cut, last) = (1, vec![], groups.len() - 1);
-    for (i, &(name, _, hint)) in TABS.iter().enumerate() {
-        end += tab_width(name);
+    let (mut cut, last) = (vec![], groups.len() - 1);
+    for (i, (&(_, _, hint), end)) in TABS.iter().zip(tab_ends()).enumerate() {
         if end >= usize::from(width)
             && (app.view == View::Table || i >= RECOMMEND)
             && app.tab_has(i)
@@ -1030,6 +1022,15 @@ fn tab_color(i: usize) -> Color {
 /// The cells a tab takes: its left edge, then its name and its key with a space around each.
 fn tab_width(name: &str) -> usize {
     name.chars().count() + 5
+}
+
+/// Where each tab ends, in cells from the screen's left edge, the first starting one cell in:
+/// for the clicks and for the hints of the tabs cut off, which `tabs` draws `tab_width` apart.
+fn tab_ends() -> impl Iterator<Item = usize> {
+    TABS.iter().scan(1, |end, t| {
+        *end += tab_width(t.0);
+        Some(*end)
+    })
 }
 
 /// The tabs on the two lines above `frame`, as a browser's: one that is on is inside a frame of
@@ -3505,11 +3506,7 @@ mod tests {
     fn narrow_table_drops_columns_and_hints_without_panicking() {
         let mut a = app();
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(
-            words(&lines[0]),
-            ["#", "Model", "Dev", "▾", "‹│", "▼ECI"],
-            "the cursor starts on the index"
-        );
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "▼ECI"], "the cursor starts on the index");
         assert!(layout(46, &a).more, "columns cut off on the right");
         assert!(!layout(400, &a).more, "all columns fit");
         assert_eq!(layout(400, &a).first, 0, "a window made wide again shows the columns scrolled off on the left");
