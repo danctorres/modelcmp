@@ -2255,10 +2255,13 @@ fn list_top(top: usize, sel: usize, shown: usize) -> usize {
 }
 
 /// An open chooser's lines and the area its box is centred in, for `draw` and `hit` alike: the
-/// screen above the status bar, or on the first start the rows under the wordmark (`splash`).
+/// frame between the tabs and the status bar, or on the first start the rows under the wordmark
+/// (`splash`). A terminal too short for a box there has it over the tabs.
 fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
     let Input::Choose { kind, items, list, .. } = &app.input else { return None };
-    let within = splash(app, area).map_or(Rect { height: area.height - 1, ..area }, |s| s.1);
+    let tabs = if area.height < 6 { 0 } else { 2 };
+    let body = Rect { y: area.y + tabs, height: area.height - 1 - tabs, ..area };
+    let within = splash(app, area).map_or(body, |s| s.1);
     Some((within, choice_lines(*kind, items, list, app.first_start, edit_room(within))))
 }
 
@@ -3815,6 +3818,8 @@ mod tests {
         let buf = term.backend().buffer();
         let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.bg == CURSOR);
         assert_eq!(below.map(|c| c.fg), Some(ACCENT), "themes below the cursor");
+        let tabs: String = (0..2).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
+        assert!(tabs.contains("yours") && !tabs.contains('╮'), "a list too tall leaves the tabs in view: {tabs}");
         for _ in 9..THEMES.len() {
             a.key(KeyCode::Char('j').into());
         }
@@ -3868,9 +3873,9 @@ mod tests {
         a.key(KeyCode::Char('t').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         let buf = term.backend().buffer();
-        // The overlay's top-left corner, right of the frame's and the first tab's; the cursor is
+        // The overlay's top-left corner, under the tabs and right of the frame's; the cursor is
         // on the row under it, the first entry.
-        let (x, y) = (0..10).flat_map(|y| (2..100).map(move |x| (x, y))).find(|&p| buf[p].symbol() == "╭").unwrap();
+        let (x, y) = (2..10).flat_map(|y| (2..100).map(move |x| (x, y))).find(|&p| buf[p].symbol() == "╭").unwrap();
         assert!(on(&term, x, y + 1) && buf[(x, y + 1)].symbol() == "▌", "and the choice list's");
         // With the terminal's own colours and its background unknown, a reverse-video bar with
         // colours off it; a pill in the accent stays one.
