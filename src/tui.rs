@@ -8,8 +8,8 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, Input, Kind, List, MARKED, Mouse, NCOLS, NOTES, PRICE,
-    RECOMMEND, Stop, TABS, VIA, View, What, choice_rows, has_menu, hidden, menu_rows, on_price, shown,
+    App, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse, NCOLS,
+    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, choice_rows, has_menu, hidden, menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -846,8 +846,8 @@ const SEP: &str = "│";
 const ACTIONS: [&str; 8] =
     ["enter details", "x launch", "o open", "y copy name", "space select", "f fav", "e exclude", "n note"];
 
-/// The last group of every overlay: `? help` is the last hint a narrow terminal drops.
-const BACK: [&str; 3] = ["esc back", "q quit", "? help"];
+/// The last group of every overlay, the last hints a narrow terminal drops.
+const BACK: [&str; 2] = ["esc back", "q quit"];
 
 /// The model actions a view offers, in `ACTIONS` order whatever order they are asked in.
 fn actions(keys: &str) -> Vec<&'static str> {
@@ -855,15 +855,15 @@ fn actions(keys: &str) -> Vec<&'static str> {
 }
 
 /// Key reminders in the status bar, in groups every view keeps in the same order: moving,
-/// the view's own keys, the model's actions, then the way back and help. Narrow terminals
-/// drop them from the front, so the actions outlast the view's keys and `? help` goes last.
+/// the view's own keys, the model's actions, then the way back. Narrow terminals
+/// drop them from the front, so the actions outlast the view's keys and the way back goes last.
 /// A toggle names what pressing it does; `A a S F E R C t ?` are on their tabs above the frame, and
 /// one cut off a terminal `width` wide is here instead; the rest of the keys are in `?`. `s` acts
 /// on the column picked with `h l`.
 fn hints(app: &App, width: u16) -> Vec<&'static str> {
     let groups: Vec<Vec<&'static str>> = match app.view {
         View::Table if app.selecting() => {
-            vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit", "? help"]]
+            vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
         View::Table => {
             let mut view = vec!["/ filter", "s sort"];
@@ -892,7 +892,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if !app.query.is_empty() || app.only.is_some() || app.task.is_some() {
                 back.push("esc back");
             }
-            back.extend(["q quit", "? help"]);
+            back.push("q quit");
             vec![vec!["h l column"], view, actions("enter x o y space f e n"), back]
         }
         View::Detail(_) => vec![vec!["j k scroll"], actions("x o y space f e n"), BACK.to_vec()],
@@ -911,8 +911,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
-    // drops last. Off the table only the panels', whose keys work there.
-    let (mut end, mut cut) = (1, vec![]);
+    // drops last. Off the table only the panels', whose keys work there. `? help` goes after
+    // the way back, so it is the last to go.
+    let (mut end, mut cut, last) = (1, vec![], groups.len() - 1);
     for (i, &(name, _, hint)) in TABS.iter().enumerate() {
         end += tab_width(name);
         if end >= usize::from(width)
@@ -921,11 +922,11 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             && !app.tab_on(i)
             && !groups.iter().any(|g| g.contains(&hint))
         {
-            cut.push(hint);
+            if i == HELP_TAB { groups[last].push(hint) } else { cut.push(hint) }
         }
     }
     if !cut.is_empty() {
-        groups.insert(groups.len() - 1, cut);
+        groups.insert(last, cut);
     }
     groups.join(&SEP)
 }
@@ -2080,7 +2081,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     }
     let parts = parts(app);
     // Key hints fill what the left side leaves free; whole hints drop from the front on
-    // narrow terminals, and `? help` is the last to go.
+    // narrow terminals, and the way back is the last to go.
     let (hints, start) = hint_layout(app, &parts, area.width);
     let limit = (area.x + start).saturating_sub(1);
     for (i, line) in parts.iter().enumerate() {
@@ -2702,7 +2703,7 @@ fn verdict_lines(models: &[&Model]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Back, ECI, HELP_TAB};
+    use crate::app::{Back, ECI};
     use crate::data::Offer;
     use ratatui::crossterm::event::KeyCode;
 
@@ -3145,7 +3146,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit  ? help"
+                "h l column  │  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -3205,7 +3206,8 @@ mod tests {
             (Some(KeyCode::Char('s')), Some(KeyCode::Esc), Some(KeyCode::Char(' ')), None)
         );
         let mut a = app();
-        let (w, h) = (200, 6);
+        // Too narrow for the help tab, so its hint is in the bar.
+        let (w, h) = (100, 6);
         let (_, lines) = render(&mut a, w, h);
         let bar = &lines[h as usize - 1];
         let x = bar[..bar.find("? help").unwrap()].chars().count() as u16;
@@ -3351,10 +3353,11 @@ mod tests {
             [10, 11, 19, 65, 79, 91, 101, 110].map(|x| hit(&a, area, MouseEvent { row: x % 2, ..click(x, 0) })),
             [Some(0), Some(1), Some(2), Some(5), Some(6), Some(7), Some(8), None].map(|i| i.map(Mouse::Tab))
         );
-        // Cut off a narrow terminal, a tab is a hint in the status bar instead.
-        let cut =
-            |w| hints(&a, w).into_iter().filter(|h| TABS[..HELP_TAB].iter().any(|t| t.2 == *h)).collect::<Vec<_>>();
-        assert_eq!((cut(102), cut(101), cut(79)), (vec![], vec!["t theme"], vec!["R recommend", "t theme"]));
+        // Cut off a narrow terminal, a tab is a hint in the status bar instead, help's the last.
+        let cut = |w| hints(&a, w).into_iter().filter(|h| TABS.iter().any(|t| t.2 == *h)).collect::<Vec<_>>();
+        assert_eq!((cut(111), cut(110), cut(102)), (vec![], vec!["? help"], vec!["? help"]));
+        assert_eq!((cut(101), cut(79)), (vec!["t theme", "? help"], vec!["R recommend", "t theme", "? help"]));
+        assert_eq!(hints(&a, 79).last(), Some(&"? help"));
         // Over the open theme list a click on a tab is that tab, and elsewhere outside the list.
         a.key(KeyCode::Char('t').into());
         assert_eq!(
