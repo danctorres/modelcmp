@@ -690,10 +690,14 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
         let cells = vals.iter().map(|v| v.map_or("-".into(), &fmt)).collect();
         Row { label: label.into(), cells, vals, ext, section: "" }
     }
-    // A list price, yours having none, after a `~` as in the table.
+    // A list price, yours having none, after a `~` as in the table, and as there neither the
+    // best nor the worst: it has no value to colour.
     let price = |label: &str, f: fn(&Offer) -> f64| {
-        let mut r = row(label, models.iter().map(|m| m.priced_offer().map(f)).collect(), money, false);
-        r.cells.iter_mut().zip(models).filter(|(_, m)| m.listed()).for_each(|(c, _)| c.insert(0, '~'));
+        let offers: Vec<_> = models.iter().map(|m| (m.priced_offer().map(f), m.listed())).collect();
+        let mut r = row(label, offers.iter().map(|&(v, listed)| v.filter(|_| !listed)).collect(), money, false);
+        for (c, v) in r.cells.iter_mut().zip(&offers).filter_map(|(c, &(v, listed))| Some((c, v.filter(|_| listed)?))) {
+            *c = format!("~{}", money(v));
+        }
         r
     };
     let mut rows = vec![
@@ -879,6 +883,14 @@ mod tests {
         assert_eq!((find("context").section, find("ECI").section), ("", "scores"));
         let same = compare_rows(&[&a, &a]);
         assert_eq!(same.iter().find(|r| r.label == "context").unwrap().ext, None, "equal values are not marked");
+        // A list price is neither the best nor the worst, as in the table.
+        let at = |p: f64| Offer { input: p, output: p, available: true, ..Default::default() };
+        let yours = |p: f64| Model { offers: vec![at(p)], ..Default::default() };
+        let unpriced = Offer { unpriced: true, ..at(0.0) };
+        let listed = Model { offers: vec![unpriced, Offer { available: false, ..at(1.0) }], ..Default::default() };
+        let rows = compare_rows(&[&yours(3.0), &yours(5.0), &listed]);
+        let price = rows.iter().find(|r| r.label == "$ in / 1M").unwrap();
+        assert_eq!((price.cells[2].as_str(), price.ext), ("~1.0", Some((3.0, 5.0))));
     }
 
     #[test]

@@ -2520,6 +2520,8 @@ fn compare(
         for (i, c) in r.cells.into_iter().enumerate().skip(first).take(shown) {
             let style = match r.ext.and_then(|e| Some((e, r.vals[i]?))) {
                 _ if muted[i] => fg(MUTED),
+                // A list price, as in the table: not one you'd pay.
+                _ if c.starts_with('~') => fg(MUTED).add_modifier(Modifier::ITALIC),
                 Some(((best, _), v)) if v == best => fg(GOOD).add_modifier(BOLD),
                 Some(((_, worst), v)) if v == worst => fg(BAD),
                 _ => Style::new(),
