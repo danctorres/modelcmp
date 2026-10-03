@@ -6,7 +6,7 @@ use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, TIERS, by_value, compare_rows, custom_line, custom_priced, detail_lines,
-    frontier_legend, pick, priced, shown_via, task_line, truncate, verdict, visible,
+    frontier_legend, pick, priced, shown_via, task_line, truncate, verdict, via, visible,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -192,9 +192,7 @@ fn table(models: &[&Model], store: &Store, any: bool) {
         } else {
             "  "
         };
-        let v = shown_via(m, any);
-        let via = if v.is_empty() { "-".into() } else { v.join(", ") };
-        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via);
+        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(m, any));
     }
 }
 
@@ -325,7 +323,7 @@ pub fn show(data: &Data, store: &Store, q: &str, json: bool) -> Result {
     if json {
         return print_json(&out(m, store, true));
     }
-    for line in detail_lines(m, store) {
+    for line in detail_lines(m, store, data.any_available()) {
         println!("{line}");
     }
     Ok(())
@@ -344,7 +342,7 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
         println!("  {q:<w0$}  {win:<w1$}  {margin}");
     }
     println!();
-    let table = compare_rows(&models);
+    let table = compare_rows(&models, data.any_available());
     // Artificial Analysis names its benchmarks at length.
     let lw = table.iter().map(|r| r.label.chars().count() + 1).max().unwrap_or(0).max(22);
     let mut section = "";

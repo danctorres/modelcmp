@@ -1597,6 +1597,11 @@ impl App {
         in_reach(m, false, self.any_available)
     }
 
+    /// Whether you have access to a model, as the data last set had it.
+    pub fn any_available(&self) -> bool {
+        self.any_available
+    }
+
     /// Via as the table shows it: the harnesses, or `OUT_OF_REACH` for one you have no access to.
     fn shown_via<'a>(&self, m: &'a Model) -> Vec<&'a str> {
         shown_via(m, self.any_available)

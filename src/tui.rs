@@ -1333,7 +1333,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             (lines, block) = recommend(app, (area.width as usize).saturating_sub(4).min(130), &mut spots);
             Some(("recommend".to_string(), lines))
         }
-        View::Detail(_) => app.current().map(|m| detail(m, &app.store)),
+        View::Detail(_) => app.current().map(|m| detail(m, &app.store, app.any_available())),
         View::Compare if app.marked_shown < 2 => {
             let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
             let n = app.marked_shown;
@@ -1350,8 +1350,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Compare => {
             let (lines, first) = compare(
                 &app.marked_models(),
-                app.compare_sel,
-                app.compare_x,
+                app.any_available(),
+                (app.compare_sel, app.compare_x),
                 area.width.saturating_sub(4) as usize,
                 &app.overlay_query,
                 |m| app.muted(m),
@@ -2529,9 +2529,9 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
 
 /// The model's name, the title, then every detail line, with `key:` labels and section headings
 /// coloured.
-fn detail(m: &Model, store: &Store) -> (String, Vec<Line<'static>>) {
+fn detail(m: &Model, store: &Store, any: bool) -> (String, Vec<Line<'static>>) {
     let is_label = |k: &str| k.len() < 16 && k.trim().chars().all(|c| c.is_alphabetic() || c == ' ');
-    let mut lines = detail_rows(m, store).into_iter();
+    let mut lines = detail_rows(m, store, any).into_iter();
     let title = lines.next().map(|r| r.1).unwrap_or_default();
     // A task's name in its colour, as its ★ in the table: on its fit line and after `favorite:`.
     let named = |t: &str| Span::styled(t.to_string(), fg(task_color(t)).add_modifier(BOLD));
@@ -2564,17 +2564,18 @@ fn detail(m: &Model, store: &Store) -> (String, Vec<Line<'static>>) {
 /// column is grey, its bests and worsts too, as its row in the table. When they do not all fit in
 /// `avail` cells, the view starts at model `first`, moved only as far as it takes to show the
 /// selection, and the `first` in effect comes back for `App::compare_x`. Each shown model's
-/// column, between its two bars and from the model row down, goes to `spots`.
+/// column, between its two bars and from the model row down, goes to `spots`. `any` is whether
+/// you have access to a model, for Via to read as in the table.
 fn compare(
     models: &[&Model],
-    sel: usize,
-    first: usize,
+    any: bool,
+    (sel, first): (usize, usize),
     avail: usize,
     query: &str,
     muted: impl Fn(&Model) -> bool,
     spots: &mut Vec<Spot>,
 ) -> (Vec<Line<'static>>, usize) {
-    let mut rows = compare_rows(models);
+    let mut rows = compare_rows(models, any);
     let muted: Vec<bool> = models.iter().map(|m| muted(m)).collect();
     // The model row is the header; `query` filters the rest, forgiving a typo when nothing matches.
     let mut typos = false;
@@ -3052,7 +3053,7 @@ mod tests {
         assert_eq!(buf[(cell(&lines[opus as usize], "★"), opus)].fg, STAR, "{lines:?}");
         a.term_bg = None;
         // In compare its column is muted.
-        let rows = compare(&a.marked_models(), 0, 0, 200, "", |m| a.muted(m), &mut vec![]).0;
+        let rows = compare(&a.marked_models(), a.any_available(), (0, 0), 200, "", |m| a.muted(m), &mut vec![]).0;
         let names = rows.iter().find(|l| l.to_string().starts_with("model ")).unwrap();
         let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
         assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
@@ -3656,7 +3657,7 @@ mod tests {
     fn compare_colours_every_tied_cell() {
         let mk = |n: &str, context| Model { name: n.into(), context, ..Default::default() };
         let (a, b, c) = (mk("a", 1_000_000), mk("b", 200_000), mk("c", 200_000));
-        let lines = compare(&[&a, &b, &c], 0, 0, 200, "", |_| false, &mut vec![]).0;
+        let lines = compare(&[&a, &b, &c], false, (0, 0), 200, "", |_| false, &mut vec![]).0;
         let ctx = lines.iter().find(|l| l.to_string().starts_with("context")).unwrap();
         let fgs: Vec<_> =
             ctx.spans.iter().filter(|s| s.content.trim().ends_with(['M', 'k'])).map(|s| s.style.fg).collect();
@@ -3669,22 +3670,22 @@ mod tests {
         let ms: Vec<&Model> =
             ["opus", "flash"].iter().map(|k| a.data.models.iter().find(|m| m.key == *k).unwrap()).collect();
         let row = |v: &Vec<Line>| v.iter().find(|l| l.to_string().starts_with("model ")).unwrap().to_string();
-        let (full, first) = compare(&ms, 1, 1, 200, "", |_| false, &mut vec![]);
+        let (full, first) = compare(&ms, false, (1, 1), 200, "", |_| false, &mut vec![]);
         assert!(row(&full).contains("opus") && row(&full).contains("flash"));
         assert_eq!(first, 0, "everything fits, so nothing scrolls off");
         assert!(!row(&full).contains('‹') && !row(&full).contains('›'), "no scroll marks when all fit");
         let mut spots = vec![];
-        let (cut, first) = compare(&ms, 1, 0, 20, "", |_| false, &mut spots);
+        let (cut, first) = compare(&ms, false, (1, 0), 20, "", |_| false, &mut spots);
         let edge = row(&cut).chars().position(|c| c == '‹').unwrap();
         assert_eq!(spots[0].x.start, edge + 1, "a click on ‹ is on no model");
         assert!(!row(&cut).contains("opus") && row(&cut).contains("flash"), "scrolls to show the selection");
         assert_eq!(first, 1);
         assert!(cut.iter().any(|l| l.to_string().starts_with("models 2-2 of 2")));
         assert!(row(&cut).contains('‹') && !row(&cut).contains('›'), "‹ marks models off to the left");
-        let (past, first) = compare(&ms, 7, 0, 20, "", |_| false, &mut vec![]);
+        let (past, first) = compare(&ms, false, (7, 0), 20, "", |_| false, &mut vec![]);
         assert!(row(&past).contains("flash") && first == 1, "a cursor past the models lands on the last");
         let mut spots = vec![];
-        let (back, first) = compare(&ms, 0, 1, 20, "", |_| false, &mut spots);
+        let (back, first) = compare(&ms, false, (0, 1), 20, "", |_| false, &mut spots);
         assert_eq!(spots[0].x.end, row(&back).chars().count() - 1, "nor on ›");
         assert!(row(&back).contains("opus") && !row(&back).contains("flash"));
         assert_eq!(first, 0);
@@ -3706,7 +3707,7 @@ mod tests {
         let topics: Vec<String> = full.iter().map(Line::to_string).filter(|l| l.starts_with("── ")).collect();
         assert!(topics[0].starts_with("── scores ─"), "{topics:?}");
         assert!(topics.iter().all(|t| t.chars().count() == full[rule].width()), "topic rules span the model row");
-        let (some, _) = compare(&ms, 0, 0, 200, "eci", |_| false, &mut vec![]);
+        let (some, _) = compare(&ms, false, (0, 0), 200, "eci", |_| false, &mut vec![]);
         assert_eq!(
             labels(&some).iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
             ["model", "ECI"],
@@ -3714,7 +3715,7 @@ mod tests {
         );
         let names = |v: &Vec<Line>| v.iter().filter(|l| l.to_string().starts_with("── ")).count();
         assert_eq!(names(&some), 1, "only the topics with a shown row keep their rule");
-        let (typo, _) = compare(&ms, 0, 0, 200, "contxt", |_| false, &mut vec![]);
+        let (typo, _) = compare(&ms, false, (0, 0), 200, "contxt", |_| false, &mut vec![]);
         assert!(labels(&typo).contains(&"context".to_string()), "a typo is forgiven when nothing matches");
     }
 
@@ -4002,14 +4003,15 @@ mod tests {
         overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset);
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         let a = app();
-        let text: Vec<String> = detail(&a.data.models[0], &a.store).1.iter().map(ToString::to_string).collect();
+        let text: Vec<String> =
+            detail(&a.data.models[0], &a.store, a.any_available()).1.iter().map(ToString::to_string).collect();
         assert!(text.iter().any(|l| l.starts_with("  developer:  anthropic")), "{text:?}");
         let mut m = a.data.models[0].clone();
         m.fit.insert("coding".into(), 50.0);
-        let lines = detail(&m, &a.store).1;
+        let lines = detail(&m, &a.store, a.any_available()).1;
         let coding = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == "coding").expect("a coding fit line");
         assert_eq!(coding.style.fg, Some(task_color("coding")), "a task's name is in its colour");
-        let rows = compare(&a.marked_models(), 0, 0, 200, "", |_| false, &mut vec![]).0;
+        let rows = compare(&a.marked_models(), a.any_available(), (0, 0), 200, "", |_| false, &mut vec![]).0;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
         assert!(rows.iter().any(|l| l.to_string().starts_with("model")));
     }
