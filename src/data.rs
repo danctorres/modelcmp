@@ -643,20 +643,27 @@ fn keep_listed(
     (kept.map(|(ids, h)| (h, ids)).collect(), silent)
 }
 
-/// What the harnesses listed at the last refresh, from its cache whatever the format. Not the
-/// listings that refresh kept from the one before, unless `kept`: a harness silent twice in a
-/// row, as one you logged out of, no longer has the models it once listed.
-fn cached_harness(cache: &[u8], kept: bool) -> BTreeMap<String, Vec<String>> {
-    #[derive(Deserialize, Default)]
-    struct Listed {
-        #[serde(default)]
-        harness: BTreeMap<String, Vec<String>>,
-        #[serde(default)]
-        kept: Vec<String>,
+/// What the harnesses listed at the last refresh, read from its cache whatever the format.
+#[derive(Deserialize, Default)]
+struct Listed {
+    #[serde(default)]
+    harness: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    kept: Vec<String>,
+}
+
+impl Listed {
+    fn of(cache: &[u8]) -> Self {
+        serde_json::from_slice(cache).unwrap_or_default()
     }
-    let mut listed = serde_json::from_slice::<Listed>(cache).unwrap_or_default();
-    listed.harness.retain(|h, _| kept || !listed.kept.contains(h));
-    listed.harness
+
+    /// Its listings. Not the ones that refresh kept from the one before, unless `kept`: a
+    /// harness silent twice in a row, as one you logged out of, no longer has the models it
+    /// once listed.
+    fn harness(&self, kept: bool) -> BTreeMap<String, Vec<String>> {
+        let listings = self.harness.iter().filter(|(h, _)| kept || !self.kept.contains(h));
+        listings.map(|(h, ids)| (h.clone(), ids.clone())).collect()
+    }
 }
 
 /// The pages linked at the last refresh, Artificial Analysis's then Epoch's, from its cache: the
@@ -803,6 +810,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let cache = std::cell::LazyCell::new(|| std::fs::read(cache_path(src)).unwrap_or_default());
     // Only a page a site lists is linked; without its list, only one linked at the last refresh.
     let before = if aa.is_empty() || epoch.is_empty() { cached_pages(&cache) } else { Default::default() };
+    let was = std::cell::LazyCell::new(|| Listed::of(&cache));
     let mut unpaged = [None, None];
     for (i, (pages, s)) in [(&mut aa, Source::Aa), (&mut epoch, Source::Epoch)].into_iter().enumerate() {
         if pages.is_empty() {
@@ -824,10 +832,10 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     // Built only for who shows it: a command waits for the whole of it anyway.
     if let Some(early) = early.filter(|_| !awaited.is_empty()) {
         let mut first = Data { warning: None, ..data.clone() };
-        first.harness = keep_listed(listed.clone(), || cached_harness(&cache, false)).0;
+        first.harness = keep_listed(listed.clone(), || was.harness(false)).0;
         // A harness still listing keeps what the cache has for it, and so what the table shows,
         // whether or not the last refresh kept it: its marks do not go to come back.
-        let mut shown = cached_harness(&cache, true);
+        let mut shown = was.harness(true);
         first.harness.extend(awaited.iter().filter_map(|h| Some((h.to_string(), shown.remove(*h)?))));
         first.apply_available();
         early(first);
@@ -839,7 +847,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         listed.entry(h.to_string()).or_insert(None);
     }
     let silent;
-    (data.harness, silent) = keep_listed(listed, || cached_harness(&cache, false));
+    (data.harness, silent) = keep_listed(listed, || was.harness(false));
     let lost;
     (data.kept, lost) = silent.into_iter().partition(|h| data.harness.contains_key(h));
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
@@ -2045,8 +2053,9 @@ mod tests {
         assert_eq!(keep_listed(all, || unreachable!("every harness answered")).1, [""; 0]);
         // Kept once: what the last refresh itself kept is not there to keep again.
         let cache = br#"{"harness": {"opencode": ["google/flash"], "pi": ["openai/gpt"]}, "kept": ["pi"]}"#;
-        assert_eq!(cached_harness(cache, false), BTreeMap::from([("opencode".to_string(), ids("google/flash"))]));
-        assert_eq!(cached_harness(cache, true).len(), 2, "all of them for one still listing");
+        let was = Listed::of(cache);
+        assert_eq!(was.harness(false), BTreeMap::from([("opencode".to_string(), ids("google/flash"))]));
+        assert_eq!(was.harness(true).len(), 2, "all of them for one still listing");
     }
 
     #[test]
