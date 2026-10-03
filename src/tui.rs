@@ -37,7 +37,14 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 /// A refresh under way: where its result comes, and its steps for the frame's count.
-type Refresh = (Receiver<Result<Data, data::Failure>>, data::Steps);
+/// What a refresh sends: the data before its slow harnesses, when it has any to wait for, then
+/// its outcome.
+enum Refreshed {
+    Early(Data),
+    Done(Result<Data, data::Failure>),
+}
+
+type Refresh = (Receiver<Refreshed>, data::Steps);
 
 /// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
 /// no data until one is picked.
@@ -365,7 +372,9 @@ fn spawn_refresh() -> Refresh {
     let steps = data::Steps::default();
     let counted = steps.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(data::refresh(&counted));
+        let early = tx.clone();
+        let res = data::refresh(&counted, move |d| drop(early.send(Refreshed::Early(d))));
+        let _ = tx.send(Refreshed::Done(res));
     });
     (rx, steps)
 }
@@ -385,14 +394,19 @@ fn event_loop(
     loop {
         // Before the draw, so one that ended under the intro is in the first frame.
         let done = rx.as_ref().and_then(|r| match r.0.try_recv() {
-            Ok(res) => Some(res),
+            Ok(sent) => Some(sent),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Err("refresh thread died".into())),
+            Err(TryRecvError::Disconnected) => Some(Refreshed::Done(Err("refresh thread died".into()))),
         });
-        if let Some(res) = done {
-            rx = None;
-            app.refreshed(res);
-            dirty = true;
+        dirty |= done.is_some();
+        match done {
+            // The refresh goes on, and its news comes with the rest.
+            Some(Refreshed::Early(d)) => app.set_data(d),
+            Some(Refreshed::Done(res)) => {
+                rx = None;
+                app.refreshed(res);
+            }
+            None => {}
         }
         // The count of a refresh under way moves on its own, with no key pressed.
         let progress = rx.as_ref().map_or_else(String::new, |r| data::progress(&r.1));

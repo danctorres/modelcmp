@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -459,7 +460,7 @@ impl Model {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Data {
     /// `FORMAT` when fetched.
     #[serde(default)]
@@ -593,12 +594,17 @@ pub fn load_cache() -> Option<Data> {
     Some(d)
 }
 
-/// What each installed harness says it can use: its ids, or none when its listing failed, hung
-/// or was cut short by `stop`, so a refresh always finishes. One not installed is left out.
+fn installed(bin: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+}
+
+/// What a harness answered: its ids, or none when its listing failed, hung or was cut short.
+type Listing = (String, Option<Vec<String>>);
+
+/// What each harness `asked` says it can use, sent to `answers` as it answers: its ids, or
+/// none when its listing failed, hung or was cut short by `stop`, so a refresh always finishes.
 /// All are asked at once, so the slowest is the wait.
-fn harness_models(stop: &AtomicBool, steps: &Steps) -> BTreeMap<String, Option<Vec<String>>> {
-    let on_path =
-        |bin: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()));
+fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &Steps, answers: &Sender<Listing>) {
     let ids = |bin: &str, probe: &Probe| match probe {
         Probe::Provider(p) => Some(vec![format!("{p}/*")]),
         Probe::List(args) => {
@@ -608,17 +614,15 @@ fn harness_models(stop: &AtomicBool, steps: &Steps) -> BTreeMap<String, Option<V
         Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?),
     };
     std::thread::scope(|s| {
-        let asked: Vec<_> = HARNESSES
-            .iter()
-            .filter(|(bin, _)| on_path(bin))
-            .map(|(bin, probe)| {
-                step(steps, bin);
-                let ids = &ids;
-                (bin, s.spawn(move || (ids(bin, probe), answered(steps, bin)).0))
-            })
-            .collect();
-        asked.into_iter().map(|(bin, ids)| (bin.to_string(), ids.join().ok().flatten())).collect()
-    })
+        for (bin, probe) in asked {
+            step(steps, bin);
+            let ids = &ids;
+            s.spawn(move || {
+                let _ = answers.send((bin.to_string(), ids(bin, probe)));
+                answered(steps, bin);
+            });
+        }
+    });
 }
 
 /// The listings a refresh keeps, and the harnesses that gave none: one that did not answer
@@ -634,9 +638,9 @@ fn keep_listed(
 }
 
 /// What the harnesses listed at the last refresh, from its cache whatever the format. Not the
-/// listings that refresh kept from the one before: a harness silent twice in a row, as one you
-/// logged out of, no longer has the models it once listed.
-fn cached_harness(cache: &[u8]) -> BTreeMap<String, Vec<String>> {
+/// listings that refresh kept from the one before, unless `kept`: a harness silent twice in a
+/// row, as one you logged out of, no longer has the models it once listed.
+fn cached_harness(cache: &[u8], kept: bool) -> BTreeMap<String, Vec<String>> {
     #[derive(Deserialize, Default)]
     struct Listed {
         #[serde(default)]
@@ -645,7 +649,7 @@ fn cached_harness(cache: &[u8]) -> BTreeMap<String, Vec<String>> {
         kept: Vec<String>,
     }
     let mut listed = serde_json::from_slice::<Listed>(cache).unwrap_or_default();
-    listed.harness.retain(|h, _| !listed.kept.contains(h));
+    listed.harness.retain(|h, _| kept || !listed.kept.contains(h));
     listed.harness
 }
 
@@ -757,28 +761,39 @@ fn progress_text(total: usize, awaited: &[&str]) -> String {
 }
 
 /// Download the sources and ask the harnesses in parallel, merge, write cache. `steps` counts
-/// them for `progress`.
-pub fn refresh(steps: &Steps) -> Result<Data, Failure> {
+/// them for `progress`. `early` gets the data as soon as it is downloaded, when harnesses are
+/// still listing their models, which have the ones the cache had until the whole answer: they
+/// are not waited for to show the rest.
+pub fn refresh(steps: &Steps, early: impl FnOnce(Data)) -> Result<Data, Failure> {
     let src = source();
     let key = match src {
         Source::Epoch => None,
         Source::Aa => Some(aa_key().ok_or(Failure::NoKey)?),
     };
     let stop = Arc::new(AtomicBool::new(false));
+    let (tx, answers) = std::sync::mpsc::channel();
+    // The installed ones: one not installed is left out.
+    let asked: Vec<_> = HARNESSES.iter().filter(|h| installed(h.0)).collect();
     let harness = {
-        let (stop, steps) = (Arc::clone(&stop), Arc::clone(steps));
-        std::thread::spawn(move || harness_models(&stop, &steps))
+        let (asked, stop, steps) = (asked.clone(), Arc::clone(&stop), Arc::clone(steps));
+        std::thread::spawn(move || harness_models(&asked, &stop, &steps, &tx))
     };
     let res = download(src, key.as_deref(), steps);
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
-    let listed = harness.join().unwrap_or_default();
-    let (mut data, [aa, epoch], release) = res?;
+    let (mut data, [aa, epoch], release) = match res {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = harness.join();
+            return Err(e);
+        }
+    };
     // Only links hang on them, so without one the refresh still succeeds, and says so.
     let text = |xml: Result<Vec<u8>, Failure>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
     let (aa, epoch) = (text(aa), text(epoch));
     let (mut aa, mut epoch) = (sitemap(&aa, Source::Aa), sitemap(&epoch, Source::Epoch));
-    // Read once, and only by a refresh that a list of pages or a harness's models did not reach.
+    // Read once, and only by a refresh that a list of pages or a harness's models did not reach,
+    // or not yet.
     let cache = std::cell::LazyCell::new(|| std::fs::read(cache_path(src)).unwrap_or_default());
     // Only a page a site lists is linked; without its list, only one linked at the last refresh.
     let before = if aa.is_empty() || epoch.is_empty() { cached_pages(&cache) } else { Default::default() };
@@ -792,16 +807,34 @@ pub fn refresh(steps: &Steps) -> Result<Data, Failure> {
     }
     aa_pages(&mut data.models, &aa);
     epoch_listed(&mut data.models, &epoch);
-    let silent;
-    (data.harness, silent) = keep_listed(listed, || cached_harness(&cache));
-    let lost;
-    (data.kept, lost) = silent.into_iter().partition(|h| data.harness.contains_key(h));
     // Only the update notice hangs on it, so without it the refresh still succeeds.
     data.latest = release
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
         .unwrap_or_default();
+    let mut listed: BTreeMap<_, _> = answers.try_iter().collect();
+    let awaited: Vec<_> = asked.iter().map(|h| h.0).filter(|h| !listed.contains_key(*h)).collect();
+    if !awaited.is_empty() {
+        let mut first = Data { warning: None, ..data.clone() };
+        first.harness = keep_listed(listed.clone(), || cached_harness(&cache, false)).0;
+        // A harness still listing keeps what the cache has for it, and so what the table shows,
+        // whether or not the last refresh kept it: its marks do not go to come back.
+        let mut shown = cached_harness(&cache, true);
+        first.harness.extend(awaited.iter().filter_map(|h| Some((h.to_string(), shown.remove(*h)?))));
+        first.apply_available();
+        early(first);
+    }
+    // Until the last harness has answered. One that never does, its thread dead, is silent.
+    listed.extend(answers.iter());
+    let _ = harness.join();
+    for h in awaited {
+        listed.entry(h.to_string()).or_insert(None);
+    }
+    let silent;
+    (data.harness, silent) = keep_listed(listed, || cached_harness(&cache, false));
+    let lost;
+    (data.kept, lost) = silent.into_iter().partition(|h| data.harness.contains_key(h));
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
     // Its own source's file, though a switch may have happened meanwhile.
     // An unwritable cache costs the next start a download, not this one its data.
@@ -909,7 +942,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
 pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
-        cached => match refresh(&Steps::default()) {
+        cached => match refresh(&Steps::default(), drop) {
             Ok(mut d) => {
                 let w = d.warning.take();
                 Ok((d, w))
@@ -2005,7 +2038,8 @@ mod tests {
         assert_eq!(keep_listed(all, || unreachable!("every harness answered")).1, [""; 0]);
         // Kept once: what the last refresh itself kept is not there to keep again.
         let cache = br#"{"harness": {"opencode": ["google/flash"], "pi": ["openai/gpt"]}, "kept": ["pi"]}"#;
-        assert_eq!(cached_harness(cache), BTreeMap::from([("opencode".to_string(), ids("google/flash"))]));
+        assert_eq!(cached_harness(cache, false), BTreeMap::from([("opencode".to_string(), ids("google/flash"))]));
+        assert_eq!(cached_harness(cache, true).len(), 2, "all of them for one still listing");
     }
 
     #[test]
