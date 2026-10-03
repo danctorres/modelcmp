@@ -556,7 +556,11 @@ fn paint(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), String> {
 /// What a mouse event lands on, with the same geometry `draw` uses: the frame's inner area
 /// holds the header and then the rows from `app.table.offset()`.
 fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
+    let shift = m.modifiers.contains(KeyModifiers::SHIFT);
     match m.kind {
+        // Shift+wheel goes sideways, for terminals and mice that send no sideways wheel.
+        MouseEventKind::ScrollDown if shift => return Some(Mouse::Cols(1)),
+        MouseEventKind::ScrollUp if shift => return Some(Mouse::Cols(-1)),
         MouseEventKind::ScrollDown => return Some(Mouse::Scroll(3)),
         MouseEventKind::ScrollUp => return Some(Mouse::Scroll(-3)),
         MouseEventKind::ScrollRight => return Some(Mouse::Cols(1)),
@@ -3234,6 +3238,8 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Row(1)), "the notes open nothing");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
         assert_eq!(hit(&a, area, wheel(MouseEventKind::ScrollLeft)), Some(Mouse::Cols(-1)));
+        let shifted = MouseEvent { modifiers: KeyModifiers::SHIFT, ..wheel(MouseEventKind::ScrollDown) };
+        assert_eq!(hit(&a, area, shifted), Some(Mouse::Cols(1)), "shift+wheel goes sideways");
         a.mouse(Mouse::Menu(1));
         let (_, lines) = render(&mut a, w - 2, h - 3);
         let any = lines[2][..lines[2].find("any").unwrap()].chars().count() as u16 + 1;
