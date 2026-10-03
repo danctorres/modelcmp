@@ -373,7 +373,7 @@ fn spawn_refresh() -> Refresh {
     let counted = steps.clone();
     std::thread::spawn(move || {
         let early = tx.clone();
-        let res = data::refresh(&counted, move |d| drop(early.send(Refreshed::Early(d))));
+        let res = data::refresh(&counted, Some(move |d| drop(early.send(Refreshed::Early(d)))));
         let _ = tx.send(Refreshed::Done(res));
     });
     (rx, steps)

@@ -770,7 +770,7 @@ fn progress_text(total: usize, awaited: &[&str]) -> String {
 /// them for `progress`. `early` gets the data as soon as it is downloaded, when harnesses are
 /// still listing their models, which have the ones the cache had until the whole answer: they
 /// are not waited for to show the rest.
-pub fn refresh(steps: &Steps, early: impl FnOnce(Data)) -> Result<Data, Failure> {
+pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
     let src = source();
     let key = match src {
         Source::Epoch => None,
@@ -821,7 +821,8 @@ pub fn refresh(steps: &Steps, early: impl FnOnce(Data)) -> Result<Data, Failure>
         .unwrap_or_default();
     let mut listed: BTreeMap<_, _> = answers.try_iter().collect();
     let awaited: Vec<_> = asked.iter().map(|h| h.0).filter(|h| !listed.contains_key(*h)).collect();
-    if !awaited.is_empty() {
+    // Built only for who shows it: a command waits for the whole of it anyway.
+    if let Some(early) = early.filter(|_| !awaited.is_empty()) {
         let mut first = Data { warning: None, ..data.clone() };
         first.harness = keep_listed(listed.clone(), || cached_harness(&cache, false)).0;
         // A harness still listing keeps what the cache has for it, and so what the table shows,
@@ -948,7 +949,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
 pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
-        cached => match refresh(&Steps::default(), drop) {
+        cached => match refresh(&Steps::default(), None::<fn(Data)>) {
             Ok(mut d) => {
                 let w = d.warning.take();
                 Ok((d, w))
