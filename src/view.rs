@@ -741,11 +741,22 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
 /// models to compare, the winner is `-`.
 pub fn verdict(models: &[&Model]) -> Vec<[String; 3]> {
     let coding = |m: &Model| task_score(m, "coding");
+    // A list price is not one you'd pay: it wins nothing here, as in the rows below.
+    let cost = |m: &Model| m.cost().filter(|_| !m.listed());
+    // Value hangs on the price, so a list price wins nothing there either.
+    let value = |m: &Model| m.fit.get("value").copied().filter(|_| !m.listed());
+    // Left with fewer than two prices by a list one, the row says so, not that data is missing.
+    let listed = models.iter().any(|m| m.listed());
+    let on_price = |mut row: [String; 3]| {
+        if listed && row[1] == "-" {
+            row[2] = "only a list price (~)".into();
+        }
+        row
+    };
     vec![
-        best(models, "cheaper", Model::cost, false, usd),
+        on_price(best(models, "cheaper", cost, false, usd)),
         best(models, "better at coding", coding, true, |v| format!("{v:.0}")),
-        // The coding percentile, as Code/$: capability points over dollars would read as nothing.
-        best(models, "coding per $", |m| Some(m.fit.get("coding")? / m.blended()?), true, |v| format!("{v:.1}")),
+        on_price(best(models, "better value", value, true, |v| format!("{v:.0}"))),
     ]
 }
 
@@ -902,15 +913,28 @@ mod tests {
             offers: vec![offer(p)],
             ..Default::default()
         };
-        let (big, small, new) = (mk("big", Some(90.0), 10.0), mk("small", Some(60.0), 2.0), mk("new", None, 1.0));
-        let v = verdict(&[&big, &small, &new]);
+        let mut ms = [mk("big", Some(90.0), 10.0), mk("small", Some(60.0), 2.0), mk("new", None, 1.0)];
+        fit::add_value(&mut ms);
+        let [big, small, new] = &ms;
+        let v = verdict(&[big, small, new]);
         let s = |r: [&str; 3]| r.map(String::from);
         assert_eq!(v[0], s(["cheaper", "new", "$1.0 vs $2.0"]));
         assert_eq!(v[1], s(["better at coding", "big", "90 vs 60"]), "a model without the score is skipped");
-        assert_eq!(v[2], s(["coding per $", "small", "30.0 vs 9.0"]));
-        assert_eq!(verdict(&[&big, &new])[1], s(["better at coding", "-", "not enough data"]));
-        assert_eq!(verdict(&[&small, &small])[0], s(["cheaper", "tie: small, small", "$2.0 each"]));
+        assert_eq!(v[2], s(["better value", "small", "75 vs 25"]), "the Value column's percentile");
+        assert_eq!(verdict(&[big, new])[1], s(["better at coding", "-", "not enough data"]));
+        assert_eq!(verdict(&[small, small])[0], s(["cheaper", "tie: small, small", "$2.0 each"]));
         let twin = mk("twin", Some(60.0), 2.0);
-        assert_eq!(verdict(&[&big, &small, &twin])[0], s(["cheaper", "tie: small, twin", "$2.0 each, next $10"]));
+        assert_eq!(verdict(&[big, small, &twin])[0], s(["cheaper", "tie: small, twin", "$2.0 each, next $10"]));
+        let unpriced = Offer { available: true, unpriced: true, ..Default::default() };
+        let offers = vec![unpriced, Offer { available: false, ..offer(1.0) }];
+        let mut ms = [ms[0].clone(), ms[1].clone(), Model { offers, ..mk("est", Some(95.0), 0.0) }];
+        fit::add_value(&mut ms);
+        let v = verdict(&[&ms[0], &ms[1], &ms[2]]);
+        assert_eq!(v[0], s(["cheaper", "small", "$2.0 vs $10"]), "a list price is not one you'd pay");
+        assert_eq!((v[2][0].as_str(), v[2][1].as_str()), ("better value", "small"), "nor one to divide by");
+        let v = verdict(&[&ms[1], &ms[2]]);
+        assert_eq!(v[0], s(["cheaper", "-", "only a list price (~)"]), "a pair with one says why it has no winner");
+        assert_eq!(v[2], s(["better value", "-", "only a list price (~)"]));
+        assert_eq!(v[1][1], "est", "coding does not hang on the price");
     }
 }

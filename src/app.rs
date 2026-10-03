@@ -114,7 +114,7 @@ fn month(v: f64) -> String {
 }
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
-/// index, the task scores and Code/$, then speed when Artificial Analysis measures it.
+/// index, the task scores and Value, then speed when Artificial Analysis measures it.
 pub const COLS: [Col; 13] = [
     Col {
         ranked: false,
@@ -161,9 +161,7 @@ pub const COLS: [Col; 13] = [
     col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
     Col {
         price: true,
-        ..col("Code/$", "value", "coding percentile ÷ Price, as a percentile, ~ on a list price", |m| {
-            m.fit.get("value").copied()
-        })
+        ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied())
     },
     Col {
         aa_only: true,
@@ -178,7 +176,7 @@ pub const COLS: [Col; 13] = [
     },
 ];
 
-/// Whether `COLS[i]` hangs on the price: Price, $in, $cache and $out, and Code/$, which divides by it.
+/// Whether `COLS[i]` hangs on the price: Price, $in, $cache and $out, and Value, which divides by it.
 pub fn on_price(i: usize) -> bool {
     COLS[i].price
 }
@@ -938,7 +936,7 @@ impl App {
         self.rebuild();
     }
 
-    /// Recompute everything that depends on `data::cached()`: Code/$ and the column values.
+    /// Recompute everything that depends on `data::cached()`: Value and the column values.
     pub fn reprice(&mut self) {
         let mut data = std::mem::take(&mut self.data);
         crate::fit::add_value(&mut data.models);

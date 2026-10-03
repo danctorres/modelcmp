@@ -1611,7 +1611,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             };
             let listed = app.listed[r];
             let style = match ext[i] {
-                // A list price is not one you'd pay: no level, no best or worst, nor for Code/$ over it.
+                // A list price is not one you'd pay: no level, no best or worst, nor for Value over it.
                 _ if listed && on_price(i) => tint(MUTED).add_modifier(Modifier::ITALIC),
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
                 _ if i + 2 == PRICE => soft(LEVEL[level(v)]),
@@ -3001,7 +3001,7 @@ mod tests {
         let mut a = app();
         let (buf, lines) = render(&mut a, 206, 6);
         let header = "# ✓ ★ ✗ Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding Agentic \
-                      Reason Code/$ │ Via ▾ Notes";
+                      Reason Value │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 3, "{}", lines[1]);
@@ -3405,10 +3405,10 @@ mod tests {
             a.key(KeyCode::Char('h').into());
         }
         let (_, lines) = render(&mut a, 54, 4);
-        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Code/$"], "scrolls back only as far as needed");
+        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Value"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 54, 4);
-        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Code/$"], "{}", lines[0]);
+        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "Value"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 48, 4);
         assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");
@@ -3449,7 +3449,7 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 6);
         let y = lines.iter().position(|l| l.contains("flash")).unwrap();
         assert_eq!(lines[y].matches("~0.10").count(), 4, "Price, $in, $cache and $out: {}", lines[y]);
-        assert_eq!(lines[y].matches('~').count(), 5, "and Code/$, which divides by it: {}", lines[y]);
+        assert_eq!(lines[y].matches('~').count(), 5, "and Value, which divides by it: {}", lines[y]);
         let x = lines[y].chars().position(|c| c == '~').unwrap() as u16;
         let cell = &buf[(x, y as u16)];
         assert!(cell.modifier.contains(Modifier::ITALIC) && cell.fg == MUTED, "as not available");

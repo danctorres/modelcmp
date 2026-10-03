@@ -465,11 +465,6 @@ impl Model {
         let first = self.links().into_iter().next().map(|(_, url)| url);
         first.ok_or_else(|| format!("no site has a page for {}", self.name))
     }
-
-    /// `cost`, but never 0, for dividing by.
-    pub fn blended(&self) -> Option<f64> {
-        self.cost().filter(|p| *p > 0.0)
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -551,7 +546,7 @@ impl Data {
             }
             m.available = !m.via.is_empty();
         }
-        // Code/$ ranks the price you would pay, which availability picks.
+        // Value ranks the price you would pay, which availability picks.
         crate::fit::add_value(&mut self.models);
     }
 
@@ -603,7 +598,7 @@ pub fn load_cache() -> Option<Data> {
     let bytes = std::fs::read(cache_path(source())).ok()?;
     // One written in another format reads wrong here (a missing price as free), so it is no fallback.
     let mut d = serde_json::from_slice::<Data>(&bytes).ok().filter(|d| d.format == FORMAT)?;
-    // Code/$ is derived here from cached fields, so a change to the formula applies without a re-download.
+    // Value is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
 }

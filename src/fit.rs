@@ -298,10 +298,14 @@ pub fn aa_fit(
     (fit, show)
 }
 
+/// What a free model counts as costing in "value": below any price, so free models rank over
+/// every priced one, and among themselves by coding.
+const FREE: f64 = 1e-9;
+
 /// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
 /// model with both. The task only counts models at or above `VALUE_FLOOR` (see `Need::Coder`).
 pub fn add_value(models: &mut [Model]) {
-    let raw: Vec<Option<f64>> = models.iter().map(|m| Some(m.fit.get("coding")? / m.blended()?)).collect();
+    let raw: Vec<Option<f64>> = models.iter().map(|m| Some(m.fit.get("coding")? / m.cost()?.max(FREE))).collect();
     let all: Vec<f64> = raw.iter().flatten().copied().collect();
     for (m, v) in models.iter_mut().zip(raw) {
         if let Some(v) = v {
@@ -434,5 +438,10 @@ mod tests {
         assert!(models[0].fit.contains_key("value"), "the ratio is shown for every model");
         assert!(fit(&models[0], task("value").unwrap()).is_none(), "cheap but weak");
         assert!(models[1].fit["value"] > models[2].fit["value"]);
+
+        let mut models = [mk(70.0, 0.0), mk(60.0, 0.0), mk(90.0, 0.01)];
+        add_value(&mut models);
+        let v = |i: usize| models[i].fit["value"];
+        assert!(v(0) > v(1) && v(1) > v(2), "free beats any price, the better coder first");
     }
 }

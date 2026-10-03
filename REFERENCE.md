@@ -8,7 +8,7 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 
 One row per model. Columns: Model, Dev, Released (year and month), Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input; a price after a `~` is the list price of other providers, yours listing none),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
-Code/$, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
+Value, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
 its Intelligence Index, and each task column is one benchmark's score (0-100): Coding the
 Coding Index, Agentic Terminal-Bench 4.0, Reason HLE; two more columns show speed,
 Tok/s (output tokens per second) and TTFT (seconds to the first token), medians across
@@ -66,7 +66,7 @@ pick for work that fits it, even when a built-in task fits too: for a bug, your 
 `coding`. It is gone when its last model is cleared, and `--rename` gives it another name, one no
 task has yet.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `cache`, `out`, `ctx` (thousands of
-tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value` (the TUI's Code/$), and with Artificial Analysis `tps` and `ttft`. `--task` and
+tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value`, and with Artificial Analysis `tps` and `ttft`. `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
 model from the task's list: `low` the cheapest in the top half of the models the source
 evaluated, `mid` the cheapest in the top quarter, `high` the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
