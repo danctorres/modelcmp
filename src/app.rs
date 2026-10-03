@@ -1826,6 +1826,12 @@ impl App {
         }
     }
 
+    /// Whether `col`'s header offers its dropdown now: a task's columns do not while a task is
+    /// picked, when `open_menu` refuses them.
+    pub fn menu(&self, col: usize) -> bool {
+        has_menu(col) && !(self.task.is_some() && TASK_COLS.contains(&col))
+    }
+
     /// Open the dropdown of the column under the cursor, on the entry in effect.
     fn open_menu(&mut self) {
         // A task's line is drawn from its score, so its columns show that.

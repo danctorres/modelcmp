@@ -9,7 +9,7 @@
 
 use crate::app::{
     App, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse, NCOLS,
-    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, choice_rows, has_menu, hidden, menu_rows, on_price, shown,
+    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, choice_rows, hidden, menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -706,7 +706,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let (col, cx, w) = col_at(&l, x)?;
     // The ▾ ends a left-aligned text header ("Dev▼ ▾") and is the last cell of a numeric one.
     let arrow = if col == 1 || col == VIA { cx + 4 + u16::from(app.sort_col == col) } else { cx + w - 1 };
-    Some(if has_menu(col) && x >= arrow { Mouse::Menu(col) } else { Mouse::Header(col) })
+    Some(if app.menu(col) && x >= arrow { Mouse::Menu(col) } else { Mouse::Header(col) })
 }
 
 /// The column `x` is on, from the model name on: its cursor index, where it starts and its width.
@@ -859,7 +859,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         }
         View::Table => {
             let mut view = vec!["B benchmarks", "/ filter", "s sort"];
-            if has_menu(app.col) {
+            if app.menu(app.col) {
                 view.push("d dropdown");
             }
             // On the price columns, or anywhere while it is off the default.
@@ -1471,7 +1471,7 @@ fn layout(width: u16, app: &App) -> Layout {
     let ms = &app.data.models;
     // Headers need room for the sort arrow, and a dropdown's for its " ▾".
     let widths: [u16; COLS.len()] = std::array::from_fn(|i| {
-        let head = col_head(app, i + 2).chars().count() + 1 + if has_menu(i + 2) { 2 } else { 0 };
+        let head = col_head(app, i + 2).chars().count() + 1 + if app.menu(i + 2) { 2 } else { 0 };
         head.max(app.widths[i]) as u16
     });
     let dev_w = ms.iter().map(|m| m.developer.chars().count()).max().unwrap_or(0).clamp(6, 12) as u16;
@@ -1593,7 +1593,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         buf.set_stringn(dev_x + dev_w, y, "‹", 1, fg(ACCENT).add_modifier(BOLD));
     }
     for &(i, x, w) in &cols {
-        let text = format!("{}{}{}", arrow(i + 2), col_head(app, i + 2), if has_menu(i + 2) { " ▾" } else { "" });
+        let text = format!("{}{}{}", arrow(i + 2), col_head(app, i + 2), if app.menu(i + 2) { " ▾" } else { "" });
         buf.set_stringn(area.x + x, y, format!("{text:>w$}", w = w as usize), w as usize, header(i + 2));
     }
     if let Some((x, w)) = via {
@@ -3155,6 +3155,13 @@ mod tests {
             LEVEL[1],
             "the blended price takes its level's colour"
         );
+        // A task shows its own scores, so its columns offer no dropdown while one is picked.
+        a.col = ECI + 1;
+        let (_, lines) = render(&mut a, 206, 6);
+        assert!(lines[0].matches('▾').count() == 6 && lines[5].contains("d dropdown"), "{lines:?}");
+        a.task = fit::task("agentic");
+        let (_, lines) = render(&mut a, 206, 6);
+        assert!(lines[0].matches('▾').count() == 3 && !lines[5].contains("d dropdown"), "{lines:?}");
     }
 
     #[test]
