@@ -1321,14 +1321,14 @@ fn layout(width: u16, app: &App) -> Layout {
     // one, keeping the last position otherwise. Model and Dev stay put.
     let ws: Vec<u16> = widths.into_iter().chain([via_w, notes_w]).collect();
     // A column starting a group has a `│` in its gap, one cell wider; so does the first shown
-    // when scrolled, parting it from Dev. Released, in Dev's group, has the cell but no `│`.
+    // when scrolled, parting it from Dev. Released, in Dev's group, has neither.
     let sep = |k: usize| u16::from(GROUPS.contains(&(k + 2)));
     // A column the source does not measure takes no room at all.
     let ws: Vec<u16> = ws.into_iter().enumerate().map(|(k, w)| if hidden(k + 2) { 0 } else { w }).collect();
     let span = |k: usize| if ws[k] == 0 { 0 } else { ws[k] + GAP + sep(k) };
     let fixed: u16 = (0..ws.len()).map(span).sum::<u16>() + dev_w + GAP;
     let name_w = width.saturating_sub(name_x + fixed).clamp(NAME_MIN, longest.max(NAME_MIN));
-    let mut x = name_x + name_w + GAP + dev_w + GAP + 1;
+    let mut x = name_x + name_w + GAP + dev_w + GAP;
     let room = width.saturating_sub(x) + GAP;
     let first = match app.col.checked_sub(2) {
         Some(s) => {
@@ -1339,7 +1339,8 @@ fn layout(width: u16, app: &App) -> Layout {
                 let (mut lo, mut used) = (s, ws[s] + GAP);
                 for k in (0..s).rev().filter(|&k| ws[k] > 0) {
                     let cost = ws[k] + GAP + sep(lo);
-                    if used + cost > room {
+                    // Plus the first's own `│`, unless it is Released.
+                    if used + cost + u16::from(k > 0) > room {
                         break;
                     }
                     (lo, used) = (k, used + cost);
@@ -1357,9 +1358,7 @@ fn layout(width: u16, app: &App) -> Layout {
     let mut started = false;
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
         let part = if started { sep(k) == 1 } else { k > 0 };
-        if started {
-            x += sep(k);
-        }
+        x += u16::from(part);
         started = true;
         if x + w > width {
             more = true;
@@ -2880,10 +2879,7 @@ mod tests {
             "harnesses are coloured"
         );
         assert_eq!(&words(&lines[2])[..11], ["1", "☐", "☆", "·", "opus", "anthropic", "-", "│", "5.0", "5.0", "5.0"]);
-        assert_eq!(
-            &words(&lines[3])[..11],
-            ["2", "☐", "☆", "·", "flash", "google", "-", "│", "0.10", "0.10", "0.10"]
-        );
+        assert_eq!(&words(&lines[3])[..11], ["2", "☐", "☆", "·", "flash", "google", "-", "│", "0.10", "0.10", "0.10"]);
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
@@ -3166,6 +3162,12 @@ mod tests {
         assert!(!layout(400, &a).more, "all columns fit");
         assert_eq!(layout(400, &a).first, 0, "a window made wide again shows the columns scrolled off on the left");
         // Rows above or below the window are reported for the frame's ▲ ▼.
+        for w in 46..400 {
+            let l = layout(w, &a);
+            assert!(l.name_w == NAME_MIN || !l.more, "names are cut only so every column fits: {w}");
+        }
+        let l = layout(400, &a);
+        assert_eq!(l.cols[0].1, l.name_x + l.name_w + GAP + l.dev_w + GAP, "Released a gap after Dev, as in a group");
         let mut data = std::mem::take(&mut a.data);
         data.models.push(model("mini", "openai", Some(100.0), 0.5));
         a.set_data(data);
