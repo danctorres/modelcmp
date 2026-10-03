@@ -291,7 +291,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Model under the cursor",
         &[
             ("n", "note for the model, agents read it"),
-            ("y Y", "copy the model id / name"),
+            ("y Y", "copy the model name / id"),
             ("o", "open the model's page on a site"),
             ("x", "open a harness on the model in a new terminal"),
         ],
@@ -2163,8 +2163,8 @@ impl App {
                     self.input = Input::choose("open in which harness?", Kind::Launch, items, 0);
                 }
             }
-            KeyCode::Char('y') if row => return Some(Effect::Copy(model_id(self.current()?, &self.data.harness))),
-            KeyCode::Char('Y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
+            KeyCode::Char('Y') if row => return Some(Effect::Copy(model_id(self.current()?, &self.data.harness))),
+            KeyCode::Char('y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
             KeyCode::Char(' ') if table && self.selecting() => {
                 return self.flag(Store::is_marked, Store::toggle_marked, ["selected", "deselected"]);
             }
@@ -3646,7 +3646,7 @@ mod tests {
             Some(Effect::Open("https://openrouter.ai/x/gpt55".into())),
             "o opens the picked model"
         );
-        assert!(matches!(press(&mut a, "y"), Some(Effect::Copy(id)) if id.contains("gpt55")));
+        assert!(matches!(press(&mut a, "Y"), Some(Effect::Copy(id)) if id.contains("gpt55")));
         assert_eq!(press(&mut a, "e"), Some(Effect::Save), "e excludes it, so it leaves the line");
         assert_eq!(a.current().unwrap().key, "mini", "the cursor lands on what is left");
         assert_eq!(press(&mut a, "e"), Some(Effect::Save));
@@ -4041,9 +4041,9 @@ mod tests {
         assert_eq!((press(&mut a, "o"), a.status.as_str()), (None, "no site has a page for gpt55"), "none: it says so");
         assert!(a.failed, "in red, as nothing was opened");
         a.data.models[0].epoch = Some("gpt55".into());
-        assert_eq!(press(&mut a, "y"), Some(Effect::Copy("p/gpt55".into())));
+        assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/gpt55".into())));
         a.data.models[0].name = "GPT 5.5".into();
-        assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("GPT 5.5".into())));
+        assert_eq!(press(&mut a, "y"), Some(Effect::Copy("GPT 5.5".into())));
     }
 
     #[test]

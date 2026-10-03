@@ -827,7 +827,7 @@ const NAME_MIN: u16 = 16;
 const SEP: &str = "│";
 /// The actions on one model, in the one order every view shows them in.
 const ACTIONS: [&str; 8] =
-    ["enter details", "x launch", "o open", "y copy id", "space select", "f fav", "e exclude", "n note"];
+    ["enter details", "x launch", "o open", "y copy name", "space select", "f fav", "e exclude", "n note"];
 
 /// The last group of every overlay: `? help` is the last hint a narrow terminal drops.
 const BACK: [&str; 3] = ["esc back", "q quit", "? help"];
@@ -3013,7 +3013,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  R recommend  a all  │  enter details  x launch  o open  y copy id  space select  f fav  e exclude  n note  │  q quit  ? help"
+                "h l column  │  / filter  s sort  R recommend  a all  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit  ? help"
             ),
             "{}",
             lines[5]
