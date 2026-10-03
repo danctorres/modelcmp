@@ -256,6 +256,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("0 _ $ w b", "first / last column; next / previous group"),
             ("gg G 3gg", "top / bottom / row 3"),
             ("( ) ^u ^d", "half a page up / down"),
+            ("] [", "next / previous selected model"),
+            ("} {", "next / previous available model"),
             ("v", "highlight a range; space e C act on all of it"),
         ],
     ),
@@ -883,6 +885,26 @@ impl App {
 
     fn select(&mut self, i: usize) {
         self.table.select(Some(i.min(self.rows.len().saturating_sub(1))));
+    }
+
+    /// Moves the cursor to the `n`th row below it whose model `hit` holds for, up for a negative
+    /// `n`: as `step` does, a move stops at the last such row, and one that starts there wraps
+    /// around to the first. False when the cursor stays.
+    fn jump(&mut self, n: isize, hit: impl Fn(&Self, &Model) -> bool) -> bool {
+        let (cur, len, count) = (self.selected(), self.rows.len(), n.unsigned_abs());
+        let holds = |r: &usize| hit(self, &self.data.models[self.rows[*r]]);
+        let to = if n > 0 {
+            (cur + 1..len).filter(&holds).take(count).last().or_else(|| (0..len).find(&holds))
+        } else {
+            (0..cur).rev().filter(&holds).take(count).last().or_else(|| (0..len).rev().find(&holds))
+        };
+        match to {
+            Some(r) if r != cur => {
+                self.select(r);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// What `/` edits: the compare and help overlays filter their own rows, the table its models.
@@ -1946,6 +1968,28 @@ impl App {
             KeyCode::Char('E') if table => {
                 self.only_excluded = !self.only_excluded;
                 self.rebuild();
+            }
+            KeyCode::Char(c @ (']' | '[')) if table => {
+                if !self.jump(if c == ']' { n } else { -n }, |a, m| a.store.is_marked(&m.key)) {
+                    self.refuse(if self.current().is_some_and(|m| self.store.is_marked(&m.key)) {
+                        "no other selected model is shown"
+                    } else if self.any_marked() {
+                        "no selected model is shown"
+                    } else {
+                        "no selected models: space selects the one under the cursor"
+                    });
+                }
+            }
+            KeyCode::Char(c @ ('}' | '{')) if table => {
+                if self.no_access() {
+                    self.refuse(NO_ACCESS);
+                } else if !self.jump(if c == '}' { n } else { -n }, |a, m| a.accessible(m)) {
+                    self.refuse(if self.current().is_some_and(|m| self.accessible(m)) {
+                        "no other available model is shown"
+                    } else {
+                        "no available model is shown"
+                    });
+                }
             }
             KeyCode::Char('U') if table && self.store.marked.is_empty() => {
                 self.refuse("no selected models: space selects the one under the cursor");
@@ -3632,6 +3676,62 @@ mod tests {
         press(&mut a, "gg j M");
         assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
         assert_eq!((a.store.marked.len(), a.only_marked, a.rows.len()), (0, false, 3), "U unmarks all and leaves M");
+    }
+
+    #[test]
+    fn brackets_jump_between_selected_models() {
+        let mut a = app();
+        press(&mut a, "]");
+        assert_eq!(a.status, "no selected models: space selects the one under the cursor");
+        press(&mut a, "a");
+        assert_eq!(keys(&a), ["gpt55", "mini", "llama4", "opus5"]);
+        for k in ["gpt55", "llama4", "opus5"] {
+            a.store.toggle_marked(k);
+        }
+        a.rebuild();
+        press(&mut a, "2gg]");
+        assert_eq!(a.selected(), 2, "from mini, not selected, to the next selected below");
+        press(&mut a, "2gg[");
+        assert_eq!(a.selected(), 0, "and the previous above");
+        press(&mut a, "]");
+        assert_eq!(a.selected(), 2);
+        press(&mut a, "2]");
+        assert_eq!(a.selected(), 3, "a count stops at the last, as 5j does");
+        press(&mut a, "]");
+        assert_eq!(a.selected(), 0, "past the last back to the first");
+        press(&mut a, "[");
+        assert_eq!(a.selected(), 3, "before the first back to the last");
+        a.query = "gpt55".into();
+        a.rebuild();
+        press(&mut a, "]");
+        assert_eq!(a.status, "no other selected model is shown");
+        a.query = "mini".into();
+        a.rebuild();
+        press(&mut a, "]");
+        assert_eq!(a.status, "no selected model is shown");
+    }
+
+    #[test]
+    fn braces_jump_between_available_models() {
+        let mut a = app();
+        press(&mut a, "a");
+        press(&mut a, "2gg}");
+        assert_eq!(a.selected(), 3, "past llama4, which you have no access to");
+        press(&mut a, "{");
+        assert_eq!(a.selected(), 1);
+        press(&mut a, "}}");
+        assert_eq!(a.selected(), 0, "past the last back to the first");
+        a.query = "opus".into();
+        a.rebuild();
+        press(&mut a, "}");
+        assert_eq!(a.status, "no other available model is shown");
+        a.query = "llama".into();
+        a.rebuild();
+        press(&mut a, "}");
+        assert_eq!(a.status, "no available model is shown");
+        a.any_available = false;
+        press(&mut a, "}");
+        assert_eq!(a.status, NO_ACCESS, "as a says with access to no model");
     }
 
     #[test]

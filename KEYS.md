@@ -24,6 +24,8 @@ commands and JSON.
 | `0` `_` `$` `w` `b` | first / last column; next / previous group: names and release, prices, benchmarks, speed (Artificial Analysis), Via; in compare and recommend, `0` `_` `$` pick the first / last model |
 | `gg` `G` `3gg` | top / bottom / row 3; a number before `gg` goes to that row, as `12gg` to row 12, in dropdowns and lists too |
 | `(` `)` `^u` `^d` | half a page up / down, stopping at the first / last row as `PgUp` `PgDn` and the wheel do; overlays and dropdowns mark lines off screen with the same `▲` `▼` |
+| `]` `[` | move the cursor to the next / previous selected model, past the last back to the first; a count repeats, as in `2]` |
+| `}` `{` | move the cursor to the next / previous model you have access to, past the greyed `not available` rows `a` shows, wrapping as `]` `[` do |
 | `v` | highlight a range of rows: move to extend it, then `space` `e` or `C` act on all of it (`C` compares just the range); `v` again or `esc` cancels |
 
 ## Filter and sort
