@@ -8,8 +8,8 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, Edit, Effect, GROUPS, HELP, Input, Kind, List, Mouse, NCOLS, NOTES, PRICE, Stop, VIA, View, What,
-    choice_rows, has_menu, hidden, menu_rows, on_price, shown,
+    App, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, Input, Kind, List, MARKED, Mouse, NCOLS, NOTES, PRICE,
+    RECOMMEND, Stop, TABS, VIA, View, What, choice_rows, has_menu, hidden, menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -591,9 +591,20 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         return None;
     }
     let pos = ratatui::layout::Position::new(m.column, m.row);
-    let inner = Rect::new(1, 1, area.width - 2, area.height - 3);
+    // Under the tabs' two lines and the frame's top border.
+    let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
     let l = layout(inner.width, app);
     let head = head(app);
+    // A tab on the first two lines, or the edge left of it, over recommend too.
+    let on_tabs = m.row <= area.y + 1 && !mark && !pick && !extend;
+    let mut end = 1;
+    let tab = TABS
+        .iter()
+        .position(|&(name, ..)| {
+            end += tab_width(name) as u16;
+            on_tabs && (1..end).contains(&m.column)
+        })
+        .map(Mouse::Tab);
     // An open list first: a click on an entry acts on it, on its frame nothing, and any click
     // outside closes it.
     let list = match &app.input {
@@ -613,7 +624,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             return None;
         }
         if !rect.contains(pos) {
-            return Some(Mouse::Outside);
+            // A tab over the theme list, one itself, leaves it for that tab.
+            let theme = matches!(app.input, Input::Choose { kind: Kind::Theme, .. });
+            return Some(tab.filter(|_| theme).unwrap_or(Mouse::Outside));
         }
         let inner = rect.inner(ratatui::layout::Margin::new(1, 1));
         if !inner.contains(pos) {
@@ -625,6 +638,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // A hint in the status bar presses its key.
     if m.row == area.bottom() - 1 {
         return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten();
+    }
+    if on_tabs {
+        return tab;
     }
     // In compare and recommend a click is on what is drawn under it (`App::spots`): a plain one
     // opens it on a double click (`double`), a right one selects it, as in the table, and a ctrl
@@ -684,14 +700,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     let x = m.column - inner.x;
     // The # header goes to the first row, as `gg` does; the ✓ header shows marked models only,
-    // as `M` does, the ★ favorites only, as `F`, and the ✗ excluded only, as `E`.
+    // as `S` does, the ★ favorites only, as `F`, and the ✗ excluded only, as `E`.
     if x < l.name_x {
         let num_w = l.name_x - 7;
         return match x {
             _ if x <= num_w => Some(Mouse::Top),
-            _ if (num_w + 1..num_w + 3).contains(&x) => Some(Mouse::OnlyMarked),
-            _ if (num_w + 3..num_w + 5).contains(&x) => Some(Mouse::OnlyFav),
-            _ if (num_w + 5..num_w + 7).contains(&x) => Some(Mouse::OnlyExcluded),
+            _ if (num_w + 1..num_w + 3).contains(&x) => Some(Mouse::Tab(MARKED)),
+            _ if (num_w + 3..num_w + 5).contains(&x) => Some(Mouse::Tab(FAV)),
+            _ if (num_w + 5..num_w + 7).contains(&x) => Some(Mouse::Tab(EXCLUDED)),
             _ => None,
         };
     }
@@ -841,9 +857,10 @@ fn actions(keys: &str) -> Vec<&'static str> {
 /// Key reminders in the status bar, in groups every view keeps in the same order: moving,
 /// the view's own keys, the model's actions, then the way back and help. Narrow terminals
 /// drop them from the front, so the actions outlast the view's keys and `? help` goes last.
-/// A toggle names what pressing it does; `M F E` show only once they would change
-/// something, the rest of the keys are in `?`. `s` acts on the column picked with `h l`.
-fn hints(app: &App) -> Vec<&'static str> {
+/// A toggle names what pressing it does; `A a S F E R C t ?` are on their tabs above the frame, and
+/// one cut off a terminal `width` wide is here instead; the rest of the keys are in `?`. `s` acts
+/// on the column picked with `h l`.
+fn hints(app: &App, width: u16) -> Vec<&'static str> {
     let groups: Vec<Vec<&'static str>> = match app.view {
         View::Table if app.selecting() => {
             vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit", "? help"]]
@@ -852,29 +869,6 @@ fn hints(app: &App) -> Vec<&'static str> {
             let mut view = vec!["/ filter", "s sort"];
             if has_menu(app.col) {
                 view.push("d dropdown");
-            }
-            view.push("R recommend");
-            if app.marked_shown >= 2 {
-                view.push("C compare");
-            }
-            if app.only_marked {
-                view.push("M every model");
-            } else if app.any_marked() {
-                view.push("M selected only");
-            }
-            if app.only_fav {
-                view.push("F every model");
-            } else if app.any_fav() {
-                view.push("F favorites only");
-            }
-            if app.only_excluded {
-                view.push("E every model");
-            } else if !app.store.excluded.is_empty() {
-                view.push("E excluded only");
-            }
-            // With access to none every model shows already, so `a` has nothing to change.
-            if !app.no_access() {
-                view.push(if app.all { "a yours only" } else { "a all" });
             }
             // On the price columns, or anywhere while it is off the default.
             let cached = data::cached() > 0.0;
@@ -886,9 +880,7 @@ fn hints(app: &App) -> Vec<&'static str> {
                 || !app.dev.is_empty()
                 || !app.via.is_empty()
                 || app.task.is_some()
-                || app.only_marked
-                || app.only_fav
-                || app.only_excluded
+                || app.only.is_some()
             {
                 view.push("c clear");
             }
@@ -897,7 +889,7 @@ fn hints(app: &App) -> Vec<&'static str> {
             }
             let mut back = vec![];
             // Where esc goes back from, as in the overlays.
-            if !app.query.is_empty() || app.only_marked || app.only_fav || app.only_excluded || app.task.is_some() {
+            if !app.query.is_empty() || app.only.is_some() || app.task.is_some() {
                 back.push("esc back");
             }
             back.extend(["q quit", "? help"]);
@@ -917,7 +909,24 @@ fn hints(app: &App) -> Vec<&'static str> {
         }
         View::Recommend => vec![vec!["j k task", "h l 0 $ model"], actions("enter x o y space f e n"), BACK.to_vec()],
     };
-    let groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
+    let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
+    // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
+    // drops last. Off the table only the panels', whose keys work there.
+    let (mut end, mut cut) = (1, vec![]);
+    for (i, &(name, _, hint)) in TABS.iter().enumerate() {
+        end += tab_width(name);
+        if end >= usize::from(width)
+            && (app.view == View::Table || i >= RECOMMEND)
+            && app.tab_has(i)
+            && !app.tab_on(i)
+            && !groups.iter().any(|g| g.contains(&hint))
+        {
+            cut.push(hint);
+        }
+    }
+    if !cut.is_empty() {
+        groups.insert(groups.len() - 1, cut);
+    }
     groups.join(&SEP)
 }
 
@@ -954,7 +963,7 @@ fn hint_key(hint: &str) -> Option<KeyCode> {
 fn hint_layout(app: &App, parts: &[Line], width: u16) -> (Vec<&'static str>, u16) {
     // The pill, a space, then each part and its " · ".
     let left = mode(app).0.chars().count() + 3 + parts.iter().map(|p| p.width() + 3).sum::<usize>();
-    let all = hints(app);
+    let all = hints(app, width);
     let mut hints = &all[..];
     while hints.len() > 1 && (hints[0] == SEP || left + hints.join("  ").chars().count() + 1 > width as usize) {
         hints = &hints[1..];
@@ -1014,6 +1023,73 @@ const DEVS: [Color; 7] =
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
+/// The colour tab `i` of `TABS` is on in.
+fn tab_color(i: usize) -> Color {
+    match i {
+        MARKED => MARK,
+        FAV => STAR,
+        EXCLUDED => BAD,
+        _ if i < RECOMMEND => ACCENT,
+        _ => Color::Cyan,
+    }
+}
+
+/// The cells a tab takes: its left edge, then its name and its key with a space around each.
+fn tab_width(name: &str) -> usize {
+    name.chars().count() + 5
+}
+
+/// The tabs on the two lines above `frame`, as a browser's: one that is on is inside a frame of
+/// its own, whose sides run down into `frame`, its top border open under it; a thin line parts
+/// two that are off. A panel's, the panel a box of
+/// its own over `frame`, stands on the border, closed. One with nothing to show is muted. The
+/// sort, `sort_w` cells at the border's right end, stays. Returns the cells of the frame's top
+/// border under the tab that is on, cut to the frame.
+fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
+    // Not over the frame's right corner, nor past it; nor, on its border, over the sort.
+    let put = |buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style| {
+        let end = frame.right().saturating_sub(1 + if y == frame.y { sort_w } else { 0 });
+        buf.set_stringn(x, y, text, usize::from(end.saturating_sub(x)), style);
+    };
+    let panel = (RECOMMEND..TABS.len()).any(|i| app.tab_on(i));
+    let (y, mut x, mut before, mut span) = (frame.y - 1, frame.x + 1, false, None::<(u16, u16)>);
+    for i in 0..=TABS.len() {
+        let on = i < TABS.len() && app.tab_on(i);
+        let (top, side, down) = match (before, on) {
+            // Between two that are off, the thin line a browser has there.
+            (false, false) if i > 0 && i < TABS.len() => (" ", "│", "─"),
+            (false, false) => (" ", " ", "─"),
+            (false | true, _) if panel => (if on { "╭" } else { "╮" }, "│", "┴"),
+            (false, true) => ("╭", "│", "╯"),
+            (true, _) => ("╮", "│", "╰"),
+        };
+        put(buf, x, y - 1, top, fg(MUTED));
+        put(buf, x, y, side, fg(MUTED));
+        // Away from a tab that is on the frame's border is left as it is, the sort on it too.
+        if before || on {
+            put(buf, x, y + 1, down, fg(MUTED));
+        }
+        let Some(&(name, key, _)) = TABS.get(i) else { break };
+        let (style, key_style) = match (on, app.tab_has(i)) {
+            (true, _) => (fg(tab_color(i)).add_modifier(BOLD), fg(KEY).add_modifier(BOLD)),
+            (_, true) => (Style::new(), fg(KEY).add_modifier(BOLD)),
+            _ => (fg(MUTED), fg(MUTED)),
+        };
+        put(buf, x + 1, y, &format!(" {name} "), style);
+        put(buf, x + 3 + name.chars().count() as u16, y, &format!("{key} "), key_style);
+        let w = tab_width(name) as u16;
+        if on {
+            put(buf, x + 1, y - 1, &"─".repeat(usize::from(w - 1)), fg(MUTED));
+            if !panel {
+                put(buf, x + 1, y + 1, &" ".repeat(usize::from(w - 1)), Style::new());
+            }
+            span = Some((x - frame.x, x + w + 1 - frame.x));
+        }
+        (x, before) = (x + w, on);
+    }
+    span.map_or((0, 0), |(lo, hi)| (lo.min(frame.width), hi.min(frame.width)))
+}
+
 /// The cursor's fill, on a row, a column of compare or a name in recommend, between two bars of
 /// the accent that say where it is (`cursor_ends`, `cursor`). Drawn as the accent, which tells it
 /// from a marked row's, and painted as a faint grey (`fill`): a hue on a row says something of
@@ -1167,7 +1243,8 @@ fn draw(app: &mut App, f: &mut Frame) {
     if area.height < 4 || area.width < 4 {
         return;
     }
-    let body = Rect { height: area.height - 1, ..area };
+    // The tabs have the first two lines, the frame the rest down to the status bar.
+    let body = Rect { y: area.y + 2, height: area.height - 3, ..area };
     let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
     // The first start asks its question under the wordmark, settled as the intro leaves it.
     let splash = splash(app, area);
@@ -1196,14 +1273,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         // A state still too long would run over the version: the source goes, which `B` shows too.
         let source = if state.chars().count() > room { String::new() } else { source };
         let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, app.col_name(app.sort_col));
-        // What the column under the cursor means, centred and cut to clear the sort on either side.
-        let side = sort.chars().count() + 2;
-        let room = (body.width as usize).saturating_sub(2 * side).max(1);
-        let about = truncate(&format!(" {}: {} ", app.col_name(app.col), app.col_about(app.col)), room);
+        let sort_w = sort.chars().count();
         let frame = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(fg(MUTED))
-            .title_top(Line::from(about).style(fg(MUTED)).centered())
             .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
             .title_bottom(version)
             .title_bottom(
@@ -1214,8 +1287,25 @@ fn draw(app: &mut App, f: &mut Frame) {
         app.page = inner.height.saturating_sub(head);
         let buf = f.buffer_mut();
         frame.render(body, buf);
+        // What the column under the cursor means, centred and cut to clear the sort on either
+        // side; where that would run under the tabs that are on, centred on the wider side of them.
+        let (lo, hi) = tabs(buf, body, sort_w as u16, app);
+        let (lo, hi) = (usize::from(lo), usize::from(hi));
+        let (text, width) = (format!(" {}: {} ", app.col_name(app.col), app.col_about(app.col)), body.width as usize);
+        let mut end = width.saturating_sub(sort_w + 1);
+        let mut about = truncate(&text, width.saturating_sub(2 * (sort_w + 2)).max(1));
+        let mut x = width.saturating_sub(about.chars().count()) / 2;
+        if x < hi && x + about.chars().count() > lo {
+            let left = lo.min(end);
+            let start;
+            (start, end) = if left.saturating_sub(1) > end.saturating_sub(hi) { (1, left) } else { (hi, end) };
+            let room = end.saturating_sub(start);
+            about = truncate(&text, room.max(1));
+            x = start + room.saturating_sub(about.chars().count()) / 2;
+        }
+        buf.set_stringn(body.x + x as u16, body.y, about, end.saturating_sub(x), fg(MUTED));
         let (right, above, below) = table(buf, inner, app);
-        if right {
+        if right && inner.height > 0 {
             // Columns cut off on the right: `l` scrolls to them.
             buf.set_stringn(body.right() - 1, inner.y, "›", 1, fg(ACCENT).add_modifier(BOLD));
         }
@@ -1831,16 +1921,16 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     if stale(app) {
         parts.push(part(data_age(&app.data), BAD));
     }
-    // The marks of models the data has, as M, C and U count them.
-    if app.any_marked() {
-        let n = app.marked_shown;
-        parts.push(part(format!("{n} selected{}", if app.only_marked { " only" } else { "" }), MARK));
+    // The marks of models the data has, as S, C and U count them.
+    let selected = format!("{} selected", app.marked_shown);
+    if app.any_marked() && app.only != Some(MARKED) {
+        parts.push(part(selected.clone(), MARK));
     }
-    if app.only_fav {
-        parts.push(part("★ favorites only".into(), STAR));
-    }
-    if app.only_excluded {
-        parts.push(part("✗ excluded only".into(), BAD));
+    // The one of `S` `F` `E` that is on.
+    let only = [(selected.as_str(), MARK), ("★ favorites", STAR), ("✗ excluded", BAD)];
+    if let Some(i) = app.only {
+        let (name, color) = only[i - MARKED];
+        parts.push(part(format!("{name} only"), color));
     }
     // The tasks the model under the cursor is the favorite for, each ★ in its task's colour:
     // the row's single ★ does not say which.
@@ -2247,7 +2337,10 @@ fn overlay(
     for (line, y) in lines.into_iter().skip(*scroll as usize).zip(text.y..text.bottom()) {
         line.render(Rect { y, height: 1, ..text }, buf);
     }
-    vmarks(buf, rect.x, text.y, text.bottom() - 1, above, below);
+    // A box of one line, under the tabs on a screen of four, has no text to mark.
+    if text.height > 0 {
+        vmarks(buf, rect.x, text.y, text.bottom() - 1, above, below);
+    }
     (text, above, below)
 }
 
@@ -2609,7 +2702,7 @@ fn verdict_lines(models: &[&Model]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Back, ECI};
+    use crate::app::{Back, ECI, HELP_TAB};
     use crate::data::Offer;
     use ratatui::crossterm::event::KeyCode;
 
@@ -2703,11 +2796,15 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 4);
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
-        assert!(lines[3].contains("a all  % no cache  r refresh  │  enter details"), "{}", lines[3]);
+        assert!(lines[3].contains("s sort  d dropdown  % no cache  r refresh  │  enter details"), "{}", lines[3]);
         a.refreshing = true;
         data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
-        assert!(lines[3].contains("a all  % 90% cached  │"), "off the default, the way back: {}", lines[3]);
+        assert!(
+            lines[3].contains("s sort  d dropdown  % 90% cached  │"),
+            "off the default, the way back: {}",
+            lines[3]
+        );
         assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "refreshing: {}", lines[3]);
     }
 
@@ -2959,7 +3056,7 @@ mod tests {
         let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
         assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
         // Back in the available view it shows only for being marked, and says so.
-        a.key(KeyCode::Char('a').into());
+        a.key(KeyCode::Char('A').into());
         let (_, lines) = render(&mut a, 160, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         assert!(lines[opus].contains("not available"), "{lines:?}");
@@ -2976,10 +3073,9 @@ mod tests {
         let (buf, lines) = render(&mut a, 120, 6);
         assert!(lines[2].contains(NO_ACCESS) && buf[(cell(&lines[2], "no harness"), 2)].fg == Color::Yellow);
         assert!(lines[3].contains("opus") && lines[5].starts_with(" NORMAL  2 all (no access found)"), "{lines:?}");
-        assert!(!lines[5].contains("a all") && !lines[5].contains("a yours only"), "nothing for a to do: {}", lines[5]);
         a.key(KeyCode::Char('a').into());
         assert!(!a.all && a.status == NO_ACCESS, "and the key says so: {}", a.status);
-        // The clicks on the rows start under it too; the frame puts them one line further down.
+        // The clicks on the rows start under it too; the tabs and the frame put them three lines further down.
         let click = |row| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 12,
@@ -2987,7 +3083,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         let on = |row| hit(&a, Rect::new(0, 0, 120, 9), click(row));
-        assert_eq!((on(3), on(4)), (None, Some(Mouse::Cell(0, 0))));
+        assert_eq!((on(5), on(6)), (None, Some(Mouse::Cell(0, 0))));
     }
 
     /// The cell where `pat` starts on `line`, which may hold multi-byte glyphs before it.
@@ -3049,7 +3145,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  R recommend  a all  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit  ? help"
+                "h l column  │  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit  ? help"
             ),
             "{}",
             lines[5]
@@ -3105,8 +3201,8 @@ mod tests {
         assert_eq!(split_hint("h l 0 $ model"), ("h l 0 $", " model"));
         assert_eq!(split_hint("enter best models first"), ("enter", " best models first"));
         assert_eq!(
-            (hint_key("a all"), hint_key("esc back"), hint_key("space select"), hint_key("j k scroll")),
-            (Some(KeyCode::Char('a')), Some(KeyCode::Esc), Some(KeyCode::Char(' ')), None)
+            (hint_key("s sort"), hint_key("esc back"), hint_key("space select"), hint_key("j k scroll")),
+            (Some(KeyCode::Char('s')), Some(KeyCode::Esc), Some(KeyCode::Char(' ')), None)
         );
         let mut a = app();
         let (w, h) = (200, 6);
@@ -3133,7 +3229,7 @@ mod tests {
             m.fit.insert("overall".into(), pct);
         }
         a.set_data(data);
-        let (w, h) = (120, 30);
+        let (w, h) = (120, 31);
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         // Where `pat` last shows on screen, as `draw` puts it.
         let mut at = |a: &mut App, pat: &str, mods: KeyModifiers| {
@@ -3190,7 +3286,7 @@ mod tests {
         assert_eq!(a.view, View::Table, "a double click on a task ranks by it");
         a.store.toggle_favorite("debugging", "flash");
         "RG".chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
-        assert!(hints(&a).contains(&"enter your model"), "on a task of your own, enter goes to its model");
+        assert!(hints(&a, 200).contains(&"enter your model"), "on a task of your own, enter goes to its model");
     }
 
     #[test]
@@ -3236,18 +3332,36 @@ mod tests {
     fn clicks_land_on_rows_headers_and_dropdown_entries() {
         use ratatui::crossterm::event::KeyModifiers;
         let mut a = app();
-        let (w, h) = (170, 10);
+        let (w, h) = (170, 12);
         let area = Rect::new(0, 0, w, h);
-        // `draw` puts the header on row 1, its rule on row 2 and the first model on row 3, one cell in.
-        let (_, lines) = render(&mut a, w - 2, h - 3);
+        // `draw` puts the tabs on rows 0 and 1 and under them the frame, which `click` counts
+        // from: the header on its row 1, its rule on row 2 and the first model on row 3, one cell in.
+        let (_, lines) = render(&mut a, w - 2, h - 5);
         // Screen column of a header, one cell in: `▾` takes several bytes.
         let col = |s: &str| lines[0][..lines[0].find(s).unwrap()].chars().count() as u16 + 1;
         let click = |x, y| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: x,
-            row: y,
+            row: y + 2,
             modifiers: KeyModifiers::NONE,
         };
+        // " │ yours A │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t │ help ?  ": a tab, the edge left
+        // of it too, and nothing right of the last one.
+        assert_eq!(
+            [10, 11, 19, 65, 79, 91, 101, 110].map(|x| hit(&a, area, MouseEvent { row: x % 2, ..click(x, 0) })),
+            [Some(0), Some(1), Some(2), Some(5), Some(6), Some(7), Some(8), None].map(|i| i.map(Mouse::Tab))
+        );
+        // Cut off a narrow terminal, a tab is a hint in the status bar instead.
+        let cut =
+            |w| hints(&a, w).into_iter().filter(|h| TABS[..HELP_TAB].iter().any(|t| t.2 == *h)).collect::<Vec<_>>();
+        assert_eq!((cut(102), cut(101), cut(79)), (vec![], vec!["t theme"], vec!["R recommend", "t theme"]));
+        // Over the open theme list a click on a tab is that tab, and elsewhere outside the list.
+        a.key(KeyCode::Char('t').into());
+        assert_eq!(
+            [10, 150].map(|x| hit(&a, area, MouseEvent { row: 1, ..click(x, 0) })),
+            [Some(Mouse::Tab(0)), Some(Mouse::Outside)]
+        );
+        a.key(KeyCode::Esc.into());
         assert_eq!(hit(&a, area, click(12, 4)), Some(Mouse::Cell(1, 0)));
         assert_eq!(hit(&a, area, click(col("Dev"), 4)), Some(Mouse::Cell(1, 1)));
         assert_eq!(hit(&a, area, click(1, 4)), Some(Mouse::Row(1)), "the row number is no cell");
@@ -3263,12 +3377,12 @@ mod tests {
         let shift = |x, y| MouseEvent { modifiers: KeyModifiers::SHIFT, ..click(x, y) };
         assert_eq!(hit(&a, area, shift(3, 5)), Some(Mouse::Extend(2)), "shift click extends like a drag");
         assert_eq!(hit(&a, area, drag(3, 0)), Some(Mouse::Extend(0)), "a drag above the table: the first row");
-        assert_eq!(hit(&a, area, drag(3, h)), Some(Mouse::Extend(h as usize - 6)), "below: the last row");
-        assert_eq!(hit(&a, Rect::new(0, 0, w, 5), drag(3, 2)), None, "no rows to extend over");
+        assert_eq!(hit(&a, area, drag(3, h)), Some(Mouse::Extend(h as usize - 8)), "below: the last row");
+        assert_eq!(hit(&a, Rect::new(0, 0, w, 7), drag(3, 2)), None, "no rows to extend over");
         assert_eq!(hit(&a, area, click(1, 1)), Some(Mouse::Top), "the # header: the first row");
-        assert_eq!(hit(&a, area, click(3, 1)), Some(Mouse::OnlyMarked), "the ✓ header: marked only");
-        assert_eq!(hit(&a, area, click(5, 1)), Some(Mouse::OnlyFav), "the ★ header: favorites only");
-        assert_eq!(hit(&a, area, click(7, 1)), Some(Mouse::OnlyExcluded), "the ✗ header: excluded only");
+        assert_eq!(hit(&a, area, click(3, 1)), Some(Mouse::Tab(MARKED)), "the ✓ header: marked only");
+        assert_eq!(hit(&a, area, click(5, 1)), Some(Mouse::Tab(FAV)), "the ★ header: favorites only");
+        assert_eq!(hit(&a, area, click(7, 1)), Some(Mouse::Tab(EXCLUDED)), "the ✗ header: excluded only");
         assert_eq!(hit(&a, area, click(9, 1)), Some(Mouse::Header(0)));
         assert_eq!(hit(&a, area, click(3, 2)), None, "the rule under the header");
         assert_eq!(hit(&a, area, click(col("Dev"), 1)), Some(Mouse::Header(1)));
@@ -3277,7 +3391,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(PRICE)), "the ▾ after Price");
         assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(9)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
-        assert_eq!(hit(&a, area, click(3, h - 1)), None, "the status bar");
+        assert_eq!(hit(&a, area, click(3, h - 2)), None, "the status bar");
         let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.find("opencode")?))).unwrap();
         let (x, y) = (lines[k][..via].chars().count() as u16 + 1, k as u16 + 1);
         assert_eq!(hit(&a, area, click(x + 7, y)), Some(Mouse::Harness(k - 2, 0)), "a harness in Via");
@@ -3291,7 +3405,7 @@ mod tests {
         let shifted = MouseEvent { modifiers: KeyModifiers::SHIFT, ..wheel(MouseEventKind::ScrollDown) };
         assert_eq!(hit(&a, area, shifted), Some(Mouse::Cols(1)), "shift+wheel goes sideways");
         a.mouse(Mouse::Menu(1));
-        let (_, lines) = render(&mut a, w - 2, h - 3);
+        let (_, lines) = render(&mut a, w - 2, h - 4);
         let any = lines[2][..lines[2].find("any").unwrap()].chars().count() as u16 + 1;
         assert_eq!(hit(&a, area, click(any, 3)), Some(Mouse::Item(0)));
         assert_eq!(hit(&a, area, click(any, 4)), Some(Mouse::Item(1)));
@@ -3654,8 +3768,46 @@ mod tests {
     }
 
     #[test]
+    fn tabs_leave_the_sort_and_the_column_s_description_in_view() {
+        let mut a = app();
+        let key = a.data.models[0].key.clone();
+        a.store.toggle_excluded(&key);
+        a.store.toggle_marked(&a.data.models[1].key.clone());
+        a.rebuild();
+        "SE".chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
+        let rows = |a: &mut App, w: u16| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 20)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            (0..20).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
+        };
+        // ✗'s tab, on, opens the border left of the sort at 70 columns and is over the sort at 60.
+        for (w, left) in [
+            (60, "╭─────────── ECI: Epoch AI's overall capability…─"),
+            (70, "╭─── ECI: Epoch AI's overall capability index ────╯"),
+        ] {
+            let lines = rows(&mut a, w);
+            assert!(lines[2].starts_with(left) && lines[2].ends_with(" ▼ by ECI ╮"), "{}", lines[2]);
+            assert!(lines[19].contains("✗ excluded only"), "E left S: {}", lines[19]);
+        }
+        // ✓'s, further left, leaves the wider side on its right.
+        a.key(KeyCode::Char('S').into());
+        let top = &rows(&mut a, 100)[2];
+        assert!(
+            top.contains("╯              ╰────── ECI: Epoch AI's overall capability index ──────"),
+            "right of it: {top}"
+        );
+        // A panel's tab stands on the frame, closed, and a cut one is a hint there too.
+        a.key(KeyCode::Char('C').into());
+        let top = &rows(&mut a, 120)[2];
+        assert!(top.contains("┴───────────┴") && !top.contains('╯'), "{top}");
+        let cut = hints(&a, 20);
+        assert!(cut.contains(&"t theme") && !cut.contains(&"a all"), "a's key does nothing in a panel: {cut:?}");
+    }
+
+    #[test]
     fn theme_list_scrolls_to_the_cursor() {
-        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 9)).unwrap();
         let mut a = app();
         a.key(KeyCode::Char('t').into());
         // Mid-list the cursor is on the last row shown, where the ▼ is: it shows in place of the
@@ -3672,7 +3824,7 @@ mod tests {
         }
         term.draw(|f| draw(&mut a, f)).unwrap();
         let buf = term.backend().buffer();
-        let text: String = (0..8).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
+        let text: String = (0..9).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(text.contains(THEMES[THEMES.len() - 1].0) && text.contains('▲'), "{text}");
         assert!(text.contains("enter saves") && !text.contains('▼'), "at the last theme, the hint below it: {text}");
         // With one row to show, it is the cursor's and not the hint, so the cursor is off the border.
@@ -3702,26 +3854,27 @@ mod tests {
 
     #[test]
     fn cursor_runs_through_the_frame() {
-        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 10)).unwrap();
         let mut a = app();
         let on = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
             term.backend().buffer()[(x, y)].bg == CURSOR
         };
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([on(&term, 0, 3), on(&term, 50, 3), on(&term, 99, 3), on(&term, 0, 4)], [true, true, true, false]);
+        assert_eq!([on(&term, 0, 5), on(&term, 50, 5), on(&term, 99, 5), on(&term, 0, 6)], [true, true, true, false]);
         let buf = term.backend().buffer();
-        assert_eq!((buf[(0, 3)].symbol(), buf[(99, 3)].symbol()), ("▌", "▐"), "the border is its two bars");
-        assert_eq!((buf[(0, 3)].fg, buf[(0, 4)].symbol()), (ACCENT, "│"));
+        assert_eq!((buf[(0, 5)].symbol(), buf[(99, 5)].symbol()), ("▌", "▐"), "the border is its two bars");
+        assert_eq!((buf[(0, 5)].fg, buf[(0, 6)].symbol()), (ACCENT, "│"));
         a.key(KeyCode::Char('v').into());
         a.key(KeyCode::Char('j').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([on(&term, 0, 3), on(&term, 99, 4)], [true, true], "the visual range too");
+        assert_eq!([on(&term, 0, 5), on(&term, 99, 6)], [true, true], "the visual range too");
         a.key(KeyCode::Esc.into());
         a.key(KeyCode::Char('t').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         let buf = term.backend().buffer();
-        // The overlay's top-left corner; the cursor is on the row under it, the first entry.
-        let (x, y) = (0..8).flat_map(|y| (1..100).map(move |x| (x, y))).find(|&p| buf[p].symbol() == "╭").unwrap();
+        // The overlay's top-left corner, right of the frame's and the first tab's; the cursor is
+        // on the row under it, the first entry.
+        let (x, y) = (0..10).flat_map(|y| (2..100).map(move |x| (x, y))).find(|&p| buf[p].symbol() == "╭").unwrap();
         assert!(on(&term, x, y + 1) && buf[(x, y + 1)].symbol() == "▌", "and the choice list's");
         // With the terminal's own colours and its background unknown, a reverse-video bar with
         // colours off it; a pill in the accent stays one.
@@ -3759,19 +3912,41 @@ mod tests {
                 assert_eq!(odd, None, "{:?} at {w}x{h}", a.view);
             }
         }
-        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(101, 10)).unwrap();
         let mut a = app();
         a.col = ECI;
         term.draw(|f| draw(&mut a, f)).unwrap();
-        let top: String = (0..100).map(|x| term.backend().buffer()[(x, 0)].symbol()).collect();
-        assert!(top.starts_with("╭──"), "{top}");
+        let row = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16| {
+            (0..101).map(|x| term.backend().buffer()[(x, y)].symbol()).collect::<String>()
+        };
+        // The tab that is on has a frame of its own, which runs down into the table's, open under it.
+        assert_eq!(row(&term, 0).trim_end(), " ╭─────────╮");
+        let tabs = row(&term, 1);
+        assert!(
+            tabs.starts_with(
+                " │ yours A │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t"
+            ),
+            "{tabs}"
+        );
+        let top = row(&term, 2);
         assert!(top.ends_with("─ ▼ by ECI ╮"), "{top}");
+        assert!(top.starts_with("╭╯         ╰──────────"), "{top}");
         let (l, r) = top.split_once(" ECI: Epoch AI's overall capability index ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
-        let bottom: String = (0..100).map(|x| term.backend().buffer()[(x, 6)].symbol()).collect();
+        // Recommend's tab is the one on over its panel.
+        a.view = View::Recommend;
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let on = (0..101).filter(|&x| {
+            term.backend().buffer()[(x, 1)].modifier.contains(BOLD)
+                && row(&term, 1).chars().nth(x as usize) == Some('r')
+        });
+        assert_eq!(on.count(), 1, "{}", row(&term, 1));
+        a.view = View::Table;
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
         assert!(bottom.contains("models.dev + Epoch AI"), "{bottom}");
         assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{bottom}");
-        assert_eq!(a.page, 3, "8 lines minus status bar, two borders, the header and its rule");
+        assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
         // The right border marks columns off to the right, the left one rows below, then above.
         let mut data = std::mem::take(&mut a.data);
         for i in 0..6 {
@@ -3782,22 +3957,22 @@ mod tests {
         let edge = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
             term.backend().buffer()[(x, y)].symbol().to_string()
         };
-        let marks = [edge(&term, 99, 1), edge(&term, 0, 2), edge(&term, 99, 2), edge(&term, 0, 3), edge(&term, 0, 5)];
+        let marks = [edge(&term, 100, 3), edge(&term, 0, 4), edge(&term, 100, 4), edge(&term, 0, 5), edge(&term, 0, 7)];
         assert_eq!(marks, ["›", "├", "┤", "▌", "▼"], "the rule joins the frame, the cursor's bar is on it");
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([edge(&term, 0, 3), edge(&term, 0, 5)], ["▲", "▌"]);
-        assert_eq!(term.backend().buffer()[(0, 3)].fg, ACCENT);
+        assert_eq!([edge(&term, 0, 5), edge(&term, 0, 7)], ["▲", "▌"]);
+        assert_eq!(term.backend().buffer()[(0, 5)].fg, ACCENT);
         // On a marked row's fill the ▲ is black as the row, where the accent would not read.
         a.store.marked = a.data.models.iter().map(|m| m.key.clone()).collect();
         term.draw(|f| draw(&mut a, f)).unwrap();
-        let top = &term.backend().buffer()[(0, 3)];
+        let top = &term.backend().buffer()[(0, 5)];
         assert_eq!((top.symbol(), top.fg, top.bg), ("▲", Color::Black, MARK));
         a.store.marked.clear();
         // A tall overlay stops above the status bar, which shows its keys.
         a.key(KeyCode::Char('?').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        let bar: String = (0..100).map(|x| edge(&term, x, 7)).collect();
+        let bar: String = (0..100).map(|x| edge(&term, x, 9)).collect();
         assert!(bar.starts_with(" HELP "), "{bar}");
     }
 

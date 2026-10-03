@@ -574,7 +574,7 @@ pub fn shown_via(m: &Model, any: bool) -> Vec<&str> {
 }
 
 /// Models the user should see: the ones in reach, with `marked_only` only the selected ones.
-/// Unlike `M` in the TUI, it leaves out a selected model out of reach, as an agent cannot call it.
+/// Unlike `S` in the TUI, it leaves out a selected model out of reach, as an agent cannot call it.
 pub fn visible<'a>(
     data: &'a Data,
     store: &'a Store,

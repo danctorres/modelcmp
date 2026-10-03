@@ -57,7 +57,7 @@ enum Cmd {
         /// Include models you have no access to
         #[arg(short, long)]
         all: bool,
-        /// Selected only: your shortlist (`M` in the TUI)
+        /// Selected only: your shortlist (`S` in the TUI)
         #[arg(short = 'm', long, alias = "marked")]
         selected: bool,
         /// Only these developers, e.g. --dev anthropic --dev openai (the Dev dropdown, `d`, in the TUI)

@@ -208,7 +208,7 @@ impl Store {
         parses
     }
 
-    /// What `M` shows and `C` compares.
+    /// What `S` shows and `C` compares.
     pub fn is_marked(&self, key: &str) -> bool {
         self.marked.iter().any(|k| k == key)
     }

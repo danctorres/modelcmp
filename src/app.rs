@@ -280,7 +280,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "General",
         &[
             ("?", "this help; / keeps the lines that match"),
-            ("esc", "back: overlay, highlight, filter, M, F, E, task"),
+            ("esc", "back: overlay, highlight, filter, S, F, E, task"),
             ("q", "quit; asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
             ("u", "upgrade modelcmp when a newer version is out; asks first"),
@@ -307,9 +307,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "filter models, compare rows, this help or a list"),
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
             ("d", "dropdown on a header with ▾; space enter toggle"),
-            ("a", "all models, including ones you have no access to"),
+            ("a A", "all models, including ones you have no access to / yours only"),
+            ("tab", "next tab; shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
-            ("c", "clear filters, bounds, task, M, F and E; the selection stays"),
+            ("c", "clear filters, bounds, task, S, F and E; the selection stays"),
         ],
     ),
     (
@@ -323,7 +324,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("r a", "in f's list: rename a task you named, write what it is about"),
             ("e", "exclude the model"),
             ("U", "deselect every model"),
-            ("M F E", "selected / favorite / excluded only; again: every model"),
+            ("S F E", "selected / favorite / excluded only"),
         ],
     ),
     (
@@ -352,6 +353,31 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
 ];
+
+/// The tabs above the table, each with its name, its key and its hint in the status bar while
+/// it is cut off: yours, all, the selected, favorite and excluded only, then the panels,
+/// recommend and compare, the theme list and the help.
+pub const TABS: [(&str, char, &str); 9] = [
+    ("yours", 'A', "A yours"),
+    ("all", 'a', "a all"),
+    ("✓ selected", 'S', "S selected only"),
+    ("★ favorites", 'F', "F favorites only"),
+    ("✗ excluded", 'E', "E excluded only"),
+    ("recommend", 'R', "R recommend"),
+    ("compare", 'C', "C compare"),
+    ("theme", 't', "t theme"),
+    ("help", '?', "? help"),
+];
+/// Where each tab is in `TABS`; the panels' are from recommend's on.
+const YOURS: usize = 0;
+const ALL: usize = 1;
+pub const MARKED: usize = 2;
+pub const FAV: usize = 3;
+pub const EXCLUDED: usize = 4;
+pub const RECOMMEND: usize = 5;
+const COMPARE: usize = 6;
+const THEME: usize = 7;
+pub const HELP_TAB: usize = 8;
 
 /// Where esc leaves details for: the table, or the overlay they were opened from at its scroll.
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -698,12 +724,9 @@ pub enum Mouse {
     Cols(isize),
     /// Click on the # header: the first row, as `gg` goes.
     Top,
-    /// Click on the ✓ header: show marked models only, as `M` does.
-    OnlyMarked,
-    /// Click on the ★ header: show favorites only, as `F` does.
-    OnlyFav,
-    /// Click on the ✗ header: show excluded models only, as `E` does.
-    OnlyExcluded,
+    /// Click on tab `i`: yours or all alone, and ✓ ★ ✗ on or off, as `S` `F` `E`. The ✓ ★ ✗
+    /// headers are their tabs too.
+    Tab(usize),
     /// Click on a column header.
     Header(usize),
     /// Click on a header's ▾: open its dropdown.
@@ -807,14 +830,16 @@ pub struct App {
     /// draws them all.
     fronts: Vec<Front>,
     pub table: TableState,
-    /// How many marks are of models the data has: the ones `M`, `C` and `U` act on, as a
+    /// How many marks are of models the data has: the ones `S`, `C` and `U` act on, as a
     /// refresh or a source switch can drop a selected model while its mark stays. Set by
     /// `rebuild`, so a frame does not scan every model for it.
     pub marked_shown: usize,
-    pub only_marked: bool,
-    pub only_fav: bool,
-    /// `E`: show excluded models only.
-    pub only_excluded: bool,
+    /// Whether `F` and `E` have a model to show, set by `rebuild` as the marks' count is: one
+    /// the data no longer has, or that is out of reach, is none.
+    fav_shown: bool,
+    excluded_shown: bool,
+    /// The one of `S` `F` `E` that is on, as its tab in `TABS`: its models only.
+    pub only: Option<usize>,
     /// Row where `v` started a visual range; the range runs to the cursor.
     pub visual: Option<usize>,
     /// Rows picked one by one with ctrl click; selected along with the visual range.
@@ -890,9 +915,9 @@ impl App {
             fronts: vec![],
             table: TableState::default().with_selected(0),
             marked_shown: 0,
-            only_marked: false,
-            only_fav: false,
-            only_excluded: false,
+            fav_shown: false,
+            excluded_shown: false,
+            only: None,
             visual: None,
             picked: vec![],
             view: View::Table,
@@ -1197,7 +1222,7 @@ impl App {
         self.store.marked.iter().filter_map(|k| self.data.models.iter().find(|m| m.key == *k)).collect()
     }
 
-    /// Whether any model is marked, so `M` has something to show: a kept mark of a model the
+    /// Whether any model is marked, so `S` has something to show: a kept mark of a model the
     /// data no longer has is none.
     pub fn any_marked(&self) -> bool {
         self.marked_shown > 0
@@ -1209,9 +1234,73 @@ impl App {
         self.store.is_favorite(self.task, key)
     }
 
-    /// Whether any model shows a ★ in the table, so `F` has something to show.
-    pub fn any_fav(&self) -> bool {
-        self.data.models.iter().any(|m| self.is_fav(&m.key))
+    /// Whether tab `i` has anything to show.
+    pub fn tab_has(&self, i: usize) -> bool {
+        match i {
+            YOURS => !self.no_access(),
+            MARKED => self.any_marked(),
+            FAV => self.fav_shown,
+            EXCLUDED => self.excluded_shown,
+            // It takes two models.
+            COMPARE => self.marked_shown >= 2,
+            _ => true,
+        }
+    }
+
+    /// Whether tab `i` is on: a panel's alone while it is open, else yours or all while none of
+    /// `S` `F` `E` is, and the one of those that is.
+    pub fn tab_on(&self, i: usize) -> bool {
+        let panel = match (&self.input, &self.view) {
+            (Input::Choose { kind: Kind::Theme, .. }, _) => Some(THEME),
+            (_, View::Recommend) => Some(RECOMMEND),
+            (_, View::Compare) => Some(COMPARE),
+            (_, View::Help) => Some(HELP_TAB),
+            _ => None,
+        };
+        match i {
+            _ if panel.is_some() || i >= RECOMMEND => panel == Some(i),
+            YOURS | ALL => self.only.is_none() && (i == ALL) == (self.all || self.no_access()),
+            _ => self.only == Some(i),
+        }
+    }
+
+    /// The next tab with something to show, past the last back to the first; `back` the one
+    /// before. It leaves the theme list, a tab as the panels are.
+    fn step_tab(&mut self, back: bool) -> Option<Effect> {
+        let len = TABS.len();
+        let cur = (0..len).rev().find(|&i| self.tab_on(i)).unwrap_or(0);
+        let step = if back { len - 1 } else { 1 };
+        let i = (1..len).map(|k| (cur + k * step) % len).find(|&i| self.tab_has(i))?;
+        self.input = Input::None;
+        self.set_tab(i)
+    }
+
+    /// Show tab `i` alone, leaving a panel or the details for the table; one with nothing to
+    /// show says so, as its key does.
+    fn set_tab(&mut self, i: usize) -> Option<Effect> {
+        if self.tab_on(i) && i >= RECOMMEND {
+            return None;
+        }
+        let view = std::mem::replace(&mut self.view, View::Table);
+        let key = KeyCode::Char(TABS[i].1);
+        // A panel's key opens it from the table; compare with fewer than 2 selected says how to
+        // select them, as `C` does.
+        if i >= RECOMMEND {
+            return self.table_key(key, 1);
+        }
+        // An empty one's key says why as it does in the table, and the panel stays open.
+        if !self.tab_has(i) {
+            let effect = self.table_key(key, 1);
+            self.view = view;
+            return effect;
+        }
+        // With access to none `a` stays off, as its key leaves it: all is every model already.
+        if i < MARKED {
+            self.all = i == ALL && !self.no_access();
+        }
+        self.only = (i >= MARKED).then_some(i);
+        self.rebuild();
+        None
     }
 
     /// Whether the open choice list is `f`'s tasks, where space or enter ticks one and the list
@@ -1269,9 +1358,12 @@ impl App {
                     self.typos,
                 )
                 .is_some()
-                && (!self.only_marked || self.store.is_marked(&m.key))
-                && (!self.only_fav || self.is_fav(&m.key))
-                && (!self.only_excluded || self.store.is_excluded(&m.key))
+                && match self.only {
+                    Some(MARKED) => self.store.is_marked(&m.key),
+                    Some(FAV) => self.is_fav(&m.key),
+                    Some(EXCLUDED) => self.store.is_excluded(&m.key),
+                    _ => true,
+                }
                 && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
                 && (skip == VIA
                     || self.via.is_empty()
@@ -1287,11 +1379,14 @@ impl App {
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
         self.marked_shown = self.data.models.iter().filter(|m| self.store.is_marked(&m.key)).count();
-        // Unmarking the last marked model, or a refresh dropping it, leaves M (and unfavoriting
+        // Unmarking the last marked model, or a refresh dropping it, leaves S (and unfavoriting
         // the last, F) for every model rather than an empty table.
-        self.only_marked &= self.any_marked();
-        self.only_fav &= self.any_fav();
-        self.only_excluded &= !self.store.excluded.is_empty();
+        // A selected model shows out of reach too, as `filtered` keeps it.
+        let shows = |m: &&Model| self.in_reach(m) || self.store.is_marked(&m.key);
+        let fav = self.data.models.iter().filter(shows).any(|m| self.is_fav(&m.key));
+        let excluded = self.data.models.iter().filter(shows).any(|m| self.store.is_excluded(&m.key));
+        (self.fav_shown, self.excluded_shown) = (fav, excluded);
+        self.only = self.only.filter(|&i| [self.any_marked(), fav, excluded][i - MARKED]);
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
         let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
         let anchor = self.visual.and_then(key_of);
@@ -1357,7 +1452,7 @@ impl App {
         self.select(sel);
     }
 
-    /// Rebuild after a selection or flag changes: a row that drops out, under `M` or for being
+    /// Rebuild after a selection or flag changes: a row that drops out, under `S` or for being
     /// out of reach, leaves the cursor where it was, as selecting never moves it.
     pub fn rebuild_in_place(&mut self) {
         let (at, row) = (self.selected(), self.rows.get(self.selected()).copied());
@@ -1940,6 +2035,12 @@ impl App {
                     self.input_key(KeyCode::Enter, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
+                // A click on another tab leaves the theme list for it, as `tab` does.
+                Mouse::Tab(i) if self.tab_on(i) => None,
+                Mouse::Tab(_) => {
+                    self.input = Input::None;
+                    self.on_mouse(m)
+                }
                 // The first start's question stays open: closing it would pick the default.
                 _ if self.first_start && matches!(self.input, Input::Choose { kind: Kind::Source, .. }) => None,
                 // Outside, or anything else that is not an entry: close it. A search takes an
@@ -1970,6 +2071,14 @@ impl App {
                 Mouse::MarkModel(_) if self.view == View::Recommend => self.on_key(KeyCode::Char(' ').into()),
                 _ => None,
             };
+        }
+        // A tab shows alone from a panel or the details too; in the table ✓ ★ ✗ go on or off, as
+        // `S` `F` `E`.
+        if let (Input::None, Mouse::Tab(i)) = (&self.input, m)
+            && (self.view != View::Table || !(MARKED..RECOMMEND).contains(&i))
+            && i < TABS.len()
+        {
+            return self.set_tab(i);
         }
         if self.view != View::Table || self.input != Input::None {
             return None;
@@ -2081,9 +2190,7 @@ impl App {
                 self.select(n);
             }
             Mouse::Top => self.go_to(0),
-            Mouse::OnlyMarked => return self.table_key(KeyCode::Char('M'), 1),
-            Mouse::OnlyFav => return self.table_key(KeyCode::Char('F'), 1),
-            Mouse::OnlyExcluded => return self.table_key(KeyCode::Char('E'), 1),
+            Mouse::Tab(i @ MARKED..RECOMMEND) => return self.table_key(KeyCode::Char(TABS[i].1), 1),
             Mouse::Header(c) if c < NCOLS => {
                 self.col = c;
                 return self.table_key(KeyCode::Char('s'), 1);
@@ -2161,23 +2268,34 @@ impl App {
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the columns marked ▾"),
-            KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => self.refuse(NO_SELECTED),
-            KeyCode::Char('M') if table => {
-                self.only_marked = !self.only_marked;
+            // The next tab with something to show, past the last back to the first.
+            KeyCode::Tab | KeyCode::BackTab => return self.step_tab(code == KeyCode::BackTab),
+            KeyCode::Char('S') if table && self.only != Some(MARKED) && !self.any_marked() => self.refuse(NO_SELECTED),
+            KeyCode::Char('S') if table => {
+                self.only = (self.only != Some(MARKED)).then_some(MARKED);
                 self.rebuild();
             }
-            KeyCode::Char('F') if table && !self.only_fav && !self.any_fav() => {
-                self.refuse("no favorites: f favorites the one under the cursor");
+            // One out of reach is under `a`, as an excluded one is.
+            KeyCode::Char('F') if table && self.only != Some(FAV) && !self.fav_shown => {
+                let out = self.data.models.iter().any(|m| self.is_fav(&m.key));
+                self.refuse(match out {
+                    true => "no favorites you have access to: a shows all",
+                    false => "no favorites: f favorites the one under the cursor",
+                });
             }
             KeyCode::Char('F') if table => {
-                self.only_fav = !self.only_fav;
+                self.only = (self.only != Some(FAV)).then_some(FAV);
                 self.rebuild();
             }
-            KeyCode::Char('E') if table && !self.only_excluded && self.store.excluded.is_empty() => {
-                self.refuse("no excluded models: e excludes the one under the cursor");
+            KeyCode::Char('E') if table && self.only != Some(EXCLUDED) && !self.excluded_shown => {
+                let out = self.data.models.iter().any(|m| self.store.is_excluded(&m.key));
+                self.refuse(match out {
+                    true => "no excluded models you have access to: a shows all",
+                    false => "no excluded models: e excludes the one under the cursor",
+                });
             }
             KeyCode::Char('E') if table => {
-                self.only_excluded = !self.only_excluded;
+                self.only = (self.only != Some(EXCLUDED)).then_some(EXCLUDED);
                 self.rebuild();
             }
             KeyCode::Char(']' | '[') if table && !self.any_marked() => self.refuse(NO_SELECTED),
@@ -2210,9 +2328,7 @@ impl App {
                 if self.task.take().is_some() {
                     (self.sort_col, self.descending) = DEFAULT_SORT;
                 }
-                self.only_marked = false;
-                self.only_fav = false;
-                self.only_excluded = false;
+                self.only = None;
                 self.rebuild();
             }
             KeyCode::Char('q') => self.input = Input::Quit,
@@ -2237,15 +2353,8 @@ impl App {
                 } else if !self.query.is_empty() {
                     self.query.clear();
                     self.rebuild();
-                } else if self.only_marked {
-                    // Back out of M to every model.
-                    self.only_marked = false;
-                    self.rebuild();
-                } else if self.only_fav {
-                    self.only_fav = false;
-                    self.rebuild();
-                } else if self.only_excluded {
-                    self.only_excluded = false;
+                } else if self.only.take().is_some() {
+                    // Back out of S, F or E to every model.
                     self.rebuild();
                 } else if self.task.take().is_some() {
                     // Back to recommend, where enter picked the task.
@@ -2262,6 +2371,7 @@ impl App {
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
                 (self.task_sel, self.task_wanted) = (0, None);
+                self.scroll = 0;
             }
             KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y' | ' ') if self.view == View::Recommend && !row => {
                 self.refuse("the cursor is on a task: l picks a model");
@@ -2411,11 +2521,10 @@ impl App {
                 }
             }
             // With access to none every model shows already.
-            KeyCode::Char('a') if table && self.no_access() => self.refuse(NO_ACCESS),
-            KeyCode::Char('a') if table => {
-                self.all = !self.all;
-                self.rebuild();
-            }
+            KeyCode::Char('a' | 'A') if table && self.no_access() => self.refuse(NO_ACCESS),
+            // To the all tab, and `A` to yours, out of `S` `F` `E` too.
+            KeyCode::Char('a') if table => return self.set_tab(ALL),
+            KeyCode::Char('A') if table => return self.set_tab(YOURS),
             KeyCode::Char('%') if table => {
                 let off = crate::data::cached() > 0.0;
                 crate::data::set_cached(if off { 0.0 } else { self.cache_on });
@@ -2609,6 +2718,10 @@ impl App {
                     }
                     // The key that opens the theme list also closes it.
                     KeyCode::Char('t') if *kind == Kind::Theme => self.input = Input::None,
+                    // And it is a tab, which tab leaves for the next.
+                    KeyCode::Tab | KeyCode::BackTab if *kind == Kind::Theme => {
+                        return self.step_tab(code == KeyCode::BackTab);
+                    }
                     KeyCode::Esc => self.input = Input::None,
                     _ => {}
                 }
@@ -2678,6 +2791,103 @@ mod tests {
             };
         }
         App::new(Data { fetched: 0, models, ..Default::default() }, Store::default())
+    }
+
+    #[test]
+    fn tabs_show_one_set_of_models() {
+        let mut a = app();
+        let on = |a: &App| (0..TABS.len()).filter(|&i| a.tab_on(i)).collect::<Vec<_>>();
+        assert_eq!((on(&a), a.rows.len()), (vec![0], 3), "yours at start");
+        code(&mut a, KeyCode::Tab);
+        assert_eq!((on(&a), a.rows.len()), (vec![1], 4), "tab: all");
+        code(&mut a, KeyCode::Tab);
+        assert_eq!((on(&a), &a.view), (vec![5], &View::Recommend), "the tabs with nothing to show are skipped");
+        code(&mut a, KeyCode::Tab);
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Theme, .. }) && on(&a) == [7], "then the theme list");
+        code(&mut a, KeyCode::Tab);
+        assert_eq!((on(&a), &a.view, &a.input), (vec![8], &View::Help, &Input::None), "which tab leaves for help");
+        a.mouse(Mouse::Tab(5));
+        assert_eq!((on(&a), &a.view), (vec![5], &View::Recommend), "a click on a tab leaves help for it");
+        a.mouse(Mouse::Tab(8));
+        code(&mut a, KeyCode::Tab);
+        assert_eq!((on(&a), &a.view), (vec![0], &View::Table), "past help, the last, back to yours");
+        a.mouse(Mouse::Tab(5));
+        a.mouse(Mouse::Tab(5));
+        assert_eq!(a.view, View::Recommend, "a click on recommend opens it, and again leaves it open");
+        a.mouse(Mouse::Tab(1));
+        assert_eq!((on(&a), &a.view), (vec![1], &View::Table), "a click on a tab leaves recommend for it");
+        press(&mut a, "A ");
+        a.mouse(Mouse::Tab(6));
+        assert_eq!((on(&a), &a.view), (vec![6], &View::Compare), "compare's tab opens it, as C does");
+        a.mouse(Mouse::Tab(0));
+        code(&mut a, KeyCode::BackTab);
+        code(&mut a, KeyCode::BackTab);
+        assert_eq!(on(&a), [7], "shift+tab goes back from yours to help, then the theme list");
+        code(&mut a, KeyCode::BackTab);
+        assert_eq!(on(&a), [5], "with one model selected, shift+tab goes past compare");
+        code(&mut a, KeyCode::BackTab);
+        assert_eq!(
+            (on(&a), a.rows.len()),
+            (vec![2], 1),
+            "shift+tab goes back, past the empty ones to the selected only"
+        );
+        a.mouse(Mouse::Tab(3));
+        assert_eq!((on(&a), a.status.contains("no favorites")), (vec![2], true), "an empty tab says why");
+        press(&mut a, "R");
+        a.status.clear();
+        a.mouse(Mouse::Tab(3));
+        assert_eq!((&a.view, a.status.contains("no favorites")), (&View::Recommend, true), "and leaves a panel open");
+        press(&mut a, "Rt");
+        a.mouse(Mouse::Tab(7));
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Theme, .. }), "a click on theme's tab keeps its list");
+        a.mouse(Mouse::Tab(5));
+        assert_eq!((&a.input, &a.view), (&Input::None, &View::Recommend), "one on another tab leaves it for that tab");
+        press(&mut a, "R");
+        a.store.toggle_favorite("coding", "opus5");
+        a.rebuild();
+        a.mouse(Mouse::Tab(3));
+        assert_eq!((on(&a), a.rows.len()), (vec![3], 1), "a click on ★ leaves ✓ for the favorites, as F does");
+        a.mouse(Mouse::Tab(3));
+        assert_eq!(on(&a), [0], "and one on a tab that is on takes it off");
+        press(&mut a, "Fa");
+        assert_eq!((on(&a), a.rows.len()), (vec![1], 4), "a goes to all, out of ★");
+        press(&mut a, "a");
+        assert_eq!(on(&a), [1], "a again stays on all");
+        press(&mut a, "FA");
+        assert_eq!((on(&a), a.rows.len()), (vec![0], 3), "A goes to yours");
+        a.mouse(Mouse::Tab(1));
+        assert_eq!((on(&a), a.all, a.rows.len()), (vec![1], true, 4), "a click on all shows it alone");
+        for m in &mut a.data.models {
+            m.available = false;
+        }
+        let mut a = App::new(std::mem::take(&mut a.data), Store::default());
+        a.mouse(Mouse::Tab(0));
+        assert_eq!((on(&a), a.status.as_str()), (vec![1], NO_ACCESS), "with access to none, all is the tab on");
+        a.mouse(Mouse::Tab(1));
+        assert!(!a.all, "and a stays off");
+    }
+
+    #[test]
+    fn tabs_work_from_the_details_and_skip_what_would_show_nothing() {
+        let mut a = app();
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Tab);
+        assert_eq!((&a.view, a.all), (&View::Table, true), "tab leaves the details for the next tab");
+        code(&mut a, KeyCode::Enter);
+        a.mouse(Mouse::Tab(RECOMMEND));
+        assert_eq!(a.view, View::Recommend, "and so does a click on one");
+        press(&mut a, "RA");
+        let out = a.data.models.iter().find(|m| !m.available).unwrap().key.clone();
+        a.store.toggle_excluded(&out);
+        a.rebuild();
+        press(&mut a, "E");
+        assert!(!a.tab_has(EXCLUDED) && a.only != Some(EXCLUDED), "an excluded model out of reach is none to show");
+        assert_eq!(a.status, "no excluded models you have access to: a shows all");
+        press(&mut a, "aE");
+        assert_eq!((a.only == Some(EXCLUDED), a.rows.len()), (true, 1), "in all it is one");
+        a.data.models.retain(|m| m.key != out);
+        a.rebuild();
+        assert!(!a.tab_has(EXCLUDED) && a.only != Some(EXCLUDED), "and gone from the data it is none again");
     }
 
     #[test]
@@ -3923,9 +4133,9 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, " G ");
         assert_eq!(a.store.marked, vec!["gpt55", "opus5"]);
-        press(&mut a, "M");
+        press(&mut a, "S");
         assert_eq!(keys(&a), ["gpt55", "opus5"]);
-        press(&mut a, "M");
+        press(&mut a, "S");
         assert_eq!(a.rows.len(), 3);
         press(&mut a, "C");
         assert_eq!(a.view, View::Compare);
@@ -3988,21 +4198,29 @@ mod tests {
         assert_eq!(a.view, View::Compare, "any other key only cancels the question");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table, "esc closes the overlay");
-        press(&mut a, "Mc");
-        assert_eq!((a.marked_models().len(), a.only_marked, a.rows.len()), (2, false, 3), "c keeps them and leaves M");
-        press(&mut a, "ggj M");
+        press(&mut a, "Sc");
+        assert_eq!(
+            (a.marked_models().len(), a.only == Some(MARKED), a.rows.len()),
+            (2, false, 3),
+            "c keeps them and leaves S"
+        );
+        press(&mut a, "ggj S");
         assert_eq!(keys(&a), ["gpt55", "mini", "opus5"]);
         press(&mut a, "ggvG ");
         assert_eq!(
-            (a.store.marked.len(), a.only_marked, a.rows.len()),
+            (a.store.marked.len(), a.only == Some(MARKED), a.rows.len()),
             (0, false, 3),
-            "unmarking every marked model leaves M for every model"
+            "unmarking every marked model leaves S for every model"
         );
         press(&mut a, "U");
         assert_eq!(a.status, NO_SELECTED);
-        press(&mut a, "gg j M");
+        press(&mut a, "gg j S");
         assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
-        assert_eq!((a.store.marked.len(), a.only_marked, a.rows.len()), (0, false, 3), "U unmarks all and leaves M");
+        assert_eq!(
+            (a.store.marked.len(), a.only == Some(MARKED), a.rows.len()),
+            (0, false, 3),
+            "U unmarks all and leaves S"
+        );
     }
 
     #[test]
@@ -4010,7 +4228,7 @@ mod tests {
         let mut a = app();
         a.store.toggle_marked("gone");
         a.rebuild();
-        for k in ["]", "M", "U"] {
+        for k in ["]", "S", "U"] {
             press(&mut a, k);
             assert_eq!(a.status, NO_SELECTED, "{k}: a model gone is none");
         }
@@ -4021,12 +4239,12 @@ mod tests {
         a.store.toggle_marked("opus5");
         a.store.toggle_marked("gpt55");
         a.rebuild();
-        press(&mut a, "M");
+        press(&mut a, "S");
         a.data.models.retain(|m| m.key != "gpt55");
         a.rebuild();
-        assert!(a.only_marked, "a refresh that drops one selected model keeps M");
+        assert!(a.only == Some(MARKED), "a refresh that drops one selected model keeps S");
         press(&mut a, "gg ");
-        assert!(!a.only_marked, "unmarking the last one shown leaves M though a gone one's mark stays");
+        assert!(a.only != Some(MARKED), "unmarking the last one shown leaves S though a gone one's mark stays");
         a = app();
         press(&mut a, "a");
         assert_eq!(keys(&a), ["gpt55", "mini", "llama4", "opus5"]);
@@ -4082,35 +4300,40 @@ mod tests {
     #[test]
     fn esc_backs_out_of_views_and_toggles_close_what_they_open() {
         let mut a = app();
-        press(&mut a, "M");
-        assert_eq!((a.only_marked, a.status.as_str()), (false, NO_SELECTED));
-        press(&mut a, " M/x");
+        press(&mut a, "S");
+        assert_eq!((a.only == Some(MARKED), a.status.as_str()), (false, NO_SELECTED));
+        press(&mut a, " S/x");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.query.as_str(), a.only_marked), ("", true), "esc clears the search first");
+        assert_eq!((a.query.as_str(), a.only == Some(MARKED)), ("", true), "esc clears the search first");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.only_marked, a.rows.len()), (false, 3), "then leaves M");
+        assert_eq!((a.only == Some(MARKED), a.rows.len()), (false, 3), "then leaves S");
         assert_eq!(a.store.marked, ["gpt55"], "without touching the marks");
         press(&mut a, "F");
-        assert_eq!((a.only_fav, a.status.as_str()), (false, "no favorites: f favorites the one under the cursor"));
+        assert_eq!(
+            (a.only == Some(FAV), a.status.as_str()),
+            (false, "no favorites: f favorites the one under the cursor")
+        );
         a.store.toggle_favorite("coding", "opus5");
+        a.rebuild();
         press(&mut a, "F");
         assert_eq!(keys(&a), ["opus5"], "F shows the favorites only");
-        press(&mut a, "Mc");
-        assert_eq!((a.only_marked, a.only_fav, a.rows.len()), (false, false, 3), "c leaves M and F");
-        press(&mut a, "MF");
-        assert!(a.rows.is_empty(), "M and F together: marked favorites");
-        press(&mut a, "MF");
-        a.mouse(Mouse::OnlyMarked);
-        a.mouse(Mouse::OnlyFav);
+        press(&mut a, "Sc");
+        assert_eq!((a.only == Some(MARKED), a.only == Some(FAV), a.rows.len()), (false, false, 3), "c leaves S and F");
+        press(&mut a, "SF");
+        assert_eq!((a.only == Some(MARKED), keys(&a)), (false, vec!["opus5"]), "F leaves S for the favorites alone");
+        press(&mut a, "F");
+        a.mouse(Mouse::Tab(FAV));
+        a.mouse(Mouse::Tab(MARKED));
         press(&mut a, "G");
         a.mouse(Mouse::Top);
         assert_eq!(a.selected(), 0, "the # header goes to the first row");
-        assert!((a.only_marked, a.only_fav) == (true, true), "the ✓ and ★ headers do what M and F do");
+        assert!((a.only == Some(MARKED), a.only == Some(FAV)) == (true, false), "the ✓ and ★ tabs do what S and F do");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.only_marked, a.only_fav), (false, true), "esc leaves M first");
+        assert_eq!((a.only == Some(MARKED), a.rows.len()), (false, 3), "esc leaves S");
+        press(&mut a, "F");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.only_fav, a.rows.len()), (false, 3), "then F");
+        assert_eq!((a.only == Some(FAV), a.rows.len()), (false, 3), "and F");
         a.store.toggle_favorite("coding", "opus5");
         press(&mut a, "Rj");
         code(&mut a, KeyCode::Enter);
@@ -4123,16 +4346,17 @@ mod tests {
         press(&mut a, "CC");
         assert_eq!(a.view, View::Table, "C closes compare, as ? and R close theirs");
         press(&mut a, "c");
-        a.mouse(Mouse::OnlyExcluded);
+        a.mouse(Mouse::Tab(EXCLUDED));
         assert_eq!(
-            (a.only_excluded, a.status.as_str()),
+            (a.only == Some(EXCLUDED), a.status.as_str()),
             (false, "no excluded models: e excludes the one under the cursor")
         );
         a.store.toggle_excluded("mini");
-        a.mouse(Mouse::OnlyExcluded);
+        a.rebuild();
+        a.mouse(Mouse::Tab(EXCLUDED));
         assert_eq!(keys(&a), ["mini"], "the ✗ header, as E, shows the excluded only");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.only_excluded, a.rows.len()), (false, 3), "esc leaves E");
+        assert_eq!((a.only == Some(EXCLUDED), a.rows.len()), (false, 3), "esc leaves E");
     }
 
     #[test]
@@ -4325,7 +4549,7 @@ mod tests {
     #[test]
     fn mouse_selects_sorts_and_scrolls() {
         let mut a = app();
-        a.mouse(Mouse::OnlyMarked);
+        a.mouse(Mouse::Tab(MARKED));
         assert!(a.failed && a.status.starts_with("no selected models"), "{}", a.status);
         assert_eq!(a.mouse(Mouse::Row(2)), None);
         assert!(!a.failed && a.status.is_empty(), "the next click clears it, as a key does");
