@@ -252,7 +252,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Move",
         &[
             ("j k ↓ ↑", "move; a count repeats, as in 3j"),
-            ("h l ← →", "pick a column; in compare and recommend, a model"),
+            ("h l ← →", "pick a column; in compare a model, in recommend a model or the task"),
             ("0 _ $ w b", "first / last column; next / previous group"),
             ("gg G 3gg", "top / bottom / row 3"),
             ("( ) ^u ^d", "half a page up / down"),
@@ -314,11 +314,19 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+/// Where esc leaves details for: the table, or the overlay they were opened from at its scroll.
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum Back {
+    Table,
+    Compare(u16),
+    Recommend(u16),
+}
+
 #[derive(PartialEq, Debug)]
 pub enum View {
     Table,
-    /// Details; opened from compare, they hold its scroll, which esc goes back to.
-    Detail(Option<u16>),
+    /// Details, and where esc goes back to.
+    Detail(Back),
     Compare,
     Help,
     Recommend,
@@ -663,10 +671,27 @@ pub enum Mouse {
     Menu(usize),
     /// Click on entry `n` of the open dropdown or choice list.
     Item(usize),
-    /// Click outside the open dropdown or choice list: close it.
+    /// Click outside the open dropdown or choice list: close it. In compare and recommend, a
+    /// click on no model, which only clears the status as any click does.
     Outside,
     /// Click on a status bar hint: press its key.
     Key(KeyCode),
+    /// Click on a stop in compare or recommend: move the cursor to it.
+    Model(Stop),
+    /// Double click on it: do what `enter` does, open the model's details or rank the table by
+    /// the task.
+    Open(Stop),
+    /// Right click on it: move the cursor to it and do what `space` does where it does anything.
+    MarkModel(Stop),
+}
+
+/// Where the sideways cursor of compare or recommend can be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Stop {
+    /// Model `i` in compare.
+    Compare(usize),
+    /// Stop `i` of task `t` in recommend: 0 its name and the rest of its block, else its model `i - 1`.
+    Recommend(usize, usize),
 }
 
 /// `provider/model` as opencode takes it, else pi, when either has the model (`launch_cmd`):
@@ -722,7 +747,8 @@ pub struct App {
     pub via: Vec<String>,
     /// Task whose price frontier the table shows, picked in the recommend overlay.
     pub task: Option<&'static Task>,
-    /// Cursor in the recommend overlay: the task, and the model on its best-per-price line.
+    /// Cursor in the recommend overlay: the task, and on it 0 for its name, else the model
+    /// `task_sel - 1` on its line; past the end of an emptied line it is on the name too.
     pub task_cur: usize,
     pub task_sel: usize,
     pub query: String,
@@ -754,6 +780,8 @@ pub struct App {
     pub compare_sel: usize,
     /// First model the compare view shows, set by the renderer so the cursor stays in view.
     pub compare_x: usize,
+    /// Where the renderer drew each model of the compare or recommend overlay, and the click on it.
+    pub spots: Vec<(ratatui::layout::Rect, Stop)>,
     /// Filter on the rows of the compare or help overlay, typed with `/` in either.
     pub overlay_query: String,
     /// Rows visible in the body, set by the renderer; drives page movement.
@@ -822,6 +850,7 @@ impl App {
             scroll: 0,
             compare_sel: 0,
             compare_x: 0,
+            spots: vec![],
             overlay_query: String::new(),
             page: 20,
             hscroll: 0,
@@ -924,20 +953,21 @@ impl App {
     }
 
     /// The model under the cursor: the row in the table and details, the column in compare,
-    /// the one picked on the task's line in recommend.
+    /// the one picked on the task's line in recommend, where a task's name has none.
     pub fn current(&self) -> Option<&Model> {
         if self.view == View::Compare {
             let marked = self.marked_models();
             return marked.get(self.compare_sel.min(marked.len().saturating_sub(1))).copied();
         }
         if self.view == View::Recommend {
+            let i = self.task_sel.checked_sub(1)?;
             // A task of your own has no line but its model.
             let Some(t) = self.cur_task() else {
                 let line = self.custom_line(self.custom_at()?);
-                return line.get(self.task_sel.min(line.len().saturating_sub(1))).copied();
+                return line.get(i.min(line.len().saturating_sub(1))).copied();
             };
             let front = self.task_frontier(t);
-            return front.get(self.task_sel.min(front.len().saturating_sub(1))).map(|&(m, _)| m);
+            return front.get(i.min(front.len().saturating_sub(1))).map(|&(m, _)| m);
         }
         if matches!(self.view, View::Detail(_)) {
             return self.data.models.iter().find(|m| m.key == self.detail);
@@ -945,15 +975,18 @@ impl App {
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
     }
 
-    /// How many models the open overlay's sideways cursor moves over.
+    /// How many stops the open overlay's sideways cursor moves over: compare's models, the
+    /// task's name and its models in recommend.
     fn across_len(&self) -> usize {
         match self.view {
             View::Compare => self.marked_shown,
-            _ => match (self.cur_task(), self.custom_at()) {
-                (Some(t), _) => self.task_frontier(t).len(),
-                (None, Some(t)) => self.custom_line(t).len(),
-                (None, None) => 0,
-            },
+            _ => {
+                1 + match (self.cur_task(), self.custom_at()) {
+                    (Some(t), _) => self.task_frontier(t).len(),
+                    (None, Some(t)) => self.custom_line(t).len(),
+                    (None, None) => 0,
+                }
+            }
         }
     }
 
@@ -1711,7 +1744,9 @@ impl App {
     /// the developer, a harness in Via, as `x` does, and from a number the page it comes from;
     /// a click on a header sorts by it, as `s` does, and on its ▾ opens the dropdown. A click on
     /// an entry does what enter does: in a dropdown and `f`'s tasks it toggles the entry and the
-    /// list stays open until a click outside; in the other choice lists it picks the entry.
+    /// list stays open until a click outside; in the other choice lists it picks the entry. In
+    /// compare and recommend a click moves the cursor to the model or task, and a double click
+    /// does what enter does.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
         let effect = self.on_mouse(m);
         self.follow();
@@ -1735,6 +1770,7 @@ impl App {
         if self.input == Input::None || (list && !typing) {
             self.status.clear();
             self.failed = false;
+            (self.count, self.g_pending) = (0, None);
         }
         if let Mouse::Scroll(n) = m {
             if list || self.input == Input::None {
@@ -1768,6 +1804,19 @@ impl App {
         // The sideways wheel moves the model cursor wherever h and l do.
         if let (View::Compare | View::Recommend, Input::None, Mouse::Cols(n)) = (&self.view, &self.input, &m) {
             return self.table_key(KeyCode::Char(if *n < 0 { 'h' } else { 'l' }), n.abs());
+        }
+        if let (Input::None, Mouse::Model(s) | Mouse::Open(s) | Mouse::MarkModel(s)) = (&self.input, m) {
+            match (s, &self.view) {
+                (Stop::Compare(i), View::Compare) => self.compare_sel = i,
+                (Stop::Recommend(t, i), View::Recommend) => (self.task_cur, self.task_sel) = (t, i),
+                _ => return None,
+            }
+            // Compare leaves out `space`: it would drop the model from the view.
+            return match m {
+                Mouse::Open(_) => self.on_key(KeyCode::Enter.into()),
+                Mouse::MarkModel(_) if self.view == View::Recommend => self.on_key(KeyCode::Char(' ').into()),
+                _ => None,
+            };
         }
         if self.view != View::Table || self.input != Input::None {
             return None;
@@ -1914,8 +1963,10 @@ impl App {
         let table = self.view == View::Table;
         // Keys that act on the current model, which only help hides.
         // Compare shows none with fewer than 2 selected, and then has no current model to act on.
+        // Recommend has one on a model, not on a task's name nor past the end of a line emptied.
         let row = table
-            || matches!(self.view, View::Detail(_) | View::Recommend)
+            || matches!(self.view, View::Detail(_))
+            || (self.view == View::Recommend && self.current().is_some())
             || (self.view == View::Compare && self.marked_shown >= 2);
         // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
         let across = matches!(self.view, View::Compare | View::Recommend);
@@ -2021,8 +2072,10 @@ impl App {
             KeyCode::Esc => {
                 if self.overlay_search() && !self.overlay_query.is_empty() {
                     self.overlay_query.clear();
-                } else if let View::Detail(Some(scroll)) = self.view {
+                } else if let View::Detail(Back::Compare(scroll)) = self.view {
                     (self.view, self.scroll) = (View::Compare, scroll);
+                } else if let View::Detail(Back::Recommend(scroll)) = self.view {
+                    (self.view, self.scroll) = (View::Recommend, scroll);
                 } else if !table {
                     self.view = View::Table;
                 } else if self.selecting() {
@@ -2055,6 +2108,9 @@ impl App {
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
                 self.task_sel = 0;
+            }
+            KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y' | ' ') if self.view == View::Recommend && !row => {
+                self.refuse("the cursor is on a task: l picks a model");
             }
             KeyCode::Char('e') if row => {
                 return self.flag(Store::is_excluded, Store::toggle_excluded, ["excluded", "unexcluded"]);
@@ -2139,19 +2195,21 @@ impl App {
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
             }
             KeyCode::Char('B') => self.ask_source(),
-            KeyCode::Enter if self.view == View::Recommend => {
+            KeyCode::Enter if self.view == View::Recommend && !row => {
                 let Some(t) = self.cur_task() else {
-                    // A task of your own has one model and no line to rank: the table, on that model.
-                    let key = self.current().map(|m| m.key.clone());
+                    // A task of your own has no line to rank: the table, on its cheapest model.
+                    let line = self.custom_at().map_or(vec![], |t| self.custom_line(t));
+                    let first = line.first().map(|m| (m.key.clone(), m.name.clone()));
+                    let key = first.as_ref().map(|(k, _)| k.clone());
                     // A built-in task picked before would keep the table to its line, as esc undoes.
                     if self.task.take().is_some() {
                         (self.sort_col, self.descending) = DEFAULT_SORT;
                         self.rebuild();
                     }
                     let row = key.and_then(|k| self.rows.iter().position(|&i| self.data.models[i].key == k));
-                    let said = self.custom_at().map(|task| match (self.current(), row) {
-                        (Some(m), Some(_)) => Ok(format!("{}, your model for {task}", m.name)),
-                        (Some(m), None) => Err(format!("{}, your model for {task}, is filtered out: c clears", m.name)),
+                    let said = self.custom_at().map(|task| match (&first, row) {
+                        (Some((_, m)), Some(_)) => Ok(format!("{m}, your model for {task}")),
+                        (Some((_, m)), None) => Err(format!("{m}, your model for {task}, is filtered out: c clears")),
                         (None, _) => Err(format!("the model of {task} is not one you can use")),
                     });
                     self.view = View::Table;
@@ -2179,10 +2237,14 @@ impl App {
                     _ => self.refuse(format!("no model has data for {}", t.name)),
                 }
             }
-            // Recommend's enter is above.
+            // Recommend's enter on a task's name is above.
             KeyCode::Enter if row && !matches!(self.view, View::Detail(_)) => {
                 self.detail = self.current()?.key.clone();
-                self.view = View::Detail((self.view == View::Compare).then_some(self.scroll));
+                self.view = View::Detail(match self.view {
+                    View::Compare => Back::Compare(self.scroll),
+                    View::Recommend => Back::Recommend(self.scroll),
+                    _ => Back::Table,
+                });
                 self.scroll = 0;
             }
             // A new search starts empty; esc brings the previous one back.
@@ -3261,7 +3323,7 @@ mod tests {
             a.select(at);
             a.key(KeyCode::Enter.into());
             a.key(KeyCode::Char(' ').into());
-            assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Detail(None), "llama4"));
+            assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Detail(Back::Table), "llama4"));
             leave.iter().for_each(|&k| _ = a.key(k.into()));
             assert_eq!(a.view, View::Table);
             assert!(!shown(&a).contains(&"llama4".into()), "{leave:?}: {:?}", shown(&a));
@@ -3427,25 +3489,28 @@ mod tests {
         assert_eq!(edit(&a), None, "overall is built in");
         code(&mut a, KeyCode::Esc);
         a.store.rename_task("dispatch", "tool-dispatch").unwrap();
-        // Recommend lists it after the built-in tasks, its model under the cursor; enter goes to
-        // the table, on that model.
+        // Recommend lists it after the built-in tasks, the cursor on its name, its model after
+        // it; enter on the name goes to the table, on that model.
         press(&mut a, "RG");
         assert_eq!((a.task_cur, a.custom_at(), a.task_at_hand().is_none()), (TASKS.len(), Some("tool-dispatch"), true));
-        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()));
+        assert!(a.current().is_none(), "on the name");
         press(&mut a, "l");
         assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "one model on its line");
+        press(&mut a, "h");
         code(&mut a, KeyCode::Enter);
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, on.as_str()));
         assert!(a.status.ends_with("your model for tool-dispatch"), "{}", a.status);
         // f on its block starts on it; without its model the task is gone, and the cursor is on
         // the task before.
         press(&mut a, "RGf");
+        assert!(a.failed && a.input == Input::None, "f on a task's name has no model to favorite");
+        press(&mut a, "lf");
         assert_eq!(under(&a), "✓ tool-dispatch  routing tool calls");
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.task_cur, a.store.favorite("tool-dispatch")), (TASKS.len() - 1, None));
         // An empty name names no task.
-        press(&mut a, "2ggfG");
+        press(&mut a, "2gglfG");
         code(&mut a, KeyCode::Enter);
         assert_eq!(edit(&a), Some(("New".into(), String::new())));
         assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.custom_tasks().len()), (None, None, 0));
@@ -3455,7 +3520,7 @@ mod tests {
         a.store.toggle_favorite("tool-dispatch", &on);
         a.store.toggle_favorite("tool-dispatch:low", "mini");
         a.rebuild();
-        press(&mut a, "G");
+        press(&mut a, "Gl");
         assert_eq!((&a.view, a.current().map(|m| m.key.as_str())), (&View::Recommend, Some("mini")));
         press(&mut a, "l");
         assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "h l move along its line");
@@ -3488,7 +3553,7 @@ mod tests {
         assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
         assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
         // In recommend, f starts on the task under the cursor, so f enter toggles it.
-        press(&mut a, "Rj");
+        press(&mut a, "Rjl");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
         assert!(
@@ -3550,22 +3615,29 @@ mod tests {
     fn recommend_moves_a_model_cursor_that_the_row_keys_act_on() {
         let mut a = app();
         press(&mut a, "R");
-        assert!(a.current().is_none(), "overall has no data in this fixture, so nothing is picked");
+        assert!(a.current().is_none(), "the cursor starts on the first task's name");
         press(&mut a, "j");
         let front: Vec<String> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, best last");
-        assert_eq!(a.current().unwrap().key, "mini", "the cursor starts on the cheapest");
+        assert!(a.current().is_none(), "j k land on the name");
+        assert!(press(&mut a, "o").is_none() && a.failed, "where the row keys have no model");
+        press(&mut a, "l");
+        assert_eq!(a.current().unwrap().key, "mini", "l steps onto the cheapest");
         press(&mut a, "l");
         assert_eq!(a.current().unwrap().key, "gpt55");
         press(&mut a, "l");
-        assert_eq!(a.current().unwrap().key, "mini", "wraps");
+        assert!(a.current().is_none(), "wraps to the name");
         press(&mut a, "h");
         assert_eq!(a.current().unwrap().key, "gpt55", "and back");
         press(&mut a, "0");
-        assert_eq!(a.current().unwrap().key, "mini");
+        assert!(a.current().is_none(), "0 goes to the name");
         a.mouse(Mouse::Cols(1));
-        assert_eq!(a.current().unwrap().key, "gpt55", "the sideways wheel moves the model cursor as in compare");
+        assert_eq!(a.current().unwrap().key, "mini", "the sideways wheel moves the cursor as in compare");
+        code(&mut a, KeyCode::Enter);
+        assert!(matches!(a.view, View::Detail(Back::Recommend(_))), "enter on a model opens its details");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Recommend, "mini"), "esc goes back");
         press(&mut a, "0$");
         assert_eq!(a.current().unwrap().key, "gpt55");
         press(&mut a, "oG");
@@ -3577,8 +3649,11 @@ mod tests {
         assert!(matches!(press(&mut a, "y"), Some(Effect::Copy(id)) if id.contains("gpt55")));
         assert_eq!(press(&mut a, "e"), Some(Effect::Save), "e excludes it, so it leaves the line");
         assert_eq!(a.current().unwrap().key, "mini", "the cursor lands on what is left");
+        assert_eq!(press(&mut a, "e"), Some(Effect::Save));
+        assert!(a.current().is_none(), "an emptied line leaves the cursor on the name");
+        assert!(press(&mut a, "o").is_none() && a.failed, "where the row keys say so");
         press(&mut a, "$j");
-        assert_eq!((a.task_cur, a.task_sel), (2, 0), "j k move between tasks and start at the cheapest");
+        assert_eq!((a.task_cur, a.task_sel), (2, 0), "j k move between tasks and land on the name");
         press(&mut a, "k$RR");
         assert_eq!(a.task_sel, 0, "so does reopening");
     }
@@ -3588,11 +3663,13 @@ mod tests {
         let mut a = app();
         let row = |a: &App, key: &str| a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
         press(&mut a, "Rjl");
-        assert_eq!(a.selected(), row(&a, "gpt55"), "recommend's pick");
+        assert_eq!(a.selected(), row(&a, "mini"), "recommend's pick");
         a.mouse(Mouse::Cols(1));
-        assert_eq!(a.selected(), row(&a, "mini"), "the wheel too");
+        assert_eq!(a.selected(), row(&a, "gpt55"), "the wheel too");
+        a.mouse(Mouse::Cols(1));
+        assert_eq!(a.selected(), row(&a, "gpt55"), "a task's name leaves it");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, "mini"), "esc lands on it");
+        assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, "gpt55"), "esc lands on it");
         a.store.marked = vec!["gpt55".into(), "mini".into()];
         a.rebuild();
         press(&mut a, "Cl");
@@ -3636,11 +3713,24 @@ mod tests {
         assert_eq!(a.compare_sel, 0, "0 picks the first model");
         press(&mut a, "$");
         assert_eq!(a.compare_sel, 1, "$ picks the last model");
+        press(&mut a, "2");
+        a.mouse(Mouse::Model(Stop::Compare(0)));
+        assert_eq!((&a.view, a.compare_sel), (&View::Compare, 0), "a click moves to the model");
+        press(&mut a, "l");
+        assert_eq!(a.compare_sel, 1, "and drops a count typed before it");
+        press(&mut a, "h");
+        a.mouse(Mouse::Open(Stop::Compare(1)));
+        assert_eq!(
+            (&a.view, a.current().unwrap().key.as_str()),
+            (&View::Detail(Back::Compare(0)), "opus5"),
+            "a double click opens it"
+        );
+        code(&mut a, KeyCode::Esc);
         a.scroll = 3;
         code(&mut a, KeyCode::Enter);
         assert_eq!(
             (&a.view, a.current().unwrap().key.as_str(), a.scroll),
-            (&View::Detail(Some(3)), "opus5", 0),
+            (&View::Detail(Back::Compare(3)), "opus5", 0),
             "enter shows its details"
         );
         code(&mut a, KeyCode::Esc);
@@ -4020,11 +4110,15 @@ mod tests {
         assert_eq!(a.view, View::Table, "a click only highlights, however often");
         a.mouse(Mouse::Row(1));
         assert_eq!(a.mouse(Mouse::Cell(2, 0)), None);
-        assert_eq!((a.selected(), &a.view), (2, &View::Detail(None)), "a double click on the name opens the details");
+        assert_eq!(
+            (a.selected(), &a.view),
+            (2, &View::Detail(Back::Table)),
+            "a double click on the name opens the details"
+        );
         assert_eq!(a.mouse(Mouse::Scroll(3)), None);
         assert_eq!(a.scroll, 3);
         assert_eq!(a.mouse(Mouse::Row(0)), None, "clicks do nothing behind an overlay");
-        assert_eq!(a.view, View::Detail(None));
+        assert_eq!(a.view, View::Detail(Back::Table));
         code(&mut a, KeyCode::Esc);
         a.mouse(Mouse::Scroll(-1));
         assert_eq!(a.selected(), 1);
@@ -4119,7 +4213,7 @@ mod tests {
     fn detail_and_quit() {
         let mut a = app();
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.view, View::Detail(None));
+        assert_eq!(a.view, View::Detail(Back::Table));
         press(&mut a, "jjj");
         assert_eq!(a.scroll, 3);
         press(&mut a, "gg");

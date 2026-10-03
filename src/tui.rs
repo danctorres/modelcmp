@@ -8,7 +8,7 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, Edit, Effect, GROUPS, HELP, Input, Kind, List, Mouse, NCOLS, NOTES, PRICE, VIA, View, What,
+    App, COLS, ECI, Edit, Effect, GROUPS, HELP, Input, Kind, List, Mouse, NCOLS, NOTES, PRICE, Stop, VIA, View, What,
     choice_rows, col_about, col_name, has_menu, hidden, menu_rows,
 };
 use crate::data::{self, Data, Model};
@@ -401,12 +401,7 @@ fn event_loop(
             dirty = true;
         }
         if dirty {
-            terminal
-                .draw(|f| {
-                    draw(app, f);
-                    recolor(f.buffer_mut(), palette(app), app.term_bg);
-                })
-                .map_err(|e| e.to_string())?;
+            paint(terminal, app)?;
         }
         // Block on input; wake every 200ms while a refresh is in flight, else once a minute to
         // repaint the data age in the frame.
@@ -421,12 +416,28 @@ fn event_loop(
             }
             wait = Duration::ZERO;
             let size = terminal.size().map_err(|e| e.to_string())?;
+            // Held until the input's change is saved, so an agent's write cannot land in between.
+            let mut lock = None;
             let input = match event::read().map_err(|e| e.to_string())? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     click = None;
                     Some(Ok(k))
                 }
                 Event::Mouse(e) => {
+                    // A click goes by the screen it lands on: keys before it in this batch and an
+                    // agent's change of the marks are drawn first. A drag only extends the
+                    // table's range, which goes by the rows, not the screen.
+                    if matches!(e.kind, MouseEventKind::Down(_)) {
+                        lock = Some(crate::store::lock(&crate::store::path()));
+                        if app.store.reload_if_changed() {
+                            app.rebuild_in_place();
+                            dirty = true;
+                        }
+                        if dirty {
+                            paint(terminal, app)?;
+                            dirty = false;
+                        }
+                    }
                     let m = hit(app, Rect::new(0, 0, size.width, size.height), e);
                     match dragged(&mut press, e, m) {
                         Some(m) => Some(Err(double(&mut click, m, Instant::now()))),
@@ -441,12 +452,15 @@ fn event_loop(
                 Event::Resize(..) => None,
                 _ => continue,
             };
-            // Held until the key's change is saved, so an agent's write cannot land in between.
-            let _lock = crate::store::lock(&crate::store::path());
-            // An agent may have marked or noted a model meanwhile: act on its file, not a stale copy.
-            if app.store.reload_if_changed() {
-                app.rebuild_in_place();
-            }
+            // An agent may have marked or noted a model meanwhile: act on its file, not a stale
+            // copy. A click did so before finding what it is on.
+            let _lock = lock.unwrap_or_else(|| {
+                let held = crate::store::lock(&crate::store::path());
+                if app.store.reload_if_changed() {
+                    app.rebuild_in_place();
+                }
+                held
+            });
             let effect = match input {
                 Some(Ok(k)) => app.key(k),
                 Some(Err(m)) => app.mouse(m),
@@ -528,6 +542,17 @@ fn event_loop(
     }
 }
 
+/// Draws the app, in the theme's colours.
+fn paint(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), String> {
+    terminal
+        .draw(|f| {
+            draw(app, f);
+            recolor(f.buffer_mut(), palette(app), app.term_bg);
+        })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// What a mouse event lands on, with the same geometry `draw` uses: the frame's inner area
 /// holds the header and then the rows from `app.table.offset()`.
 fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
@@ -581,6 +606,22 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // A hint in the status bar presses its key.
     if m.row == area.bottom() - 1 {
         return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten();
+    }
+    // In compare and recommend a click is on what is drawn under it (`App::spots`): a plain one
+    // opens it on a double click (`double`), a right one selects it, as in the table, and a ctrl
+    // or shift one, with no highlight there to add to, moves to it. Elsewhere it still clears
+    // the status, as a click does in the table.
+    if matches!(app.view, View::Compare | View::Recommend) {
+        let spot = app.spots.iter().find(|(r, _)| r.contains(pos)).map(|&(_, s)| s);
+        return Some(spot.map_or(Mouse::Outside, |s| {
+            if mark {
+                Mouse::MarkModel(s)
+            } else if extend || pick {
+                Mouse::Model(s)
+            } else {
+                Mouse::Open(s)
+            }
+        }));
     }
     // A drag past the table's edges still extends the range to its nearest row.
     if extend {
@@ -701,13 +742,17 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// A cell opens on a double click, two presses on it within `DOUBLE_CLICK`: a single press,
 /// the first of the two included, is a click on its row. `last` is the press to pair with.
 fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Mouse {
-    let (Mouse::Cell(n, _) | Mouse::Harness(n, _)) = m else {
-        *last = None;
-        return m;
+    let single = match m {
+        Mouse::Cell(n, _) | Mouse::Harness(n, _) => Mouse::Row(n),
+        Mouse::Open(s) => Mouse::Model(s),
+        _ => {
+            *last = None;
+            return m;
+        }
     };
     let again = last.is_some_and(|(t, was)| was == m && at.duration_since(t) < DOUBLE_CLICK);
     *last = (!again).then_some((at, m));
-    if again { m } else { Mouse::Row(n) }
+    if again { m } else { single }
 }
 
 /// Start `cmd` in a new terminal window here, without waiting: Windows Terminal under WSL,
@@ -846,12 +891,12 @@ fn hints(app: &App) -> Vec<&'static str> {
         View::Compare => {
             vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("enter x o y f e n"), BACK.to_vec()]
         }
-        View::Recommend => vec![
-            vec!["j k task", "h l 0 $ model"],
-            vec!["enter best models first"],
-            actions("x o y space f e n"),
-            BACK.to_vec(),
-        ],
+        // On a task's name, enter ranks by it; on a model, it and the others act on the model.
+        View::Recommend if app.current().is_none() => {
+            let enter = if app.custom_at().is_some() { "enter your model" } else { "enter best models first" };
+            vec![vec!["j k task", "h l 0 $ model"], vec![enter], BACK.to_vec()]
+        }
+        View::Recommend => vec![vec!["j k task", "h l 0 $ model"], actions("enter x o y space f e n"), BACK.to_vec()],
     };
     let groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     groups.join(&SEP)
@@ -1166,11 +1211,15 @@ fn draw(app: &mut App, f: &mut Frame) {
     let buf = f.buffer_mut();
     // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
     let mut cursor = status(buf, bar, app).map(|x| (x, bar.y));
+    // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
+    let (mut spots, mut block) = (vec![], None);
     let lines = match app.view {
         View::Table => None,
         View::Help => Some(("keys".to_string(), help(&app.overlay_query))),
         View::Recommend => {
-            Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(130))))
+            let lines;
+            (lines, block) = recommend(app, (area.width as usize).saturating_sub(4).min(130), &mut spots);
+            Some(("recommend".to_string(), lines))
         }
         View::Detail(_) => app.current().map(|m| detail(m, &app.store)),
         View::Compare if app.marked_shown < 2 => {
@@ -1194,17 +1243,17 @@ fn draw(app: &mut App, f: &mut Frame) {
                 area.width.saturating_sub(4) as usize,
                 &app.overlay_query,
                 |m| app.muted(m),
+                &mut spots,
             );
             app.compare_x = first;
             Some(("compare".into(), lines))
         }
     };
+    app.spots.clear();
     if let Some((title, lines)) = lines {
         if app.view == View::Recommend {
-            // Keep the cursor's block in view: it runs from the name under it to the next blank line.
-            let start = lines.iter().position(|l| l.spans.iter().any(|s| s.style.bg == Some(CURSOR)));
-            if let Some(start) = start {
-                let end = lines[start..].iter().position(|l| l.width() == 0).map_or(lines.len(), |n| start + n);
+            // Keep the cursor's task block in view.
+            if let Some(std::ops::Range { start, end }) = block {
                 let shown = body.height.saturating_sub(2) as usize;
                 // No cursor goes to the lines above the first block and under the last: they
                 // show with it, where they fit.
@@ -1217,7 +1266,23 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset);
+        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset);
+        // Where each spot landed on screen, scrolled and cut to the box, for a click to find it.
+        let top = app.scroll as usize;
+        app.spots = spots
+            .into_iter()
+            .filter_map(|p| {
+                let ys = p.lines.start.max(top)..p.lines.end.min(top + text.height as usize);
+                let xs = p.x.start..p.x.end.min(text.width as usize);
+                let rect = Rect::new(
+                    text.x + xs.start as u16,
+                    text.y + (ys.start - top) as u16,
+                    xs.len() as u16,
+                    ys.len() as u16,
+                );
+                (!ys.is_empty() && !xs.is_empty()).then_some((rect, p.at))
+            })
+            .collect();
     }
     // `q` and `u` ask first: the same box, confirmed by the same key again.
     let ask = match app.input {
@@ -1246,7 +1311,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         // Under the wordmark the box is muted, as the table's frame; over the table it has
         // the text's colour, as every box there, which parts it from that frame.
         let border = if splash.is_some() { MUTED } else { Color::Reset };
-        let (above, below) = overlay(buf, within, title, lines, &mut scroll, border);
+        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, border);
         *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
@@ -2106,9 +2171,16 @@ fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
 
+/// Where overlay lines show something to click: cells `x` of lines `lines`, and what is there.
+struct Spot {
+    lines: std::ops::Range<usize>,
+    x: std::ops::Range<usize>,
+    at: Stop,
+}
+
 /// A centred rounded box in `border`, its title bold in the text's colour, showing `lines` from
 /// `scroll` on, which is clamped to the content: the accent is left to the table's headers and
-/// the cursor. Returns whether lines are scrolled off above and below.
+/// the cursor. Returns where the lines went, and whether some are scrolled off above and below.
 fn overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -2116,7 +2188,7 @@ fn overlay(
     lines: Vec<Line<'static>>,
     scroll: &mut u16,
     border: Color,
-) -> (bool, bool) {
+) -> (Rect, bool, bool) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
     let shown = h.saturating_sub(2) as usize;
@@ -2132,15 +2204,16 @@ fn overlay(
         .border_style(fg(border))
         .title_top(Line::from(format!(" {title} ")).style(Style::new().add_modifier(BOLD)))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
-    let inner = block.inner(rect);
+    // Inside the border, a cell of padding either side.
+    let text = rect.inner(ratatui::layout::Margin::new(2, 1));
     Clear.render(rect, buf);
     block.render(rect, buf);
     let (above, below) = (*scroll > 0, *scroll as usize + shown < lines.len());
-    for (line, y) in lines.into_iter().skip(*scroll as usize).zip(inner.y..inner.bottom()) {
-        line.render(Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 }, buf);
+    for (line, y) in lines.into_iter().skip(*scroll as usize).zip(text.y..text.bottom()) {
+        line.render(Rect { y, height: 1, ..text }, buf);
     }
-    vmarks(buf, rect.x, inner.y, inner.bottom() - 1, above, below);
-    (above, below)
+    vmarks(buf, rect.x, text.y, text.bottom() - 1, above, below);
+    (text, above, below)
 }
 
 fn heading(text: &str) -> Line<'static> {
@@ -2179,12 +2252,14 @@ fn help(query: &str) -> Vec<Line<'static>> {
 
 /// One block per task: what it is, when to pick a model high on it and its best models per
 /// price, wrapped to `width`. The cursor's block is highlighted; enter
-/// ranks the table by it. Your own tasks follow, each with the model you gave it.
-fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
+/// ranks the table by it. Your own tasks follow, each with the model you gave it. Where each
+/// model and task block is goes to `spots`, and the lines of the cursor's block come back too.
+fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'static>>, Option<std::ops::Range<usize>>) {
     let cur = app.current().map(|m| m.key.clone());
+    let mut block = None;
     let name = |i: usize, s: &str| {
         let style = fg(task_color(s)).add_modifier(BOLD);
-        let mut name = cursor(i == app.task_cur, vec![Span::styled(s.to_string(), style)]);
+        let mut name = cursor(i == app.task_cur && cur.is_none(), vec![Span::styled(s.to_string(), style)]);
         name.push(Span::raw(" "));
         name
     };
@@ -2195,27 +2270,42 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
         .into_iter()
         .map(|l| l.style(fg(MUTED)))
         .collect();
+    // Task `t`'s line of models, wrapped onto the end of `v`, each model a spot, and the rest
+    // of its block from line `start` one too; with none it says "no data".
+    let mut models = |v: &mut Vec<Line<'static>>, t: usize, start: usize, label, items: Vec<Line<'static>>| {
+        let none = items.is_empty();
+        let items =
+            if none { vec![Line::from(cursor(false, vec![Span::styled("no data", fg(MUTED))]))] } else { items };
+        let (lines, at) = wrapped_at(label, items, &Span::styled("·", fg(MUTED)), width);
+        let y = v.len();
+        if !none {
+            let at = at.into_iter().enumerate();
+            spots.extend(at.map(|(i, (l, x))| Spot { lines: y + l..y + l + 1, x, at: Stop::Recommend(t, i + 1) }));
+        }
+        v.extend(lines);
+        spots.push(Spot { lines: start..v.len(), x: 0..width, at: Stop::Recommend(t, 0) });
+        if t == app.task_cur {
+            block = Some(start..v.len());
+        }
+    };
     for (i, t) in TASKS.iter().enumerate() {
         v.push(Line::default());
+        let start = v.len();
         v.extend(wrapped(name(i, t.name), words(t.about), &space, width));
         v.extend(wrapped(label("  use for:         "), words(t.when), &space, width));
         let picked = (i == app.task_cur).then_some(cur.as_deref()).flatten();
         // Each entry brings a cell for the cursor's bar at either end, the gaps between them.
-        v.extend(wrapped(
-            label("  best per price: "),
-            frontier_spans(app, t, picked),
-            &Span::styled("·", fg(MUTED)),
-            width,
-        ));
+        models(&mut v, i, start, label("  best per price: "), frontier_spans(app, t, picked));
     }
     for (i, t) in app.store.custom_tasks().into_iter().enumerate() {
         v.push(Line::default());
+        let start = v.len();
         v.extend(wrapped(name(TASKS.len() + i, t), words(app.store.about(t).unwrap_or(CUSTOM_ABOUT)), &space, width));
         v.extend(wrapped(label("  use for:         "), words(CUSTOM_WHEN), &space, width));
         // No benchmark ranks it, so its line is the models you gave it, each with the tier it
         // is for and no score.
         let picked = (TASKS.len() + i == app.task_cur).then_some(cur.as_deref()).flatten();
-        let mut line: Vec<Line> = app
+        let line: Vec<Line> = app
             .custom_line(t)
             .iter()
             .map(|m| {
@@ -2228,17 +2318,14 @@ fn recommend(app: &App, width: usize) -> Vec<Line<'static>> {
                 Line::from(cursor(picked == Some(m.key.as_str()), spans))
             })
             .collect();
-        if line.is_empty() {
-            line.push(Line::from(cursor(false, vec![Span::styled("no data", fg(MUTED))])));
-        }
-        v.extend(wrapped(label("  your model:     "), line, &Span::styled("·", fg(MUTED)), width));
+        models(&mut v, TASKS.len() + i, start, label("  your model:     "), line);
     }
     v.push(Line::default());
     let cli = words(
         "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model> [--tier low|mid|high]",
     );
     v.extend(wrapped(vec![], cli, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
-    v
+    (v, block)
 }
 
 /// `label` then `items` joined by `glue`, broken between items at `width`, continuation
@@ -2249,10 +2336,20 @@ fn wrapped(
     glue: &Span<'static>,
     width: usize,
 ) -> Vec<Line<'static>> {
+    wrapped_at(label, items, glue, width).0
+}
+
+/// `wrapped`, with the line and cells each item landed on.
+fn wrapped_at(
+    label: Vec<Span<'static>>,
+    items: Vec<Line<'static>>,
+    glue: &Span<'static>,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<(usize, std::ops::Range<usize>)>) {
     let indent: usize = label.iter().map(Span::width).sum();
     let end = glue.content.trim_end();
     let end_w = Span::raw(end).width();
-    let mut lines = Vec::new();
+    let (mut lines, mut at) = (Vec::new(), Vec::new());
     let (mut cur, mut w) = (label, indent);
     for item in items {
         // Room is kept for the punctuation a later break would add.
@@ -2266,11 +2363,12 @@ fn wrapped(
             w += glue.width();
             cur.push(glue.clone());
         }
+        at.push((lines.len(), w..w + item.width()));
         w += item.width();
         cur.extend(item.spans);
     }
     lines.push(Line::from(cur));
-    lines
+    (lines, at)
 }
 
 /// `name $price (score)` for each entry of the task's price frontier, cheapest first and the
@@ -2278,11 +2376,7 @@ fn wrapped(
 /// the task's colour, or grey and marked not recommended when it is on the line only as the
 /// favorite. The `picked` model is under the cursor, keeping its colours as in the table.
 fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'static>> {
-    let front = app.task_frontier(t);
-    if front.is_empty() {
-        return vec![Line::from(cursor(false, vec![Span::styled("no data", fg(MUTED))]))];
-    }
-    front
+    app.task_frontier(t)
         .iter()
         .map(|(m, s)| {
             let fav = app.store.is_favorite(Some(t), &m.key);
@@ -2323,7 +2417,8 @@ fn detail(m: &Model, store: &Store) -> (String, Vec<Line<'static>>) {
 /// the worst in red, and the one under the cursor filled between its two bars; a `muted` model's
 /// column is grey, its bests and worsts too, as its row in the table. When they do not all fit in
 /// `avail` cells, the view starts at model `first`, moved only as far as it takes to show the
-/// selection, and the `first` in effect comes back for `App::compare_x`.
+/// selection, and the `first` in effect comes back for `App::compare_x`. Each shown model's
+/// column, between its two bars and from the model row down, goes to `spots`.
 fn compare(
     models: &[&Model],
     sel: usize,
@@ -2331,6 +2426,7 @@ fn compare(
     avail: usize,
     query: &str,
     muted: impl Fn(&Model) -> bool,
+    spots: &mut Vec<Spot>,
 ) -> (Vec<Line<'static>>, usize) {
     let mut rows = compare_rows(models);
     let muted: Vec<bool> = models.iter().map(|m| muted(m)).collect();
@@ -2351,8 +2447,9 @@ fn compare(
     let n = models.len();
     let sel = sel.min(n.saturating_sub(1));
     let label_w = rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
+    // In cells as the terminal draws them, so a wide character keeps the columns in line.
     let widths: Vec<usize> =
-        (0..n).map(|i| rows.iter().map(|r| r.cells[i].chars().count()).max().unwrap_or(0)).collect();
+        (0..n).map(|i| rows.iter().map(|r| Span::raw(r.cells[i].as_str()).width()).max().unwrap_or(0)).collect();
     // How many models from `f` on fit beside the labels; always at least one.
     let count = |f: usize, reserve: usize| {
         let mut room = avail.saturating_sub(label_w + reserve);
@@ -2381,6 +2478,7 @@ fn compare(
     if shown < n {
         out.push(Line::from(format!("models {}-{} of {n} · h l move", first + 1, first + shown)).style(fg(MUTED)));
     }
+    let top = out.len();
     // The model row carries `‹` and `›` for models scrolled off, as the table's header does.
     let edge = fg(ACCENT).add_modifier(BOLD);
     let (mut width, mut section) = (0usize, "");
@@ -2412,7 +2510,8 @@ fn compare(
             }
             spans.push(bar(i == sel, "▌"));
             let style = if i == sel { style.bg(CURSOR) } else { style };
-            spans.push(Span::styled(format!("{c:>w$}", w = widths[i]), style));
+            let pad = " ".repeat(widths[i] - Span::raw(c.as_str()).width());
+            spans.push(Span::styled(pad + &c, style));
         }
         spans.push(bar(first + shown == sel + 1, "▐"));
         if k == 0 && first + shown < n {
@@ -2426,6 +2525,13 @@ fn compare(
         } else {
             out.push(line);
         }
+    }
+    // Each model's cells follow the cell before it, `‹` or the bar of the one before; the `‹`
+    // and `›` are no model's, as in the table's header.
+    let mut x = label_w + 1;
+    for (i, w) in widths.iter().enumerate().skip(first).take(shown) {
+        spots.push(Spot { lines: top..out.len(), x: x..x + w + 2, at: Stop::Compare(i) });
+        x += w + 2;
     }
     (out, first)
 }
@@ -2449,7 +2555,7 @@ fn verdict_lines(models: &[&Model]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ECI;
+    use crate::app::{Back, ECI};
     use crate::data::Offer;
     use ratatui::crossterm::event::KeyCode;
 
@@ -2566,10 +2672,16 @@ mod tests {
         let mut buf = Buffer::empty(area);
         table(&mut buf, Rect { height: height - 1, ..area }, app);
         status(&mut buf, Rect { y: height - 1, height: 1, ..area }, app);
-        let lines = (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_owned())
-            .collect();
+        let lines = text(&buf);
         (buf, lines)
+    }
+
+    /// Each line of `buf` as it reads.
+    fn text(buf: &Buffer) -> Vec<String> {
+        let a = buf.area;
+        (a.y..a.bottom())
+            .map(|y| (a.x..a.right()).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_owned())
+            .collect()
     }
 
     #[test]
@@ -2788,7 +2900,7 @@ mod tests {
         assert_eq!(buf[(cell(&lines[opus as usize], "★"), opus)].fg, STAR, "{lines:?}");
         a.term_bg = None;
         // In compare its column is muted.
-        let rows = compare(&a.marked_models(), 0, 0, 200, "", |m| a.muted(m)).0;
+        let rows = compare(&a.marked_models(), 0, 0, 200, "", |m| a.muted(m), &mut vec![]).0;
         let names = rows.iter().find(|l| l.to_string().starts_with("model ")).unwrap();
         let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
         assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
@@ -2960,6 +3072,74 @@ mod tests {
     }
 
     #[test]
+    fn a_click_in_compare_and_recommend_is_on_the_model_under_it() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
+            m.fit.insert("overall".into(), pct);
+        }
+        a.set_data(data);
+        let (w, h) = (120, 30);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        // Where `pat` last shows on screen, as `draw` puts it.
+        let mut at = |a: &mut App, pat: &str, mods: KeyModifiers| {
+            term.draw(|f| draw(a, f)).unwrap();
+            let lines = text(term.backend().buffer());
+            let y = lines.iter().rposition(|l| l.contains(pat)).unwrap();
+            let x = lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16;
+            let e =
+                MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y as u16, modifiers: mods };
+            hit(a, Rect::new(0, 0, w, h), e)
+        };
+        "  j C".chars().skip(1).for_each(|c| _ = a.key(KeyCode::Char(c).into()));
+        let none = KeyModifiers::NONE;
+        // The model row, under the verdict, which names them too.
+        assert_eq!(
+            (at(&mut a, "opus", none), at(&mut a, "flash", none)),
+            (Some(Mouse::Open(Stop::Compare(0))), Some(Mouse::Open(Stop::Compare(1))))
+        );
+        assert_eq!(at(&mut a, "verdict:", none), Some(Mouse::Outside), "above the model row no model");
+        assert_eq!(
+            at(&mut a, "flash", KeyModifiers::CONTROL),
+            Some(Mouse::Model(Stop::Compare(1))),
+            "a ctrl click moves"
+        );
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Char('R').into());
+        // Overall's line, cheapest first, after the task's name.
+        assert_eq!(
+            (at(&mut a, "opus $", none), at(&mut a, "flash $", none)),
+            (Some(Mouse::Open(Stop::Recommend(0, 2))), Some(Mouse::Open(Stop::Recommend(0, 1))))
+        );
+        let block = Some(Mouse::Open(Stop::Recommend(1, 0)));
+        assert_eq!(at(&mut a, &TASKS[1].about[..20], none), block, "the rest of a block is its task");
+        let last = TASKS.len() - 1;
+        let block = Some(Mouse::Open(Stop::Recommend(last, 0)));
+        assert_eq!(at(&mut a, "no data", none), block, "and \"no data\" is no model");
+        a.mouse(Mouse::Model(Stop::Recommend(1, 0)));
+        assert_eq!((a.task_cur, a.task_sel, a.current().is_none()), (1, 0, true), "a click moves to the task");
+        a.mouse(Mouse::Model(Stop::Compare(2)));
+        assert_eq!((a.task_cur, a.task_sel), (1, 0), "compare's stop is none of recommend's");
+        a.mouse(Mouse::Model(Stop::Recommend(0, 2)));
+        assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (0, "opus"), "a click moves to the model");
+        let was = a.store.is_marked("flash");
+        assert_eq!(a.mouse(Mouse::MarkModel(Stop::Recommend(0, 1))), Some(Effect::Save));
+        assert_ne!(a.store.is_marked("flash"), was, "a right click toggles its selection, as space does");
+        a.mouse(Mouse::Open(Stop::Recommend(0, 1)));
+        assert!(
+            matches!(a.view, View::Detail(Back::Recommend(_))) && a.current().unwrap().key == "flash",
+            "a double click on a model opens its details"
+        );
+        a.key(KeyCode::Esc.into());
+        assert_eq!((&a.view, a.task_sel), (&View::Recommend, 1), "esc goes back to it");
+        a.mouse(Mouse::Open(Stop::Recommend(0, 0)));
+        assert_eq!(a.view, View::Table, "a double click on a task ranks by it");
+        a.store.toggle_favorite("debugging", "flash");
+        "RG".chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
+        assert!(hints(&a).contains(&"enter your model"), "on a task of your own, enter goes to its model");
+    }
+
+    #[test]
     fn a_cell_takes_a_double_click() {
         let (t, ms) = (Instant::now(), Duration::from_millis);
         let (cell, row) = (Mouse::Cell(3, PRICE), Mouse::Row(3));
@@ -2970,6 +3150,9 @@ mod tests {
         assert_eq!(double(&mut last, cell, t + ms(800)), row, "too slow: two clicks");
         assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(900)), row, "another cell: a click");
         assert_eq!(double(&mut last, Mouse::Extend(4), t + ms(950)), Mouse::Extend(4), "a drag is itself");
+        let (open, model) = (Mouse::Open(Stop::Compare(1)), Mouse::Model(Stop::Compare(1)));
+        assert_eq!(double(&mut last, open, t + ms(1000)), model, "a model: a click moves");
+        assert_eq!(double(&mut last, open, t + ms(1100)), open, "and a double click opens");
         assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(999)), row, "and breaks the pair");
     }
 
@@ -3129,7 +3312,7 @@ mod tests {
             m.fit.insert("coding".into(), pct);
         }
         a.set_data(data);
-        let lines = recommend(&a, 200);
+        let lines = recommend(&a, 200, &mut vec![]).0;
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let name = spans.iter().find(|s| s.content == "coding").unwrap();
         assert_eq!(name.style.fg, Some(task_color("coding")));
@@ -3141,7 +3324,7 @@ mod tests {
         data.models.iter_mut().find(|m| m.key == "flash").unwrap().fit.insert("coding".into(), 40.0);
         a.store.toggle_favorite("coding", "flash");
         a.set_data(data);
-        let lines = recommend(&a, 200);
+        let lines = recommend(&a, 200, &mut vec![]).0;
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert!(spans[star + 1].content.starts_with("flash "));
@@ -3274,7 +3457,7 @@ mod tests {
     fn compare_colours_every_tied_cell() {
         let mk = |n: &str, context| Model { name: n.into(), context, ..Default::default() };
         let (a, b, c) = (mk("a", 1_000_000), mk("b", 200_000), mk("c", 200_000));
-        let lines = compare(&[&a, &b, &c], 0, 0, 200, "", |_| false).0;
+        let lines = compare(&[&a, &b, &c], 0, 0, 200, "", |_| false, &mut vec![]).0;
         let ctx = lines.iter().find(|l| l.to_string().starts_with("context")).unwrap();
         let fgs: Vec<_> =
             ctx.spans.iter().filter(|s| s.content.trim().ends_with(['M', 'k'])).map(|s| s.style.fg).collect();
@@ -3287,18 +3470,23 @@ mod tests {
         let ms: Vec<&Model> =
             ["opus", "flash"].iter().map(|k| a.data.models.iter().find(|m| m.key == *k).unwrap()).collect();
         let row = |v: &Vec<Line>| v.iter().find(|l| l.to_string().starts_with("model ")).unwrap().to_string();
-        let (full, first) = compare(&ms, 1, 1, 200, "", |_| false);
+        let (full, first) = compare(&ms, 1, 1, 200, "", |_| false, &mut vec![]);
         assert!(row(&full).contains("opus") && row(&full).contains("flash"));
         assert_eq!(first, 0, "everything fits, so nothing scrolls off");
         assert!(!row(&full).contains('‹') && !row(&full).contains('›'), "no scroll marks when all fit");
-        let (cut, first) = compare(&ms, 1, 0, 20, "", |_| false);
+        let mut spots = vec![];
+        let (cut, first) = compare(&ms, 1, 0, 20, "", |_| false, &mut spots);
+        let edge = row(&cut).chars().position(|c| c == '‹').unwrap();
+        assert_eq!(spots[0].x.start, edge + 1, "a click on ‹ is on no model");
         assert!(!row(&cut).contains("opus") && row(&cut).contains("flash"), "scrolls to show the selection");
         assert_eq!(first, 1);
         assert!(cut.iter().any(|l| l.to_string().starts_with("models 2-2 of 2")));
         assert!(row(&cut).contains('‹') && !row(&cut).contains('›'), "‹ marks models off to the left");
-        let (past, first) = compare(&ms, 7, 0, 20, "", |_| false);
+        let (past, first) = compare(&ms, 7, 0, 20, "", |_| false, &mut vec![]);
         assert!(row(&past).contains("flash") && first == 1, "a cursor past the models lands on the last");
-        let (back, first) = compare(&ms, 0, 1, 20, "", |_| false);
+        let mut spots = vec![];
+        let (back, first) = compare(&ms, 0, 1, 20, "", |_| false, &mut spots);
+        assert_eq!(spots[0].x.end, row(&back).chars().count() - 1, "nor on ›");
         assert!(row(&back).contains("opus") && !row(&back).contains("flash"));
         assert_eq!(first, 0);
         assert!(row(&back).ends_with("opus▐›") && !row(&back).contains('‹'), "› marks models off to the right");
@@ -3319,7 +3507,7 @@ mod tests {
         let topics: Vec<String> = full.iter().map(Line::to_string).filter(|l| l.starts_with("── ")).collect();
         assert!(topics[0].starts_with("── scores ─"), "{topics:?}");
         assert!(topics.iter().all(|t| t.chars().count() == full[rule].width()), "topic rules span the model row");
-        let (some, _) = compare(&ms, 0, 0, 200, "eci", |_| false);
+        let (some, _) = compare(&ms, 0, 0, 200, "eci", |_| false, &mut vec![]);
         assert_eq!(
             labels(&some).iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
             ["model", "ECI"],
@@ -3327,7 +3515,7 @@ mod tests {
         );
         let names = |v: &Vec<Line>| v.iter().filter(|l| l.to_string().starts_with("── ")).count();
         assert_eq!(names(&some), 1, "only the topics with a shown row keep their rule");
-        let (typo, _) = compare(&ms, 0, 0, 200, "contxt", |_| false);
+        let (typo, _) = compare(&ms, 0, 0, 200, "contxt", |_| false, &mut vec![]);
         assert!(labels(&typo).contains(&"context".to_string()), "a typo is forgiven when nothing matches");
     }
 
@@ -3479,7 +3667,7 @@ mod tests {
             .flat_map(|(w, h)| [(w, h, None), (w, h, Some(0))])
         {
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-            for view in [View::Table, View::Help, View::Detail(None), View::Compare, View::Recommend] {
+            for view in [View::Table, View::Help, View::Detail(Back::Table), View::Compare, View::Recommend] {
                 let mut a = app();
                 a.store.marked = vec!["opus".into(), "flash".into()];
                 (a.view, a.term_bg) = (view, term_bg);
@@ -3554,7 +3742,7 @@ mod tests {
         let a = app();
         let text: Vec<String> = detail(&a.data.models[0], &a.store).1.iter().map(ToString::to_string).collect();
         assert!(text.iter().any(|l| l.starts_with("  developer:  anthropic")), "{text:?}");
-        let rows = compare(&a.marked_models(), 0, 0, 200, "", |_| false).0;
+        let rows = compare(&a.marked_models(), 0, 0, 200, "", |_| false, &mut vec![]).0;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
         assert!(rows.iter().any(|l| l.to_string().starts_with("model")));
     }
@@ -3632,8 +3820,8 @@ mod tests {
     #[test]
     fn recommend_panel_wraps_and_highlights_the_cursor() {
         let mut a = app();
-        a.task_cur = TASKS.iter().position(|t| t.name == "vision").unwrap();
-        let lines = recommend(&a, 60);
+        (a.view, a.task_cur) = (View::Recommend, TASKS.iter().position(|t| t.name == "vision").unwrap());
+        let lines = recommend(&a, 60, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         assert!(text[0].starts_with("best per price: the top model"), "{}", text[0]);
         let gap = text.iter().position(String::is_empty).unwrap();
@@ -3645,22 +3833,22 @@ mod tests {
         );
         let names: Vec<&str> = text.iter().filter_map(|l| l.strip_prefix(' ')?.split_whitespace().next()).collect();
         assert_eq!(names[..2], ["overall", "use"], "overall comes first");
-        // The picked model on the cursor's task is under a cursor of its own; other tasks have none.
+        // The cursor is on the cursor task's name or one of its models, not both; other tasks have none.
         let mut b = app();
         let mut data = std::mem::take(&mut b.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
             m.fit.insert("overall".into(), pct);
         }
         b.set_data(data);
-        (b.view, b.task_sel) = (View::Recommend, 1);
-        let bars: Vec<String> = recommend(&b, 200)
+        (b.view, b.task_sel) = (View::Recommend, 2);
+        let bars: Vec<String> = recommend(&b, 200, &mut vec![])
+            .0
             .iter()
             .flat_map(|l| l.spans.iter())
             .filter(|s| s.style.bg == Some(CURSOR))
             .map(|s| s.content.to_string())
             .collect();
-        assert_eq!(bars[..3], ["▌", "overall", "▐"], "the task name between its bars: {bars:?}");
-        assert!(bars.len() == 6 && bars[4].starts_with("opus "), "and the best of overall: {bars:?}");
+        assert!(bars.len() == 3 && bars[1].starts_with("opus "), "the best of overall, its name not: {bars:?}");
         let vision = text.iter().position(|l| l.starts_with("▌vision▐ ")).unwrap();
         let models = text[vision..].iter().position(|l| l.starts_with("  best per price:  "));
         assert!(models.is_some_and(|n| n <= 3), "every task lists its models: {:?}", &text[vision..vision + 4]);
@@ -3676,7 +3864,7 @@ mod tests {
         a.store.toggle_favorite("debugging", "opus");
         a.store.set_about("debugging", "finding and fixing a bug");
         (a.view, a.task_cur) = (View::Recommend, TASKS.len());
-        let lines = recommend(&a, 80);
+        let lines = recommend(&a, 80, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         let own = text.iter().position(|l| l.starts_with("▌debugging▐ finding and fixing a bug")).unwrap();
         assert_eq!(
@@ -3685,10 +3873,10 @@ mod tests {
             "a built-in task's three lines, the last block"
         );
         assert_eq!(text[own + 1], format!("  use for:         {CUSTOM_WHEN}"));
-        assert!(text[own + 2].starts_with("  your model:     ▌★ opus $5.0▐"), "{}", text[own + 2]);
+        assert!(text[own + 2].starts_with("  your model:      ★ opus $5.0 "), "{}", text[own + 2]);
         // A tier's model joins the line, cheapest first, and says its tier.
         a.store.toggle_favorite("debugging:low", "flash");
-        let text: Vec<String> = recommend(&a, 80).iter().map(ToString::to_string).collect();
-        assert_eq!(text[own + 2], "  your model:     ▌★ flash $0.10 (low)▐· ★ opus $5.0 ");
+        let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        assert_eq!(text[own + 2], "  your model:      ★ flash $0.10 (low) · ★ opus $5.0 ");
     }
 }
