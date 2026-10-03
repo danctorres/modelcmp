@@ -1838,18 +1838,25 @@ impl App {
         if self.task.is_some() && col_benches(self.col).is_some() {
             return self.refuse("a task shows its own scores: c leaves the task");
         }
-        let ms: Vec<(usize, &Model)> = self.filtered(self.col).collect();
-        let benches = col_benches(self.col);
+        let (items, picked) = self.menu_items(self.col);
+        self.input = Input::Menu { col: self.col, items, list: List::at(picked.map_or(0, |i| i + 1)) };
+    }
+
+    /// The entries of `col`'s dropdown, each with how many models it would show, and the one
+    /// in effect, counted from the first entry after "any".
+    fn menu_items(&self, col: usize) -> (Vec<(String, usize)>, Option<usize>) {
+        let ms: Vec<(usize, &Model)> = self.filtered(col).collect();
+        let benches = col_benches(col);
         // The first entry of a task's dropdown counts the models with the task's score.
-        let scored = numeric(self.col).filter(|_| benches.is_some());
+        let scored = numeric(col).filter(|_| benches.is_some());
         let first = scored.map_or(ms.len(), |c| ms.iter().filter(|(_, m)| (c.get)(m).is_some()).count());
         let (mut items, picked) = if let Some((_, benches)) = benches {
             // How many models each benchmark scored.
             let count = |b: &str| ms.iter().filter(|(_, m)| m.scores.contains_key(b)).count();
-            let picked = self.col_bench(self.col).and_then(|b| benches.iter().position(|x| *x == b));
+            let picked = self.col_bench(col).and_then(|b| benches.iter().position(|x| *x == b));
             (benches.iter().map(|&b| (b.to_string(), count(b))).collect(), picked)
-        } else if self.col == 1 || self.col == VIA {
-            let by_dev = self.col == 1;
+        } else if col == 1 || col == VIA {
+            let by_dev = col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
             // Via as the table shows it, so "not available" can be picked too.
             let labels =
@@ -1865,7 +1872,7 @@ impl App {
             } else {
                 names.sort_by_key(|&(_, n)| Reverse(n));
             }
-            let current = if self.col == 1 { &self.dev } else { &self.via };
+            let current = if col == 1 { &self.dev } else { &self.via };
             let picked = current.first().and_then(|d| names.iter().position(|(x, _)| x == d));
             (names, picked)
         } else {
@@ -1881,11 +1888,10 @@ impl App {
         items.insert(0, (benches.map_or("any", |b| b.0).into(), first));
         // The entry a task column shows already keeps the bounds on it: it counts what the table shows.
         if benches.is_some() {
-            let col = self.col;
             items[picked.map_or(0, |i| i + 1)].1 =
                 self.filtered(usize::MAX).filter(|&(i, _)| self.val(i, col).is_some()).count();
         }
-        self.input = Input::Menu { col: self.col, items, list: List::at(picked.map_or(0, |i| i + 1)) };
+        (items, picked)
     }
 
     fn toggle_mark(&mut self) {
@@ -2643,6 +2649,11 @@ impl App {
                         } else if col_benches(*col).is_some() {
                             let col = *col;
                             self.pick_bench(col, i);
+                            // The pick drops the column's bounds, which the counts were under.
+                            let fresh = self.menu_items(col).0;
+                            if let Input::Menu { items, .. } = &mut self.input {
+                                *items = fresh;
+                            }
                         } else {
                             let picked = if *col == 1 { &mut self.dev } else { &mut self.via };
                             match picked.iter().position(|d| *d == items[i].0) {
@@ -3122,6 +3133,7 @@ mod tests {
         assert_eq!(menu(&a)[..2], [("all", 0), ("DeepSWE", 2)]);
         // A task's line is drawn from its score: choosing one shows it again, and no other is picked.
         press(&mut a, "j ");
+        assert_eq!(menu(&a)[..2], [("all", 2), ("DeepSWE", 2)], "the open list counts again, the bound gone");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
