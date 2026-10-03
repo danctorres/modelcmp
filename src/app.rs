@@ -30,6 +30,8 @@ pub struct Col {
     pub read: fn(&str, bool) -> Option<f64>,
     /// Only Artificial Analysis measures it: hidden with any other source (`hidden`).
     pub aa_only: bool,
+    /// It hangs on the price, so a list price shows in it after a `~` (`on_price`).
+    pub price: bool,
 }
 
 impl Col {
@@ -66,6 +68,7 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
         show: |v| score(Some(v)),
         read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()),
         aa_only: false,
+        price: false,
     }
 }
 
@@ -121,16 +124,19 @@ pub const COLS: [Col; 13] = [
     },
     Col {
         lower_better: true,
+        price: true,
         show: money,
         ..col("Price", "price", "USD per 1M tokens, 3:1 input:output", |m| m.cost())
     },
     Col {
         lower_better: true,
+        price: true,
         show: money,
         ..col("$in", "in", "USD per 1M input tokens, cheapest available provider", |m| Some(m.priced_offer()?.input))
     },
     Col {
         lower_better: true,
+        price: true,
         show: money,
         ..col("$cache", "cache", "USD per 1M cached input tokens ($in when the provider has no discount)", |m| {
             m.priced_offer().map(|o| o.cache_read.unwrap_or(o.input))
@@ -138,6 +144,7 @@ pub const COLS: [Col; 13] = [
     },
     Col {
         lower_better: true,
+        price: true,
         show: money,
         ..col("$out", "out", "USD per 1M output tokens, cheapest available provider", |m| {
             Some(m.priced_offer()?.output)
@@ -152,9 +159,12 @@ pub const COLS: [Col; 13] = [
     col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
     col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
     col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
-    col("Code/$", "value", "coding percentile ÷ Price, as a percentile, ~ on a list price", |m| {
-        m.fit.get("value").copied()
-    }),
+    Col {
+        price: true,
+        ..col("Code/$", "value", "coding percentile ÷ Price, as a percentile, ~ on a list price", |m| {
+            m.fit.get("value").copied()
+        })
+    },
     Col {
         aa_only: true,
         show: |v| format!("{v:.0}"),
@@ -170,7 +180,7 @@ pub const COLS: [Col; 13] = [
 
 /// Whether `COLS[i]` hangs on the price: Price, $in, $cache and $out, and Code/$, which divides by it.
 pub fn on_price(i: usize) -> bool {
-    (1..=4).contains(&i) || i == 10
+    COLS[i].price
 }
 
 /// A value of `COLS[i]` as its cell shows it: after a `~` when it comes from a list price (`Model::listed`).
