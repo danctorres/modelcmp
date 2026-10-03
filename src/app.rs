@@ -72,6 +72,14 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
     }
 }
 
+/// The benchmarks the dropdown of the task column `id` lists, after the entry for the task's
+/// score: "all" with Epoch, which fits them into one, the task's own field with Artificial
+/// Analysis.
+fn benched(id: &str) -> Option<(&'static str, &'static [&'static str])> {
+    let (own, more) = crate::fit::task(id)?.sourced();
+    (!more.is_empty()).then_some((own.unwrap_or("all"), more))
+}
+
 fn positive(x: f64) -> Option<f64> {
     (x > 0.0).then_some(x)
 }
@@ -159,10 +167,7 @@ pub const COLS: [Col; 13] = [
     col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
     col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
     col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
-    Col {
-        price: true,
-        ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied())
-    },
+    Col { price: true, ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied()) },
     Col {
         aa_only: true,
         show: |v| format!("{v:.0}"),
@@ -230,7 +235,7 @@ pub fn numeric(col: usize) -> Option<&'static Col> {
 }
 
 /// Header of the column at cursor index `col`.
-pub fn col_name(col: usize) -> &'static str {
+pub fn base_col_name(col: usize) -> &'static str {
     match col {
         0 => "Model",
         1 => "Dev",
@@ -242,11 +247,20 @@ pub fn col_name(col: usize) -> &'static str {
 
 /// Whether the header of the column at cursor index `col` opens a dropdown with `d`.
 pub fn has_menu(col: usize) -> bool {
-    col == 1 || col == PRICE || col == VIA
+    col == 1 || col == PRICE || col == VIA || TASK_COLS.contains(&col)
+}
+
+/// Coding, Agentic and Reason: the columns `col_benches` has benchmarks for, with either
+/// source. Asked of every header on every frame, so not looked up.
+const TASK_COLS: std::ops::RangeInclusive<usize> = ECI + 1..=ECI + 3;
+
+/// The benchmarks the dropdown of the task column at cursor index `col` lists.
+fn col_benches(col: usize) -> Option<(&'static str, &'static [&'static str])> {
+    benched(numeric(col)?.id)
 }
 
 /// What the column at cursor index `col` means.
-pub fn col_about(col: usize) -> String {
+pub fn base_col_about(col: usize) -> String {
     match col {
         0 => "model name (dimmed if Via is empty)".into(),
         1 => "company that trained the model".into(),
@@ -292,7 +306,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("s", "sort by the column; again reverses"),
             ("/", "filter models, compare rows, this help or a list"),
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
-            ("d", "dropdown on Dev, Price and Via (▾); space enter toggle"),
+            ("d", "dropdown on a header with ▾; space enter toggle"),
             ("a", "all models, including ones you have no access to"),
             ("%", "Price with none of the input cached, or back to --cache"),
             ("c", "clear filters, bounds, task, M, F and E; the selection stays"),
@@ -750,6 +764,9 @@ pub struct App {
     /// `vals[i][c]` is `COLS[c]` of `data.models[i]`, computed once per data load: a price is a
     /// search through the offers, too slow to repeat for every model on every key.
     pub vals: Vec<[Option<f64>; COLS.len()]>,
+    /// The benchmark each task's column shows, picked in its dropdown; none for the task's
+    /// score. `fill_col` puts the benchmark's scores in `vals`.
+    bench: [Option<&'static str>; COLS.len()],
     /// `Model::listed` of each model, cached as `vals`.
     pub listed: Vec<bool>,
     /// Widest shown value of each column over every model, so the layout holds when filtering.
@@ -849,6 +866,7 @@ impl App {
         let mut app = App {
             data: Data::default(),
             vals: vec![],
+            bench: [None; COLS.len()],
             listed: vec![],
             widths: [0; COLS.len()],
             ext: [None; COLS.len()],
@@ -909,12 +927,7 @@ impl App {
 
     /// Replace the data and recompute everything derived from it.
     pub fn set_data(&mut self, data: Data) {
-        self.vals = data.models.iter().map(|m| COLS.each_ref().map(|c| (c.get)(m))).collect();
         self.listed = data.models.iter().map(Model::listed).collect();
-        self.widths = std::array::from_fn(|c| {
-            let shown = self.vals.iter().zip(&self.listed).filter_map(|(v, &l)| Some(shown(c, v[c]?, l)));
-            shown.map(|s| s.chars().count()).max().unwrap_or(0)
-        });
         self.any_available = data.any_available();
         // The rows index the old data: point them at the same models in the new, so `rebuild`
         // keeps the cursor and the highlight on them; a model gone points nowhere. Data taken out
@@ -928,12 +941,77 @@ impl App {
             }
         }
         self.data = data;
+        self.fill();
         // A refresh that could not ask for the newest release leaves nothing to upgrade to.
         if self.input == Input::Upgrade && self.data.update().is_none() {
             self.input = Input::None;
         }
         self.compare_sel = self.compare_sel.min(self.marked_models().len().saturating_sub(1));
         self.rebuild();
+    }
+
+    /// The column values and their widths, from the data and the benchmarks picked.
+    fn fill(&mut self) {
+        self.vals = vec![[None; COLS.len()]; self.data.models.len()];
+        (0..COLS.len()).for_each(|c| self.fill_col(c));
+    }
+
+    /// `fill` for `COLS[c]` alone: a pick changes one column, and the prices are slow to search.
+    fn fill_col(&mut self, c: usize) {
+        let pick = self.bench[c];
+        for (v, m) in self.vals.iter_mut().zip(&self.data.models) {
+            v[c] = match pick {
+                Some(b) => m.scores.get(b).map(|s| s * 100.0),
+                None => (COLS[c].get)(m),
+            };
+        }
+        let shown = self.vals.iter().zip(&self.listed).filter_map(|(v, &l)| Some(shown(c, v[c]?, l)));
+        self.widths[c] = shown.map(|s| s.chars().count()).max().unwrap_or(0);
+    }
+
+    /// Entry `i` of a task column's dropdown is what the column shows, the first or the picked
+    /// one again the task's score. Bounds on it go, typed for what it showed; not when the
+    /// entry is what it shows already.
+    fn pick_bench(&mut self, col: usize, i: usize) {
+        let Some((c, (_, benches))) = col.checked_sub(TEXT).zip(col_benches(col)) else { return };
+        let pick = i.checked_sub(1).and_then(|i| benches.get(i).copied()).filter(|b| self.bench[c] != Some(b));
+        if pick == self.bench[c] {
+            return;
+        }
+        self.bench[c] = pick;
+        self.bounds.retain(|b| b.0 != col);
+        self.fill_col(c);
+    }
+
+    /// Every task column back to its task's score, and the bounds typed for a picked benchmark
+    /// gone. Without `refill` the values wait for the `set_data` that follows.
+    fn drop_benches(&mut self, refill: bool) {
+        for c in 0..COLS.len() {
+            if self.bench[c].take().is_some() {
+                self.bounds.retain(|b| b.0 != c + TEXT);
+                if refill {
+                    self.fill_col(c);
+                }
+            }
+        }
+    }
+
+    /// The benchmark picked for the task column at cursor index `col`, shown in place of its score.
+    pub fn col_bench(&self, col: usize) -> Option<&'static str> {
+        *self.bench.get(col.checked_sub(TEXT)?)?
+    }
+
+    /// Header of the column at cursor index `col`: a task column's picked benchmark, else `col_name`.
+    pub fn col_name(&self, col: usize) -> &'static str {
+        self.col_bench(col).unwrap_or_else(|| base_col_name(col))
+    }
+
+    /// What the column at cursor index `col` means.
+    pub fn col_about(&self, col: usize) -> String {
+        match self.col_bench(col) {
+            Some(_) => "score on this benchmark alone, 0-100".into(),
+            None => base_col_about(col),
+        }
     }
 
     /// Recompute everything that depends on `data::cached()`: Value and the column values.
@@ -1178,9 +1256,9 @@ impl App {
             .collect()
     }
 
-    /// Models passing every filter but the frontier, ignoring the ones on column `skip` except a
-    /// minimum (the Price dropdown only replaces the maximum), so a dropdown can count what each
-    /// of its entries would show.
+    /// Models passing every filter but the frontier, ignoring the ones on column `skip` except
+    /// Price's minimum (its dropdown only replaces the maximum; a task's drops both bounds), so
+    /// a dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
         // A selected model shows even out of reach, so it can be compared.
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
@@ -1201,7 +1279,7 @@ impl App {
                 && self
                     .bounds
                     .iter()
-                    .filter(|b| b.0 != skip || b.1.is_finite())
+                    .filter(|b| b.0 != skip || skip == PRICE && b.1.is_finite())
                     .all(|&(c, lo, hi)| self.val(i, c).is_some_and(|v| v >= lo && v <= hi))
         })
     }
@@ -1356,6 +1434,8 @@ impl App {
             return None;
         }
         self.first_start = false;
+        // A pick is one of the other source's benchmarks.
+        self.drop_benches(false);
         crate::data::set_source(src);
         self.store.source = src.id().to_string();
         self.report(Ok(format!("benchmarks from {} · B to change", src.label())));
@@ -1654,8 +1734,21 @@ impl App {
 
     /// Open the dropdown of the column under the cursor, on the entry in effect.
     fn open_menu(&mut self) {
+        // A task's line is drawn from its score, so its columns show that.
+        if self.task.is_some() && col_benches(self.col).is_some() {
+            return self.refuse("a task shows its own scores: c leaves the task");
+        }
         let ms: Vec<(usize, &Model)> = self.filtered(self.col).collect();
-        let (mut items, picked) = if self.col == 1 || self.col == VIA {
+        let benches = col_benches(self.col);
+        // The first entry of a task's dropdown counts the models with the task's score.
+        let scored = numeric(self.col).filter(|_| benches.is_some());
+        let first = scored.map_or(ms.len(), |c| ms.iter().filter(|(_, m)| (c.get)(m).is_some()).count());
+        let (mut items, picked) = if let Some((_, benches)) = benches {
+            // How many models each benchmark scored.
+            let count = |b: &str| ms.iter().filter(|(_, m)| m.scores.contains_key(b)).count();
+            let picked = self.col_bench(self.col).and_then(|b| benches.iter().position(|x| *x == b));
+            (benches.iter().map(|&b| (b.to_string(), count(b))).collect(), picked)
+        } else if self.col == 1 || self.col == VIA {
             let by_dev = self.col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
             // Via as the table shows it, so "not available" can be picked too.
@@ -1685,7 +1778,13 @@ impl App {
                 .collect();
             (items, self.price_level())
         };
-        items.insert(0, ("any".into(), ms.len()));
+        items.insert(0, (benches.map_or("any", |b| b.0).into(), first));
+        // The entry a task column shows already keeps the bounds on it: it counts what the table shows.
+        if benches.is_some() {
+            let col = self.col;
+            items[picked.map_or(0, |i| i + 1)].1 =
+                self.filtered(usize::MAX).filter(|&(i, _)| self.val(i, col).is_some()).count();
+        }
         self.input = Input::Menu { col: self.col, items, list: List::at(picked.map_or(0, |i| i + 1)) };
     }
 
@@ -2061,7 +2160,7 @@ impl App {
                 self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
-            KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the Dev, Price and Via columns"),
+            KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the columns marked ▾"),
             KeyCode::Char('M') if table && !self.only_marked && !self.any_marked() => self.refuse(NO_SELECTED),
             KeyCode::Char('M') if table => {
                 self.only_marked = !self.only_marked;
@@ -2106,6 +2205,7 @@ impl App {
                 self.bounds.clear();
                 self.dev.clear();
                 self.via.clear();
+                self.drop_benches(true);
                 // The task set the sort; back to the default.
                 if self.task.take().is_some() {
                     (self.sort_col, self.descending) = DEFAULT_SORT;
@@ -2277,6 +2377,8 @@ impl App {
                     return None;
                 };
                 self.task = Some(t);
+                // The line is drawn from the task's score, so its column shows that.
+                self.drop_benches(true);
                 // On the frontier the priciest is the best: each row down is cheaper and scores lower.
                 (self.sort_col, self.descending) = (PRICE, true);
                 self.view = View::Table;
@@ -2406,7 +2508,7 @@ impl App {
                             self.bounds.push((col, lo, hi));
                         }
                         None if text.is_empty() => {}
-                        None => self.report(Err(format!("{text} is not a value for {}", col_name(col)))),
+                        None => self.report(Err(format!("{text} is not a value for {}", self.col_name(col)))),
                     }
                     self.rebuild();
                 }
@@ -2424,6 +2526,9 @@ impl App {
                         let i = at?;
                         if *col == PRICE {
                             self.set_price_level(if self.price_level() == i.checked_sub(1) { 0 } else { i });
+                        } else if col_benches(*col).is_some() {
+                            let col = *col;
+                            self.pick_bench(col, i);
                         } else {
                             let picked = if *col == 1 { &mut self.dev } else { &mut self.via };
                             match picked.iter().position(|d| *d == items[i].0) {
@@ -2588,7 +2693,7 @@ mod tests {
         assert_eq!(a.val(gpt, PRICE), Some(3.5875));
         press(&mut a, "%");
         assert_eq!((a.val(gpt, PRICE), sel(&a)), (Some(10.0), was), "full input price, the cursor stays");
-        assert!(col_about(PRICE).contains(" 0% of the input cached") && a.status.contains("one-off"));
+        assert!(base_col_about(PRICE).contains(" 0% of the input cached") && a.status.contains("one-off"));
         press(&mut a, "%");
         assert_eq!(a.val(gpt, PRICE), Some(3.5875), "again: back to an agent's 90%");
         // Started with --cache 50, % goes back to 50, not 90.
@@ -2774,14 +2879,66 @@ mod tests {
     }
 
     #[test]
+    fn a_task_column_shows_the_benchmark_picked_in_its_dropdown() {
+        let mut a = app();
+        for (key, s) in [("gpt55", 0.4), ("mini", 0.7)] {
+            let m = a.data.models.iter_mut().find(|m| m.key == key).unwrap();
+            m.scores.insert("DeepSWE".into(), s);
+        }
+        a.col = ECI + 1;
+        press(&mut a, "d");
+        assert_eq!(menu(&a)[..2], [("all", 2), ("DeepSWE", 2)], "each with the models it scored");
+        // The entry already shown changes nothing: a bound typed for the column stays.
+        a.bounds.push((a.col, 1.0, f64::MAX));
+        press(&mut a, " ");
+        assert_eq!(a.bounds.len(), 1);
+        a.bounds.clear();
+        press(&mut a, "j ");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "s");
+        assert_eq!((a.col_name(a.col), keys(&a)), ("DeepSWE", vec!["mini", "gpt55", "opus5"]), "unscored last");
+        assert_eq!(a.val(a.rows[0], a.col), Some(70.0));
+        press(&mut a, "c");
+        assert_eq!((a.col_name(a.col), keys(&a)[0]), ("Coding", "gpt55"), "c is back to the task's score");
+        // A bound on the column goes with a pick, so the counts leave it out; the entry shown
+        // already keeps it, and counts what the table shows.
+        a.bounds.push((a.col, 1e9, f64::MAX));
+        press(&mut a, "d");
+        assert_eq!(menu(&a)[..2], [("all", 0), ("DeepSWE", 2)]);
+        // A task's line is drawn from its score: choosing one shows it again, and no other is picked.
+        press(&mut a, "j ");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "R2gg");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.task.is_some(), a.col_name(ECI + 1)), (true, "Coding"));
+        a.col = ECI + 1;
+        press(&mut a, "d");
+        assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "Coding"));
+        assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()));
+        // Leaving the task took its sort along.
+        press(&mut a, "cs");
+        // Another source has other benchmarks: the pick goes, and a bound typed for it.
+        press(&mut a, "dj ");
+        code(&mut a, KeyCode::Esc);
+        a.bounds.push((a.col, 60.0, f64::MAX));
+        a.switch(Source::Aa);
+        assert_eq!((a.col_name(a.col), a.bounds.len()), ("Coding", 0));
+        assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()), "with either source");
+        // Artificial Analysis lists the task's own benchmark, then its others about the task.
+        let m = a.data.models.iter_mut().find(|m| m.key == "mini").unwrap();
+        m.scores.insert("scicode".into(), 0.3);
+        press(&mut a, "d");
+        assert_eq!(menu(&a), [("artificial_analysis_coding_index", 2), ("terminalbench_v4_0", 0), ("scicode", 1)]);
+        press(&mut a, "G ");
+        assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
+    }
+
+    #[test]
     fn dropdowns_pick_a_developer_and_a_price_level() {
         let mut a = app();
         a.col = ECI;
         press(&mut a, "d");
-        assert_eq!(
-            (&a.input, a.status.as_str()),
-            (&Input::None, "d opens a dropdown on the Dev, Price and Via columns")
-        );
+        assert_eq!((&a.input, a.status.as_str()), (&Input::None, "d opens a dropdown on the columns marked ▾"));
         a.col = 0;
         press(&mut a, "ld");
         assert_eq!(menu(&a), [("any", 3), ("anthropic", 1), ("openai", 2)], "developers A-Z, not by count");
@@ -2831,7 +2988,7 @@ mod tests {
     fn via_dropdown_picks_a_harness() {
         let mut a = app();
         a.col = VIA;
-        assert_eq!(col_name(a.col), "Via");
+        assert_eq!(base_col_name(a.col), "Via");
         press(&mut a, "d");
         assert_eq!(menu(&a), [("any", 3), ("codex", 2), ("opencode", 2), ("claude", 1)]);
         press(&mut a, "/cla");
@@ -3124,8 +3281,8 @@ mod tests {
 
     #[test]
     fn every_column_says_what_it_means() {
-        assert!(col_about(0).contains("Via"));
-        assert!(col_about(1).contains("trained"));
+        assert!(base_col_about(0).contains("Via"));
+        assert!(base_col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
     }
 

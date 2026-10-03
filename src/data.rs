@@ -418,17 +418,25 @@ impl Model {
 
     /// `price`, when its prices are known, else the `list` one: prices to show, `listed` as not yours.
     pub fn priced_offer(&self) -> Option<&Offer> {
-        self.price().filter(|o| !o.unpriced).or_else(|| self.list())
+        self.quoted().map(|q| q.0)
+    }
+
+    /// `priced_offer` and `listed` in one search through the offers, for what asks both of a model.
+    pub fn quoted(&self) -> Option<(&Offer, bool)> {
+        match self.price().filter(|o| !o.unpriced) {
+            Some(o) => Some((o, false)),
+            None => self.list().map(|o| (o, true)),
+        }
     }
 
     /// Whether the prices shown are the list ones, yours having none: what a `~` before them says.
     pub fn listed(&self) -> bool {
-        self.price().is_some_and(|o| o.unpriced) && self.list().is_some()
+        self.quoted().is_some_and(|q| q.1)
     }
 
     /// `Offer::blended` of `priced_offer`; 0 when it is free, none when nobody lists a price.
     pub fn cost(&self) -> Option<f64> {
-        self.priced_offer().map(Offer::blended)
+        self.quoted().map(|q| q.0.blended())
     }
 
     /// The model's page on models.dev, which lists every provider's price for it.
@@ -2596,13 +2604,13 @@ mod tests {
         let m = Model { offers: vec![plain, cached], ..Default::default() };
         assert_eq!(m.price().unwrap().provider, "c", "the dearer list price is cheaper once cached");
         assert!(
-            crate::app::col_about(crate::app::PRICE)
+            crate::app::base_col_about(crate::app::PRICE)
                 .contains(&format!("{:.0}% of the input cached", crate::data::cached() * 100.0))
         );
         // A one-off prompt caches nothing: the cheaper list price wins again.
         set_cached(0.0);
         assert_eq!(m.price().unwrap().provider, "p");
-        assert!(crate::app::col_about(crate::app::PRICE).contains(" 0% of the input cached"));
+        assert!(crate::app::base_col_about(crate::app::PRICE).contains(" 0% of the input cached"));
         set_cached(2.0);
         assert_eq!(crate::data::cached(), 1.0, "clamped");
         // A price nobody lists is unknown, not free: yours still names the id, but costs nothing known.

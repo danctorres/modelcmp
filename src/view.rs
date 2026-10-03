@@ -453,7 +453,7 @@ pub fn usd(x: f64) -> String {
 
 /// A model's blended price as `usd`: after a `~` when it is the list one (`Model::listed`), `-` when unknown.
 fn price(m: &Model) -> String {
-    m.cost().map_or("-".into(), |c| format!("{}{}", if m.listed() { "~" } else { "" }, usd(c)))
+    m.quoted().map_or("-".into(), |(o, listed)| format!("{}{}", if listed { "~" } else { "" }, usd(o.blended())))
 }
 
 /// What a frontier line shows, for the recommend panel and `modelcmp recommend`, which adds the key.
@@ -590,7 +590,15 @@ pub fn visible<'a>(
 
 /// Everything about one model, one line per entry.
 pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
+    detail_rows(m, store).into_iter().map(|r| r.1).collect()
+}
+
+/// `detail_lines`, each task's fit line with the task's name, for the TUI to colour it.
+pub fn detail_rows(m: &Model, store: &Store) -> Vec<(Option<&'static str>, String)> {
     let yes = |b: bool| if b { "yes" } else { "no" };
+    let source = crate::data::source();
+    // With Artificial Analysis a task's score is one benchmark, so none are listed under it.
+    let benches = if source == crate::data::Source::Aa { "" } else { ", benchmarks at best effort" };
     let mut v = vec![
         format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.developer)),
@@ -627,20 +635,27 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
             Some(store.favorite_for(&m.key).join(", ")).filter(|s| !s.is_empty()).unwrap_or("-".into())
         ),
         String::new(),
-        format!("  {} {}", crate::data::source().index().0, score(m.eci)),
-        format!("  task fit ({}, value a percentile):", crate::data::source().scale()),
+        format!("  {} {}", source.index().0, score(m.eci)),
+        format!("  task fit ({}, value a percentile{benches}):", source.scale()),
     ]);
+    // The benchmarks listed under a task, so the rest come after: one a task's score here does
+    // not come from, as the fields a column's dropdown adds with Artificial Analysis, or the
+    // benchmarks of a task the model has no score for.
+    let mut used: Vec<&str> = vec![];
+    let mut fits = vec![];
     for t in TASKS {
         if let Some(s) = fit::fit(m, t) {
+            fits.push((v.len(), t.name));
             v.push(format!("    {:<13}{:>4.0}  {}", t.name, fit::shown(m, t, s), t.about));
+            v.extend(task_benches(m, t));
+            used.extend(used_benches(t));
         }
     }
-    if !m.scores.is_empty() {
+    let mut other = m.scores.iter().filter(|(b, _)| !used.contains(&b.as_str())).peekable();
+    if other.peek().is_some() {
         v.push(String::new());
-        v.push(format!("  benchmarks ({}, best effort setting):", crate::data::source().label()));
-        for (b, s) in &m.scores {
-            v.push(format!("    {:<36}{:>5.1}%", b, s * 100.0));
-        }
+        v.push(format!("  other benchmarks ({}, best effort setting):", source.label()));
+        v.extend(other.map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
     }
     v.push(String::new());
     v.push("  providers ($ per 1M tokens in / cached in / out, model id):".into());
@@ -663,7 +678,26 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
         // No padding left after an id without a harness, for a terminal to wrap.
         v.push(line.trim_end().to_string());
     }
-    v
+    let mut rows: Vec<_> = v.into_iter().map(|s| (None, s)).collect();
+    for (i, t) in fits {
+        rows[i].0 = Some(t);
+    }
+    rows
+}
+
+/// The benchmarks a task's score comes from, with the source in use.
+fn used_benches(t: &fit::Task) -> Vec<&'static str> {
+    let (own, all) = t.sourced();
+    own.map_or(all.to_vec(), |b| vec![b])
+}
+
+/// Under a task's fit in the details: the model's score on each benchmark the task's score
+/// comes from, the ones it was tested on. None for a task with no benchmarks of its own, whose
+/// `about` says what ranks it, nor when the score is one benchmark, the same number again.
+fn task_benches(m: &Model, t: &fit::Task) -> Vec<String> {
+    let (own, all) = t.sourced();
+    let all = if own.is_some() { &[] } else { all };
+    all.iter().filter_map(|b| Some(format!("      {:<34}{:>5.1}%", b, m.scores.get(*b)? * 100.0))).collect()
 }
 
 #[derive(Default)]
@@ -674,6 +708,8 @@ pub struct Row {
     pub vals: Vec<Option<f64>>,
     /// The best and the worst value, colouring every cell that has one; none when they all agree.
     pub ext: Option<(f64, f64)>,
+    /// The cells holding a list price (`Model::listed`), drawn muted; empty off the price rows.
+    pub listed: Vec<bool>,
     /// The topic the row belongs to, named in a rule above its first row; `""` for the
     /// model, price and context rows at the top.
     pub section: &'static str,
@@ -688,16 +724,18 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
             (lo != hi).then_some(if higher { (hi, lo) } else { (lo, hi) })
         });
         let cells = vals.iter().map(|v| v.map_or("-".into(), &fmt)).collect();
-        Row { label: label.into(), cells, vals, ext, section: "" }
+        Row { label: label.into(), cells, vals, ext, ..Default::default() }
     }
     // A list price, yours having none, after a `~` as in the table, and as there neither the
     // best nor the worst: it has no value to colour.
     let price = |label: &str, f: fn(&Offer) -> f64| {
-        let offers: Vec<_> = models.iter().map(|m| (m.priced_offer().map(f), m.listed())).collect();
+        let quoted = models.iter().map(|m| m.quoted());
+        let offers: Vec<_> = quoted.map(|q| (q.map(|q| f(q.0)), q.is_some_and(|q| q.1))).collect();
         let mut r = row(label, offers.iter().map(|&(v, listed)| v.filter(|_| !listed)).collect(), money, false);
         for (c, v) in r.cells.iter_mut().zip(&offers).filter_map(|(c, &(v, listed))| Some((c, v.filter(|_| listed)?))) {
             *c = format!("~{}", money(v));
         }
+        r.listed = offers.iter().map(|o| o.1).collect();
         r
     };
     let mut rows = vec![
@@ -742,21 +780,22 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
 pub fn verdict(models: &[&Model]) -> Vec<[String; 3]> {
     let coding = |m: &Model| task_score(m, "coding");
     // A list price is not one you'd pay: it wins nothing here, as in the rows below.
-    let cost = |m: &Model| m.cost().filter(|_| !m.listed());
+    let cost = |m: &Model| m.quoted().filter(|q| !q.1).map(|q| q.0.blended());
     // Value hangs on the price, so a list price wins nothing there either.
-    let value = |m: &Model| m.fit.get("value").copied().filter(|_| !m.listed());
-    // Left with fewer than two prices by a list one, the row says so, not that data is missing.
-    let listed = models.iter().any(|m| m.listed());
-    let on_price = |mut row: [String; 3]| {
-        if listed && row[1] == "-" {
+    let any_value = |m: &Model| m.fit.get("value").copied();
+    let value = |m: &Model| any_value(m).filter(|_| !m.listed());
+    // Left with fewer than two by a list price, when `any` counts two with it, the row says so,
+    // not that data is missing.
+    let on_price = |mut row: [String; 3], any: &dyn Fn(&Model) -> Option<f64>| {
+        if row[1] == "-" && models.iter().filter(|m| any(m).is_some()).count() > 1 {
             row[2] = "only a list price (~)".into();
         }
         row
     };
     vec![
-        on_price(best(models, "cheaper", cost, false, usd)),
+        on_price(best(models, "cheaper", cost, false, usd), &|m| m.cost()),
         best(models, "better at coding", coding, true, |v| format!("{v:.0}")),
-        on_price(best(models, "better value", value, true, |v| format!("{v:.0}"))),
+        on_price(best(models, "better value", value, true, |v| format!("{v:.0}")), &any_value),
     ]
 }
 
@@ -798,6 +837,22 @@ mod tests {
         assert_eq!(lines[pages], "  pages:      https://models.dev/models/a/b/");
         assert_eq!(lines[pages + 1], "              https://epoch.ai/models/b");
         assert_eq!(at("  note:"), pages + 2);
+    }
+
+    #[test]
+    fn details_say_the_benchmarks_a_task_score_comes_from() {
+        let coding = fit::task("coding").unwrap();
+        let mut m = Model::default();
+        assert!(task_benches(&m, fit::task("value").unwrap()).is_empty(), "no benchmarks of its own");
+        m.scores = [("DeepSWE", 0.5), ("HLE", 0.25), ("scicode", 0.1)].map(|(b, s)| (b.to_string(), s)).into();
+        m.fit.insert("coding".into(), 50.0);
+        assert_eq!(task_benches(&m, coding), [format!("      {:<34} 50.0%", "DeepSWE")], "not another task's");
+        // Each under its task; one no task uses comes after them.
+        let lines = detail_lines(&m, &Store::default());
+        let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
+        assert_eq!(at("      DeepSWE"), at("    coding") + 1);
+        assert_eq!(at("    scicode"), at("  other benchmarks") + 2);
+        assert_eq!(at("    HLE"), at("  other benchmarks") + 1, "reasoning has no fit here, but the score shows");
     }
 
     #[test]
@@ -936,5 +991,8 @@ mod tests {
         assert_eq!(v[0], s(["cheaper", "-", "only a list price (~)"]), "a pair with one says why it has no winner");
         assert_eq!(v[2], s(["better value", "-", "only a list price (~)"]));
         assert_eq!(v[1][1], "est", "coding does not hang on the price");
+        let none = Model { offers: vec![], ..mk("none", None, 0.0) };
+        let v = verdict(&[&ms[2], &none]);
+        assert_eq!((v[0][2].as_str(), v[2][2].as_str()), ("not enough data", "not enough data"), "one price at all");
     }
 }

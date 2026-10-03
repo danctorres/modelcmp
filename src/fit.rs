@@ -37,7 +37,21 @@ pub struct Task {
     pub benches: &'static [&'static str],
     /// The same for Artificial Analysis: one of its API's `evaluations` fields, shown as is.
     pub aa: Option<&'static str>,
+    /// Its other fields about the task, still run on new models: the column's dropdown lists
+    /// them after `aa`.
+    pub aa_more: &'static [&'static str],
     pub need: Need,
+}
+
+impl Task {
+    /// With the source in use: the one benchmark the task's score is, when it is one (Artificial
+    /// Analysis), and the others about the task; Epoch fits all of its into one score.
+    pub fn sourced(&self) -> (Option<&'static str>, &'static [&'static str]) {
+        match crate::data::source() {
+            crate::data::Source::Aa => (self.aa, self.aa_more),
+            _ => (None, self.benches),
+        }
+    }
 }
 
 /// Artificial Analysis's overall index, its ECI.
@@ -46,7 +60,7 @@ pub const AA_INDEX: &str = "artificial_analysis_intelligence_index";
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
 /// not be about code. Math and factual-recall benchmarks stay out.
 /// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
-/// Listed with the general pick first, then in decision order: coding, the cheaper pick, the rest.
+/// Listed with the general pick first, then in the table's column order: coding, agentic, reasoning, the cheaper pick, vision.
 pub const TASKS: &[Task] = &[
     Task {
         name: "overall",
@@ -54,6 +68,7 @@ pub const TASKS: &[Task] = &[
         when: "a tiebreaker, or work that fits no other task",
         need: Need::None,
         aa: None,
+        aa_more: &[],
         benches: &[],
     },
     Task {
@@ -62,6 +77,7 @@ pub const TASKS: &[Task] = &[
         when: "fixing a bug, adding a feature to an existing repo, refactors",
         need: Need::None,
         aa: Some("artificial_analysis_coding_index"),
+        aa_more: &["terminalbench_v4_0", "scicode"],
         benches: &[
             "DeepSWE",
             "FrontierCode",
@@ -74,19 +90,12 @@ pub const TASKS: &[Task] = &[
         ],
     },
     Task {
-        name: "value",
-        about: "coding per dollar, among the top half on coding",
-        when: "routine coding that needs no top reasoning",
-        need: Need::Coder,
-        aa: None,
-        benches: &[],
-    },
-    Task {
         name: "agentic",
         about: "multi-step tool use, long autonomous tasks",
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         need: Need::Tools,
         aa: Some("terminalbench_v4_0"),
+        aa_more: &["tau_banking"],
         benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0", "DeepResearch Bench", "Terminal Bench"],
     },
     Task {
@@ -95,6 +104,7 @@ pub const TASKS: &[Task] = &[
         when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
         need: Need::None,
         aa: Some("hle"),
+        aa_more: &["gpqa", "lcr"],
         benches: &[
             "GPQA diamond",
             "HLE",
@@ -108,11 +118,21 @@ pub const TASKS: &[Task] = &[
         ],
     },
     Task {
+        name: "value",
+        about: "coding per dollar, among the top half on coding",
+        when: "routine coding that needs no top reasoning",
+        need: Need::Coder,
+        aa: None,
+        aa_more: &[],
+        benches: &[],
+    },
+    Task {
         name: "vision",
         about: "image input (ranked by overall capability)",
         when: "screenshots, UI mockups, diagrams as input",
         need: Need::Vision,
         aa: None,
+        aa_more: &[],
         benches: &[],
     },
 ];
@@ -131,7 +151,7 @@ pub fn task_benches() -> Vec<&'static str> {
 
 /// Every Artificial Analysis field a task uses, sorted.
 pub fn aa_fields() -> Vec<&'static str> {
-    let mut v: Vec<&str> = TASKS.iter().filter_map(|t| t.aa).collect();
+    let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.aa.into_iter().chain(t.aa_more.iter().copied())).collect();
     v.sort();
     v.dedup();
     v
