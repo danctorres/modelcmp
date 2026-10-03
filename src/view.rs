@@ -661,11 +661,14 @@ pub fn detail_lines(m: &Model, store: &Store) -> Vec<String> {
     v
 }
 
+#[derive(Default)]
 pub struct Row {
     pub label: String,
     pub cells: Vec<String>,
-    /// Index of the best cell, if the row is comparable.
-    pub best: Option<usize>,
+    /// The value of each cell, empty for rows not compared.
+    pub vals: Vec<Option<f64>>,
+    /// The best and the worst value, colouring every cell that has one; none when they all agree.
+    pub ext: Option<(f64, f64)>,
     /// The topic the row belongs to, named in a rule above its first row; `""` for the
     /// model, price and context rows at the top.
     pub section: &'static str,
@@ -674,20 +677,18 @@ pub struct Row {
 /// Rows for side-by-side comparison.
 pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
-        let best = vals
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| Some((i, (*v)?)))
-            .max_by(|a, b| if higher { a.1.total_cmp(&b.1) } else { b.1.total_cmp(&a.1) })
-            .map(|(i, _)| i)
-            .filter(|_| vals.iter().flatten().count() > 1);
-        let cells = vals.into_iter().map(|v| v.map_or("-".into(), &fmt)).collect();
-        Row { label: label.into(), cells, best, section: "" }
+        let mut it = vals.iter().flatten();
+        let ext = it.next().and_then(|&first| {
+            let (lo, hi) = it.fold((first, first), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            (lo != hi).then_some(if higher { (hi, lo) } else { (lo, hi) })
+        });
+        let cells = vals.iter().map(|v| v.map_or("-".into(), &fmt)).collect();
+        Row { label: label.into(), cells, vals, ext, section: "" }
     }
     let price = |f: fn(&Offer) -> f64| -> Vec<Option<f64>> { models.iter().map(|m| m.priced_offer().map(f)).collect() };
     let mut rows = vec![
-        Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), best: None, section: "" },
-        Row { label: "via".into(), cells: models.iter().map(|m| via(&m.via)).collect(), best: None, section: "" },
+        Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), ..Default::default() },
+        Row { label: "via".into(), cells: models.iter().map(|m| via(&m.via)).collect(), ..Default::default() },
         row("$ in / 1M", price(|o| o.input), money, false),
         // No cache discount: cached input costs full price.
         row("$ cached in / 1M", price(|o| o.cache_read.unwrap_or(o.input)), money, false),
@@ -862,10 +863,12 @@ mod tests {
         let (a, b) = (mk("a", 100, Some(150.0)), mk("b", 200, None));
         let rows = compare_rows(&[&a, &b]);
         let find = |l: &str| rows.iter().find(|r| r.label == l).unwrap();
-        assert_eq!(find("context").best, Some(1));
-        assert_eq!(find("ECI").best, None, "a single value is not a comparison");
+        assert_eq!(find("context").ext, Some((200.0, 100.0)));
+        assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);
         assert_eq!((find("context").section, find("ECI").section), ("", "scores"));
+        let same = compare_rows(&[&a, &a]);
+        assert_eq!(same.iter().find(|r| r.label == "context").unwrap().ext, None, "equal values are not marked");
     }
 
     #[test]

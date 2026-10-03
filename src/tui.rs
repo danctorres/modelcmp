@@ -839,12 +839,12 @@ fn hints(app: &App) -> Vec<&'static str> {
             back.extend(["q quit", "? help"]);
             vec![vec!["h l column"], view, actions("enter x o y space f e n"), back]
         }
-        View::Detail => vec![vec!["j k scroll"], actions("x o y space f e n"), BACK.to_vec()],
+        View::Detail(_) => vec![vec!["j k scroll"], actions("x o y space f e n"), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
         View::Help => vec![vec!["j k scroll"], vec!["/ search"], vec!["esc back", "q quit"]],
         View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
         View::Compare => {
-            vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("x o y f e n"), BACK.to_vec()]
+            vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("enter x o y f e n"), BACK.to_vec()]
         }
         View::Recommend => vec![
             vec!["j k task", "h l 0 $ model"],
@@ -1172,7 +1172,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Recommend => {
             Some(("recommend".to_string(), recommend(app, (area.width as usize).saturating_sub(4).min(130))))
         }
-        View::Detail => app.current().map(|m| detail(m, &app.store)),
+        View::Detail(_) => app.current().map(|m| detail(m, &app.store)),
         View::Compare if app.marked_shown < 2 => {
             let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
             let n = app.marked_shown;
@@ -1810,7 +1810,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::None, View::Table) => ("NORMAL", Color::Magenta),
         (Input::None, View::Help) => ("HELP", Color::Cyan),
         (Input::None, View::Recommend) => ("RECOMMEND", Color::Cyan),
-        (Input::None, View::Detail) => ("DETAIL", Color::Cyan),
+        (Input::None, View::Detail(_)) => ("DETAIL", Color::Cyan),
         (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
     }
 }
@@ -2319,11 +2319,11 @@ fn detail(m: &Model, store: &Store) -> (String, Vec<Line<'static>>) {
     (title, lines)
 }
 
-/// The verdict, then the marked models side by side with the best value of each row in green
-/// and the one under the cursor filled between its two bars; a `muted` model's column is grey, its
-/// bests too, as its row in the table. When they do not all fit in `avail` cells, the view starts at
-/// model `first`, moved only as far as it takes to show the selection, and the `first` in effect
-/// comes back for `App::compare_x`.
+/// The verdict, then the marked models side by side with the best value of each row in green,
+/// the worst in red, and the one under the cursor filled between its two bars; a `muted` model's
+/// column is grey, its bests and worsts too, as its row in the table. When they do not all fit in
+/// `avail` cells, the view starts at model `first`, moved only as far as it takes to show the
+/// selection, and the `first` in effect comes back for `App::compare_x`.
 fn compare(
     models: &[&Model],
     sel: usize,
@@ -2399,12 +2399,11 @@ fn compare(
         // bar on the next, blank off it, so a model's cells stay where they are.
         let bar = |on: bool, bar: &'static str| if on { Span::styled(bar, EDGE) } else { Span::raw(" ") };
         for (i, c) in r.cells.into_iter().enumerate().skip(first).take(shown) {
-            let style = if muted[i] {
-                fg(MUTED)
-            } else if r.best == Some(i) {
-                fg(GOOD).add_modifier(BOLD)
-            } else {
-                Style::new()
+            let style = match r.ext.and_then(|e| Some((e, r.vals[i]?))) {
+                _ if muted[i] => fg(MUTED),
+                Some(((best, _), v)) if v == best => fg(GOOD).add_modifier(BOLD),
+                Some(((_, worst), v)) if v == worst => fg(BAD),
+                _ => Style::new(),
             };
             if k == 0 && i == first && first > 0 {
                 spans.push(Span::styled("‹", edge));
@@ -3272,6 +3271,17 @@ mod tests {
     }
 
     #[test]
+    fn compare_colours_every_tied_cell() {
+        let mk = |n: &str, context| Model { name: n.into(), context, ..Default::default() };
+        let (a, b, c) = (mk("a", 1_000_000), mk("b", 200_000), mk("c", 200_000));
+        let lines = compare(&[&a, &b, &c], 0, 0, 200, "", |_| false).0;
+        let ctx = lines.iter().find(|l| l.to_string().starts_with("context")).unwrap();
+        let fgs: Vec<_> =
+            ctx.spans.iter().filter(|s| s.content.trim().ends_with(['M', 'k'])).map(|s| s.style.fg).collect();
+        assert_eq!(fgs, [Some(GOOD), Some(BAD), Some(BAD)], "{ctx:?}");
+    }
+
+    #[test]
     fn compare_scrolls_models_sideways() {
         let a = app();
         let ms: Vec<&Model> =
@@ -3469,7 +3479,7 @@ mod tests {
             .flat_map(|(w, h)| [(w, h, None), (w, h, Some(0))])
         {
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-            for view in [View::Table, View::Help, View::Detail, View::Compare, View::Recommend] {
+            for view in [View::Table, View::Help, View::Detail(None), View::Compare, View::Recommend] {
                 let mut a = app();
                 a.store.marked = vec!["opus".into(), "flash".into()];
                 (a.view, a.term_bg) = (view, term_bg);

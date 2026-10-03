@@ -28,7 +28,7 @@ all its scores.
 
 `modelcmp recommend --json` gives the same lists as `benchmarks`. In the TUI, move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
-column.
+column, and in a row of compare.
 
 ## Commands
 

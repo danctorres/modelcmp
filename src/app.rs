@@ -317,7 +317,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
 #[derive(PartialEq, Debug)]
 pub enum View {
     Table,
-    Detail,
+    /// Details; opened from compare, they hold its scroll, which esc goes back to.
+    Detail(Option<u16>),
     Compare,
     Help,
     Recommend,
@@ -938,7 +939,7 @@ impl App {
             let front = self.task_frontier(t);
             return front.get(self.task_sel.min(front.len().saturating_sub(1))).map(|&(m, _)| m);
         }
-        if self.view == View::Detail {
+        if matches!(self.view, View::Detail(_)) {
             return self.data.models.iter().find(|m| m.key == self.detail);
         }
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
@@ -1914,7 +1915,7 @@ impl App {
         // Keys that act on the current model, which only help hides.
         // Compare shows none with fewer than 2 selected, and then has no current model to act on.
         let row = table
-            || matches!(self.view, View::Detail | View::Recommend)
+            || matches!(self.view, View::Detail(_) | View::Recommend)
             || (self.view == View::Compare && self.marked_shown >= 2);
         // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
         let across = matches!(self.view, View::Compare | View::Recommend);
@@ -2020,6 +2021,8 @@ impl App {
             KeyCode::Esc => {
                 if self.overlay_search() && !self.overlay_query.is_empty() {
                     self.overlay_query.clear();
+                } else if let View::Detail(Some(scroll)) = self.view {
+                    (self.view, self.scroll) = (View::Compare, scroll);
                 } else if !table {
                     self.view = View::Table;
                 } else if self.selecting() {
@@ -2176,9 +2179,10 @@ impl App {
                     _ => self.refuse(format!("no model has data for {}", t.name)),
                 }
             }
-            KeyCode::Enter if table && self.current().is_some() => {
+            // Recommend's enter is above.
+            KeyCode::Enter if row && !matches!(self.view, View::Detail(_)) => {
                 self.detail = self.current()?.key.clone();
-                self.view = View::Detail;
+                self.view = View::Detail((self.view == View::Compare).then_some(self.scroll));
                 self.scroll = 0;
             }
             // A new search starts empty; esc brings the previous one back.
@@ -3257,7 +3261,7 @@ mod tests {
             a.select(at);
             a.key(KeyCode::Enter.into());
             a.key(KeyCode::Char(' ').into());
-            assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Detail, "llama4"));
+            assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Detail(None), "llama4"));
             leave.iter().for_each(|&k| _ = a.key(k.into()));
             assert_eq!(a.view, View::Table);
             assert!(!shown(&a).contains(&"llama4".into()), "{leave:?}: {:?}", shown(&a));
@@ -3632,6 +3636,19 @@ mod tests {
         assert_eq!(a.compare_sel, 0, "0 picks the first model");
         press(&mut a, "$");
         assert_eq!(a.compare_sel, 1, "$ picks the last model");
+        a.scroll = 3;
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(
+            (&a.view, a.current().unwrap().key.as_str(), a.scroll),
+            (&View::Detail(Some(3)), "opus5", 0),
+            "enter shows its details"
+        );
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(
+            (&a.view, a.compare_sel, a.scroll),
+            (&View::Compare, 1, 3),
+            "esc goes back to compare, where it was"
+        );
         assert_eq!(press(&mut a, "o"), None, "o lists the sites even when only OpenRouter has it");
         assert_eq!(
             code(&mut a, KeyCode::Enter),
@@ -4003,11 +4020,11 @@ mod tests {
         assert_eq!(a.view, View::Table, "a click only highlights, however often");
         a.mouse(Mouse::Row(1));
         assert_eq!(a.mouse(Mouse::Cell(2, 0)), None);
-        assert_eq!((a.selected(), &a.view), (2, &View::Detail), "a double click on the name opens the details");
+        assert_eq!((a.selected(), &a.view), (2, &View::Detail(None)), "a double click on the name opens the details");
         assert_eq!(a.mouse(Mouse::Scroll(3)), None);
         assert_eq!(a.scroll, 3);
         assert_eq!(a.mouse(Mouse::Row(0)), None, "clicks do nothing behind an overlay");
-        assert_eq!(a.view, View::Detail);
+        assert_eq!(a.view, View::Detail(None));
         code(&mut a, KeyCode::Esc);
         a.mouse(Mouse::Scroll(-1));
         assert_eq!(a.selected(), 1);
@@ -4102,7 +4119,7 @@ mod tests {
     fn detail_and_quit() {
         let mut a = app();
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.view, View::Detail);
+        assert_eq!(a.view, View::Detail(None));
         press(&mut a, "jjj");
         assert_eq!(a.scroll, 3);
         press(&mut a, "gg");
