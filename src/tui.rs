@@ -1002,9 +1002,9 @@ const MARK: Color = Color::LightBlue;
 /// A favorite's ★ with no task at hand: gold, as stars are in mail clients and on GitHub.
 const STAR: Color = Color::Yellow;
 /// One colour per task in `TASKS` order: the ★ of its favorite and its name in recommend. Off the mark colour (light blue), the key hints' cyan, the worst
-/// value's red and yellow for a match; 16 colours leave no room to also skip the best's green.
+/// value's red and yellow for a match; 16 colours leave no room to also skip the best's green, but no two are a pair.
 const TASK: [Color; 6] =
-    [Color::LightCyan, Color::Green, Color::LightGreen, Color::Blue, Color::LightMagenta, Color::LightYellow];
+    [Color::LightCyan, Color::Green, Color::LightRed, Color::Blue, Color::LightMagenta, Color::LightYellow];
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
 /// Developers' and harnesses' colours in the terminal's own theme: one per Via name (`data::vias`).
