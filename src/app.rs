@@ -724,8 +724,7 @@ pub enum Mouse {
     Cols(isize),
     /// Click on the # header: the first row, as `gg` goes.
     Top,
-    /// Click on tab `i`: yours or all alone, and ✓ ★ ✗ on or off, as `S` `F` `E`. The ✓ ★ ✗
-    /// headers are their tabs too.
+    /// Click on tab `i`: yours or all alone, and ✓ ★ ✗ on or off, as `S` `F` `E`.
     Tab(usize),
     /// Click on a column header.
     Header(usize),
@@ -4354,7 +4353,7 @@ mod tests {
         a.store.toggle_excluded("mini");
         a.rebuild();
         a.mouse(Mouse::Tab(EXCLUDED));
-        assert_eq!(keys(&a), ["mini"], "the ✗ header, as E, shows the excluded only");
+        assert_eq!(keys(&a), ["mini"], "the ✗ tab, as E, shows the excluded only");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only == Some(EXCLUDED), a.rows.len()), (false, 3), "esc leaves E");
     }

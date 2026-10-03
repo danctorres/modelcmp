@@ -699,17 +699,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         });
     }
     let x = m.column - inner.x;
-    // The # header goes to the first row, as `gg` does; the ✓ header shows marked models only,
-    // as `S` does, the ★ favorites only, as `F`, and the ✗ excluded only, as `E`.
+    // The # header goes to the first row, as `gg` does; the mark columns have no header.
     if x < l.name_x {
-        let num_w = l.name_x - 7;
-        return match x {
-            _ if x <= num_w => Some(Mouse::Top),
-            _ if (num_w + 1..num_w + 3).contains(&x) => Some(Mouse::Tab(MARKED)),
-            _ if (num_w + 3..num_w + 5).contains(&x) => Some(Mouse::Tab(FAV)),
-            _ if (num_w + 5..num_w + 7).contains(&x) => Some(Mouse::Tab(EXCLUDED)),
-            _ => None,
-        };
+        return (x <= l.name_x - 7).then_some(Mouse::Top);
     }
     let (col, cx, w) = col_at(&l, x)?;
     // The ▾ ends a left-aligned text header ("Dev▼ ▾") and is the last cell of a numeric one.
@@ -1594,10 +1586,6 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let room = |x: u16, w: u16| usize::from(w.min(area.right().saturating_sub(x)));
     let (nw, dw) = (room(name_x, name_w), room(dev_x, dev_w));
     buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
-    // Each mark column labelled with its own glyph, as mail clients head a star column with a star.
-    for (x, g) in [(box_x, "✓"), (star_x, "★"), (ex_x, "✗")] {
-        buf.set_stringn(x, y, g, 1, fg(MUTED));
-    }
     buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
     buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
     if first > 0 && dev_x + dev_w < area.right() {
@@ -3127,7 +3115,7 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 206, 6);
-        let header = "# ✓ ★ ✗ Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding ▾ Agentic ▾ \
+        let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding ▾ Agentic ▾ \
                       Reason ▾ Value │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
@@ -3383,9 +3371,7 @@ mod tests {
         assert_eq!(hit(&a, area, drag(3, h)), Some(Mouse::Extend(h as usize - 8)), "below: the last row");
         assert_eq!(hit(&a, Rect::new(0, 0, w, 7), drag(3, 2)), None, "no rows to extend over");
         assert_eq!(hit(&a, area, click(1, 1)), Some(Mouse::Top), "the # header: the first row");
-        assert_eq!(hit(&a, area, click(3, 1)), Some(Mouse::Tab(MARKED)), "the ✓ header: marked only");
-        assert_eq!(hit(&a, area, click(5, 1)), Some(Mouse::Tab(FAV)), "the ★ header: favorites only");
-        assert_eq!(hit(&a, area, click(7, 1)), Some(Mouse::Tab(EXCLUDED)), "the ✗ header: excluded only");
+        assert_eq!([3, 5, 7].map(|x| hit(&a, area, click(x, 1))), [None; 3], "no header over the marks");
         assert_eq!(hit(&a, area, click(9, 1)), Some(Mouse::Header(0)));
         assert_eq!(hit(&a, area, click(3, 2)), None, "the rule under the header");
         assert_eq!(hit(&a, area, click(col("Dev"), 1)), Some(Mouse::Header(1)));
@@ -3511,7 +3497,7 @@ mod tests {
         let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(
             words(&lines[0]),
-            ["#", "✓", "★", "✗", "Model", "Dev", "▾", "‹│", "▼ECI"],
+            ["#", "Model", "Dev", "▾", "‹│", "▼ECI"],
             "the cursor starts on the index"
         );
         assert!(layout(46, &a).more, "columns cut off on the right");
@@ -3544,21 +3530,21 @@ mod tests {
         // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "‹│", "Notes"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "Notes"]);
         a.col = VIA;
         let (_, lines) = render(&mut a, 47, 4);
-        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "‹│", "Via", "▾"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "Via", "▾"]);
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
         let (_, lines) = render(&mut a, 56, 4);
-        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "▾", "Value"], "scrolls back only as far as needed");
+        assert_eq!(words(&lines[0])[4..], ["‹│", "Reason", "▾", "Value"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 56, 4);
-        assert_eq!(words(&lines[0])[7..], ["‹│", "Reason", "▾", "Value"], "{}", lines[0]);
+        assert_eq!(words(&lines[0])[4..], ["‹│", "Reason", "▾", "Value"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 48, 4);
-        assert_eq!(words(&lines[0]), ["#", "✓", "★", "✗", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");
+        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");
         for (w, h) in [(1, 1), (3, 2), (0, 0), (30, 3), (12, 1)] {
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);
