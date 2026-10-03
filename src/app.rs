@@ -369,7 +369,7 @@ pub const TABS: [(&str, char, &str); 9] = [
     ("help", '?', "? help"),
 ];
 /// Where each tab is in `TABS`; the panels' are from recommend's on.
-const YOURS: usize = 0;
+pub const YOURS: usize = 0;
 const ALL: usize = 1;
 pub const MARKED: usize = 2;
 pub const FAV: usize = 3;
@@ -833,6 +833,8 @@ pub struct App {
     /// refresh or a source switch can drop a selected model while its mark stays. Set by
     /// `rebuild`, so a frame does not scan every model for it.
     pub marked_shown: usize,
+    /// How many of them are out of reach whatever `a`, which yours shows too: its tab's `+N`.
+    pub marked_out: usize,
     /// Whether `F` and `E` have a model to show, set by `rebuild` as the marks' count is: one
     /// the data no longer has, or that is out of reach, is none.
     fav_shown: bool,
@@ -914,6 +916,7 @@ impl App {
             fronts: vec![],
             table: TableState::default().with_selected(0),
             marked_shown: 0,
+            marked_out: 0,
             fav_shown: false,
             excluded_shown: false,
             only: None,
@@ -1377,7 +1380,8 @@ impl App {
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
-        self.marked_shown = self.data.models.iter().filter(|m| self.store.is_marked(&m.key)).count();
+        let marked = || self.data.models.iter().filter(|m| self.store.is_marked(&m.key));
+        (self.marked_shown, self.marked_out) = (marked().count(), marked().filter(|m| !self.accessible(m)).count());
         // Unmarking the last marked model, or a refresh dropping it, leaves S (and unfavoriting
         // the last, F) for every model rather than an empty table.
         // A selected model shows out of reach too, as `filtered` keeps it.

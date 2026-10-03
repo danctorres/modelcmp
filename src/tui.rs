@@ -9,7 +9,7 @@
 
 use crate::app::{
     App, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse, NCOLS,
-    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, choice_rows, hidden, menu_rows, on_price, shown,
+    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, choice_rows, hidden, menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -597,7 +597,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let head = head(app);
     // A tab on the first two lines, or the edge left of it, over recommend too.
     let on_tabs = m.row <= area.y + 1 && !mark && !pick && !extend;
-    let tab = tab_ends().position(|end| on_tabs && (1..end).contains(&usize::from(m.column))).map(Mouse::Tab);
+    let tab = tab_ends(app).position(|end| on_tabs && (1..end).contains(&usize::from(m.column))).map(Mouse::Tab);
     // An open list first: a click on an entry acts on it, on its frame nothing, and any click
     // outside closes it.
     let list = match &app.input {
@@ -899,7 +899,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     // drops last. Off the table only the panels', whose keys work there. `? help` goes after
     // the way back, so it is the last to go.
     let (mut cut, last) = (vec![], groups.len() - 1);
-    for (i, (&(_, _, hint), end)) in TABS.iter().zip(tab_ends()).enumerate() {
+    for (i, (&(_, _, hint), end)) in TABS.iter().zip(tab_ends(app)).enumerate() {
         if end >= usize::from(width)
             && (app.view == View::Table || i >= RECOMMEND)
             && app.tab_has(i)
@@ -1019,16 +1019,21 @@ fn tab_color(i: usize) -> Color {
     }
 }
 
-/// The cells a tab takes: its left edge, then its name and its key with a space around each.
-fn tab_width(name: &str) -> usize {
-    name.chars().count() + 5
+/// What follows the name of tab `i`: on yours `+N`, the selected models out of reach it shows too.
+fn tab_plus(app: &App, i: usize) -> String {
+    if i == YOURS && app.marked_out > 0 { format!(" +{}", app.marked_out) } else { String::new() }
+}
+
+/// The cells tab `i` takes: its left edge, then its name and its key with a space around each.
+fn tab_width(app: &App, i: usize) -> usize {
+    TABS[i].0.chars().count() + tab_plus(app, i).len() + 5
 }
 
 /// Where each tab ends, in cells from the screen's left edge, the first starting one cell in:
 /// for the clicks and for the hints of the tabs cut off, which `tabs` draws `tab_width` apart.
-fn tab_ends() -> impl Iterator<Item = usize> {
-    TABS.iter().scan(1, |end, t| {
-        *end += tab_width(t.0);
+fn tab_ends(app: &App) -> impl Iterator<Item = usize> {
+    (0..TABS.len()).scan(1, |end, i| {
+        *end += tab_width(app, i);
         Some(*end)
     })
 }
@@ -1069,9 +1074,12 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
             (_, true) => (Style::new(), fg(KEY).add_modifier(BOLD)),
             _ => (fg(MUTED), fg(MUTED)),
         };
+        // The `+N` in the colour of the ✓ its models have.
+        let (plus, len) = (tab_plus(app, i), name.chars().count() as u16);
         put(buf, x + 1, y, &format!(" {name} "), style);
-        put(buf, x + 3 + name.chars().count() as u16, y, &format!("{key} "), key_style);
-        let w = tab_width(name) as u16;
+        put(buf, x + 2 + len, y, &format!("{plus} "), fg(MARK).add_modifier(BOLD));
+        put(buf, x + 3 + len + plus.len() as u16, y, &format!("{key} "), key_style);
+        let w = tab_width(app, i) as u16;
         if on {
             put(buf, x + 1, y - 1, &"─".repeat(usize::from(w - 1)), fg(MUTED));
             if !panel {
@@ -3054,6 +3062,12 @@ mod tests {
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         assert!(lines[opus].contains("not available"), "{lines:?}");
         assert!(lines[4].starts_with(" NORMAL  1 available + 1 not available"), "{}", lines[4]);
+        // Its tab counts it, and a click past the count is still on the next tab.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 20)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let tabs = &text(term.backend().buffer())[1];
+        assert!(tabs.contains(" yours +1 A "), "{tabs}");
+        assert_eq!(tab_ends(&a).next(), Some(14));
     }
 
     #[test]
