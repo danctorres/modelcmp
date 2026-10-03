@@ -242,7 +242,12 @@ enum Probe {
     Table(&'static [&'static str]),
     /// No such command: being installed means access to every model of this provider.
     Provider(&'static str),
+    /// No such command either, but GitHub's API lists what the account may use (`copilot_ids`).
+    Copilot,
 }
+
+/// models.dev's provider for the models GitHub Copilot serves.
+const COPILOT: &str = "github-copilot";
 
 const HARNESSES: &[(&str, Probe)] = &[
     ("opencode", Probe::List(&["models"])),
@@ -250,6 +255,7 @@ const HARNESSES: &[(&str, Probe)] = &[
     ("claude", Probe::Provider("anthropic")),
     ("codex", Probe::Provider("openai")),
     ("gemini", Probe::Provider("google")),
+    ("copilot", Probe::Copilot),
 ];
 
 /// pi's names for providers models.dev names otherwise, paired by the model ids they share.
@@ -528,9 +534,11 @@ impl Data {
                     .filter(|(_, ids)| ids.contains(id.as_str()) || ids.contains(all.as_str()))
                     .map(|(h, _)| h.to_string())
                     .collect();
-                let by_env = *env
-                    .entry(&o.provider)
-                    .or_insert_with(|| o.env.iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty())));
+                // Not Copilot's: its key is any GitHub token, which says nothing of what the plan takes.
+                let by_env = o.provider != COPILOT
+                    && *env
+                        .entry(&o.provider)
+                        .or_insert_with(|| o.env.iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty())));
                 if by_env {
                     o.via.push("env".into());
                 }
@@ -618,6 +626,7 @@ fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &S
             Some(out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect())
         }
         Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?),
+        Probe::Copilot => copilot_ids(stop),
     };
     std::thread::scope(|s| {
         for (bin, probe) in asked {
@@ -695,6 +704,69 @@ fn table_ids(out: &str) -> Option<Vec<String>> {
         .skip_while(|f| !f.starts_with(&["provider", "model"]));
     let cols = lines.next()?.len();
     Some(lines.filter(|f| f.len() == cols).map(|f| format!("{}/{}", f[0], f[1])).collect())
+}
+
+/// The `github-copilot/model` ids Copilot's CLI takes on your plan, asked of GitHub as it
+/// does, which has no command for it. With the tokens that takes from the environment,
+/// then the one `gh` stored: the first GitHub answers, as a token set for something else may
+/// not reach Copilot.
+fn copilot_ids(stop: &AtomicBool) -> Option<Vec<String>> {
+    let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
+    let host = env("COPILOT_GH_HOST").or_else(|| env("GH_HOST")).unwrap_or_else(|| "github.com".into());
+    // Without the environment's, which `gh` would print in place of its own.
+    let gh = ["-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "gh", "auth", "token", "--hostname", &host];
+    let gh = std::iter::once_with(|| run("env", &gh, Duration::from_secs(10), stop)).flatten();
+    let tokens = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"].into_iter().filter_map(env).chain(gh);
+    // All of them in the time any other harness has, however many GitHub leaves unanswered.
+    let end = Instant::now() + Duration::from_secs(30);
+    tokens.take_while(|_| Instant::now() < end).find_map(|token| {
+        let host = host.clone();
+        unless_stopped(stop, end, move || copilot_models(&host, token.trim()))
+    })
+}
+
+/// Copilot's `models` answer for the account of `token`, from the API host GitHub names for
+/// it, which is another for a business or an enterprise.
+fn copilot_models(host: &str, token: &str) -> Option<Vec<String>> {
+    let agent = agent(Duration::from_secs(15));
+    let get = |url: &str| {
+        let req = agent.get(url).header("Authorization", format!("Bearer {token}"));
+        let body = req.header("Copilot-Integration-Id", "copilot-developer-cli").call().ok()?.body_mut().read_to_vec();
+        serde_json::from_slice::<serde_json::Value>(&body.ok()?).ok()
+    };
+    let user = get(&format!("https://api.{host}/copilot_internal/user"))?;
+    copilot_enabled(&get(&format!("{}/models", user["endpoints"]["api"].as_str()?))?)
+}
+
+/// `ask`'s answer, or none once `stop` is set or `end` has come: a download cannot be killed
+/// as a command is, so it is left to end on its own.
+fn unless_stopped<T: Send + 'static>(
+    stop: &AtomicBool,
+    end: Instant,
+    ask: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
+    use std::sync::mpsc::RecvTimeoutError::Timeout;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(ask()));
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(answer) => return answer,
+            Err(Timeout) if !stop.load(Relaxed) && Instant::now() < end => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// The ids of Copilot's `models` answer that its CLI takes, under models.dev's provider for
+/// them: the ones its picker offers and no policy keeps off, switched off or not yet on. A policy that enables a model
+/// is not enough, as a plan may leave the CLI with none but `auto`.
+fn copilot_enabled(models: &serde_json::Value) -> Option<Vec<String>> {
+    let taken = |m: &&serde_json::Value| {
+        let policy = &m["policy"]["state"];
+        m["model_picker_enabled"] == true && (policy.is_null() || policy == "enabled")
+    };
+    let ids = models["data"].as_array()?.iter().filter(taken).filter_map(|m| m["id"].as_str());
+    Some(ids.map(|id| format!("{COPILOT}/{id}")).collect())
 }
 
 /// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit` or on `stop`,
@@ -976,9 +1048,14 @@ pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
     }
 }
 
+/// What every download goes through, given up at `limit`.
+fn agent(limit: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder().timeout_global(Some(limit)).build().into()
+}
+
 /// `url`'s body; `key` goes in Artificial Analysis's `x-api-key` header.
 fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, Failure> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).build().into();
+    let agent = agent(Duration::from_secs(60));
     let mut req = agent.get(url);
     if let Some(k) = key {
         req = req.header("x-api-key", k);
@@ -2056,6 +2133,35 @@ mod tests {
         let was = Listed::of(cache);
         assert_eq!(was.harness(false), BTreeMap::from([("opencode".to_string(), ids("google/flash"))]));
         assert_eq!(was.harness(true).len(), 2, "all of them for one still listing");
+    }
+
+    #[test]
+    fn copilot_lists_what_its_cli_takes() {
+        let models = serde_json::json!({"data": [
+            {"id": "gpt-5-mini", "model_picker_enabled": true},
+            {"id": "claude-haiku-4.5", "model_picker_enabled": true, "policy": {"state": "enabled"}},
+            {"id": "claude-opus-5.5", "model_picker_enabled": true, "policy": {"state": "disabled"}},
+            {"id": "gpt-6-sol", "model_picker_enabled": true, "policy": {"state": "unconfigured"}},
+            {"id": "kimi-k3", "model_picker_enabled": false, "policy": {"state": "enabled"}},
+            {"id": "copilot-search-a"},
+        ]});
+        let ids = ["github-copilot/gpt-5-mini", "github-copilot/claude-haiku-4.5"].map(String::from).to_vec();
+        assert_eq!(copilot_enabled(&models), Some(ids), "enabled by a policy is not offered by the picker");
+        assert_eq!(copilot_enabled(&serde_json::json!({"message": "Bad credentials"})), None, "not a listing");
+    }
+
+    #[test]
+    fn a_download_is_left_behind_once_stopped() {
+        let (t, go) = (Instant::now(), &AtomicBool::new(false));
+        let end = t + Duration::from_secs(5);
+        assert_eq!(unless_stopped(go, end, || Some(1)), Some(1));
+        let slow = || {
+            std::thread::sleep(Duration::from_secs(10));
+            Some(1)
+        };
+        assert_eq!(unless_stopped(&AtomicBool::new(true), end, slow), None);
+        assert_eq!(unless_stopped(go, t, slow), None, "nor past its time");
+        assert!(t.elapsed() < Duration::from_secs(5), "not waited for");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use store::Store;
 
 /// Pick the right LLM: prices (models.dev) + benchmarks (Epoch AI, or Artificial Analysis), filtered to the
 /// models you can already use: the ones your harnesses list (opencode models, pi --list-models;
-/// claude, codex and gemini give their own provider's), plus providers you have API keys for.
+/// claude, codex and gemini give their own provider's, copilot what its CLI takes on your plan), plus providers you have API keys for.
 /// The VIA column says which. Run without a command for the interactive TUI.
 #[derive(Parser)]
 #[command(
@@ -63,7 +63,7 @@ enum Cmd {
         /// Only these developers, e.g. --dev anthropic --dev openai (the Dev dropdown, `d`, in the TUI)
         #[arg(long)]
         dev: Vec<String>,
-        /// Only models you have through these harnesses (opencode, pi, claude, codex, gemini) or env; repeatable (the Via dropdown, `d`, in the TUI)
+        /// Only models you have through these harnesses (opencode, pi, claude, codex, gemini, copilot) or env; repeatable (the Via dropdown, `d`, in the TUI)
         #[arg(long)]
         via: Vec<String>,
         /// Max rows, 0 = no limit

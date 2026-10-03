@@ -730,7 +730,7 @@ pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
 
 /// The command that starts `harness` on `m`, if the harness has it: opencode and pi take
 /// `provider/model` as they listed it (`listed`, pi's `openai-codex/...` for models.dev's `openai/...`),
-/// the single-provider CLIs (claude, codex, gemini) the bare model id.
+/// the others (claude, codex, gemini, copilot) the bare model id.
 pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
     let o = m.offer_via(harness).filter(|_| harness != "env")?;
     let id = if matches!(harness, "opencode" | "pi") {

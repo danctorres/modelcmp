@@ -1008,7 +1008,8 @@ const TASK: [Color; 6] =
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
 /// Developers' and harnesses' colours in the terminal's own theme: one per Via name (`data::vias`).
-const DEVS: [Color; 6] = [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green, Color::LightMagenta];
+const DEVS: [Color; 7] =
+    [Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta, Color::Green, Color::LightMagenta, Color::LightGreen];
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
@@ -1147,7 +1148,7 @@ const fn fg(c: Color) -> Style {
 
 /// A developer's or harness's colour, as a placeholder `recolor` resolves to one of the theme's
 /// accents: a Via name's place in `data::vias`, so no two share one, else the name's byte sum mod
-/// 210, which keeps it mod 6, 10 and 14 (`DEVS`, `Palette::accents`).
+/// 210, which keeps it mod 7, 10 and 14 (`DEVS`, `Palette::accents`).
 fn dev_color(dev: &str) -> Color {
     let k = crate::data::vias().position(|v| v == dev);
     Color::Indexed(k.unwrap_or_else(|| dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)

@@ -277,11 +277,11 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0x0f380f,
             bg: 0x9bbc0f,
-            // Six, not ten: the DMG screen is four shades of green, and ten colours that far
-            // apart would have to leave it for navy and purple. Six still divide the 210 and
-            // keep the Via names apart, as the terminal's own six do. Only the mark (slot 12)
+            // Seven, not ten: the DMG screen is four shades of green, and ten colours that far
+            // apart would have to leave it for navy and purple. Seven still divide the 210 and
+            // keep the Via names apart, as the terminal's own seven do. Only the mark (slot 12)
             // is a blue, as a green or a brown would give its fill the cursor's.
-            accents: &[0x0f380f, 0x5a5a00, 0x3b2d0c, 0x13463a, 0x704214, 0x046800],
+            accents: &[0x0f380f, 0x5a5a00, 0x3b2d0c, 0x13463a, 0x704214, 0x046800, 0x8a1c00],
         }),
     ),
 ];
