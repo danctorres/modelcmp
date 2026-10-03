@@ -1220,7 +1220,7 @@ fn offer_name(id: &str, name: &str) -> String {
 /// (Vercel calls `gpt-5.2-pro` "GPT 5.2") and one such offer must not merge two models.
 /// The row OpenRouter or Epoch knows (`known`) absorbs the others, else the first by key.
 /// Returns each absorbed key and the key it went into.
-// ponytail: ids without a digit ("auto", "deepseek-chat") are too generic to trust and never merge.
+// ponytail: ids without a digit ("deepseek-chat", "sonar") are too generic to trust and never merge.
 fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> bool) -> Vec<(String, String)> {
     let mut order: Vec<String> = by_key.keys().cloned().collect();
     order.sort_by_cached_key(|k| (!known(k), k.clone()));
@@ -1324,6 +1324,8 @@ struct MdModel {
     status: String,
     /// The model's page on models.dev, "zhipuai/glm-5.3", whichever provider offers it.
     canonical_model_id: String,
+    /// "auto" or "model-router" for a router.
+    family: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1765,6 +1767,12 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         // Text generation models only: skip image/video/embedding endpoints, and retired ones.
         .filter(|(_, _, md)| md.modalities.output.is_empty() || md.modalities.output.iter().any(|o| o == "text"))
         .filter(|(_, _, md)| md.status != "deprecated")
+        // Nor routers, which pass each prompt to some model: models.dev's family says so, else
+        // the id ("trustedrouter/auto"). Not the name, which would hide a real "XRouter 7B": a
+        // router left in has no score, so only a favorite's place recommends it.
+        .filter(|(_, mid, md)| {
+            !["auto", "model-router"].contains(&md.family.as_str()) && *mid != "auto" && !mid.ends_with("/auto")
+        })
         .map(|(pid, mid, md)| (pid, mid, md, offer_name(mid, &md.name)))
         // ponytail: models.dev lists an embedding's output as text, so only its name tells.
         .filter(|e| !["embed", "rerank"].iter().any(|w| e.3.to_lowercase().contains(w)))
@@ -1785,7 +1793,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         let key = fold_vendor(&raw, &keys, &orgs);
         if pid == "openrouter" {
             openrouter.entry(key.clone()).or_insert_with(|| mid.clone());
-            // Its routers ("openrouter/auto") are no model's page.
+            // Its own models ("openrouter/<stealth>") are no model's page.
             if !mid.starts_with("openrouter/") {
                 or_slug.entry(slug(mid)).or_insert_with(|| mid.clone());
             }
@@ -2168,7 +2176,7 @@ mod tests {
             "zai": {"models": {"glm-5.3": {"name": "GLM-5.3", "canonical_model_id": "zhipuai/glm-5.3"}}},
             "a": {"models": {
                 "z/glm-5.3": {"name": "GLM-5.3", "canonical_model_id": "zhipuai/glm-5.3"},
-                "auto": {"name": "Auto", "canonical_model_id": "x/one"},
+                "coding-router": {"name": "Coding Router", "canonical_model_id": "x/one"},
                 "qwen3.8-max": {"name": "Qwen 3.8 Max"},
                 "gemma-4-it": {"name": "Gemma 4"},
                 "sonar": {"name": "Sonar"},
@@ -2179,7 +2187,7 @@ mod tests {
             }},
             "b": {"models": {
                 "glm-latest": {"name": "GLM-5.3", "canonical_model_id": "zai/glm-latest"},
-                "auto": {"name": "Auto", "canonical_model_id": "x/two"},
+                "coding-router": {"name": "Coding Router", "canonical_model_id": "x/two"},
                 "qwen3.8-max": {"name": "Qwen 3.8 Max"},
                 "llama-9-fp8": {"name": "Llama 9 FP8"},
                 "phi-9": {"name": "Phi 9"},
@@ -2204,13 +2212,27 @@ mod tests {
                 "x/bigstral-large": {"name": "Bigstral Large"},
                 "meta-llama/llama-9": {"name": "Llama 9"},
                 "openrouter/auto": {"name": "Auto Router"}
+            }},
+            "kilo": {"models": {
+                "kilo-auto/small": {"name": "Auto Small", "family": "auto"},
+                "brick": {"name": "Brick v1", "family": "model-router"},
+                "z-ai/autoglm-9b": {"name": "AutoGLM 9B"},
+                "x/auto-coder-2": {"name": "Auto-Coder 2"},
+                "x/auto": {"name": "Auto"},
+                "nanogpt/coding-router": {"name": "Coding Router"},
+                "x/xrouter-7b": {"name": "XRouter 7B"}
             }}
         }"#;
         let d = merge(json, &Scores::default(), None).unwrap();
         let row = |k: &str| d.models.iter().find(|m| m.key == k).unwrap();
         assert_eq!(row("glm53").md.as_deref(), Some("zhipuai/glm-5.3"), "the page, not provider/id nor an alias");
-        assert_eq!(row("auto").md, None, "a router's offers name a page each: none is its");
-        assert_eq!(row("auto").openrouter, None, "nor is OpenRouter's router another provider's");
+        let routers = ["autorouter", "autosmall", "brickv1", "auto"].map(|k| d.models.iter().any(|m| m.key == k));
+        assert_eq!(routers, [false; 4], "a router is no model");
+        let models =
+            ["autoglm9b", "autocoder2", "xrouter7b", "codingrouter"].map(|k| d.models.iter().any(|m| m.key == k));
+        assert_eq!(models, [true; 4], "but a model named Auto... is, and the name alone never hides one");
+        assert_eq!(row("codingrouter").md, None, "a router left in names a page per offer: none is its");
+        assert_eq!(row("codingrouter").openrouter, None, "nor is another model's OpenRouter id");
         assert_eq!(row("qwen38max").openrouter, None, "one mislabelled offer of three is not the model");
         assert_eq!(row("llama9fp8").openrouter.as_deref(), Some("meta-llama/llama-9"), "but the id cut short is");
         assert_eq!(row("phi9").openrouter, None, "an id per offer: none is the row's");
