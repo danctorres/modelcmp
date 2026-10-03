@@ -9,7 +9,7 @@
 
 use crate::app::{
     App, COLS, ECI, Edit, Effect, GROUPS, HELP, Input, Kind, List, Mouse, NCOLS, NOTES, PRICE, Stop, VIA, View, What,
-    choice_rows, col_about, col_name, has_menu, hidden, menu_rows,
+    choice_rows, col_about, col_name, has_menu, hidden, menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -1608,7 +1608,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 buf.set_stringn(area.x + x + w - 1, y, "-", 1, tint(MUTED));
                 continue;
             };
+            let listed = app.listed[r];
             let style = match ext[i] {
+                // A list price is not one you'd pay: no level, no best or worst, nor for Code/$ over it.
+                _ if listed && on_price(i) => tint(MUTED).add_modifier(Modifier::ITALIC),
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
                 _ if i + 2 == PRICE => soft(LEVEL[level(v)]),
                 Some((best, _)) if !dim && v == best => tint(GOOD).add_modifier(BOLD),
@@ -1616,7 +1619,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 _ => text,
             };
             let w = w as usize;
-            buf.set_stringn(area.x + x, y, format!("{:>w$}", (COLS[i].show)(v)), w, style);
+            buf.set_stringn(area.x + x, y, format!("{:>w$}", shown(i, v, listed)), w, style);
         }
         if let Some((x, w)) = via {
             let (mut x, end) = (area.x + x, area.x + x + w);
@@ -2328,7 +2331,7 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
             .iter()
             .map(|m| {
                 let said = custom_priced(m, &app.store, t, false);
-                let price = fg(m.cost().map_or(MUTED, |c| LEVEL[level(c)]));
+                let price = fg(m.cost().filter(|_| !m.listed()).map_or(MUTED, |c| LEVEL[level(c)]));
                 let spans = vec![
                     Span::styled("★ ", fg(STAR).add_modifier(BOLD)),
                     Span::styled(said.trim_start_matches("★ ").to_string(), price),
@@ -2403,7 +2406,7 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
             if fav {
                 spans.push(Span::styled("★ ", fg(task_color(t.name)).add_modifier(BOLD)));
             }
-            let price = if fav && off { MUTED } else { m.cost().map_or(MUTED, |c| LEVEL[level(c)]) };
+            let price = if fav && off || m.listed() { MUTED } else { m.cost().map_or(MUTED, |c| LEVEL[level(c)]) };
             spans.push(Span::styled(priced(m, fit::shown(m, t, *s), false, false), fg(price)));
             if fav && off {
                 spans.push(Span::styled(" not recommended", fg(MUTED)));
@@ -3429,6 +3432,25 @@ mod tests {
         assert_eq!(buf[(px, 1)].symbol(), "─", "a thin one elsewhere");
         assert!(buf[(x + w - 1, 3)].modifier.contains(BOLD), "its cells are bold");
         assert!(!buf[(px + 1, 3)].modifier.contains(BOLD), "other columns are not");
+    }
+
+    #[test]
+    fn a_list_price_is_marked_and_muted() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        // Yours lists no price; another provider's does.
+        let yours = Offer { provider: "g".into(), unpriced: true, available: true, ..Default::default() };
+        data.models[1].offers.insert(0, yours);
+        data.models[1].fit.insert("value".into(), 50.0);
+        a.set_data(data);
+        let (buf, lines) = render(&mut a, 200, 6);
+        let y = lines.iter().position(|l| l.contains("flash")).unwrap();
+        assert_eq!(lines[y].matches("~0.10").count(), 4, "Price, $in, $cache and $out: {}", lines[y]);
+        assert_eq!(lines[y].matches('~').count(), 5, "and Code/$, which divides by it: {}", lines[y]);
+        let x = lines[y].chars().position(|c| c == '~').unwrap() as u16;
+        let cell = &buf[(x, y as u16)];
+        assert!(cell.modifier.contains(Modifier::ITALIC) && cell.fg == MUTED, "as not available");
+        assert!(!lines.iter().any(|l| l.contains("opus") && l.contains('~')), "a price of yours is not");
     }
 
     #[test]

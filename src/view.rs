@@ -419,7 +419,7 @@ pub fn custom_priced(m: &Model, store: &Store, task: &str, keyed: bool) -> Strin
     let tiers: Vec<&str> = TIERS.iter().map(|t| t.0).filter(|x| is(Some(x))).collect();
     let tiers = if is(None) || tiers.is_empty() { String::new() } else { format!(" ({})", tiers.join(", ")) };
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
-    format!("★ {}{key} {}{tiers}", m.name, m.cost().map_or("-".into(), usd))
+    format!("★ {}{key} {}{tiers}", m.name, price(m))
 }
 
 /// Two values of a column in order, the highest first with `desc`: blanks last either way.
@@ -451,6 +451,11 @@ pub fn usd(x: f64) -> String {
     if x == 0.0 { "free".into() } else { format!("${}", money(x)) }
 }
 
+/// A model's blended price as `usd`: after a `~` when it is the list one (`Model::listed`), `-` when unknown.
+fn price(m: &Model) -> String {
+    m.cost().map_or("-".into(), |c| format!("{}{}", if m.listed() { "~" } else { "" }, usd(c)))
+}
+
 /// What a frontier line shows, for the recommend panel and `modelcmp recommend`, which adds the key.
 pub fn frontier_legend(keyed: bool) -> String {
     format!(
@@ -472,7 +477,7 @@ pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
     let flag = if favorite { "★ " } else { "" };
     let s = if s.is_nan() { "-".into() } else { format!("{s:.0}") };
-    format!("{flag}{}{key} {} ({s})", m.name, m.cost().map_or("-".into(), usd))
+    format!("{flag}{}{key} {} ({s})", m.name, price(m))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
@@ -685,14 +690,19 @@ pub fn compare_rows(models: &[&Model]) -> Vec<Row> {
         let cells = vals.iter().map(|v| v.map_or("-".into(), &fmt)).collect();
         Row { label: label.into(), cells, vals, ext, section: "" }
     }
-    let price = |f: fn(&Offer) -> f64| -> Vec<Option<f64>> { models.iter().map(|m| m.priced_offer().map(f)).collect() };
+    // A list price, yours having none, after a `~` as in the table.
+    let price = |label: &str, f: fn(&Offer) -> f64| {
+        let mut r = row(label, models.iter().map(|m| m.priced_offer().map(f)).collect(), money, false);
+        r.cells.iter_mut().zip(models).filter(|(_, m)| m.listed()).for_each(|(c, _)| c.insert(0, '~'));
+        r
+    };
     let mut rows = vec![
         Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), ..Default::default() },
         Row { label: "via".into(), cells: models.iter().map(|m| via(&m.via)).collect(), ..Default::default() },
-        row("$ in / 1M", price(|o| o.input), money, false),
+        price("$ in / 1M", |o| o.input),
         // No cache discount: cached input costs full price.
-        row("$ cached in / 1M", price(|o| o.cache_read.unwrap_or(o.input)), money, false),
-        row("$ out / 1M", price(|o| o.output), money, false),
+        price("$ cached in / 1M", |o| o.cache_read.unwrap_or(o.input)),
+        price("$ out / 1M", |o| o.output),
         row("context", models.iter().map(|m| Some(m.context as f64)).collect(), |c| ctx(c as u64), true),
         Row {
             section: "scores",

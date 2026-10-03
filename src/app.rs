@@ -152,7 +152,9 @@ pub const COLS: [Col; 13] = [
     col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
     col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
     col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
-    col("Code/$", "value", "coding percentile ÷ Price, as a percentile", |m| m.fit.get("value").copied()),
+    col("Code/$", "value", "coding percentile ÷ Price, as a percentile, ~ on a list price", |m| {
+        m.fit.get("value").copied()
+    }),
     Col {
         aa_only: true,
         show: |v| format!("{v:.0}"),
@@ -165,6 +167,17 @@ pub const COLS: [Col; 13] = [
         ..col("TTFT", "ttft", "seconds to the first token, median across providers", |m| m.ttft)
     },
 ];
+
+/// Whether `COLS[i]` hangs on the price: Price, $in, $cache and $out, and Code/$, which divides by it.
+pub fn on_price(i: usize) -> bool {
+    (1..=4).contains(&i) || i == 10
+}
+
+/// A value of `COLS[i]` as its cell shows it: after a `~` when it comes from a list price (`Model::listed`).
+pub fn shown(i: usize, v: f64, listed: bool) -> String {
+    let s = (COLS[i].show)(v);
+    if listed && on_price(i) { format!("~{s}") } else { s }
+}
 
 /// Text columns before the numbers: 0 is the model name, 1 its developer. `VIA` follows them.
 pub const TEXT: usize = 2;
@@ -231,7 +244,11 @@ pub fn col_about(col: usize) -> String {
         1 => "company that trained the model".into(),
         VIA => "harnesses listing it, env if API key set".into(),
         NOTES => "your own note on the model".into(),
-        PRICE => format!("{}, {:.0}% of the input cached", COLS[PRICE - TEXT].about, crate::data::cached() * 100.0),
+        PRICE => format!(
+            "{}, {:.0}% of the input cached, ~ list price when yours has none",
+            COLS[PRICE - TEXT].about,
+            crate::data::cached() * 100.0
+        ),
         _ => numeric(col).map_or("", Col::about).into(),
     }
 }
@@ -725,6 +742,8 @@ pub struct App {
     /// `vals[i][c]` is `COLS[c]` of `data.models[i]`, computed once per data load: a price is a
     /// search through the offers, too slow to repeat for every model on every key.
     pub vals: Vec<[Option<f64>; COLS.len()]>,
+    /// `Model::listed` of each model, cached as `vals`.
+    pub listed: Vec<bool>,
     /// Widest shown value of each column over every model, so the layout holds when filtering.
     pub widths: [usize; COLS.len()],
     /// Best and worst value of each column among `rows`; none when they all agree, or it is not ranked.
@@ -819,6 +838,7 @@ impl App {
         let mut app = App {
             data: Data::default(),
             vals: vec![],
+            listed: vec![],
             widths: [0; COLS.len()],
             ext: [None; COLS.len()],
             store,
@@ -878,8 +898,10 @@ impl App {
     /// Replace the data and recompute everything derived from it.
     pub fn set_data(&mut self, data: Data) {
         self.vals = data.models.iter().map(|m| COLS.each_ref().map(|c| (c.get)(m))).collect();
+        self.listed = data.models.iter().map(Model::listed).collect();
         self.widths = std::array::from_fn(|c| {
-            self.vals.iter().filter_map(|v| v[c]).map(|v| (COLS[c].show)(v).chars().count()).max().unwrap_or(0)
+            let shown = self.vals.iter().zip(&self.listed).filter_map(|(v, &l)| Some(shown(c, v[c]?, l)));
+            shown.map(|s| s.chars().count()).max().unwrap_or(0)
         });
         self.any_available = data.any_available();
         // The rows index the old data: point them at the same models in the new, so `rebuild`
@@ -1222,12 +1244,13 @@ impl App {
                 rows.reverse();
             }
         }
-        // Among the models to use: a muted row is grey throughout, so it holds no extreme.
+        // Among the models to use: a muted row is grey throughout, so it holds no extreme, nor does a list price.
         self.ext = std::array::from_fn(|c| {
             if !COLS[c].ranked {
                 return None;
             }
-            let mut it = rows.iter().filter(|&&r| !self.muted(&ms[r])).filter_map(|&r| self.vals[r][c]);
+            let own = |r: usize| !(self.listed[r] && on_price(c));
+            let mut it = rows.iter().filter(|&&r| !self.muted(&ms[r]) && own(r)).filter_map(|&r| self.vals[r][c]);
             let first = it.next()?;
             let (lo, hi) = it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
             (lo != hi).then_some(if COLS[c].lower_better { (lo, hi) } else { (hi, lo) })

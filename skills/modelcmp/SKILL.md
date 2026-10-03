@@ -29,7 +29,7 @@ opencode -m "$(modelcmp list --task coding --tier mid --id)"
 
 ## Reading the numbers
 
-- `price` is $ per 1M tokens. `null` means unknown, not free.
+- `price` is $ per 1M tokens. `null` means unknown, not free. `"listed": true` (in `price`, or on a `recommend --json` entry; `~` in the tables) means the user's provider lists no price and it is the list price of other providers: an estimate.
 - `score` is on the scale of the source in use (`source` in `list --json`). With `epoch` it is in Epoch Capabilities Index points, the task's capability for coding, agentic and reasoning. With `aa` it is the Artificial Analysis Intelligence Index for `overall` and `vision`, and one benchmark's 0-100 score for the others (Coding Index, Terminal-Bench 4.0, HLE). `value` is a 0-100 percentile with either. Scores from different sources do not compare.
 - `"recommended": false` marks a favorite that sits on the frontier only because the user chose it. Still use it.
 - Models the user excluded never appear in `recommend` or `--task`.

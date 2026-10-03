@@ -1,6 +1,6 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
-use crate::app::{COLS, Col, TEXT, hidden, model_id};
+use crate::app::{COLS, Col, TEXT, hidden, model_id, on_price, shown};
 use crate::data::{Data, Model, Offer};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
@@ -45,6 +45,9 @@ struct Price<'a> {
     /// Cached input; absent when the provider lists no discount, so input costs full price
     cache_read_per_mtok: Option<f64>,
     output_per_mtok: Option<f64>,
+    /// True when this provider lists no price and the prices are the list ones of other providers
+    #[serde(skip_serializing_if = "Option::is_none")]
+    listed: Option<bool>,
 }
 
 impl<'a> From<&'a Offer> for Price<'a> {
@@ -57,6 +60,7 @@ impl<'a> From<&'a Offer> for Price<'a> {
             input_per_mtok: (!o.unpriced).then_some(o.input),
             cache_read_per_mtok: o.cache_read,
             output_per_mtok: (!o.unpriced).then_some(o.output),
+            listed: None,
         }
     }
 }
@@ -120,7 +124,18 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         excluded: s.is_excluded(&m.key),
         note: s.note(&m.key),
         favorite_for: s.favorite_for(&m.key),
-        price: m.price().map(Price::from),
+        price: m.price().map(|o| {
+            // Yours lists no price: the id to call stays yours, the prices are the list ones.
+            let p = Price::from(m.priced_offer().unwrap_or(o));
+            Price {
+                listed: Some(m.listed()),
+                provider: &o.provider,
+                id: &o.id,
+                available: o.available,
+                via: &o.via,
+                ..p
+            }
+        }),
         context: m.context,
         max_output: m.max_output,
         tool_call: m.tool_call,
@@ -152,9 +167,11 @@ fn print_json<T: Serialize>(v: &T) -> Result {
 /// The TUI's columns, so both show the same thing: Model, Dev, every numeric column the
 /// source measures, Via.
 fn table(models: &[&Model], store: &Store, any: bool) {
-    let cols: Vec<&Col> = COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT)).map(|(_, c)| c).collect();
-    let cells: Vec<Vec<String>> =
-        models.iter().map(|m| cols.iter().map(|c| (c.get)(m).map_or("-".into(), c.show)).collect()).collect();
+    let cols: Vec<(usize, &Col)> = COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT)).collect();
+    let cell =
+        |m: &Model, &(i, c): &(usize, &Col)| (c.get)(m).map_or("-".into(), |v| shown(i, v, on_price(i) && m.listed()));
+    let cells: Vec<Vec<String>> = models.iter().map(|m| cols.iter().map(|c| cell(m, c)).collect()).collect();
+    let cols: Vec<&Col> = cols.into_iter().map(|(_, c)| c).collect();
     let widths: Vec<usize> = (0..cols.len())
         .map(|i| cells.iter().map(|r| r[i].chars().count()).chain([cols[i].head().len()]).max().unwrap_or(0))
         .collect();
@@ -508,6 +525,10 @@ fn entry(m: &Model, store: &Store, score: f64, recommended: bool) -> serde_json:
     if let Some(n) = store.note(&m.key) {
         e["note"] = n.into();
     }
+    // As `price.listed` of `list --json`: an estimate from other providers' list price.
+    if m.listed() {
+        e["listed"] = true.into();
+    }
     e
 }
 
@@ -654,7 +675,16 @@ mod tests {
         assert_eq!(keys(&short), fields);
         assert_eq!(
             keys(&short["price"]),
-            ["available", "cache_read_per_mtok", "id", "input_per_mtok", "output_per_mtok", "provider", "via"]
+            [
+                "available",
+                "cache_read_per_mtok",
+                "id",
+                "input_per_mtok",
+                "listed",
+                "output_per_mtok",
+                "provider",
+                "via"
+            ]
         );
         let full = serde_json::to_value(out(&m, &store, true)).unwrap();
         let extra: Vec<_> = keys(&full).into_iter().filter(|k| !fields.contains(k)).collect();
@@ -662,6 +692,15 @@ mod tests {
         m.offers[0].unpriced = true;
         let unpriced = serde_json::to_value(out(&m, &store, false)).unwrap();
         assert_eq!(unpriced["price"]["input_per_mtok"], Value::Null, "an unknown price is not free");
+        assert_eq!(unpriced["price"]["listed"], false, "nobody lists one");
+        // Yours lists none but another provider does: the id is yours, the prices the list ones.
+        m.offers[0].available = true;
+        m.offers.push(Offer { provider: "q".into(), input: 2.0, output: 2.0, ..Default::default() });
+        let price = &serde_json::to_value(out(&m, &store, true)).unwrap()["price"];
+        assert_eq!(
+            (&price["provider"], &price["input_per_mtok"], &price["listed"]),
+            (&"p".into(), &2.0.into(), &true.into())
+        );
     }
 
     #[test]

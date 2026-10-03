@@ -382,12 +382,19 @@ pub struct Model {
 
 impl Model {
     /// The offer you'd actually use: cheapest available paid one, else a free one of yours,
-    /// else one of yours with no listed price, else the most common list price. It may be
-    /// `unpriced`, still naming the id to use; `priced_offer` is the one with prices to show.
+    /// else one of yours with no listed price, else the `list` one. It may be `unpriced`,
+    /// still naming the id to use; `priced_offer` is the one with prices to show.
     pub fn price(&self) -> Option<&Offer> {
-        if let Some(o) = cheapest(self.offers.iter().filter(|o| o.available)) {
-            return Some(o);
-        }
+        let free = || self.offers.iter().find(|o| !o.unpriced);
+        cheapest(self.offers.iter().filter(|o| o.available))
+            .or_else(|| self.list())
+            .or_else(free)
+            .or(self.offers.first())
+    }
+
+    /// The offer at the most common list price among the paid ones, whoever it is from. Not a
+    /// free one: another provider's free tier says nothing of what yours charges.
+    fn list(&self) -> Option<&Offer> {
         // ponytail: mode of prices ≈ list price; resellers with odd pricing are outvoted.
         // Ordered by price bits so that on a tie the cheapest wins, deterministically.
         let mut counts: BTreeMap<(u64, u64, u64), (usize, &Offer)> = BTreeMap::new();
@@ -395,13 +402,7 @@ impl Model {
             let cache = o.input_cached().to_bits();
             counts.entry((o.input.to_bits(), o.output.to_bits(), cache)).or_insert((0, o)).0 += 1;
         }
-        counts
-            .into_values()
-            .rev()
-            .max_by_key(|(n, _)| *n)
-            .map(|(_, o)| o)
-            .or_else(|| self.offers.iter().find(|o| !o.unpriced))
-            .or(self.offers.first())
+        counts.into_values().rev().max_by_key(|(n, _)| *n).map(|(_, o)| o)
     }
 
     /// The offer `harness` runs the model on: of the ones it reaches, the one you'd pay.
@@ -409,12 +410,17 @@ impl Model {
         cheapest(self.offers.iter().filter(|o| o.via.iter().any(|v| v == harness)))
     }
 
-    /// `price`, when its prices are known.
+    /// `price`, when its prices are known, else the `list` one: prices to show, `listed` as not yours.
     pub fn priced_offer(&self) -> Option<&Offer> {
-        self.price().filter(|o| !o.unpriced)
+        self.price().filter(|o| !o.unpriced).or_else(|| self.list())
     }
 
-    /// `Offer::blended` of the offer you'd pay; 0 when it is free, none when its price is unknown.
+    /// Whether the prices shown are the list ones, yours having none: what a `~` before them says.
+    pub fn listed(&self) -> bool {
+        self.price().is_some_and(|o| o.unpriced) && self.list().is_some()
+    }
+
+    /// `Offer::blended` of `priced_offer`; 0 when it is free, none when nobody lists a price.
     pub fn cost(&self) -> Option<f64> {
         self.priced_offer().map(Offer::blended)
     }
@@ -2492,9 +2498,21 @@ mod tests {
         let unknown = Offer { provider: "u".into(), unpriced: true, available: true, ..Default::default() };
         let free = Offer { provider: "f".into(), available: true, ..Default::default() };
         let m = Model { offers: vec![unknown.clone()], ..Default::default() };
-        assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("u", None));
-        let m = Model { offers: vec![unknown, free], ..Default::default() };
+        assert_eq!((m.price().unwrap().provider.as_str(), m.cost(), m.listed()), ("u", None, false));
+        let m = Model { offers: vec![unknown.clone(), free], ..Default::default() };
         assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("f", Some(0.0)), "a free offer is priced");
+        assert!(!m.listed(), "and it is yours");
+        // Yours has no price but others list one: the id is still yours, the price the list one.
+        let m = Model {
+            offers: vec![unknown, o("a", 5.0, false), o("b", 5.0, false), o("c", 1.0, false)],
+            ..Default::default()
+        };
+        assert_eq!((m.price().unwrap().provider.as_str(), m.cost(), m.listed()), ("u", Some(5.0), true));
+        let m = Model { offers: vec![m.offers[0].clone(), o("z", 0.0, false)], ..Default::default() };
+        assert_eq!((m.cost(), m.listed()), (None, false), "another provider's free tier is not your price");
+        let marked: Vec<_> =
+            crate::app::COLS.iter().enumerate().filter(|c| crate::app::on_price(c.0)).map(|c| c.1.id).collect();
+        assert_eq!(marked, ["price", "in", "cache", "out", "value"], "the columns a ~ goes on");
     }
 
     #[test]
