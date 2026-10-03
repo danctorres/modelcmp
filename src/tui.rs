@@ -858,7 +858,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
         View::Table => {
-            let mut view = vec!["/ filter", "s sort"];
+            let mut view = vec!["B benchmarks", "/ filter", "s sort"];
             if has_menu(app.col) {
                 view.push("d dropdown");
             }
@@ -3134,7 +3134,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "h l column  │  B benchmarks  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]
