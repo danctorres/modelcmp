@@ -13,7 +13,7 @@ its Intelligence Index, and each task column is one benchmark's score (0-100): C
 Coding Index, Agentic Terminal-Bench 4.0, Reason HLE; two more columns show speed,
 Tok/s (output tokens per second) and TTFT (seconds to the first token), medians across
 providers. A model's scores there are its best reasoning setting's; a row that names a setting
-("Grok 4.20 Non-Reasoning") has that setting's, or `-` when Artificial Analysis did not measure it. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
+("Grok 4.20 Non-Reasoning") has that setting's, or `-` when Artificial Analysis did not measure it, and one that cannot reason has its non-reasoning setting's. With either source a row has no scores when its offers are another release than the one scored, as a `-latest` id is. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
 columns are the model's capability on the task's benchmarks, in ECI points, fitted from its
 ECI and its scores (a model with few scores stays near its ECI):
 

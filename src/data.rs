@@ -1,7 +1,7 @@
 //! Fetching, caching and merging models.dev (prices) with Epoch AI (benchmarks).
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
@@ -29,8 +29,9 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 8: with Artificial Analysis, a row naming a reasoning setting has that setting's scores.
 /// 9: `Model::md` and `Model::openrouter` for `Model::url`, and `Model::epoch` a page name.
 /// 10: Artificial Analysis's agentic score is Terminal-Bench 4.0, where it was Hard.
-/// 11: prices at the tier an agent's session reaches.
-const FORMAT: u32 = 11;
+/// 11: prices at the tier an agent's session reaches. 12: a row's scores are of the release
+/// its offers are.
+const FORMAT: u32 = 12;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -1326,6 +1327,13 @@ fn aa_named(name: &str, all: &[AaEntry]) -> Option<AaEntry> {
     Some(measured.unwrap_or_else(|| AaEntry { slug: page(), ..Default::default() }))
 }
 
+/// The entries among `all` that came out with the model, the one with the shortest slug: "Kimi
+/// K2 Thinking", four months after Kimi K2, is not Kimi K2 set to think.
+fn same_release(all: &[AaEntry]) -> impl Iterator<Item = &AaEntry> {
+    let model = all.iter().min_by_key(|e| (e.slug.len(), &e.slug));
+    all.iter().filter(move |e| model.is_some_and(|m| m.release == e.release))
+}
+
 /// The settings of one model as one: the best score of each, the page of the setting-less slug,
 /// else the shortest, and the speed of the setting with the best index, which the scores mostly
 /// are: a thinking model is not as quick as its non-reasoning setting.
@@ -1401,14 +1409,6 @@ fn offer_name(id: &str, name: &str) -> String {
 /// Returns each absorbed key and the key it went into, in the order they went.
 // ponytail: ids without a digit ("deepseek-chat", "sonar") are too generic to trust and never merge.
 fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> bool) -> Vec<(String, String)> {
-    let main_id = |m: &Model| {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for o in &m.offers {
-            *counts.entry(slug(&o.id)).or_default() += 1;
-        }
-        // A clear winner only: a row of several ids, one offer each, has no main id.
-        winner(counts).filter(|main| main.bytes().any(|b| b.is_ascii_digit()))
-    };
     // The names sorted, then the numbers as written, those side by side as one: "Grok 4.1 Fast"
     // is not "Grok 4 Fast 1". A name without a digit is too generic, as an id without one.
     // ponytail: where a number sat among the names is lost; compare the positions too if two
@@ -1425,6 +1425,101 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
     let mut moved = merge_by(by_key, &known, main_id);
     moved.extend(merge_by(by_key, &known, any_order));
     moved
+}
+
+/// The id most of a row's offers go by, without its vendor. A clear winner only: a row of
+/// several ids, one offer each, has no main id; nor is one without a digit a model's.
+fn main_id(m: &Model) -> Option<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for o in &m.offers {
+        *counts.entry(slug(&o.id)).or_default() += 1;
+    }
+    winner(counts).filter(|main| main.bytes().any(|b| b.is_ascii_digit()))
+}
+
+/// The id most of a row's offers go by, as its words: `grok-4.1-fast` and `grok-4-1-fast` are
+/// one. A clear winner only, as with `main_id`, though one without a digit counts: it says
+/// what is sold, and names no model.
+fn sold_as(m: &Model) -> Option<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for o in &m.offers {
+        *counts.entry(words(&slug(&o.id)).join("-")).or_default() += 1;
+    }
+    winner(counts)
+}
+
+/// Whether a row sold as `id` is another release than the `versions` a source scored: a
+/// "-latest", which moves on, or against each of them a number where the version has another
+/// as long ("ministral-8b-2512" is not `ministral-8b-2410`, though "mistral-medium-3-5" may be
+/// `mistral-medium-2604`). More words on one side alone say nothing: "claude-opus-4-5" is
+/// `claude-opus-4-5-20251101`. Nor is one sold as non-reasoning a model scored with reasoning
+/// too, whose scores are its best setting's, or one sold as reasoning a model scored without.
+fn other_release(id: &str, versions: Option<&BTreeSet<String>>) -> bool {
+    let id = words(id);
+    if id.last().is_some_and(|w| w == "latest") {
+        return true;
+    }
+    let nums = |w: &[String]| -> HashSet<String> {
+        w.iter().filter(|w| w.bytes().all(|b| b.is_ascii_digit())).cloned().collect()
+    };
+    let other = |v: &String| {
+        let (mine, its) = (nums(&id), nums(&words(&slug(v))));
+        mine.difference(&its).any(|a| its.difference(&mine).any(|b| a.len() == b.len()))
+    };
+    let mut settings = versions.into_iter().flatten().map(|v| reasons(&words(&slug(v))));
+    let setting = match reasons(&id) {
+        Some(false) => settings.any(|s| s == Some(true)),
+        Some(true) => versions.is_some() && settings.all(|s| s == Some(false)),
+        None => false,
+    };
+    setting || versions.is_some_and(|vs| vs.iter().all(other))
+}
+
+/// Each row's group in `ep`, and whether the row takes the group's name. By the row's name,
+/// its own key then the ones it absorbed (`absorbed`), unless its offers are another release
+/// (`other_release`): "Mistral Medium" sold as `mistral-medium-latest` is not the
+/// `mistral-medium-2312` Epoch scored. Else by a model id, the row's key or the one its offers
+/// go by, when that id and the group say all the row's name does: `deepseek-r1-0528` is
+/// "DeepSeek-R1 (May 2025)", but "Qwen 3.6 Plus Uncensored" is not the `qwen-3-6-plus` it is
+/// sold as. A group a row has by name is another row's by id only when that row's name or id
+/// adds to the group's: "Llama-3.3-70B-Instruct" is "Llama 3.3 70B", and keeps its own name,
+/// but "Grok 4.3" is not the "Grok 4.3 Beta" listed beside it.
+fn joined<'a>(
+    models: &[Model],
+    absorbed: &HashMap<String, Vec<String>>,
+    ep: &'a Scores,
+) -> Vec<Option<(&'a String, bool)>> {
+    let keys = |m: &Model| std::iter::once(m.key.clone()).chain(absorbed.get(&m.key).into_iter().flatten().cloned());
+    let main: Vec<Option<String>> = models.iter().map(sold_as).collect();
+    let fits = |id: &Option<String>, g: &String| !id.as_ref().is_some_and(|id| other_release(id, ep.versions.get(g)));
+    let named = |m: &Model, id: &Option<String>| {
+        // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
+        let aa = (ep.source == Source::Aa).then(|| aa_words(&m.name, true).join("-"));
+        keys(m).chain(aa).find_map(|k| ep.group(&k)).filter(|g| fits(id, g))
+    };
+    let named: Vec<Option<&String>> = models.iter().zip(&main).map(|(m, id)| named(m, id)).collect();
+    let owned: HashSet<&String> = named.iter().flatten().copied().collect();
+    let by_id = |m: &Model, id: &Option<String>| {
+        let group = |g: &String| Some(words(&clean_name(&ep.groups.get(g)?.0)));
+        let sold = id.as_ref().and_then(|id| {
+            let g = ep.ids.get(&norm(id))?;
+            let said = [words(id), group(g)?].concat();
+            words(&m.name).iter().all(|w| said.contains(w)).then_some(g)
+        });
+        let g = keys(m).find_map(|k| ep.ids.get(&k)).or(sold)?;
+        let group = group(g)?;
+        let adds = |s: &str| group.iter().all(|w| words(s).contains(w));
+        let free = !owned.contains(g);
+        // Nor does it take the name of a row that lost the group to its own offers.
+        let rename = free && !models.iter().any(|m| m.key == *g);
+        (fits(id, g) && (free || adds(&m.name) || id.as_deref().is_some_and(adds))).then_some((g, rename))
+    };
+    models
+        .iter()
+        .zip(&main)
+        .zip(named)
+        .map(|((m, id), named)| named.map(|g| (g, true)).or_else(|| by_id(m, id)))
+        .collect()
 }
 
 /// Merges the rows `same` gives the same value into the first of them, the known ones first.
@@ -1622,6 +1717,9 @@ struct Scores {
     /// Epoch's model ids, for a model it names otherwise: `grok-4.3` is "Grok 4.3 Beta". Apart
     /// from `alias`, as an id only finds the scores: it does not choose which row keeps its key.
     ids: HashMap<String, String>,
+    /// group -> the model ids Epoch benchmarked, which say what release its scores are of
+    /// (`other_release`).
+    versions: HashMap<String, BTreeSet<String>>,
     /// group -> organization.
     org: HashMap<String, String>,
     /// Benchmark -> Epoch's fit of it.
@@ -1643,6 +1741,8 @@ struct Scores {
 struct AaEntry {
     /// Its page on artificialanalysis.ai.
     slug: String,
+    /// When it came out: a "Thinking" entry of another date is a later model, not a setting.
+    release: String,
     setting: Setting,
     index: Option<f64>,
     /// Field -> score, 0..1.
@@ -1826,20 +1926,14 @@ impl Scores {
     fn group(&self, key: &str) -> Option<&String> {
         self.groups.get_key_value(key).map(|(k, _)| k).or_else(|| self.alias.get(key))
     }
-
-    /// The group a key reaches as one of its model ids, unless a row has it by name (`owned`):
-    /// "Grok 4.3" is not given the scores of the "Grok 4.3 Beta" listed beside it.
-    fn by_id(&self, key: &str, owned: &HashSet<&String>) -> Option<&String> {
-        self.ids.get(key).filter(|g| !owned.contains(g))
-    }
 }
 
-/// The page Epoch would have for each model it knows, whichever source scores it; `epoch_listed`
-/// keeps the ones it has.
+/// The page Epoch would have for each model it knows (`joined`), whichever source scores it;
+/// `epoch_listed` keeps the ones it has.
 fn epoch_named(models: &mut [Model], ep: &Scores) {
-    let owned: HashSet<&String> = models.iter().filter_map(|m| ep.group(&m.key)).collect();
-    for m in models {
-        m.epoch = ep.group(&m.key).or_else(|| ep.by_id(&m.key, &owned)).map(|k| epoch_slug(&ep.groups[k].0));
+    let groups = joined(models, &HashMap::new(), ep);
+    for (m, g) in models.iter_mut().zip(groups) {
+        m.epoch = g.map(|(k, _)| epoch_slug(&ep.groups[k].0));
     }
 }
 
@@ -1870,6 +1964,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     };
 
     let task_benches = crate::fit::task_benches();
+    let mut unscored: HashMap<String, BTreeSet<String>> = HashMap::new();
     // Benchmark -> (floor, ceiling).
     let mut range: HashMap<&str, (f64, f64)> = HashMap::new();
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
@@ -1895,6 +1990,9 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             };
             let Some(s) = s.trim_end_matches('%').parse::<f64>().ok().filter(|s| s.is_finite()) else { continue };
             let g = group_of(v);
+            // The ids its task scores are of, else those of any score.
+            let scored = if task { &mut ep.versions } else { &mut unscored };
+            scored.entry(norm(&g)).or_default().insert(v.clone());
             // Any benchmark result may give the model a page on Epoch; only a task's scores it.
             let e = ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new()));
             if !task {
@@ -1903,6 +2001,9 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             let best = e.2.entry(bench.to_string()).or_insert(0.0);
             *best = best.max(s * scale);
         }
+    }
+    for (g, versions) in unscored {
+        ep.versions.entry(g).or_insert(versions);
     }
     for r in csv_rows(&mut zip, "epoch_capabilities_index/eci_scores.csv").unwrap_or_default() {
         let Some(eci) = col(&r, "eci")?.parse::<f64>().ok().filter(|e| e.is_finite()) else { continue };
@@ -1993,6 +2094,7 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
     let list = v["data"].as_array().or(v.as_array()).ok_or("artificial analysis: no model list")?;
     let fields = crate::fit::aa_fields();
     let mut sc = Scores { source: Source::Aa, ..Default::default() };
+    let mut names: BTreeMap<String, (&str, std::cmp::Reverse<&str>, String)> = BTreeMap::new();
     for m in list {
         let (Some(slug), Some(name)) = (m["slug"].as_str(), m["name"].as_str()) else { continue };
         let num = |f: &str| m["evaluations"][f].as_f64().filter(|x| x.is_finite());
@@ -2001,6 +2103,12 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
             continue;
         }
         sc.groups.entry(key.clone()).or_insert_with(|| (clean_name(name), None, BTreeMap::new()));
+        // Its name reaches it too, where the slug says more or less: `step-5` is "Step 5
+        // Preview" and `claude-35-sonnet` "Claude 3.5 Sonnet". Of several, the newest release.
+        // A setting with a slug of its own ("…-reasoning-0925") is the longer one.
+        let named = (m["release_date"].as_str().unwrap_or_default(), std::cmp::Reverse(slug), key.clone());
+        let e = names.entry(aa_words(&clean_name(name), true).join("-")).or_insert_with(|| named.clone());
+        *e = named.max(e.clone());
         // Indices are 0..100 and single benchmarks 0..1, though one above 1 is a percentage.
         let score = |f: &&str| {
             Some((f.to_string(), num(f).map(|x| if f.ends_with("_index") || x > 1.0 { x / 100.0 } else { x })?))
@@ -2008,6 +2116,7 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
         let top = |f: &str| m[f].as_f64().filter(|x| x.is_finite() && *x > 0.0);
         sc.settings.entry(key.clone()).or_default().push(AaEntry {
             slug: slug.to_string(),
+            release: m["release_date"].as_str().unwrap_or_default().to_string(),
             setting: aa_setting(slug, name),
             index: num(crate::fit::AA_INDEX),
             scores: fields.iter().filter_map(score).collect(),
@@ -2018,7 +2127,7 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
         }
     }
     for (key, g) in &mut sc.groups {
-        let Some(all) = sc.settings.get(key).and_then(aa_fold) else { continue };
+        let Some(all) = sc.settings.get(key).and_then(|all| aa_fold(same_release(all))) else { continue };
         (g.1, g.2) = (all.index, all.scores);
         sc.page.insert(key.clone(), all.slug);
         if all.speed != (None, None) {
@@ -2026,6 +2135,8 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
         }
     }
     sc.groups.retain(|_, (_, i, s)| i.is_some() || !s.is_empty());
+    sc.alias =
+        names.into_iter().map(|(name, (.., key))| (name, key)).filter(|(_, k)| sc.groups.contains_key(k)).collect();
     if sc.groups.is_empty() {
         return Err("artificial analysis: no benchmark data found".into());
     }
@@ -2170,16 +2281,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     }
     let mut models: Vec<Model> = by_key.into_values().collect();
     let plain = plain(&models);
-    // A row's key, then the keys it absorbed.
-    fn with_absorbed<'a>(
-        k: &'a String,
-        absorbed: &'a HashMap<String, Vec<String>>,
-    ) -> impl Iterator<Item = &'a String> {
-        std::iter::once(k).chain(absorbed.get(k).into_iter().flatten())
-    }
-    let owned: HashSet<&String> =
-        models.iter().filter_map(|m| with_absorbed(&m.key, &absorbed).find_map(|k| ep.group(k))).collect();
-    for m in &mut models {
+    let groups = joined(&models, &absorbed, ep);
+    for (m, group) in models.iter_mut().zip(groups) {
         // The family in the name is surest; else what most offers' ids say.
         m.developer = match developer_from_name(&m.name) {
             "" => dev_votes.remove(&m.key).and_then(|v| Some(v.into_iter().max_by_key(|(d, n)| (*n, d.clone()))?.0)),
@@ -2229,14 +2332,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             or_slug.get(&slug(base)).filter(|s| *s == base)
         };
         m.openrouter = or_id.map(|id| standard(id).unwrap_or(id).clone());
-        // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
-        let aa = (ep.source == Source::Aa).then(|| aa_words(&m.name, true).join("-"));
-        let gk = ep
-            .group(&m.key)
-            .or_else(|| absorbed.get(&m.key)?.iter().find_map(|k| ep.group(k)))
-            .or_else(|| with_absorbed(&m.key, &absorbed).find_map(|k| ep.by_id(k, &owned)))
-            .or(aa.as_ref().filter(|k| ep.groups.contains_key(*k)))
-            .map(String::as_str);
+        let gk = group.map(|(k, _)| k.as_str());
         // A reasoning model of its own is not the model it is named after, unless Artificial
         // Analysis lists it as that model's reasoning setting.
         let reasons = |k: &&str| ep.settings.get(*k).is_some_and(|all| all.iter().any(|e| e.setting.0 == Some(true)));
@@ -2251,7 +2347,12 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
                 (m.tps, m.ttft) = ep.speed.get(k).copied().unwrap_or_default();
                 // A row naming a reasoning setting is that setting, not the best of them
                 // all; one the API did not measure has the model's page and no scores.
-                if let Some(own) = ep.settings.get(k).and_then(|all| aa_named(&m.name, all)) {
+                // Nor is a row that cannot reason its reasoning settings.
+                let plain = |all: &Vec<AaEntry>| {
+                    let off = same_release(all).filter(|e| e.setting.0 != Some(true));
+                    aa_fold(off).filter(|_| !m.reasoning)
+                };
+                if let Some(own) = ep.settings.get(k).and_then(|all| aa_named(&m.name, all).or_else(|| plain(all))) {
                     fit = crate::fit::aa_fit(own.index, &own.scores, &ep.pools);
                     (m.tps, m.ttft) = own.speed;
                     (eci, scores) = (own.index, own.scores);
@@ -2265,7 +2366,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
                 continue;
             }
             // Epoch's names are the cleaner; Artificial Analysis's put the version first.
-            if ep.source == Source::Epoch {
+            if ep.source == Source::Epoch && group.is_some_and(|g| g.1) {
                 m.name = gname.clone();
             }
             if let Some(o) = ep.org.get(k) {
@@ -2464,6 +2565,48 @@ mod tests {
             both.contains(&("grok9".into(), None)) && both.contains(&("grok9beta".into(), Some(160.0))),
             "{both:?}"
         );
+    }
+
+    #[test]
+    fn a_row_is_the_release_its_offers_are() {
+        let vs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let other = |id: &str, v: &[&str]| other_release(id, Some(&vs(v)));
+        assert!(other("mistral-medium-latest", &["mistral-medium-2312"]), "a -latest moves on");
+        assert!(other("ministral-8b-2512", &["ministral-8b-2410"]));
+        assert!(other("command-a-reasoning-08-2025", &["c4ai-command-a-03-2025"]));
+        assert!(!other("claude-opus-4-5", &["claude-opus-4-5-20251101"]), "one says more, not otherwise");
+        assert!(!other("mistral-medium-3-5", &["mistral-medium-2604"]), "a version is not a date");
+        assert!(!other("gpt-4o-2024-11-20", &["gpt-4o-2024-08-06", "gpt-4o-2024-11-20"]), "one of them");
+        let both = ["grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning"];
+        assert!(other("grok-4-1-fast-non-reasoning", &both), "the scores are the reasoning setting's");
+        assert!(!other("grok-4-1-fast-reasoning", &both) && !other("grok-4-1-fast", &both));
+
+        let mut ep = Scores::default();
+        for (k, name, eci, v) in [
+            ("mistralmedium", "Mistral Medium", 120.0, "mistral-medium-2312"),
+            ("llama970b", "Llama 9 70B", 127.0, "Llama-9-70B-Instruct"),
+            ("r1may2025", "R1 (May 2025)", 141.0, "r1-0528"),
+            ("qwen9plus", "Qwen 9 Plus", 147.0, "qwen-9-plus"),
+        ] {
+            ep.groups.insert(k.into(), (name.into(), Some(eci), BTreeMap::new()));
+            ep.versions.insert(k.into(), vs(&[v]));
+            ep.ids.insert(norm(v), k.into());
+        }
+        let json = br#"{"p": {"models": {
+            "mistral-medium-latest": {"name": "Mistral Medium"}, "mistral-medium-2312": {"name": "mistral-medium-2312"},
+            "x/llama-9-70b-fp8": {"name": "Llama 9 70B"}, "llama-9-70b-instruct": {"name": "Llama-9-70B-Instruct"},
+            "r1-0528": {"name": "R1 0528"}, "qwen-9-plus": {"name": "Qwen 9 Plus Uncensored"}}}}"#;
+        let d = merge(json, &ep, None).unwrap();
+        let rows: Vec<_> = d.models.iter().map(|m| (m.name.as_str(), m.eci)).collect();
+        let named = [
+            ("R1 (May 2025)", Some(141.0)),
+            ("Llama 9 70B", Some(127.0)),
+            ("Llama-9-70B-Instruct", Some(127.0)),
+            ("mistral-medium-2312", Some(120.0)),
+            ("Mistral Medium", None),
+            ("Qwen 9 Plus Uncensored", None),
+        ];
+        assert_eq!(rows, named, "by the id sold, under its own name beside a row named as the group, and no fine-tune");
     }
 
     #[test]
@@ -2957,7 +3100,18 @@ mod tests {
              "evaluations":{"artificial_analysis_intelligence_index":26}},
             {"slug":"gpt-5-3-codex","name":"GPT-5.3 Codex (Xhigh)","evaluations":{"artificial_analysis_intelligence_index":33}},
             {"slug":"minimax-m3","name":"MiniMax-M3","evaluations":{"artificial_analysis_intelligence_index":29}},
-            {"slug":"phi-4","name":"Phi-4","evaluations":{"artificial_analysis_intelligence_index":6}}
+            {"slug":"phi-4","name":"Phi-4","evaluations":{"artificial_analysis_intelligence_index":6}},
+            {"slug":"kimi-k2","name":"Kimi K2","release_date":"2025-07-11",
+             "evaluations":{"artificial_analysis_intelligence_index":12}},
+            {"slug":"kimi-k2-thinking","name":"Kimi K2 Thinking","release_date":"2025-11-06",
+             "evaluations":{"artificial_analysis_intelligence_index":22}},
+            {"slug":"qwen-9-instruct","name":"Qwen 9 Instruct","evaluations":{"artificial_analysis_intelligence_index":8}},
+            {"slug":"qwen-9-instruct-reasoning","name":"Qwen 9 Instruct (Reasoning)",
+             "evaluations":{"artificial_analysis_intelligence_index":13}},
+            {"slug":"step-5","name":"Step 5 Preview","evaluations":{"artificial_analysis_intelligence_index":43}},
+            {"slug":"v3-2-reasoning-0925","name":"V3.2 Exp (Reasoning)","evaluations":{"artificial_analysis_intelligence_index":16}},
+            {"slug":"v3-2-0925","name":"V3.2 Exp (Non-reasoning)","evaluations":{"artificial_analysis_intelligence_index":13}},
+            {"slug":"mistral-medium","name":"Mistral Medium","evaluations":{"artificial_analysis_intelligence_index":5}}
         ]}"#;
         let names = [
             "Grok 4.20",
@@ -2969,11 +3123,23 @@ mod tests {
             "GPT-5.3 Codex XHigh",
             "GPT-5.3 Codex Low",
             "MiniMax M3 Thinking",
+            "Kimi K2",
+            "Kimi K2 Thinking",
+            "Step 5 Preview",
+            "V3.2 Exp",
             "Phi-4",
             "Phi-4-reasoning",
+            "Qwen 9 Instruct",
         ];
-        let models: String = names.iter().map(|n| format!(r#""{n}": {{"name": "{n}"}},"#)).collect();
-        let json = format!(r#"{{"p": {{"models": {{{}}}}}}}"#, models.trim_end_matches(','));
+        // The last three cannot reason.
+        let models: String = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!(r#""{n}": {{"name": "{n}", "reasoning": {}}},"#, i < names.len() - 3))
+            .collect();
+        let json = format!(
+            r#"{{"p": {{"models": {{{models} "mistral-medium-latest": {{"name": "Mistral Medium", "reasoning": true}}}}}}}}"#
+        );
         let d = merge(json.as_bytes(), &parse_aa(api).unwrap(), None).unwrap();
         let row = |n: &str| d.models.iter().find(|m| m.name == n).unwrap();
         let index = |n: &str| row(n).eci;
@@ -2993,6 +3159,15 @@ mod tests {
         assert_eq!(index("MiniMax M3 Thinking"), Some(29.0), "an entry saying no setting is the model's only one");
         let own = row("Phi-4-reasoning");
         assert_eq!((index("Phi-4"), own.eci, own.aa.as_deref()), (Some(6.0), None, None), "not one that cannot reason");
+        assert_eq!(
+            (index("Kimi K2"), index("Kimi K2 Thinking")),
+            (Some(12.0), Some(22.0)),
+            "a later release is no setting"
+        );
+        assert_eq!(index("Qwen 9 Instruct"), Some(8.0), "a row that cannot reason is not its reasoning setting");
+        assert_eq!(index("Step 5 Preview"), Some(43.0), "found by the entry's name, where its slug says less");
+        assert_eq!(index("V3.2 Exp"), Some(13.0), "of two entries so named, the shorter slug: no setting");
+        assert_eq!(index("Mistral Medium"), None, "sold as -latest: whichever release that is by now");
     }
 
     #[test]
