@@ -888,6 +888,10 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("enter x o y f e n"), BACK.to_vec()]
         }
         // On a task's name, enter ranks by it; on a model, it and the others act on the model.
+        // On the `among` line, the models it ranks.
+        View::Recommend if app.among.is_some() => {
+            vec![vec!["j k task", "h l 0 $ which models"], vec!["enter pick"], BACK.to_vec()]
+        }
         View::Recommend if app.current().is_none() => {
             let enter = if app.custom_at().is_some() { "enter your model" } else { "enter best models first" };
             vec![vec!["j k task", "h l 0 $ model"], vec![enter], BACK.to_vec()]
@@ -2395,17 +2399,38 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
     let mut block = None;
     let name = |i: usize, s: &str| {
         let style = fg(task_color(s)).add_modifier(BOLD);
-        let mut name = cursor(i == app.task_cur && cur.is_none(), vec![Span::styled(s.to_string(), style)]);
+        let on = i == app.task_cur && cur.is_none() && app.among.is_none();
+        let mut name = cursor(on, vec![Span::styled(s.to_string(), style)]);
         name.push(Span::raw(" "));
         name
     };
     let label = |s: &'static str| vec![Span::styled(s, fg(MUTED))];
     let words = |s: &str| s.split(' ').map(|w| Line::from(w.to_string())).collect();
     let space = Span::raw(" ");
-    let mut v: Vec<Line> = wrapped(vec![], words(&frontier_legend(false)), &space, width)
-        .into_iter()
-        .map(|l| l.style(fg(MUTED)))
-        .collect();
+    // The models it ranks, a tab of the table's each: the one on has the filled dot, bold in the
+    // colour its tab is on in, and one with nothing to show is grey.
+    let tabs = (0..EXCLUDED).map(|i| {
+        let on = i == app.among_on();
+        let style = match on {
+            true => fg(tab_color(i)).add_modifier(BOLD),
+            _ if app.tab_has(i) => Style::new(),
+            _ => fg(MUTED),
+        };
+        let text = format!("{} {}", if on { "●" } else { "○" }, TABS[i].0);
+        Line::from(cursor(app.among == Some(i), vec![Span::styled(text, style)]))
+    });
+    let (mut v, at) = wrapped_at(label("among:"), tabs.collect(), &Span::styled("·", fg(MUTED)), width);
+    spots.extend(at.into_iter().enumerate().map(|(i, (l, x))| Spot { lines: l..l + 1, x, at: Stop::Among(i) }));
+    if app.filtered_too() {
+        let note = Span::styled(" (filtered)", fg(MUTED));
+        // On a line of its own under the tabs when the last has no room for it.
+        if v.last().unwrap().width() + note.width() > width {
+            v.push(Line::from(" ".repeat("among:".len())));
+        }
+        v.last_mut().unwrap().push_span(note);
+    }
+    let among = v.len();
+    v.extend(wrapped(vec![], words(&frontier_legend(false)), &space, width).into_iter().map(|l| l.style(fg(MUTED))));
     // Task `t`'s line of models, wrapped onto the end of `v`, each model a spot, and the rest
     // of its block from line `start` one too; with none it says "no data".
     let mut models = |v: &mut Vec<Line<'static>>, t: usize, start: usize, label, items: Vec<Line<'static>>| {
@@ -2420,7 +2445,7 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         }
         v.extend(lines);
         spots.push(Spot { lines: start..v.len(), x: 0..width, at: Stop::Recommend(t, 0) });
-        if t == app.task_cur {
+        if t == app.task_cur && app.among.is_none() {
             block = Some(start..v.len());
         }
     };
@@ -2461,7 +2486,7 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model> [--tier low|mid|high]",
     );
     v.extend(wrapped(vec![], cli, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
-    (v, block)
+    (v, block.or(Some(0..among)))
 }
 
 /// `label` then `items` joined by `glue`, broken between items at `width`, continuation
@@ -3256,7 +3281,7 @@ mod tests {
             m.fit.insert("overall".into(), pct);
         }
         a.set_data(data);
-        let (w, h) = (120, 31);
+        let (w, h) = (120, 32);
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         // Where `pat` last shows on screen, as `draw` puts it.
         let mut at = |a: &mut App, pat: &str, mods: KeyModifiers| {
@@ -3288,6 +3313,7 @@ mod tests {
             (at(&mut a, "opus $", none), at(&mut a, "flash $", none)),
             (Some(Mouse::Open(Stop::Recommend(0, 2))), Some(Mouse::Open(Stop::Recommend(0, 1))))
         );
+        assert_eq!(at(&mut a, "✓ selected", none), Some(Mouse::Open(Stop::Among(MARKED))), "a tab of the among line");
         let block = Some(Mouse::Open(Stop::Recommend(1, 0)));
         assert_eq!(at(&mut a, &TASKS[1].about[..20], none), block, "the rest of a block is its task");
         let last = TASKS.len() - 1;
@@ -4103,9 +4129,12 @@ mod tests {
         (a.view, a.task_cur) = (View::Recommend, TASKS.iter().position(|t| t.name == "vision").unwrap());
         let lines = recommend(&a, 60, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert!(text[0].starts_with("best per price: the top model"), "{}", text[0]);
+        assert_eq!(
+            text[0], "among: ● yours · ○ all · ○ ✓ selected · ○ ★ favorites ",
+            "the models it ranks come first, the dot on the ones in use"
+        );
         let gap = text.iter().position(String::is_empty).unwrap();
-        assert!(gap > 1 && text[..gap].join(" ") == frontier_legend(false), "the legend wraps: {:?}", &text[..gap]);
+        assert!(gap > 2 && text[1..gap].join(" ") == frontier_legend(false), "the legend wraps: {:?}", &text[..gap]);
         assert_eq!(
             text.iter().filter(|l| l.is_empty()).count(),
             TASKS.len() + 1,
@@ -4121,6 +4150,20 @@ mod tests {
         }
         b.set_data(data);
         (b.view, b.task_sel) = (View::Recommend, 2);
+        // On the `among` line it is on a tab alone, the one in use bold, and "(filtered)" says a search narrows them.
+        (b.among, b.query) = (Some(1), "o".into());
+        let (top, block) = recommend(&b, 200, &mut vec![]);
+        let on: Vec<&Span> = top.iter().flat_map(|l| l.spans.iter()).filter(|s| s.style.bg == Some(CURSOR)).collect();
+        assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..1), "{on:?} {block:?}");
+        let yours = top[0].spans.iter().find(|s| s.content == "● yours").unwrap();
+        assert!(
+            yours.style == fg(ACCENT).add_modifier(BOLD) && top[0].to_string().ends_with(" (filtered)"),
+            "{}",
+            top[0]
+        );
+        let narrow = recommend(&b, 60, &mut vec![]).0;
+        assert_eq!(narrow[1].to_string(), "       (filtered)", "it wraps where the tabs fill the line");
+        (b.among, b.query) = (None, String::new());
         let bars: Vec<String> = recommend(&b, 200, &mut vec![])
             .0
             .iter()

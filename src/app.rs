@@ -753,6 +753,8 @@ pub enum Stop {
     Compare(usize),
     /// Stop `i` of task `t` in recommend: 0 its name and the rest of its block, else its model `i - 1`.
     Recommend(usize, usize),
+    /// Tab `i` on recommend's `among` line.
+    Among(usize),
 }
 
 /// `provider/model` as opencode takes it, else pi, when either has the model (`launch_cmd`):
@@ -817,6 +819,9 @@ pub struct App {
     /// `task_sel - 1` on its line; past the end of an emptied line it is on the name too.
     pub task_cur: usize,
     pub task_sel: usize,
+    /// The cursor on recommend's `among` line instead, the models it ranks: on the tab `among`,
+    /// one of yours, all, selected and favorites.
+    pub among: Option<usize>,
     /// The stop `task_to` wants when a shorter line gave less; none once the cursor is moved
     /// any other way, which then says where it is wanted.
     task_wanted: Option<usize>,
@@ -909,6 +914,7 @@ impl App {
             task: None,
             task_cur: 0,
             task_sel: 0,
+            among: None,
             task_wanted: None,
             query: String::new(),
             typos: false,
@@ -1099,6 +1105,9 @@ impl App {
             return marked.get(self.compare_sel.min(marked.len().saturating_sub(1))).copied();
         }
         if self.view == View::Recommend {
+            if self.among.is_some() {
+                return None;
+            }
             let i = self.task_sel.checked_sub(1)?;
             // A task of your own has no line but its model.
             let Some(t) = self.cur_task() else {
@@ -1405,8 +1414,18 @@ impl App {
         }
         // A task of your own is gone with its model, from under recommend's cursor too.
         self.task_cur = self.task_cur.min(self.task_count() - 1);
-        // Before a task keeps only its line: the models every task's line is drawn from.
-        self.fronts = TASKS.iter().map(|t| self.front(t, &rows)).collect();
+        // Before a task keeps only its line: the models every task's line is drawn from. `E`
+        // narrows none, as an excluded model is never recommended.
+        let unnarrowed;
+        let pool = if self.only == Some(EXCLUDED) {
+            self.only = None;
+            unnarrowed = matching(self);
+            self.only = Some(EXCLUDED);
+            &unnarrowed
+        } else {
+            &rows
+        };
+        self.fronts = TASKS.iter().map(|t| self.front(t, pool)).collect();
         let ms = &self.data.models;
         if let Some(t) = self.task {
             // The same line the recommend panel and `list --task` show.
@@ -1624,6 +1643,45 @@ impl App {
         self.store.is_excluded(&m.key) || !self.accessible(m)
     }
 
+    /// The tab of the models recommend ranks, the one on in its `among` line: `E` aside, as it
+    /// narrows none.
+    pub fn among_on(&self) -> usize {
+        match self.only {
+            Some(i) if i != EXCLUDED => i,
+            _ if self.all || self.no_access() => ALL,
+            _ => YOURS,
+        }
+    }
+
+    /// Whether a search, a dropdown or a bound narrows the models too.
+    pub fn filtered_too(&self) -> bool {
+        !(self.query.trim().is_empty() && self.bounds.is_empty() && self.dev.is_empty() && self.via.is_empty())
+    }
+
+    /// Recommend ranks the models of tab `i`, picked on its `among` line: the table's tab too,
+    /// and an empty one says why, as its key does there, the cursor staying off it as `h` `l` do.
+    fn pick_among(&mut self, i: usize) -> Option<Effect> {
+        if self.tab_has(i) {
+            self.among = Some(i);
+        }
+        let effect = self.set_tab(i);
+        self.view = View::Recommend;
+        effect
+    }
+
+    /// The `among` line's cursor `n` tabs along, round its ends, past the ones with nothing to show.
+    fn among_by(&mut self, mut i: usize, n: isize) {
+        for _ in 0..n.unsigned_abs() {
+            loop {
+                i = step(i, n.signum(), EXCLUDED);
+                if self.tab_has(i) {
+                    break;
+                }
+            }
+        }
+        self.among = Some(i);
+    }
+
     /// Whether `m` can be recommended: in reach and not excluded.
     fn usable(&self, m: &Model) -> bool {
         self.in_reach(m) && !self.store.is_excluded(&m.key)
@@ -1805,8 +1863,11 @@ impl App {
         } else if self.view == View::Table {
             self.select(go(self.selected(), self.rows.len()));
         } else if self.view == View::Recommend {
-            let t = go(self.task_cur, self.task_count());
-            self.task_to(t);
+            // The `among` line comes before the first task.
+            match go(self.among.map_or(self.task_cur + 1, |_| 0), self.task_count() + 1).checked_sub(1) {
+                Some(t) => self.task_to(t),
+                None => self.among = Some(self.among_on()),
+            }
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
         }
@@ -1816,6 +1877,7 @@ impl App {
     /// to sideways, or the line's last, so a shorter line on the way does not take it. Past the
     /// end of a line emptied it is on the name, and stays there.
     fn task_to(&mut self, t: usize) {
+        self.among = None;
         let sel = self.task_sel.min(self.across_len() - 1);
         // Not one a line that lost models under the cursor no longer reaches.
         let wanted = self.task_wanted.filter(|_| sel == self.task_sel).unwrap_or(sel);
@@ -2082,8 +2144,9 @@ impl App {
             match (s, &self.view) {
                 (Stop::Compare(i), View::Compare) => self.compare_sel = i,
                 (Stop::Recommend(t, i), View::Recommend) => {
-                    (self.task_cur, self.task_sel, self.task_wanted) = (t, i, None);
+                    (self.task_cur, self.task_sel, self.task_wanted, self.among) = (t, i, None, None);
                 }
+                (Stop::Among(i), View::Recommend) => return self.pick_among(i),
                 _ => return None,
             }
             // Compare leaves out `space`: it would drop the model from the view.
@@ -2251,6 +2314,36 @@ impl App {
             || (self.view == View::Compare && self.marked_shown >= 2);
         // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
         let across = matches!(self.view, View::Compare | View::Recommend);
+        // On recommend's `among` line the cursor runs over the tabs, and enter or space picks one.
+        let among = self.among.filter(|_| self.view == View::Recommend);
+        match (code, among) {
+            // A tab's key leaves recommend for it, as a click on it does.
+            (KeyCode::Char(c), _) if self.view == View::Recommend && TABS[..RECOMMEND].iter().any(|t| t.1 == c) => {
+                return self.set_tab(TABS.iter().position(|t| t.1 == c).unwrap_or(YOURS));
+            }
+            (KeyCode::Enter | KeyCode::Char(' '), Some(i)) => return self.pick_among(i),
+            (KeyCode::Char('h') | KeyCode::Left, Some(i)) => {
+                self.among_by(i, -n);
+                return None;
+            }
+            (KeyCode::Char('l') | KeyCode::Right, Some(i)) => {
+                self.among_by(i, n);
+                return None;
+            }
+            (KeyCode::Char('0' | '_'), Some(_)) => {
+                self.among_by(EXCLUDED - 1, 1);
+                return None;
+            }
+            (KeyCode::Char('$'), Some(_)) => {
+                self.among_by(0, -1);
+                return None;
+            }
+            (KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y'), Some(_)) => {
+                self.refuse("the cursor is on the models to rank: j goes to a task");
+                return None;
+            }
+            _ => {}
+        }
         match code {
             KeyCode::Char('h') | KeyCode::Left if table => self.col = step_col(self.col, -n),
             KeyCode::Char('l') | KeyCode::Right if table => self.col = step_col(self.col, n),
@@ -2391,7 +2484,7 @@ impl App {
             }
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
-                (self.task_sel, self.task_wanted) = (0, None);
+                (self.task_sel, self.task_wanted, self.among) = (0, None, None);
                 self.scroll = 0;
             }
             KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y' | ' ') if self.view == View::Recommend && !row => {
@@ -3734,6 +3827,43 @@ mod tests {
         assert!(a.store.is_excluded("gpt55"));
         assert_eq!(a.rows.len(), 3, "the table still shows it");
         assert_eq!(front(&a), ["mini"]);
+        press(&mut a, "E");
+        assert_eq!((keys(&a), front(&a)), (vec!["gpt55"], vec!["mini".to_string()]), "E narrows no line");
+        assert_eq!((a.among_on(), a.filtered_too()), (YOURS, false), "nor does recommend say so");
+        press(&mut a, "E/mini");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.filtered_too());
+        // Recommend's `among` line, before the first task: h l run over the tabs with something
+        // to show, and enter picks the models it ranks, the panel staying open.
+        press(&mut a, "cRk");
+        assert_eq!((a.among, a.current().is_none()), (Some(YOURS), true), "on the one in use");
+        press(&mut a, "l");
+        assert_eq!((a.among, a.all), (Some(ALL), false), "moving picks none");
+        press(&mut a, "l");
+        assert_eq!(a.among, Some(YOURS), "nothing selected, no favorite: past them, round the end");
+        press(&mut a, "$");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((&a.view, a.among_on(), a.all), (&View::Recommend, ALL, true));
+        assert_eq!(a.mouse(Mouse::Model(Stop::Among(MARKED))), None);
+        assert_eq!(
+            (&a.view, a.among_on(), a.status.as_str()),
+            (&View::Recommend, ALL, NO_SELECTED),
+            "an empty one says why"
+        );
+        assert_eq!(a.among, Some(ALL), "and the cursor stays off it");
+        press(&mut a, "f");
+        assert!(a.status.starts_with("the cursor is on the models to rank"), "{}", a.status);
+        a.mouse(Mouse::Model(Stop::Among(YOURS)));
+        assert_eq!((&a.view, a.among_on()), (&View::Recommend, YOURS), "a click picks too");
+        press(&mut a, "j");
+        assert_eq!((a.among, a.task_cur), (None, 0), "j is back on the first task");
+        // A tab's key leaves recommend for it, as a click on the tab does.
+        press(&mut a, "a");
+        assert_eq!((&a.view, a.all), (&View::Table, true));
+        press(&mut a, "RS");
+        assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, NO_SELECTED), "an empty one keeps the panel");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "A");
         press(&mut a, "Rj");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["mini"], "nor does the table");
