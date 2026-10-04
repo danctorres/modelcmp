@@ -887,6 +887,8 @@ pub struct App {
     /// The TUI opened on the `B` chooser, with no data, as no source was ever picked: closing it
     /// picks the default. Not so with `--source`, which picked one for the run.
     pub first_start: bool,
+    /// What `q` asked to quit from, which any key but a second `q` goes back to: an open list.
+    asked_from: Input,
     /// The terminal's background colour, when it told at start (`tui::terminal_bg`): with the
     /// terminal's own colours, what a marked row's faint fill is mixed from.
     pub term_bg: Option<u32>,
@@ -948,6 +950,7 @@ impl App {
             cache_on: 0.0,
             cache_hint: "",
             first_start: false,
+            asked_from: Input::None,
             term_bg: None,
         };
         let start = crate::data::cached();
@@ -1984,6 +1987,11 @@ impl App {
         effect
     }
 
+    /// Ask whether to quit, keeping what was open to go back to.
+    fn ask_quit(&mut self) {
+        self.asked_from = std::mem::replace(&mut self.input, Input::Quit);
+    }
+
     /// Text pasted in the terminal: typed into the search, note or bound being written, and
     /// nothing anywhere else, where its letters would run as keys.
     pub fn paste(&mut self, text: &str) {
@@ -2455,7 +2463,7 @@ impl App {
                 self.only = None;
                 self.rebuild();
             }
-            KeyCode::Char('q') => self.input = Input::Quit,
+            KeyCode::Char('q') => self.ask_quit(),
             KeyCode::Char('u') if self.data.update().is_some() => self.input = Input::Upgrade,
             KeyCode::Char('u') if self.data.latest.is_empty() => {
                 self.refuse("the newest version is not known: r asks again");
@@ -2751,6 +2759,8 @@ impl App {
                 let rows = menu_rows(items, &list.query);
                 let at = rows.get(list.sel).copied();
                 match code {
+                    // `q` asks to quit from an open list as from the table; while typing it is typed.
+                    KeyCode::Char('q') if list.idle() => self.ask_quit(),
                     // Enter does what space does; while searching, space is typed. On Price it
                     // picks the level, or drops it when it is the picked one; on Dev and Via it
                     // adds or drops the entry, as space marks a model, and on "any" drops all.
@@ -2785,6 +2795,9 @@ impl App {
             Input::Choose { kind, items, list, .. } => {
                 let at = choice_rows(items, &list.query).get(list.sel).copied();
                 match code {
+                    // `q` asks to quit from an open list as from the table; while typing it is typed.
+                    // Not on the first start's choice, which has no table to go back to.
+                    KeyCode::Char('q') if list.idle() && !self.first_start => self.ask_quit(),
                     // Space ticks a task in f's list and keeps it open, as in the Dev and Via
                     // dropdowns, and so does enter. While searching, space is typed.
                     KeyCode::Char(' ') | KeyCode::Enter
@@ -2859,7 +2872,7 @@ impl App {
                 if code == KeyCode::Char('q') {
                     return Some(Effect::Quit);
                 }
-                self.input = Input::None;
+                self.input = std::mem::replace(&mut self.asked_from, Input::None);
             }
             Input::Upgrade => {
                 self.input = Input::None;
@@ -4869,6 +4882,33 @@ mod tests {
         press(&mut a, "q");
         assert_eq!((press(&mut a, "y"), &a.input), (None, &Input::None), "only q confirms");
         assert_eq!(press(&mut a, "qq"), Some(Effect::Quit));
+        for open in ["t", "f"] {
+            let mut a = app();
+            press(&mut a, open);
+            assert!(matches!(a.input, Input::Choose { .. }), "{open} opens a list");
+            assert_eq!(press(&mut a, "qq"), Some(Effect::Quit), "qq quits from {open}'s list");
+            let mut a = app();
+            press(&mut a, open);
+            assert_eq!((press(&mut a, "jq"), &a.input), (None, &Input::Quit));
+            press(&mut a, "n");
+            let back = matches!(a.input, Input::Choose { list: List { sel: 1, .. }, .. });
+            assert!(back, "any other key is back on {open}'s list, where it was");
+            let mut a = app();
+            press(&mut a, open);
+            assert_eq!((press(&mut a, "/qq"), a.input == Input::Quit), (None, false), "a search types it");
+        }
+        let mut a = app();
+        a.col = 0;
+        press(&mut a, "ld");
+        assert!(matches!(a.input, Input::Menu { .. }), "d opens a dropdown");
+        assert_eq!((press(&mut a, "q"), &a.input), (None, &Input::Quit), "a dropdown asks too");
+        press(&mut a, "n");
+        assert!(matches!(a.input, Input::Menu { .. }), "and is back");
+        assert_eq!(press(&mut a, "qq"), Some(Effect::Quit));
+        let mut a = app();
+        a.first_start = true;
+        a.ask_source();
+        assert!(press(&mut a, "q").is_none() && matches!(a.input, Input::Choose { .. }), "not on the first start");
         assert_eq!(ctrl(&mut a, 'c'), Some(Effect::Quit), "ctrl-c quits at once");
     }
 
