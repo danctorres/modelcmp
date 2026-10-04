@@ -17,7 +17,7 @@ pub fn money(x: f64) -> String {
 /// A theme's colours: the terminal's 16 in ANSI order (black, red, green, yellow, blue,
 /// magenta, cyan, white, then the bright ones), default text, the background, and the accents
 /// developers and harnesses take theirs from. There have to be at least as many as Via names
-/// (`data::vias`), their count has to divide the 210 of `dev_color` (6, 10 and 14 do), and
+/// (`data::vias`, less omp, which has pi's), their count has to divide the 210 of `dev_color` (6, 10 and 14 do), and
 /// they have to stand far enough apart to tell two developers by colour
 /// (`accents_are_told_apart`). Nord's own palette is four blues, so its last two are tints of it rather than a fifth near-blue.
 /// Every colour here is drawn as text on the background, so each has to read on it

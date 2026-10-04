@@ -73,7 +73,7 @@ evaluated, `mid` the cheapest in the top quarter, `high` the best; the best when
 tier's pick. Every favorite of the task sits on the task's list, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
-`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi when only pi has the model, else the id at the provider you'd pay. With no match it is an error (exit code 1), so a harness is never started on an empty model.
+`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay. With no match it is an error (exit code 1), so a harness is never started on an empty model.
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name

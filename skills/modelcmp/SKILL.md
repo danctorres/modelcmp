@@ -1,6 +1,6 @@
 ---
 name: modelcmp
-description: "Pick the model for a software task: the user's own task when one fits, else their favorite, else the cheapest that is good enough. Use when choosing a model for a subagent, a delegated task or a harness run (opencode, pi, codex, claude, gemini, copilot), or when the user asks which model to use."
+description: "Pick the model for a software task: the user's own task when one fits, else their favorite, else the cheapest that is good enough. Use when choosing a model for a subagent, a delegated task or a harness run (opencode, pi, omp, codex, claude, gemini, copilot), or when the user asks which model to use."
 ---
 
 `modelcmp` already joins the models the user can call with their prices and software benchmark scores. It is the source of truth for model choice: ask it rather than the web or your own memory of which model is best.
@@ -19,7 +19,7 @@ Done when you hold one model `key` and can say which task and frontier entry it 
 
 ## One id for a harness
 
-`--tier` applies the same rules; `--id` prints the provider/model string opencode takes (for claude, codex, gemini and copilot run `modelcmp show <key> --json` and use the `id` of the `providers` entry whose `via` names the harness):
+`--tier` applies the same rules; `--id` prints the provider/model string opencode takes, or pi or omp when only they have the model (for claude, codex, gemini and copilot run `modelcmp show <key> --json` and use the `id` of the `providers` entry whose `via` names the harness):
 
 ```sh
 opencode -m "$(modelcmp list --task coding --tier mid --id)"

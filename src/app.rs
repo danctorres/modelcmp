@@ -770,19 +770,19 @@ pub enum Stop {
     Among(usize),
 }
 
-/// `provider/model` as opencode takes it, else pi, when either has the model (`launch_cmd`):
+/// `provider/model` as opencode takes it, else pi, else omp, when one has the model (`launch_cmd`):
 /// the offer you'd pay may be one only another harness reaches. With neither, that offer's.
 pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
-    let harness = ["opencode", "pi"].iter().find_map(|h| launch_cmd(m, h, listed)?.pop());
+    let harness = ["opencode", "pi", "omp"].iter().find_map(|h| launch_cmd(m, h, listed)?.pop());
     harness.unwrap_or_else(|| m.price().map_or_else(|| m.key.clone(), |o| format!("{}/{}", o.provider, o.id)))
 }
 
-/// The command that starts `harness` on `m`, if the harness has it: opencode and pi take
+/// The command that starts `harness` on `m`, if the harness has it: opencode, pi and omp take
 /// `provider/model` as they listed it (`listed`, pi's `openai-codex/...` for models.dev's `openai/...`),
 /// the others (claude, codex, gemini, copilot) the bare model id.
 pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
     let o = m.offer_via(harness).filter(|_| harness != "env")?;
-    let id = if matches!(harness, "opencode" | "pi") {
+    let id = if matches!(harness, "opencode" | "pi" | "omp") {
         let id = format!("{}/{}", o.provider, o.id);
         let own = listed.get(harness).and_then(|ids| ids.iter().find(|i| crate::data::canonical(harness, i) == id));
         own.cloned().unwrap_or(id)

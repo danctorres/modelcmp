@@ -240,6 +240,8 @@ enum Probe {
     List(&'static [&'static str]),
     /// A command that prints a table with a header row, then provider and model as the first two columns.
     Table(&'static [&'static str]),
+    /// A command that prints JSON: `models`, each with its `provider/model` id as `selector`.
+    Json(&'static [&'static str]),
     /// No such command: being installed means access to every model of this provider.
     Provider(&'static str),
     /// No such command either, but its CLI lists what the account may use to an Agent Client
@@ -253,6 +255,7 @@ const COPILOT: &str = "github-copilot";
 const HARNESSES: &[(&str, Probe)] = &[
     ("opencode", Probe::List(&["models"])),
     ("pi", Probe::Table(&["--list-models"])),
+    ("omp", Probe::Json(&["models", "--json"])),
     ("claude", Probe::Provider("anthropic")),
     ("codex", Probe::Provider("openai")),
     ("gemini", Probe::Provider("google")),
@@ -260,6 +263,7 @@ const HARNESSES: &[(&str, Probe)] = &[
 ];
 
 /// pi's names for providers models.dev names otherwise, paired by the model ids they share.
+/// omp, a fork of pi, names them the same.
 const PI_PROVIDERS: &[(&str, &str)] = &[
     ("azure-openai-responses", "azure"),
     ("fireworks", "fireworks-ai"),
@@ -276,7 +280,7 @@ const PI_PROVIDERS: &[(&str, &str)] = &[
 /// A `provider/model` id `harness` listed, with the provider as models.dev names it.
 pub fn canonical(harness: &str, id: &str) -> String {
     match id.split_once('/') {
-        Some((p, rest)) if harness == "pi" => {
+        Some((p, rest)) if matches!(harness, "pi" | "omp") => {
             format!("{}/{rest}", PI_PROVIDERS.iter().find(|a| a.0 == p).map_or(p, |a| a.1))
         }
         _ => id.to_string(),
@@ -634,6 +638,7 @@ fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &S
             Some(out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect())
         }
         Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?),
+        Probe::Json(args) => selector_ids(&run(bin, args, Duration::from_secs(30), stop)?),
         Probe::Copilot => copilot_ids(stop),
     };
     std::thread::scope(|s| {
@@ -712,6 +717,16 @@ fn table_ids(out: &str) -> Option<Vec<String>> {
         .skip_while(|f| !f.starts_with(&["provider", "model"]));
     let cols = lines.next()?.len();
     Some(lines.filter(|f| f.len() == cols).map(|f| format!("{}/{}", f[0], f[1])).collect())
+}
+
+/// The `provider/model` ids of `{"models": [{"selector": ...}]}`, as `omp models --json` prints;
+/// `None` when it is not that. Lines around the JSON are skipped, a brace in one too.
+fn selector_ids(out: &str) -> Option<Vec<String>> {
+    let models = out.match_indices('{').find_map(|(at, _)| {
+        let json = serde_json::Deserializer::from_str(&out[at..]).into_iter::<serde_json::Value>().next()?.ok()?;
+        json.get("models")?.as_array().cloned()
+    })?;
+    Some(models.iter().filter_map(|m| Some(m["selector"].as_str()?.to_string())).collect())
 }
 
 /// The `github-copilot/model` ids Copilot's CLI takes on your plan, asked of the CLI itself
@@ -2135,6 +2150,15 @@ mod tests {
                    openrouter  a/b:free  8K\npi 1.0 is out: run pi update\n";
         assert_eq!(table_ids(out).unwrap(), ["anthropic/claude-x", "openrouter/a/b:free"], "only the table's rows");
         assert_eq!(table_ids("no models\n"), None, "no header, no ids");
+    }
+
+    #[test]
+    fn selector_ids_are_read_from_the_json() {
+        let out = "omp 19 is out, see {changelog}\n{\"models\": [{\"provider\": \"openai-codex\", \"selector\": \"openai-codex/gpt\"}]}\n";
+        assert_eq!(selector_ids(out).unwrap(), ["openai-codex/gpt"]);
+        assert_eq!(canonical("omp", "openai-codex/gpt"), "openai/gpt", "the provider as models.dev names it");
+        assert_eq!(selector_ids("no models\n"), None);
+        assert_eq!(selector_ids("{\"error\": 1}"), None, "no list, no ids");
     }
 
     #[test]
