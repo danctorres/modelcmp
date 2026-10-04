@@ -869,6 +869,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             {
                 view.push("c clear");
             }
+            if app.any_marked() {
+                view.push("U deselect");
+            }
             if stale(app) {
                 view.push("r refresh");
             }
@@ -3038,6 +3041,9 @@ mod tests {
         let row = |m: &str| lines.iter().position(|l| l.contains(m)).unwrap() as u16;
         let (opus, flash) = (row("opus"), row("flash"));
         assert!(lines[flash as usize].contains('✓') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
+        a.rebuild();
+        let deselect = |a: &App| hints(a, 200).contains(&"U deselect");
+        assert!(deselect(&a) && !deselect(&app()), "U is a hint while a model is selected");
         let filled = |y: u16| (0..120).all(|x| buf[(x, y)].bg == MARK && buf[(x, y)].fg == Color::Black);
         assert!(filled(flash), "the row is filled through the border, black on the mark colour");
         assert!((0..120).all(|x| buf[(x, opus)].bg != MARK), "and only that row");
