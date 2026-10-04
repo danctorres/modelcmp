@@ -629,6 +629,20 @@ pub fn detail_rows(m: &Model, store: &Store, any: bool) -> Vec<(Option<&'static 
         format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.developer)),
         format!("  via:        {}", via(m, any)),
+        // What you'd pay and to whom, `~` as in the table; the list price when it is not yours.
+        // Per 1M tokens, as the providers below say.
+        format!(
+            "  price:      {}",
+            m.quoted().map_or("-".into(), |(o, listed)| {
+                let whom: &str = if o.available { &o.provider_name } else { "list price" };
+                if o.input + o.output == 0.0 {
+                    return format!("free  ({whom})");
+                }
+                let p = |x| format!("{}{}", if listed { "~" } else { "" }, money(x));
+                let cached = o.cache_read.map_or("-".into(), p);
+                format!("{} in · {cached} cached · {} out  ({whom})", p(o.input), p(o.output))
+            })
+        ),
         format!("  context:    {} (max output {})", ctx(m.context), ctx(m.max_output)),
     ];
     // Under context: what the model costs in time, next to what it holds.
@@ -650,10 +664,6 @@ pub fn detail_rows(m: &Model, store: &Store, any: bool) -> Vec<(Option<&'static 
         ),
         format!("  released:   {}   knowledge: {}", or_dash(&m.release), or_dash(&m.knowledge)),
     ]);
-    // A page per line, as the details panel cuts a line at its width.
-    let mut pages = m.links().into_iter().map(|(_, url)| url);
-    v.push(format!("  pages:      {}", pages.next().unwrap_or("-".into())));
-    v.extend(pages.map(|url| format!("              {url}")));
     v.extend([
         format!("  note:       {}", store.note(&m.key).unwrap_or("-")),
         format!(
@@ -684,12 +694,19 @@ pub fn detail_rows(m: &Model, store: &Store, any: bool) -> Vec<(Option<&'static 
         v.extend(other.map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
     }
     v.push(String::new());
+    // A page per line, as the details panel cuts a line at its width. Down here, as `o` opens them.
+    let mut pages = m.links().into_iter().map(|(_, url)| url);
+    v.push(format!("  pages:      {}", pages.next().unwrap_or("-".into())));
+    v.extend(pages.map(|url| format!("              {url}")));
+    v.push(String::new());
     v.push("  providers ($ per 1M tokens):".into());
     // Each label over its column of the rows below.
     v.push(format!("{:26}{:>8} {:>8} {:>8}  model id", "", "in", "cached", "out"));
     let mut offers: Vec<&Offer> = m.offers.iter().collect();
-    // Available first, then cheapest; unknown price ("-") last.
+    // Available first, then cheapest, then by name; unknown price ("-") last.
     let cost = |o: &Offer| if o.unpriced { f64::MAX } else { o.blended() };
+    // By name first, each lowercased once; the stable sort after keeps it at one price.
+    offers.sort_by_cached_key(|&o| (o.provider_name.to_lowercase(), &o.id));
     offers.sort_by(|a, b| b.available.cmp(&a.available).then(cost(a).total_cmp(&cost(b))));
     for o in offers {
         // The prices before the id, which is what a panel 80 columns wide cuts.
@@ -856,15 +873,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn details_list_a_page_per_line_under_pages() {
-        let m = Model { md: Some("a/b".into()), epoch: Some("b".into()), tps: Some(50.0), ..Default::default() };
+    fn details_show_the_price_then_pages_before_the_providers_by_name() {
+        let offer = |name: &str| Offer { provider_name: name.into(), input: 1.0, output: 2.0, ..Default::default() };
+        let offers = vec![offer("Zed"), offer("abc")];
+        let m =
+            Model { md: Some("a/b".into()), epoch: Some("b".into()), tps: Some(50.0), offers, ..Default::default() };
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
         assert_eq!(at("  speed:"), at("  context:") + 1, "speed under context");
         let pages = at("  pages:");
         assert_eq!(lines[pages], "  pages:      https://models.dev/models/a/b/");
         assert_eq!(lines[pages + 1], "              https://epoch.ai/models/b");
-        assert_eq!(at("  note:"), pages + 2);
+        assert_eq!(at("  providers"), pages + 3, "pages last before the providers");
+        assert_eq!(lines[at("  price:")], "  price:      1.0 in · - cached · 2.0 out  (list price)");
+        assert!(at("      abc") < at("      Zed"), "at one price, by name");
+        let free = Offer { provider_name: "Zed".into(), available: true, ..Default::default() };
+        let m = Model { offers: vec![free], ..Default::default() };
+        assert!(detail_lines(&m, &Store::default(), true).contains(&"  price:      free  (Zed)".to_string()));
     }
 
     #[test]
