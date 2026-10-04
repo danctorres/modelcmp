@@ -136,8 +136,18 @@ impl Store {
         Self::load_from(path())
     }
 
+    /// Pins from an older file become marks, once each.
+    fn pins_to_marks(&mut self) {
+        for k in std::mem::take(&mut self.pinned) {
+            if !self.marked.contains(&k) {
+                self.marked.push(k);
+            }
+        }
+    }
+
     /// A file that exists but does not parse is moved aside to `user.json.bad` and reported,
-    /// instead of being silently replaced by the next save.
+    /// instead of being silently replaced by the next save. One whose fields mostly read keeps
+    /// those, with a copy of the file as it was left aside the same way.
     pub fn load_from(path: PathBuf) -> Self {
         let mut s = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
@@ -153,16 +163,39 @@ impl Store {
                     let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                     bad = path.with_extension(format!("json.{t}.bad"));
                 }
-                let _ = std::fs::rename(&path, &bad);
-                let warning = Some(format!("{} is not valid ({e}); moved to {}", path.display(), bad.display()));
-                Store { warning, ..Store::default() }
+                // One bad field must not take the favorites and exclusions with it.
+                let fields = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).ok();
+                let kept = fields.and_then(|mut f| {
+                    let reads = |k: &String, v: &serde_json::Value| {
+                        let one = serde_json::Map::from_iter([(k.clone(), v.clone())]);
+                        serde_json::from_value::<Store>(one.into()).is_ok()
+                    };
+                    f.retain(|k, v| reads(k, v));
+                    serde_json::from_value::<Store>(f.into()).ok()
+                });
+                let (name, to) = (path.display(), bad.display());
+                match kept {
+                    Some(mut s) => {
+                        // Pins are not written back: they are marks before the file is.
+                        s.pins_to_marks();
+                        // With the copy aside, the file is written as kept: the next start
+                        // would only warn and copy again.
+                        let copied = std::fs::copy(&path, &bad).is_ok();
+                        if copied && let Ok(json) = serde_json::to_string_pretty(&s) {
+                            let _ = write_atomic(&path, json.as_bytes());
+                        }
+                        let aside = if copied { "a copy is in" } else { "no copy could be made in" };
+                        let warning = Some(format!("{name} is partly not valid ({e}); the rest is kept, {aside} {to}"));
+                        Store { warning, ..s }
+                    }
+                    None => {
+                        let _ = std::fs::rename(&path, &bad);
+                        Store { warning: Some(format!("{name} is not valid ({e}); moved to {to}")), ..Store::default() }
+                    }
+                }
             }),
         };
-        for k in std::mem::take(&mut s.pinned) {
-            if !s.marked.contains(&k) {
-                s.marked.push(k);
-            }
-        }
+        s.pins_to_marks();
         // A slot of no tier is a task of your own with no model to show, and could not be cleared.
         let tier = |x: &str| crate::view::TIERS.iter().any(|t| t.0 == x);
         s.favorite.retain(|k, _| k.split_once(':').is_none_or(|(_, x)| tier(x)));
@@ -466,6 +499,18 @@ mod tests {
         std::fs::write(&p, b"{again").unwrap();
         Store::load_from(p.clone());
         assert_eq!(std::fs::read(p.with_extension("json.bad")).unwrap(), b"{not json", "the first is kept");
+        // One field of the wrong type: the others are kept, and the file stays with a copy aside.
+        let partly = br#"{"favorite": {"coding": "opus"}, "excluded": ["mini"], "favorites": ["old"], "theme": 7}"#;
+        std::fs::write(&p, partly).unwrap();
+        let s = Store::load_from(p.clone());
+        assert_eq!(
+            (s.favorite.get("coding").map(String::as_str), s.excluded.len(), s.theme.as_str()),
+            (Some("opus"), 1, "")
+        );
+        assert!(p.exists() && s.warning.is_some_and(|w| w.contains("the rest is kept")));
+        let again = Store::load_from(p.clone());
+        assert!(again.warning.is_none(), "written as kept, so said once");
+        assert_eq!(again.marked, ["old"], "an older file's pins are written as marks, not dropped");
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 }
