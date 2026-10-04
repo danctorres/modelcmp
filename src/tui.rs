@@ -1004,6 +1004,8 @@ const STAR: Color = Color::Yellow;
 /// value's red and yellow for a match; 16 colours leave no room to also skip the best's green, but no two are a pair.
 const TASK: [Color; 6] =
     [Color::LightCyan, Color::Green, Color::Blue, Color::LightMagenta, Color::LightRed, Color::LightYellow];
+/// The colours of the tasks of your own: none is a built-in task's, so its ★ and name say which.
+const OWN: [Color; 4] = [Color::Magenta, Color::LightGreen, Color::Cyan, Color::Yellow];
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
 /// Developers' and harnesses' colours in the terminal's own theme: one per Via name (`data::vias`).
@@ -1237,11 +1239,14 @@ fn dev_color(dev: &str) -> Color {
     Color::Indexed(k.unwrap_or_else(|| dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)
 }
 
-/// A task's colour, or its tier's (`coding:low`), which is the task's; a task of your own is
-/// gold, as the ★ of any task.
+/// A task's colour, or its tier's (`coding:low`), which is the task's; a task of your own has
+/// one of `OWN`, picked by its name.
+// ponytail: by name, so two of your own tasks can land on one colour; colour by place in
+// `Store::custom_tasks` if that shows.
 fn task_color(task: &str) -> Color {
     let task = task.split(':').next().unwrap_or(task);
-    TASKS.iter().position(|t| t.name == task).map_or(STAR, |i| TASK[i])
+    let own = || OWN[task.bytes().map(usize::from).sum::<usize>() % OWN.len()];
+    TASKS.iter().position(|t| t.name == task).map_or_else(own, |i| TASK[i])
 }
 
 fn draw(app: &mut App, f: &mut Frame) {
@@ -2199,7 +2204,6 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // theme and a source have none, so they take the text's and not one their name gives.
             let color = match effect {
                 Effect::Fav(_, slot) => task_color(slot),
-                Effect::NewTask(_) => STAR,
                 Effect::Launch(_) => dev_color(label.split(' ').next().unwrap_or_default()),
                 _ => Color::Reset,
             };
@@ -2473,7 +2477,7 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
                 let said = custom_priced(m, &app.store, t, false);
                 let price = fg(m.quoted().filter(|q| !q.1).map_or(MUTED, |q| LEVEL[level(q.0.blended())]));
                 let spans = vec![
-                    Span::styled("★ ", fg(STAR).add_modifier(BOLD)),
+                    Span::styled("★ ", fg(task_color(t)).add_modifier(BOLD)),
                     Span::styled(said.trim_start_matches("★ ").to_string(), price),
                 ];
                 Line::from(cursor(picked == Some(m.key.as_str()), spans))
@@ -4182,7 +4186,7 @@ mod tests {
             (cursor.content.as_ref(), cursor.style.fg, cursor.style.bg),
             ("vision", Some(TASK[a.task_cur]), Some(CURSOR))
         );
-        // A task of your own is the last block, gold: its name, what you wrote it is about, that
+        // A task of your own is the last block, in a colour of its own: its name, what you wrote it is about, that
         // it is picked over a built-in task, and the model you gave it.
         a.store.toggle_favorite("debugging", "opus");
         a.store.set_about("debugging", "finding and fixing a bug");
@@ -4192,9 +4196,11 @@ mod tests {
         let own = text.iter().position(|l| l.starts_with("▌debugging▐ finding and fixing a bug")).unwrap();
         assert_eq!(
             (lines[own].spans[1].style.fg, text[own + 3].as_str()),
-            (Some(STAR), ""),
+            (Some(task_color("debugging")), ""),
             "a built-in task's three lines, the last block"
         );
+        assert_ne!(task_color("debugging"), task_color("review"), "tasks of your own can differ in colour");
+        assert!(OWN.iter().all(|c| !TASK.contains(c)), "and none has a built-in task's");
         assert_eq!(text[own + 1], format!("  use for:         {CUSTOM_WHEN}"));
         assert!(text[own + 2].starts_with("  your model:      ★ opus $5.0 "), "{}", text[own + 2]);
         // A tier's model joins the line, cheapest first, and says its tier.
