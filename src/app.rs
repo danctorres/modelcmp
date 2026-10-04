@@ -748,6 +748,8 @@ pub enum Mouse {
     /// Click outside the open dropdown or choice list: close it. In compare and recommend, a
     /// click on no model, which only clears the status as any click does.
     Outside,
+    /// Click outside the open panel (keys, details, compare, recommend): close it, as `esc` does.
+    Close,
     /// Click on a status bar hint: press its key.
     Key(KeyCode),
     /// Click on a stop in compare or recommend: move the cursor to it.
@@ -873,6 +875,8 @@ pub struct App {
     pub compare_x: usize,
     /// Where the renderer drew each model of the compare or recommend overlay, and the click on it.
     pub spots: Vec<(ratatui::layout::Rect, Stop)>,
+    /// The box of the open panel as last drawn, for a click outside it to close it.
+    pub panel: Option<ratatui::layout::Rect>,
     /// Filter on the rows of the compare or help overlay, typed with `/` in either.
     pub overlay_query: String,
     /// Rows visible in the body, set by the renderer; drives page movement.
@@ -949,6 +953,7 @@ impl App {
             compare_sel: 0,
             compare_x: 0,
             spots: vec![],
+            panel: None,
             overlay_query: String::new(),
             page: 20,
             hscroll: 0,
@@ -2163,6 +2168,14 @@ impl App {
                 Mouse::Scroll(_) | Mouse::Cols(_) => None,
                 _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             };
+        }
+        // A prompt over the panel and the panel's filter take an esc of their own first.
+        if m == Mouse::Close {
+            if self.input != Input::None {
+                self.on_key(KeyCode::Esc.into());
+            }
+            self.overlay_query.clear();
+            return self.on_key(KeyCode::Esc.into());
         }
         let typing = self.open_list().is_some_and(|l| l.typing);
         let list = self.open_list().is_some();
@@ -4845,6 +4858,13 @@ mod tests {
         assert_eq!(a.scroll, 3);
         assert_eq!(a.mouse(Mouse::Row(0)), None, "clicks do nothing behind an overlay");
         assert_eq!(a.view, View::Detail(Back::Table));
+        a.mouse(Mouse::Close);
+        assert_eq!(a.view, View::Table, "a click outside the panel closes it");
+        press(&mut a, "?/sort");
+        a.mouse(Mouse::Close);
+        assert_eq!((&a.view, &a.input, a.overlay_query.as_str()), (&View::Table, &Input::None, ""), "filtered too");
+        // Back in the details, for what follows.
+        code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
         a.mouse(Mouse::Scroll(-1));
         assert_eq!(a.selected(), 1);

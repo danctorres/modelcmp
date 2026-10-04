@@ -628,12 +628,18 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         let k = top + (m.row - inner.y) as usize;
         return (k < len).then_some(Mouse::Item(k));
     }
+    // A click outside the open panel closes it, as one outside a list does, unless it is on a
+    // hint or a tab.
+    let close = (!extend && app.panel.is_some_and(|r| !r.contains(pos))).then_some(Mouse::Close);
     // A hint in the status bar presses its key.
     if m.row == area.bottom() - 1 {
-        return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten();
+        return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten().or(close);
     }
     if on_tabs {
-        return tab;
+        return tab.or(close);
+    }
+    if close.is_some() {
+        return close;
     }
     // In compare and recommend a click is on what is drawn under it (`App::spots`): a plain one
     // opens it on a double click (`double`), a right one selects it, as in the table, and a ctrl
@@ -1377,6 +1383,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
     };
     app.spots.clear();
+    app.panel = lines.as_ref().map(|(title, lines)| overlay_rect(body, title, lines));
     if let Some((title, lines)) = lines {
         if app.view == View::Recommend {
             // Keep the cursor's task block in view.
@@ -3328,6 +3335,13 @@ mod tests {
             (Some(Mouse::Open(Stop::Compare(0))), Some(Mouse::Open(Stop::Compare(1))))
         );
         assert_eq!(at(&mut a, "verdict:", none), Some(Mouse::Outside), "above the model row no model");
+        let click =
+            |column, row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: none };
+        let on = |x, y| hit(&a, Rect::new(0, 0, w, h), click(x, y));
+        assert_eq!(on(0, 5), Some(Mouse::Close), "beside the panel: closes it");
+        assert_eq!(on(w - 1, 0), Some(Mouse::Close), "past the tabs too");
+        assert_eq!(on(w - 1, h - 1), Some(Mouse::Key(KeyCode::Char('q'))), "a hint is still its key");
+        assert_eq!(on(10, 0), Some(Mouse::Tab(0)), "a tab is still that tab");
         assert_eq!(
             at(&mut a, "flash", KeyModifiers::CONTROL),
             Some(Mouse::Model(Stop::Compare(1))),
