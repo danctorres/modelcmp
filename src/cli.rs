@@ -6,7 +6,7 @@ use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, FRONTIER_LEGEND, TIERS, by_value, compare_rows, custom_line, custom_priced,
-    detail_lines, priced, shown_via, task_line, tier_pick, truncate, verdict, via, visible,
+    detail_lines, priced, shown_via, task_line, tier_pick, truncate, used_benches, verdict, via, visible,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -556,10 +556,12 @@ fn usable<'a>(data: &'a Data, store: &'a Store) -> impl Iterator<Item = &'a Mode
 type Slots<'a> = (Option<&'a str>, BTreeMap<&'static str, &'a str>);
 
 /// A task's favorite and its tiers', the ones `on` its line: one excluded or out of reach is
-/// off it, so agents are not pointed at it either. Then the harnesses you run them on.
-fn favorites<'a>(store: &'a Store, task: &str, on: impl Fn(&str) -> bool) -> (Slots<'a>, Slots<'a>) {
+/// off it, so agents are not pointed at it either. Then the harnesses you run them on, while
+/// they have the model, as `--id` and `--cmd` go by.
+fn favorites<'a>(data: &Data, store: &'a Store, task: &str, on: impl Fn(&str) -> bool) -> (Slots<'a>, Slots<'a>) {
     let fav = |s: &str| store.favorite(s).filter(|k| on(k));
-    let via = |s: &str| fav(s).and(store.via(s));
+    let has = |k: &str, h: &str| data.models.iter().any(|m| m.key == k && launch_cmd(m, h, &data.harness).is_some());
+    let via = |s: &str| fav(s).and_then(|k| store.via(s).filter(|h| has(k, h)));
     let slots = |of: &dyn Fn(&str) -> Option<&'a str>| {
         (of(task), TIERS.iter().filter_map(|x| Some((x.0, of(&slot(task, Some(x.0)))?))).collect())
     };
@@ -585,7 +587,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
     let custom = store.custom_tasks().into_iter().map(|t| {
         let line = custom_line(usable(data, store), store, t);
         let front: Vec<_> = line.iter().map(|m| entry(m, store, f64::NAN, false)).collect();
-        let ((fav, tier_favs), (via, tier_via)) = favorites(store, t, |k| line.iter().any(|m| m.key == k));
+        let ((fav, tier_favs), (via, tier_via)) = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
         serde_json::json!({"name": t, "custom": true, "about": store.about(t).unwrap_or(CUSTOM_ABOUT), "when": CUSTOM_WHEN, "benchmarks": [], "favorite": fav, "tier_favorites": tier_favs, "via": via, "tier_via": tier_via, "frontier": front})
     });
     TASKS
@@ -596,8 +598,8 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                 .iter()
                 .map(|&(m, s)| entry(m, store, fit::shown(m, t, s), !off.contains(&m.key.as_str())))
                 .collect();
-            let ((fav, tier_favs), (via, tier_via)) = favorites(store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": t.benches, "favorite": fav, "tier_favorites": tier_favs, "via": via, "tier_via": tier_via, "frontier": front})
+            let ((fav, tier_favs), (via, tier_via)) = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": used_benches(t), "favorite": fav, "tier_favorites": tier_favs, "via": via, "tier_via": tier_via, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -809,6 +811,10 @@ mod tests {
         store.set_favorite("coding:low", "mini", Some("pi"));
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(t["tier_favorites"], serde_json::json!({"low": "mini"}));
+        assert_eq!(t["tier_via"], serde_json::json!({}), "a harness that lost the model is not one to start");
+        let mut data = data;
+        data.models[1].offers[0].via = vec!["pi".into()];
+        let t = coding(&recommend_json(&data, &store));
         assert_eq!((&t["via"], &t["tier_via"]), (&Value::Null, &serde_json::json!({"low": "pi"})), "its harness");
         store.toggle_excluded("mini");
         let t = coding(&recommend_json(&data, &store));

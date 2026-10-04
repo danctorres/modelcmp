@@ -25,8 +25,9 @@ pub enum Need {
     None,
     Tools,
     Vision,
-    /// No further behind the source's best on coding than the `low` tier allows: cheap alone
-    /// is not enough. None is while coding has no pace to tell by (`add_lag`).
+    /// No further behind your best on coding than the `low` tier allows: cheap alone is not
+    /// enough. A cut of the task's line (`view::task_frontier`), not of the score: none makes
+    /// the line while coding has no pace to tell by (`add_lag`).
     Coder,
 }
 
@@ -120,7 +121,7 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "value",
-        about: "coding per dollar, among the models close to the best on coding",
+        about: "coding per dollar, among the models close to your best on coding",
         when: "routine coding that needs no top reasoning",
         need: Need::Coder,
         aa: None,
@@ -337,8 +338,9 @@ fn months(date: &str) -> Option<f64> {
 /// of the best score is not (ECI points have no zero) and a gap in points is not either (each
 /// benchmark moves at its own pace); a percentile among every model ever scored counts a
 /// model at half the best score as near the top. A task scored for less than `WINDOW` months,
-/// or whose best has not risen in them, has no lag, and each of its tiers picks the best;
-/// "value" has none, being a rank.
+/// or whose best has not risen in them, has no lag, and each of its tiers picks the best; nor
+/// has one whose best of then scored nothing, the benchmark being too hard to tell how far
+/// behind that was. "value" has none, being a rank.
 // ponytail: a straight line over `WINDOW`; a benchmark whose scores rose in a few of those
 // months counts its models as closer than they are. The best score at each date if it bites.
 pub fn add_lag(models: &mut [Model], now: f64) {
@@ -349,9 +351,10 @@ pub fn add_lag(models: &mut [Model], now: f64) {
             let scores = models.iter().filter(|m| !old || months(&m.release).is_some_and(|r| r <= now - WINDOW));
             scores.filter_map(score).fold(f64::NEG_INFINITY, f64::max)
         };
-        let (best, rate) = (best(false), (best(false) - best(true)) / WINDOW);
+        let (best, old) = (best(false), best(true));
+        let rate = (best - old) / WINDOW;
         for m in models.iter_mut() {
-            match score(m).filter(|_| rate > 0.0 && rate.is_finite()) {
+            match score(m).filter(|_| rate > 0.0 && rate.is_finite() && old > 0.0) {
                 Some(s) => m.lag.insert(t.name.to_string(), (best - s) / rate),
                 None => m.lag.remove(t.name),
             };
@@ -360,7 +363,7 @@ pub fn add_lag(models: &mut [Model], now: f64) {
 }
 
 /// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
-/// model with both. The task only counts the models close to the best on coding (see `Need::Coder`).
+/// model with both. The task's line only takes the models close to your best on coding (see `Need::Coder`).
 pub fn add_value(models: &mut [Model]) {
     let raw: Vec<Option<f64>> = models.iter().map(|m| Some(m.fit.get("coding")? / m.cost()?.max(FREE))).collect();
     let all: Vec<f64> = raw.iter().flatten().copied().collect();
@@ -374,10 +377,9 @@ pub fn add_value(models: &mut [Model]) {
 /// Task score if the model qualifies for the task.
 pub fn fit(m: &Model, t: &Task) -> Option<f64> {
     let ok = match t.need {
-        Need::None => true,
         Need::Tools => m.tool_call,
         Need::Vision => m.vision,
-        Need::Coder => m.lag.get("coding").is_some_and(|&l| l <= crate::view::TIERS[0].1),
+        Need::None | Need::Coder => true,
     };
     if ok { m.fit.get(t.name).copied() } else { None }
 }
@@ -501,6 +503,10 @@ mod tests {
         assert_eq!(lag(&ms, "vision"), lag(&ms, "overall"), "ranked by the same index");
         assert_eq!(lag(&ms, "coding"), [None; 4], "one score, a year ago none: no pace to go by");
         assert_eq!(lag(&ms, "value"), [None; 4], "a rank, not a score");
+        // A year ago the best scored nothing: how far behind that was, no score says.
+        ms[0].shown.insert("coding".into(), 0.0);
+        add_lag(&mut ms, now);
+        assert_eq!(lag(&ms, "coding"), [None; 4]);
         // Scored for under a year: no pace either, and the lags of the last data go.
         ms[0].release = "2026-01-01".into();
         add_lag(&mut ms, now);
@@ -517,13 +523,7 @@ mod tests {
         let mut models = [mk(25.0, 0.01), mk(70.0, 1.0), mk(90.0, 10.0)];
         add_value(&mut models);
         assert!(models[0].fit.contains_key("value"), "the ratio is shown for every model");
-        assert!(fit(&models[0], task("value").unwrap()).is_none(), "cheap but weak");
         assert!(models[1].fit["value"] > models[2].fit["value"]);
-        // Weak is too far behind the best on coding, and as far as `low` allows is not.
-        models[0].lag.insert("coding".into(), 8.1);
-        models[1].lag.insert("coding".into(), 8.0);
-        let value = |m: &Model| fit(m, task("value").unwrap()).is_some();
-        assert!(!value(&models[0]) && value(&models[1]));
 
         let mut models = [mk(70.0, 0.0), mk(60.0, 0.0), mk(90.0, 0.01)];
         add_value(&mut models);

@@ -568,7 +568,7 @@ impl Data {
             }
             m.available = !m.via.is_empty();
         }
-        // Value counts the models close to the best on coding, and ranks the price you would
+        // Value counts the models close to your best on coding, and ranks the price you would
         // pay, which availability picks.
         crate::fit::add_lag(&mut self.models, now() as f64);
         crate::fit::add_value(&mut self.models);

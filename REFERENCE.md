@@ -26,7 +26,7 @@ say, using Epoch's difficulty and slope for each benchmark, with guessing counte
 moves it a little, many that agree move it more. A model without an ECI starts from a fit to
 all its scores.
 
-`modelcmp recommend --json` gives the same lists as `benchmarks`. In the TUI, move the column cursor and the
+`modelcmp recommend --json` gives the same lists as `benchmarks`; with Artificial Analysis, the one field the score is. In the TUI, move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
 column, and in a row of compare.
 
@@ -52,7 +52,7 @@ modelcmp list --task coding --tier mid --cmd    # the command that opens a harne
 modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"  # a task of your own: its model and what it is about; --rm clears the model
 modelcmp fav debugging --about "bugs and flaky tests"               # rewrite what it is about; "" clears it
 modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --task debugging --tier low returns it
-modelcmp list --task debugging --id            # that model's provider/model
+modelcmp list --task debugging --tier mid --id # that tier's provider/model, else the task's
 modelcmp fav debugging --rename triage         # another name for a task of your own; its models stay
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
 modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
@@ -71,10 +71,14 @@ Columns for `--sort`, `--min` and `--max`: `price`, `in`, `cache`, `out`, `ctx` 
 tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value`, and with Artificial Analysis `tps` and `ttft`. `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
 model from the task's list: `low` the cheapest within 8 months of progress of your best model on the task,
-`mid` the cheapest within 3, `high` your best. A month of progress is a twelfth of what the best
-score on the task rose in the last year, among every model the source scored; a task scored for
-less than a year has no such pace, and every tier picks the best. A model you `fav` for the tier, else for the task, beats the
-tier's pick. Every favorite of the task sits on the task's list, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
+`mid` the cheapest within 3, `high` your best. The list keeps the best model of
+each price level (free, up to $0.5, $2, $5, $15, and above), and what a tier picks even when its level
+has a better one. `high` is the best to the whole point: of two models a fraction of a point apart, the cheaper.
+A month of progress is a twelfth of what the best
+score on the task rose in the last year, among the models listed here that the source scored; a task scored for
+less than a year, or whose best of a year ago scored nothing, has no such pace, and every tier picks the best.
+`value` lists the models within 8 months of your best on coding. A model you `fav` for the tier, else for the task, beats the
+tier's pick. Every favorite of the task that you have and did not exclude sits on the task's list, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
 `list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model; `--via opencode` keeps the id opencode takes, for a script that always starts opencode. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. With no match it is an error (exit code 1), so a harness is never started on an empty model.

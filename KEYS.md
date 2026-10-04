@@ -44,7 +44,7 @@ commands and JSON.
 ## Selected ✓, favorite ★, excluded ✗
 
 Selected models (`✓`) are your shortlist for now, cleared when the TUI closes. A favorite
-(`★`) is your pick for a task, always on that task's line in recommend. An excluded model
+(`★`) is your pick for a task, on that task's line in recommend while you have it and did not exclude it. An excluded model
 (`✗`) is one you have but cannot use, so recommendations skip it.
 
 | Key | Action |

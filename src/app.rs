@@ -4048,10 +4048,10 @@ mod tests {
         a.set_data(data);
         let front: Vec<&str> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
-        assert_eq!(front, ["flash", "gpt55"], "flash beats mini at about the same price");
+        assert_eq!(front, ["mini", "flash", "gpt55"], "flash is its level's best, mini what low picks");
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(keys(&a), ["gpt55", "flash"], "enter shows the same line as the panel");
+        assert_eq!(keys(&a), ["gpt55", "flash", "mini"], "enter shows the same line as the panel");
     }
 
     #[test]
