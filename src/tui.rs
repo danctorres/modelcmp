@@ -1004,8 +1004,9 @@ const STAR: Color = Color::Yellow;
 /// value's red and yellow for a match; 16 colours leave no room to also skip the best's green, but no two are a pair.
 const TASK: [Color; 6] =
     [Color::LightCyan, Color::Green, Color::Blue, Color::LightMagenta, Color::LightRed, Color::LightYellow];
-/// The colours of the tasks of your own: none is a built-in task's, so its ★ and name say which.
-const OWN: [Color; 4] = [Color::Magenta, Color::LightGreen, Color::Cyan, Color::Yellow];
+/// The colours of the tasks of your own: none is a built-in task's, nor the gold of a ★ with no
+/// task at hand, nor the red of the ✗ and the worst value, so its ★ and name say which.
+const OWN: [Color; 3] = [Color::Magenta, Color::LightGreen, Color::Cyan];
 /// What a search matched, as the filter in the status bar.
 const MATCH: Color = Color::Yellow;
 /// Developers' and harnesses' colours in the terminal's own theme: one per Via name (`data::vias`).
@@ -4199,8 +4200,11 @@ mod tests {
             (Some(task_color("debugging")), ""),
             "a built-in task's three lines, the last block"
         );
-        assert_ne!(task_color("debugging"), task_color("review"), "tasks of your own can differ in colour");
-        assert!(OWN.iter().all(|c| !TASK.contains(c)), "and none has a built-in task's");
+        assert_ne!(task_color("debugging"), task_color("docs"), "tasks of your own can differ in colour");
+        assert!(
+            OWN.iter().all(|c| !TASK.contains(c) && ![STAR, BAD].contains(c)),
+            "and none has a built-in task's, nor the gold ★'s, nor the red ✗'s"
+        );
         assert_eq!(text[own + 1], format!("  use for:         {CUSTOM_WHEN}"));
         assert!(text[own + 2].starts_with("  your model:      ★ opus $5.0 "), "{}", text[own + 2]);
         // A tier's model joins the line, cheapest first, and says its tier.
