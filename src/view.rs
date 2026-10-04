@@ -459,7 +459,7 @@ fn price(m: &Model) -> String {
 /// What a frontier line shows, for the recommend panel and `modelcmp recommend`, which adds the key.
 pub fn frontier_legend(keyed: bool) -> String {
     format!(
-        "best per price: the top model at each price level, cheapest first, as name{} $/1M tokens (the task's column), \
+        "best per price: the top model at each price level, cheapest first, as name{} $/1M tokens (score on the task), \
          plus ★ your favorite, marked not recommended when it is not one",
         if keyed { " [key]" } else { "" }
     )

@@ -2479,11 +2479,13 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
             .iter()
             .map(|m| {
                 let said = custom_priced(m, &app.store, t, false);
-                let price = fg(m.quoted().filter(|q| !q.1).map_or(MUTED, |q| LEVEL[level(q.0.blended())]));
-                let spans = vec![
+                let price =
+                    fg(m.quoted().filter(|q| !q.1 && app.accessible(m)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]));
+                let mut spans = vec![
                     Span::styled("★ ", fg(task_color(t)).add_modifier(BOLD)),
                     Span::styled(said.trim_start_matches("★ ").to_string(), price),
                 ];
+                spans.extend(out_of_reach(app, m));
                 Line::from(cursor(picked == Some(m.key.as_str()), spans))
             })
             .collect();
@@ -2543,7 +2545,8 @@ fn wrapped_at(
 /// `name $price (score)` for each entry of the task's price frontier, cheapest first and the
 /// best last, each in its price level's colour as in the Price column, the favorite's ★ in
 /// the task's colour, or grey and marked not recommended when it is on the line only as the
-/// favorite. The `picked` model is under the cursor, keeping its colours as in the table.
+/// favorite; grey too and marked not available when out of reach, as its row in the table. The
+/// `picked` model is under the cursor, keeping its colours as in the table.
 fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'static>> {
     app.task_frontier(t)
         .iter()
@@ -2554,14 +2557,24 @@ fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'s
             if fav {
                 spans.push(Span::styled("★ ", fg(task_color(t.name)).add_modifier(BOLD)));
             }
-            let price = m.quoted().filter(|q| !(fav && off || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]);
+            let out = out_of_reach(app, m);
+            let grey = fav && off || out.is_some();
+            let price = m.quoted().filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]);
             spans.push(Span::styled(priced(m, fit::shown(m, t, *s), false, false), fg(price)));
             if fav && off {
-                spans.push(Span::styled(" not recommended", fg(MUTED)));
+                // Both read as a list: "not recommended, not available".
+                let said = if out.is_some() { " not recommended," } else { " not recommended" };
+                spans.push(Span::styled(said, fg(MUTED).add_modifier(Modifier::ITALIC)));
             }
+            spans.extend(out);
             Line::from(cursor(picked == Some(m.key.as_str()), spans))
         })
         .collect()
+}
+
+/// What follows a recommend entry out of reach: "not available", as its Via in the table.
+fn out_of_reach(app: &App, m: &Model) -> Option<Span<'static>> {
+    (!app.accessible(m)).then(|| Span::styled(format!(" {OUT_OF_REACH}"), fg(MUTED).add_modifier(Modifier::ITALIC)))
 }
 
 /// The model's name, the title, then every detail line, with `key:` labels and section headings
@@ -4183,6 +4196,22 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(bars.len() == 3 && bars[1].starts_with("opus "), "the best of overall, its name not: {bars:?}");
+        // Among all, a model out of reach is grey and says so, one of yours keeps its price's colour.
+        let mut data = std::mem::take(&mut b.data);
+        data.models[0].available = false;
+        b.set_data(data);
+        b.all = true;
+        b.rebuild();
+        let all = recommend(&b, 200, &mut vec![]).0;
+        let of = |n: &str| all.iter().flat_map(|l| l.spans.iter()).find(|s| s.content.starts_with(n)).unwrap().style;
+        assert!(
+            of("opus ").fg == Some(MUTED) && of("flash ").fg != Some(MUTED),
+            "{:?} {:?}",
+            of("opus "),
+            of("flash ")
+        );
+        let said = |n: &str| all.iter().any(|l| l.to_string().contains(&format!("{n} not available")));
+        assert!(said("(150)") && !said("(120)"), "opus says so, flash does not");
         let vision = text.iter().position(|l| l.starts_with("▌vision▐ ")).unwrap();
         let models = text[vision..].iter().position(|l| l.starts_with("  best per price:  "));
         assert!(models.is_some_and(|n| n <= 3), "every task lists its models: {:?}", &text[vision..vision + 4]);

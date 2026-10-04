@@ -2073,6 +2073,10 @@ impl App {
             KeyCode::Char('d') if ctrl => self.move_by(n * half, false),
             KeyCode::Char('u') if ctrl => self.move_by(-n * half, false),
             KeyCode::Char('g') if count > 0 => self.go_to(count - 1),
+            // Recommend's top is its `among` line, as `k` from the first task; `1gg` is that task.
+            KeyCode::Home | KeyCode::Char('g') if self.view == View::Recommend && !list => {
+                self.among = Some(self.among_on());
+            }
             KeyCode::Home | KeyCode::Char('g') => self.go_to(0),
             KeyCode::End | KeyCode::Char('G') => self.go_to(usize::MAX),
             // ^e is not `e`: only the keys above take ctrl.
@@ -2494,7 +2498,8 @@ impl App {
             }
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
-                (self.task_sel, self.task_wanted, self.among) = (0, None, None);
+                // It opens on its `among` line, the models it ranks.
+                (self.task_sel, self.task_wanted, self.among) = (0, None, Some(self.among_on()));
                 self.scroll = 0;
             }
             KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y' | ' ') if self.view == View::Recommend && !row => {
@@ -3791,11 +3796,11 @@ mod tests {
     #[test]
     fn picking_a_task_shows_its_frontier() {
         let mut a = app();
-        press(&mut a, "Rjj");
+        press(&mut a, "Rjjj");
         assert_eq!(a.task_cur, 2);
         press(&mut a, "G");
         assert_eq!(a.task_cur, TASKS.len() - 1);
-        press(&mut a, "gg");
+        press(&mut a, "1gg");
         assert_eq!(a.task_cur, 0, "the cursor stays inside the list");
         assert_eq!(TASKS[0].name, "overall", "the general pick comes first");
         press(&mut a, "2gg");
@@ -3871,9 +3876,9 @@ mod tests {
         press(&mut a, "E/mini");
         code(&mut a, KeyCode::Enter);
         assert!(a.filtered_too());
-        // Recommend's `among` line, before the first task: h l run over the tabs with something
-        // to show, and enter picks the models it ranks, the panel staying open.
-        press(&mut a, "cRk");
+        // Recommend opens on its `among` line, before the first task: h l run over the tabs with
+        // something to show, and enter picks the models it ranks, the panel staying open.
+        press(&mut a, "cR");
         assert_eq!((a.among, a.current().is_none()), (Some(YOURS), true), "on the one in use");
         press(&mut a, "l");
         assert_eq!((a.among, a.all), (Some(ALL), false), "moving picks none");
@@ -3895,6 +3900,10 @@ mod tests {
         assert_eq!((&a.view, a.among_on()), (&View::Recommend, YOURS), "a click picks too");
         press(&mut a, "j");
         assert_eq!((a.among, a.task_cur), (None, 0), "j is back on the first task");
+        press(&mut a, "Ggg");
+        assert_eq!(a.among, Some(YOURS), "gg is the top, the among line");
+        press(&mut a, "1gg");
+        assert_eq!((a.among, a.task_cur), (None, 0), "1gg is the first task");
         // A tab's key leaves recommend for it, as a click on the tab does.
         press(&mut a, "a");
         assert_eq!((&a.view, a.all), (&View::Table, true));
@@ -3902,7 +3911,7 @@ mod tests {
         assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, NO_SELECTED), "an empty one keeps the panel");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "A");
-        press(&mut a, "Rj");
+        press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["mini"], "nor does the table");
         press(&mut a, "c");
@@ -4169,7 +4178,7 @@ mod tests {
         assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
         assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
         // In recommend, f starts on the task under the cursor, so f enter toggles it.
-        press(&mut a, "Rjl");
+        press(&mut a, "Rjjl");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
         assert!(
@@ -4200,8 +4209,8 @@ mod tests {
         press(&mut a, "a");
         a.store.toggle_favorite("coding", "llama4");
         a.rebuild();
-        press(&mut a, "R");
-        assert_eq!(a.task_cur, 1, "still on coding");
+        press(&mut a, "R2gg");
+        assert_eq!(a.task_cur, 1, "on coding");
         let front: Vec<_> = a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
         assert_eq!(front, ["llama4", "mini", "gpt55"], "cheapest first, the favorite one among them");
         // enter shows the task in the table, where f acts on the picked task and ★ marks its model.
@@ -4231,8 +4240,8 @@ mod tests {
     fn recommend_moves_a_model_cursor_that_the_row_keys_act_on() {
         let mut a = app();
         press(&mut a, "R");
-        assert!(a.current().is_none(), "the cursor starts on the first task's name");
-        press(&mut a, "j");
+        assert_eq!((a.among, a.current().is_none()), (Some(YOURS), true), "the cursor starts on the among line");
+        press(&mut a, "jj");
         let front: Vec<String> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, best last");
@@ -4291,7 +4300,7 @@ mod tests {
     fn the_table_cursor_follows_the_model_picked_in_an_overlay() {
         let mut a = app();
         let row = |a: &App, key: &str| a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
-        press(&mut a, "Rjl");
+        press(&mut a, "Rjjl");
         assert_eq!(a.selected(), row(&a, "mini"), "recommend's pick");
         a.mouse(Mouse::Cols(1));
         assert_eq!(a.selected(), row(&a, "gpt55"), "the wheel too");
@@ -4533,7 +4542,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only == Some(FAV), a.rows.len()), (false, 3), "and F");
         a.store.toggle_favorite("coding", "opus5");
-        press(&mut a, "Rj");
+        press(&mut a, "Rjj");
         code(&mut a, KeyCode::Enter);
         assert!(a.task.is_some());
         code(&mut a, KeyCode::Esc);

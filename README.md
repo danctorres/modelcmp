@@ -57,7 +57,7 @@ modelcmp fav coding sonnet-5                # your model for coding: recommend a
 
 ```
 $ modelcmp recommend
-best per price: the top model at each price level, cheapest first, as name [key] $/1M tokens (the task's column), plus ★ your favorite, marked not recommended when it is not one
+best per price: the top model at each price level, cheapest first, as name [key] $/1M tokens (score on the task), plus ★ your favorite, marked not recommended when it is not one
 
 ...
 coding  writing and fixing code  (modelcmp list --task coding)
