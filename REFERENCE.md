@@ -6,7 +6,7 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 
 ## Columns
 
-One row per model. Columns: Model, Dev, Released (year and month), Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input; a price after a `~` is the list price of other providers, yours listing none),
+One row per model. Columns: Model, Dev, Released (year and month), Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input; a provider that charges more past a context size is priced as at 100k tokens; a price after a `~` is the list price of other providers, yours listing none),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Value, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
 its Intelligence Index, and each task column is one benchmark's score (0-100): Coding the

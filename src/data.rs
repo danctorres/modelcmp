@@ -29,7 +29,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 8: with Artificial Analysis, a row naming a reasoning setting has that setting's scores.
 /// 9: `Model::md` and `Model::openrouter` for `Model::url`, and `Model::epoch` a page name.
 /// 10: Artificial Analysis's agentic score is Terminal-Bench 4.0, where it was Hard.
-const FORMAT: u32 = 10;
+/// 11: prices at the tier an agent's session reaches.
+const FORMAT: u32 = 11;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -1514,6 +1515,57 @@ struct MdCost {
     input: f64,
     output: f64,
     cache_read: Option<f64>,
+    #[serde(deserialize_with = "tiers")]
+    tiers: Vec<MdTier>,
+}
+
+/// A model's tiers, or none when they come in another shape: they only adjust a price, and must
+/// not fail the whole reply.
+fn tiers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<MdTier>, D::Error> {
+    Ok(serde_json::from_value(serde_json::Value::deserialize(d)?).unwrap_or_default())
+}
+
+/// The prices from a context size on: "over 32k tokens, twice as much". One it does not list
+/// stays as it was.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct MdTier {
+    input: Option<f64>,
+    output: Option<f64>,
+    cache_read: Option<f64>,
+    tier: MdTierFrom,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct MdTierFrom {
+    #[serde(rename = "type")]
+    kind: String,
+    size: f64,
+}
+
+/// The context an agent's long conversation is priced at: a tier that starts by then applies.
+/// Most start past 200k tokens, which few sessions reach, and stay out.
+// ponytail: one size for every session, and a one-off prompt (`%` off) is priced at it too;
+// the tiers kept on the offer and picked when it is priced, if that bites.
+const AGENT_CONTEXT: f64 = 100_000.0;
+
+impl MdCost {
+    /// (input, output, cache read) at `AGENT_CONTEXT`: of the last tier it reaches, else the
+    /// first prices. A tier never costs less, so one priced below them is none. Its cache price
+    /// is its own: without one the cache costs as input, not the first prices' cache, unless
+    /// the input's price stays too.
+    fn agent(&self) -> (f64, f64, Option<f64>) {
+        let prices = |t: &MdTier| (t.input.unwrap_or(self.input), t.output.unwrap_or(self.output));
+        let reached = |t: &&MdTier| {
+            let (input, output) = prices(t);
+            t.tier.kind == "context" && t.tier.size <= AGENT_CONTEXT && input >= self.input && output >= self.output
+        };
+        match self.tiers.iter().filter(reached).max_by(|a, b| a.tier.size.total_cmp(&b.tier.size)) {
+            Some(t) => (prices(t).0, prices(t).1, t.cache_read.or(self.cache_read.filter(|_| t.input.is_none()))),
+            None => (self.input, self.output, self.cache_read),
+        }
+    }
 }
 
 // ---------- Epoch ----------
@@ -1991,16 +2043,16 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         if m.knowledge.is_empty() {
             m.knowledge = md.knowledge.clone();
         }
-        let cost = md.cost.as_ref();
+        let cost = md.cost.as_ref().map(MdCost::agent);
         m.offers.push(Offer {
             provider: pid.clone(),
             provider_name: p.name.clone(),
             id: if md.id.is_empty() { mid.clone() } else { md.id.clone() },
             env: p.env.clone(),
-            input: cost.map_or(0.0, |c| c.input),
-            output: cost.map_or(0.0, |c| c.output),
+            input: cost.map_or(0.0, |c| c.0),
+            output: cost.map_or(0.0, |c| c.1),
             // A few list a paid model's cache as 0, a placeholder; a cache never costs more than input.
-            cache_read: cost.and_then(|c| c.cache_read.filter(|&r| r > 0.0).map(|r| r.min(c.input))),
+            cache_read: cost.and_then(|c| c.2.filter(|&r| r > 0.0).map(|r| r.min(c.0))),
             unpriced: cost.is_none(),
             ..Default::default()
         });
@@ -2835,6 +2887,35 @@ mod tests {
         }
         let err = parse_epoch(buf.get_ref()).unwrap_err();
         assert!(err.contains("model_group"), "{err}");
+    }
+
+    #[test]
+    fn a_price_is_the_tier_an_agent_session_reaches() {
+        let json = br#"{"p": {"models": {
+            "m-1": {"name": "M 1", "cost": {"input": 2.5, "output": 7.5, "cache_read": 0.5, "tiers": [
+                {"input": 5, "output": 15, "cache_read": 1, "tier": {"type": "context", "size": 32000}},
+                {"input": 6.25, "output": 18.5, "tier": {"type": "context", "size": 128000}}]}},
+            "m-2": {"name": "M 2", "cost": {"input": 1, "output": 2, "tiers": [
+                {"input": 2, "output": 4, "tier": {"type": "context", "size": 200000}}]}},
+            "m-3": {"name": "M 3", "cost": {"input": 1, "output": 2, "cache_read": 0.1, "tiers": [
+                {"input": 2, "output": 4, "tier": {"type": "context", "size": 32000}}]}},
+            "m-4": {"name": "M 4", "cost": {"input": 1, "output": 2, "tiers": [
+                {"input": 2, "output": 4, "tier": "context", "size": "32k"}]}},
+            "m-5": {"name": "M 5", "cost": {"input": 1, "output": 2, "tiers": [
+                {"input": 2, "tier": {"type": "context", "size": 32000}}]}},
+            "m-6": {"name": "M 6", "cost": {"input": 1, "output": 2, "cache_read": 0.1, "tiers": [
+                {"output": 4, "tier": {"type": "context", "size": 32000}}]}}}}}"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        let price = |k: &str| {
+            let o = &d.models.iter().find(|m| m.key == k).unwrap().offers[0];
+            (o.input, o.output, o.cache_read)
+        };
+        assert_eq!(price("m1"), (5.0, 15.0, Some(1.0)), "over 32k, and not yet over 128k");
+        assert_eq!(price("m2"), (1.0, 2.0, None), "a tier past what a session reaches stays out");
+        assert_eq!(price("m3"), (2.0, 4.0, None), "a tier's cache price is its own, not the first prices'");
+        assert_eq!(price("m4"), (1.0, 2.0, None), "tiers in another shape are none, and the rest is read");
+        assert_eq!(price("m5"), (2.0, 2.0, None), "a price the tier does not list stays as it was");
+        assert_eq!(price("m6"), (1.0, 4.0, Some(0.1)), "the input's too, and its cache price with it");
     }
 
     #[test]
