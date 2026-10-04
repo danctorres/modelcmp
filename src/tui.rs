@@ -9,8 +9,8 @@
 
 use crate::app::{
     App, BOXES, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse,
-    NCOLS, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, hidden, menu_rows,
-    on_price, shown,
+    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, hidden, menu_rows, on_price,
+    shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -1367,7 +1367,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
     let lines = match app.view {
         View::Table => None,
-        View::Help => Some(("keys".to_string(), help(app, &app.overlay_query))),
+        View::Help => Some(("keys".to_string(), help(&app.overlay_query))),
         View::Recommend => {
             let lines;
             (lines, block, pin) = recommend(app, (area.width as usize).saturating_sub(4).min(130), &mut spots);
@@ -2514,7 +2514,7 @@ fn heading(text: &str) -> Line<'static> {
     Line::from(text.to_string()).style(Style::new().add_modifier(BOLD))
 }
 
-fn help(app: &App, query: &str) -> Vec<Line<'static>> {
+fn help(query: &str) -> Vec<Line<'static>> {
     let key_w = HELP.iter().flat_map(|(_, keys)| keys.iter()).map(|(k, _)| k.chars().count()).max().unwrap_or(0);
     let mut v: Vec<Line> = Vec::new();
     for (name, keys) in HELP {
@@ -2524,18 +2524,11 @@ fn help(app: &App, query: &str) -> Vec<Line<'static>> {
         }));
         v.push(Line::default());
     }
-    v.push(heading("Columns: green the best shown, red the worst"));
-    for c in (0..NCOLS).filter(|&c| !hidden(c)) {
-        v.push(Line::from(vec![
-            Span::styled(format!("{:<11}", col_head(app, c)), fg(KEY)),
-            Span::raw(app.col_about(c)),
-        ]));
-    }
-    v.push(Line::default());
+    v.push(Line::from("Columns: described in the top border; green the best shown, red the worst").style(fg(MUTED)));
     v.push(Line::from(format!("Saved in {}", crate::store::path().display())).style(fg(MUTED)));
     v.push(Line::from("Every key: github.com/danctorres/modelcmp/blob/main/KEYS.md").style(fg(MUTED)));
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
-    // `/` keeps the lines that match, so a key or a column can be looked up in a long list.
+    // `/` keeps the lines that match, so a key can be looked up in a long list.
     if !query.is_empty() {
         let q = query.to_lowercase();
         v.retain(|l| l.spans.iter().any(|s| s.content.to_lowercase().contains(&q)));
@@ -2931,7 +2924,7 @@ fn verdict_lines(models: &[&Model]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Back, ECI};
+    use crate::app::{Back, ECI, NCOLS};
     use crate::data::Offer;
     use ratatui::crossterm::event::KeyCode;
 
@@ -4274,13 +4267,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
-        assert_eq!(scroll as usize, help(&app(), "").len() - 4, "scroll is clamped to the content");
+        assert_eq!(scroll as usize, help("").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(""), &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         // A grid's heading is no row: the border counts the rows under it, 20 here in a box of 4 lines.
         let grid = |scroll: &mut u16| {
@@ -4342,7 +4335,7 @@ mod tests {
             lines.iter().flat_map(|l| l.spans.iter().filter(hit).map(|s| s.content.to_string())).collect()
         };
         assert_eq!(found("Gruvbox gRUV", "ruv"), [1..4, 9..12]);
-        let hits = lit_text(&help(&app(), "THEME"));
+        let hits = lit_text(&help("THEME"));
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
