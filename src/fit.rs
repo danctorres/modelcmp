@@ -18,14 +18,15 @@ const WEIGHT: f64 = 16.0;
 // ponytail: one spread for every task, fit it per task if one shows much more than the others.
 const TASK_SD: f64 = 2.0;
 
-/// Models below this coding percentile are never recommended for "value": cheap alone is not enough.
-pub const VALUE_FLOOR: f64 = 50.0;
+/// Months over which the source's best score is taken to have risen steadily (`add_lag`).
+const WINDOW: f64 = 12.0;
 
 pub enum Need {
     None,
     Tools,
     Vision,
-    /// At or above `VALUE_FLOOR` on coding.
+    /// No further behind the source's best on coding than the `low` tier allows: cheap alone
+    /// is not enough. None is while coding has no pace to tell by (`add_lag`).
     Coder,
 }
 
@@ -119,7 +120,7 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "value",
-        about: "coding per dollar, among the top half on coding",
+        about: "coding per dollar, among the models close to the best on coding",
         when: "routine coding that needs no top reasoning",
         need: Need::Coder,
         aa: None,
@@ -322,8 +323,44 @@ pub fn aa_fit(
 /// every priced one, and among themselves by coding.
 const FREE: f64 = 1e-9;
 
+/// A release date, "2026-09-18" or "2026-09", in months since 1970.
+// ponytail: months of the mean length, so a day or two off; nothing here turns on a day.
+fn months(date: &str) -> Option<f64> {
+    let mut parts = date.split('-').map(|p| p.parse::<f64>().ok());
+    let (year, month, day) = (parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(15.0));
+    Some((year - 1970.0) * 12.0 + (month - 1.0) + (day - 1.0) / 30.44)
+}
+
+/// Each task's `Model::lag`: how far the model is behind the source's best on it, in months of
+/// progress, a month being a twelfth of what the best score rose over the last `WINDOW`
+/// months. `now` is in seconds since 1970. One scale for every source and task, which a share
+/// of the best score is not (ECI points have no zero) and a gap in points is not either (each
+/// benchmark moves at its own pace); a percentile among every model ever scored counts a
+/// model at half the best score as near the top. A task scored for less than `WINDOW` months,
+/// or whose best has not risen in them, has no lag, and each of its tiers picks the best;
+/// "value" has none, being a rank.
+// ponytail: a straight line over `WINDOW`; a benchmark whose scores rose in a few of those
+// months counts its models as closer than they are. The best score at each date if it bites.
+pub fn add_lag(models: &mut [Model], now: f64) {
+    let now = now / 86400.0 / 30.436_875;
+    for t in TASKS.iter().filter(|t| t.name != "value") {
+        let score = |m: &Model| if ECI_TASKS.contains(&t.name) { m.eci } else { m.shown.get(t.name).copied() };
+        let best = |old: bool| {
+            let scores = models.iter().filter(|m| !old || months(&m.release).is_some_and(|r| r <= now - WINDOW));
+            scores.filter_map(score).fold(f64::NEG_INFINITY, f64::max)
+        };
+        let (best, rate) = (best(false), (best(false) - best(true)) / WINDOW);
+        for m in models.iter_mut() {
+            match score(m).filter(|_| rate > 0.0 && rate.is_finite()) {
+                Some(s) => m.lag.insert(t.name.to_string(), (best - s) / rate),
+                None => m.lag.remove(t.name),
+            };
+        }
+    }
+}
+
 /// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
-/// model with both. The task only counts models at or above `VALUE_FLOOR` (see `Need::Coder`).
+/// model with both. The task only counts the models close to the best on coding (see `Need::Coder`).
 pub fn add_value(models: &mut [Model]) {
     let raw: Vec<Option<f64>> = models.iter().map(|m| Some(m.fit.get("coding")? / m.cost()?.max(FREE))).collect();
     let all: Vec<f64> = raw.iter().flatten().copied().collect();
@@ -340,7 +377,7 @@ pub fn fit(m: &Model, t: &Task) -> Option<f64> {
         Need::None => true,
         Need::Tools => m.tool_call,
         Need::Vision => m.vision,
-        Need::Coder => m.fit.get("coding").is_some_and(|&c| c >= VALUE_FLOOR),
+        Need::Coder => m.lag.get("coding").is_some_and(|&l| l <= crate::view::TIERS[0].1),
     };
     if ok { m.fit.get(t.name).copied() } else { None }
 }
@@ -447,6 +484,30 @@ mod tests {
     }
 
     #[test]
+    fn lag_is_in_months_of_the_best_score_s_progress() {
+        let model = |eci: Option<f64>, release: &str| Model { eci, release: release.into(), ..Default::default() };
+        let now = months("2026-10-01").unwrap() * 30.436_875 * 86400.0;
+        // The best was 100 a year ago and is 124: 2 points a month.
+        let mut ms = [
+            model(Some(100.0), "2025-06-01"),
+            model(Some(118.0), "2026-03"),
+            model(Some(124.0), "2026-09-20"),
+            model(None, "2026-09-20"),
+        ];
+        ms[1].shown.insert("coding".into(), 50.0);
+        add_lag(&mut ms, now);
+        let lag = |ms: &[Model], task: &str| ms.iter().map(|m| m.lag.get(task).copied()).collect::<Vec<_>>();
+        assert_eq!(lag(&ms, "overall"), [Some(12.0), Some(3.0), Some(0.0), None]);
+        assert_eq!(lag(&ms, "vision"), lag(&ms, "overall"), "ranked by the same index");
+        assert_eq!(lag(&ms, "coding"), [None; 4], "one score, a year ago none: no pace to go by");
+        assert_eq!(lag(&ms, "value"), [None; 4], "a rank, not a score");
+        // Scored for under a year: no pace either, and the lags of the last data go.
+        ms[0].release = "2026-01-01".into();
+        add_lag(&mut ms, now);
+        assert_eq!(lag(&ms, "overall"), [None; 4]);
+    }
+
+    #[test]
     fn value_needs_capability() {
         let mk = |coding: f64, price: f64| Model {
             fit: scores(&[("coding", coding)]),
@@ -458,6 +519,11 @@ mod tests {
         assert!(models[0].fit.contains_key("value"), "the ratio is shown for every model");
         assert!(fit(&models[0], task("value").unwrap()).is_none(), "cheap but weak");
         assert!(models[1].fit["value"] > models[2].fit["value"]);
+        // Weak is too far behind the best on coding, and as far as `low` allows is not.
+        models[0].lag.insert("coding".into(), 8.1);
+        models[1].lag.insert("coding".into(), 8.0);
+        let value = |m: &Model| fit(m, task("value").unwrap()).is_some();
+        assert!(!value(&models[0]) && value(&models[1]));
 
         let mut models = [mk(70.0, 0.0), mk(60.0, 0.0), mk(90.0, 0.01)];
         add_value(&mut models);

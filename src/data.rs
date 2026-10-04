@@ -372,6 +372,10 @@ pub struct Model {
     /// benchmark score, 0..100 (Artificial Analysis). See `fit::shown`.
     #[serde(default)]
     pub shown: BTreeMap<String, f64>,
+    /// Task name -> months of progress behind the source's best (`fit::add_lag`), which the
+    /// tiers go by.
+    #[serde(skip)]
+    pub lag: BTreeMap<String, f64>,
     /// The model's page name on artificialanalysis.ai, when it has one (`aa_pages`).
     #[serde(default)]
     pub aa: Option<String>,
@@ -564,7 +568,9 @@ impl Data {
             }
             m.available = !m.via.is_empty();
         }
-        // Value ranks the price you would pay, which availability picks.
+        // Value counts the models close to the best on coding, and ranks the price you would
+        // pay, which availability picks.
+        crate::fit::add_lag(&mut self.models, now() as f64);
         crate::fit::add_value(&mut self.models);
     }
 

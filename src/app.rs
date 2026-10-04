@@ -1190,7 +1190,19 @@ impl App {
     /// How many stops the open overlay's sideways cursor moves over: compare's models, the
     /// task's name and its tiers in recommend.
     fn across_len(&self) -> usize {
-        if self.view == View::Compare { self.marked_shown } else { 1 + TIERS.len() }
+        match self.view {
+            View::Compare => self.marked_shown,
+            _ if self.one_pick(self.task_cur) => 2,
+            _ => 1 + TIERS.len(),
+        }
+    }
+
+    /// Whether recommend's task `i` has one pick and not one per tier: "value", a rank with no
+    /// score for a tier to be near the best on (`fit::add_lag`), unless your favorites give its
+    /// tiers models of their own.
+    pub fn one_pick(&self, i: usize) -> bool {
+        let picks = self.tier_picks(i).map(|p| p.map(|e| &e.0.key));
+        TASKS.get(i).is_some_and(|t| t.name == "value") && picks.iter().all(|p| *p == picks[0])
     }
 
     /// What each tier of recommend's task `i` picks, as `--tier` does, with its score: your
@@ -1787,7 +1799,8 @@ impl App {
         let fav = favs.iter().find(|s| at.is_none_or(|t| slot_box(s).0 == t));
         // On a tier in recommend, that tier's box, so f enter is for it alone, unless the model
         // is there as the favorite of another box of the task.
-        let tier = at.filter(|_| self.view == View::Recommend && self.task_sel > 0).map(|t| box_slot(t, self.task_sel));
+        let on_tier = self.view == View::Recommend && self.task_sel > 0 && !self.one_pick(self.task_cur);
+        let tier = at.filter(|_| on_tier).map(|t| box_slot(t, self.task_sel));
         let slot = match (tier, fav) {
             (Some(t), Some(f)) if !favs.contains(&t) => f.clone(),
             (Some(t), _) => t,
@@ -3094,8 +3107,10 @@ mod tests {
             }],
             ..Default::default()
         };
+        // A point of the score is 0.4 months: `low` reaches 20 points under the best, `mid` 7.5.
         if let Some(c) = coding {
             m.fit.insert("coding".into(), c);
+            m.lag.insert("coding".into(), (100.0 - c) / 2.5);
         }
         m
     }
@@ -4017,12 +4032,12 @@ mod tests {
     fn a_task_starts_at_the_low_tier() {
         let mut a = app();
         let mut data = std::mem::take(&mut a.data);
-        data.models.push(model("weak", true, Some(30.0), 0.01));
-        data.models.push(model("edge", true, Some(49.6), 0.05));
+        data.models.push(model("weak", true, Some(59.0), 0.01));
+        data.models.push(model("edge", true, Some(60.0), 0.05));
         a.set_data(data);
         let front: Vec<&str> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
-        assert_eq!(front, ["edge", "mini", "gpt55"], "cheap alone is no recommendation; 49.6 shows as 50");
+        assert_eq!(front, ["edge", "gpt55"], "cheap alone is no recommendation; 8 months behind the best is one");
     }
 
     #[test]
@@ -4123,7 +4138,8 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         let llama = &mut data.models[2];
         (llama.offers[0].input, llama.offers[0].output) = (0.1, 0.1);
-        llama.fit.insert("coding".into(), 55.0);
+        llama.fit.insert("coding".into(), 60.0);
+        llama.lag.insert("coding".into(), 16.0);
         a.store.toggle_marked("llama4");
         a.set_data(data);
         assert!(shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
@@ -4183,9 +4199,9 @@ mod tests {
         let coding = fit::task("coding").unwrap();
         assert!(a.favorite_unrecommended(coding, "mini"), "hidden, so not recommended");
         // A hidden favorite is not ranked, so it drops no model the filter shows: mini is
-        // cheaper and better than gptlite, yet gptlite stays.
+        // cheaper and as good as gptlite, yet gptlite stays.
         let mut data = std::mem::take(&mut a.data);
-        let mut lite = model("gptlite", true, Some(55.0), 2.0);
+        let mut lite = model("gptlite", true, Some(60.0), 2.0);
         (lite.developer, lite.via) = ("openai".into(), vec!["codex".into()]);
         data.models.push(lite);
         a.set_data(data);
@@ -4204,7 +4220,7 @@ mod tests {
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
         assert!(crate::view::priced(m, s, false, true).ends_with("(-)"));
         assert_eq!(
-            crate::view::pick([(m, s)].iter(), "low").map(|e| e.0.key.as_str()),
+            crate::view::pick([(m, s)].iter(), "coding", "low").map(|e| e.0.key.as_str()),
             Some("opus5"),
             "the only entry"
         );
@@ -5251,6 +5267,22 @@ mod tests {
         press(&mut a, "U");
         a.set_data(Data::default());
         assert_eq!(a.input, Input::None, "a refresh that lost the release takes the question back");
+    }
+
+    #[test]
+    fn value_is_one_pick_in_recommend() {
+        let mut a = app();
+        press(&mut a, "R");
+        let value = TASKS.iter().position(|t| t.name == "value").unwrap();
+        (a.among, a.task_cur, a.task_sel) = (None, value, 0);
+        assert!(a.one_pick(value) && !a.one_pick(0), "a rank has no tiers to tell apart");
+        assert_eq!((press(&mut a, "l"), a.task_sel), (None, 1));
+        assert_eq!((press(&mut a, "l"), a.task_sel), (None, 0), "one box past the name");
+        assert_eq!((press(&mut a, "$"), a.task_sel), (None, 1));
+        a.store.toggle_favorite("value:low", "mini");
+        a.rebuild();
+        assert!(!a.one_pick(value), "a tier's favorite gives the tiers models of their own");
+        assert_eq!((press(&mut a, "$"), a.task_sel), (None, 3));
     }
 
     #[test]

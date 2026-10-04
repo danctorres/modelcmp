@@ -34,8 +34,8 @@ column, and in a row of compare.
 
 ```sh
 modelcmp list                                  # models you have access to
-modelcmp list --task coding                    # best model per price level in the top half, cheapest first
-modelcmp list --task coding --tier mid         # just one: the cheapest in the top quarter
+modelcmp list --task coding                    # best model per price level, cheapest first, down to 8 months behind your best
+modelcmp list --task coding --tier mid         # just one: the cheapest within 3 months of your best
 modelcmp list --task coding --tier mid --id    # only its provider/model, for opencode -m $(...)
 modelcmp list --min coding=155 --sort price    # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
@@ -70,8 +70,10 @@ task has yet.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `cache`, `out`, `ctx` (thousands of
 tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value`, and with Artificial Analysis `tps` and `ttft`. `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
-model from the task's list: `low` the cheapest in the top half of the models the source
-evaluated, `mid` the cheapest in the top quarter, `high` the best; the best when none reaches the floor. A model you `fav` for the tier, else for the task, beats the
+model from the task's list: `low` the cheapest within 8 months of progress of your best model on the task,
+`mid` the cheapest within 3, `high` your best. A month of progress is a twelfth of what the best
+score on the task rose in the last year, among every model the source scored; a task scored for
+less than a year has no such pace, and every tier picks the best. A model you `fav` for the tier, else for the task, beats the
 tier's pick. Every favorite of the task sits on the task's list, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).

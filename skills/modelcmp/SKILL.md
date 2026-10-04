@@ -31,7 +31,7 @@ opencode -m "$(modelcmp list --task coding --tier mid --id)"
 modelcmp list --task coding --tier mid --cmd
 ```
 
-`low` is the cheapest entry in the top half of the models the source evaluated, `mid` the cheapest in the top quarter, `high` the best. The tier's favorite, else the task's, wins over the tier's pick. A custom task takes `--task` and `--tier` too: the tier's model, else the task's. With neither it exits 1 and prints no id: take the model from `recommend --json` instead.
+`low` is the cheapest entry within 8 months of progress of the best one, `mid` the cheapest within 3, `high` the best; a month of progress is a twelfth of what the best score on the task rose in the last year. The tier's favorite, else the task's, wins over the tier's pick. A custom task takes `--task` and `--tier` too: the tier's model, else the task's. With neither it exits 1 and prints no id: take the model from `recommend --json` instead.
 
 ## Reading the numbers
 

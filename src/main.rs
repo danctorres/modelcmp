@@ -42,7 +42,7 @@ enum Cmd {
         /// Best model per price level for a task (overall, coding, agentic, reasoning, value, vision): cheapest first, each row costing more and scoring higher; excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, else for the task; else low = cheapest in the top half, mid = cheapest in the top quarter, high = the best, or the best when none reaches the floor; a task of your own gives the tier's model, else the task's
+        /// One model from the task's list: your favorite for the tier, else for the task; else low = cheapest within 8 months of progress of your best model, mid = cheapest within 3, high = your best; a task of your own gives the tier's model, else the task's
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)

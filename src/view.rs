@@ -359,10 +359,11 @@ pub fn frontier<'m, T: Copy>(
 /// A task's price frontier, cheapest first: each entry costs more and scores higher, the last
 /// being the best model for the task. Each price level keeps only its best entry, since models
 /// that close in price are not worth choosing between. Models without a price or a score are
-/// left out, as are those under the `low` tier's floor: the frontier is a recommendation, and
-/// cheap alone is not one. The `favorites` join the line whether or not they earn a place
-/// on it, and are ranked only if they are among `models`; with no score for the task, a
-/// favorite's score is NaN, which `priced` shows as `-` and no tier floor reaches.
+/// left out, as are those further behind the best of them than the `low` tier allows: the
+/// frontier is a recommendation, and cheap alone is not one. The `favorites` join the line
+/// whether or not they earn a place on it, and are ranked only if they are among `models`;
+/// with no score for the task, a favorite's score is NaN, which `priced` shows as `-`, and no
+/// tier picks it on merit.
 /// With the line come the keys on it only for being favorites.
 pub fn task_frontier<'a>(
     models: impl Iterator<Item = &'a Model>,
@@ -370,7 +371,9 @@ pub fn task_frontier<'a>(
     favorites: &[&'a Model],
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
     let ranked = fit::rank(models, t);
-    let ranked: Vec<_> = ranked.into_iter().filter(|(_, s)| s.round() >= TIERS[0].1).collect();
+    // Behind the best the frontier can take, which has a price.
+    let behind = behind(ranked.iter().map(|e| e.0).filter(|m| m.cost().is_some()), t.name);
+    let ranked: Vec<_> = ranked.iter().copied().filter(|(m, _)| behind(m).is_none_or(|b| b <= TIERS[0].1)).collect();
     let mut v = frontier(&ranked, |(m, _)| m, |m| task_score(m, t.name));
     let fav = |m: &Model| favorites.iter().any(|f| f.key == m.key);
     let dearest =
@@ -434,16 +437,29 @@ pub fn by_value(x: Option<f64>, y: Option<f64>, desc: bool) -> std::cmp::Orderin
     }
 }
 
-/// `--tier` names and their score floors. A tier picks the cheapest frontier entry at or
-/// above its floor, scores compared as the task's percentile (`fit::fit`), or the best entry
-/// when none reaches it; `high` always picks the best.
-// ponytail: fixed floors on a percentile, tune them if the picks look off.
-pub const TIERS: [(&str, f64); 3] = [("low", 50.0), ("mid", 75.0), ("high", f64::INFINITY)];
+/// `--tier` names and how far behind your best model each lets its pick be, in months of
+/// progress (`fit::add_lag`). A tier picks the cheapest frontier entry no further behind than
+/// that, so `high` the best; the best too on a task with no such scale.
+// ponytail: fixed months, picked from how the tiers fell on 2026-10's data; tune them if the
+// picks look off.
+pub const TIERS: [(&str, f64); 3] = [("low", 8.0), ("mid", 3.0), ("high", 0.0)];
 
-/// The entry of a cheapest-first frontier that `tier` picks; `None` for an empty frontier.
-pub fn pick<'a, T: 'a>(front: impl Iterator<Item = &'a (T, f64)> + Clone, tier: &str) -> Option<&'a (T, f64)> {
-    let floor = TIERS.iter().find(|t| t.0 == tier).map_or(f64::INFINITY, |t| t.1);
-    front.clone().find(|(_, s)| s.round() >= floor).or(front.last())
+/// How far a model is behind the best of `models` on `task`, in months of progress
+/// (`Model::lag`); none for a model, or a task, without it.
+fn behind<'a>(models: impl Iterator<Item = &'a Model>, task: &str) -> impl Fn(&Model) -> Option<f64> {
+    let best = models.filter_map(|m| m.lag.get(task)).fold(f64::INFINITY, |a, &b| a.min(b));
+    move |m| m.lag.get(task).map(|l| l - best)
+}
+
+/// The entry of a task's cheapest-first frontier that `tier` picks; `None` for an empty frontier.
+pub fn pick<'a, 'm: 'a>(
+    front: impl Iterator<Item = &'a (&'m Model, f64)> + Clone,
+    task: &str,
+    tier: &str,
+) -> Option<&'a (&'m Model, f64)> {
+    let limit = TIERS.iter().find(|t| t.0 == tier).map_or(0.0, |t| t.1);
+    let behind = behind(front.clone().map(|e| e.0), task);
+    front.clone().find(|(m, _)| behind(m).is_some_and(|b| b <= limit)).or(front.last())
 }
 
 /// The entry of a task's line (`task_line`) that `tier` picks, as `--tier` does: your favorite
@@ -458,7 +474,7 @@ pub fn tier_pick<'m>(
     tier: &str,
 ) -> Option<(&'m Model, f64)> {
     let fav = store.tier_favorites(task, tier).find_map(|k| front.iter().find(|(m, _)| m.key == k)).copied();
-    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), tier).copied())
+    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), task, tier).copied())
 }
 
 /// `$1.5`, or `free`.
@@ -867,13 +883,21 @@ mod tests {
 
     #[test]
     fn tiers_pick_the_cheapest_good_enough() {
-        let front = [("free", 30.0), ("mini", 60.0), ("sonnet", 74.8), ("opus", 90.0)];
-        let key = |t| pick(front.iter(), t).map(|e| e.0);
-        assert_eq!(key("low"), Some("mini"));
-        assert_eq!(key("mid"), Some("sonnet"), "74.8 shows as 75");
-        assert_eq!(key("high"), Some("opus"));
-        assert_eq!(pick(front[..2].iter(), "mid").map(|e| e.0), Some("mini"), "none reaches it: the best");
-        assert_eq!(pick::<&str>([].iter(), "low"), None);
+        let model = |key: &str, lag: f64| Model {
+            key: key.into(),
+            lag: [("coding".to_string(), lag)].into(),
+            ..Default::default()
+        };
+        // Months behind the source's best, which is none of them: the tiers go by yours.
+        let ms = [model("free", 14.0), model("mini", 9.5), model("sonnet", 5.0), model("opus", 2.0)];
+        let front: Vec<(&Model, f64)> = ms.iter().map(|m| (m, 0.0)).collect();
+        let key = |front: &[(&Model, f64)], task, tier| pick(front.iter(), task, tier).map(|e| e.0.key.clone());
+        assert_eq!(key(&front, "coding", "low").as_deref(), Some("mini"), "7.5 months behind opus");
+        assert_eq!(key(&front, "coding", "mid").as_deref(), Some("sonnet"), "3 months behind is still mid");
+        assert_eq!(key(&front, "coding", "high").as_deref(), Some("opus"));
+        assert_eq!(key(&front[..2], "coding", "mid").as_deref(), Some("mini"), "behind the best there is");
+        assert_eq!(key(&front, "value", "low").as_deref(), Some("opus"), "no such scale: the best");
+        assert_eq!(key(&[], "coding", "low"), None);
     }
 
     #[test]

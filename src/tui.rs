@@ -2624,12 +2624,15 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         let pad = w.saturating_sub(Span::raw(name.as_str()).width());
         let mut spans = cursor(cur == Some((i, 0)), vec![Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD))]);
         spans.push(Span::raw(" ".repeat(pad)));
-        for (c, mut cell) in row.into_iter().enumerate() {
+        // One pick takes the row: a box as wide as the tiers', which every stop past the name is on.
+        let one = app.one_pick(i);
+        let (boxes, room) = if one { (1, TIERS.len() * (room + 2) - 2) } else { (TIERS.len(), room) };
+        for (c, mut cell) in row.into_iter().take(boxes).enumerate() {
             // Padded to the box, so the cursor's fill is as wide on every one.
             cell.push(Span::raw(" ".repeat(room.saturating_sub(cell.iter().map(Span::width).sum()))));
             let x = w + 2 + c * (room + 2);
             spots.push(Spot { lines: y..y + 1, x: x..x + room + 2, at: Stop::Recommend(i, c + 1) });
-            spans.extend(cursor(cur == Some((i, c + 1)), cell));
+            spans.extend(cursor(cur.is_some_and(|(row, sel)| row == i && (sel == c + 1 || one && sel > 0)), cell));
         }
         spots.push(Spot { lines: y..y + 1, x: 0..width, at: Stop::Recommend(i, 0) });
         if cur.is_some_and(|c| c.0 == i) {
@@ -2646,7 +2649,8 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         under.extend(wrapped(name, words(t.1), &space, width));
         under.extend(wrapped(label("  use for: "), words(t.2), &space, width));
         if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
-            let mut line = vec![Span::styled(format!("  {:<9}", format!("{}:", TIERS[c].0)), fg(MUTED))];
+            let tier = if app.one_pick(i) { "pick" } else { TIERS[c].0 };
+            let mut line = vec![Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED))];
             line.extend(entry(app, t.0, c, picks[i][c], None));
             under.push(Line::from(line));
         }
@@ -3507,6 +3511,8 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
             m.fit.insert("overall".into(), pct);
+            // flash is 6 months behind opus: `low`, and no further.
+            m.lag.insert("overall".into(), (100.0 - pct) / 5.0);
         }
         a.set_data(data);
         let (w, h) = (120, 32);
@@ -3780,6 +3786,8 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
             m.fit.insert("coding".into(), pct);
+            // flash is 6 months behind opus: `low`, and no further.
+            m.lag.insert("coding".into(), (100.0 - pct) / 5.0);
         }
         a.set_data(data);
         let lines = recommend(&a, 200, &mut vec![]).0;
@@ -3791,7 +3799,7 @@ mod tests {
         assert_eq!(spans[star + 1].style.fg, Some(LEVEL[level(5.0)]), "the name keeps its price level");
         // A favorite off the frontier, flash under the low tier's floor, is grey and says so.
         let mut data = std::mem::take(&mut a.data);
-        data.models.iter_mut().find(|m| m.key == "flash").unwrap().fit.insert("coding".into(), 40.0);
+        data.models.iter_mut().find(|m| m.key == "flash").unwrap().lag.insert("coding".into(), 12.0);
         a.store.toggle_favorite("coding", "flash");
         a.set_data(data);
         // Under the grid, the box under the cursor says why.
@@ -4441,6 +4449,8 @@ mod tests {
         let mut data = std::mem::take(&mut b.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
             m.fit.insert("overall".into(), pct);
+            // flash is 6 months behind opus: `low`, and no further.
+            m.lag.insert("overall".into(), (100.0 - pct) / 5.0);
         }
         b.set_data(data);
         (b.view, b.task_sel) = (View::Recommend, 2);
@@ -4470,6 +4480,8 @@ mod tests {
         let row = all.iter().map(ToString::to_string).find(|l| l.starts_with(" overall")).unwrap();
         let picks: Vec<&str> = row.split_whitespace().filter(|w| w.ends_with(['s', 'h'])).collect();
         assert_eq!(picks, ["flash", "▌opus", "opus"], "what each tier picks: low, mid and high");
+        let value = all.iter().map(ToString::to_string).find(|l| l.starts_with(" value")).unwrap();
+        assert_eq!(value.split_whitespace().collect::<Vec<_>>(), ["value", "-"], "a rank has one pick, not a tier's");
         assert!(all.iter().any(|l| l.to_string() == "  mid:     opus $5.0 (150)"), "under the grid, the box's model");
         // A name is cut from its start to the room its box has, the price and score kept.
         let cut: String = entry(&b, "overall", 1, b.tier_picks(0)[1], Some(14)).iter().map(|s| &*s.content).collect();
