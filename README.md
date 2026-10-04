@@ -84,15 +84,15 @@ first.
 
 A favorite can also cover one tier of a task, so easy work goes to a cheaper model than hard
 work: `modelcmp fav coding 3.7-flash --tier low` makes `--tier low` return Gemini 3.7 Flash while the other
-tiers keep your coding favorite. In the TUI, `f` lists each task's tiers under it.
+tiers keep your coding favorite. In the TUI, `f` has a box per tier on each task's row.
 
 A favorite can name the harness you run it on: `modelcmp fav coding opus-5.5 --via claude`, or
-`v` in `f`'s list. `--id` then prints the id that harness takes, `--cmd` the whole command
+`v` on a ticked box of `f`'s grid. `--id` then prints the id that harness takes, `--cmd` the whole command
 (`claude --model claude-opus-5-5`), and `recommend --json` says which harness it is.
 
 A task can be one you name yourself, with the model you give it and what it is about:
 `modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"`, or `+ new task` at the end
-of `f`'s list. No benchmark ranks it, so `recommend` shows it with that model alone and
+of `f`'s grid. No benchmark ranks it, so `recommend` shows it with that model alone and
 `modelcmp list --task debugging --id` returns it. When your task and a built-in one both fit the
 work, as debugging and coding do for a bug, agents pick yours. It takes a model per tier too
 (`modelcmp fav debugging 3.7-flash --tier low`), a cheap one for easy work and a strong one for

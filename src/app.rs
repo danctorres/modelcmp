@@ -6,7 +6,7 @@ use crate::fit::{TASKS, Task};
 use crate::store::Store;
 use crate::view::{
     LEVELS, NO_ACCESS, NO_SELECTED, THEMES, by_value, ctx, custom_line, hits, in_reach, level_label, money, score,
-    shown_via, task_line, task_score, truncate,
+    shown_via, task_line, task_score,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -295,7 +295,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("0 _ $ w b", "first / last column; next / previous group"),
             ("gg G 3gg", "top / bottom / row 3"),
             ("( ) ^u ^d", "half a page up / down"),
-            ("] [", "next / previous selected model; in f's list and dropdowns, ticked entry"),
+            ("] [", "next / previous selected model; in f's grid and dropdowns, ticked entry"),
             ("} {", "next / previous available model"),
             ("v", "highlight a range; space e C act on all of it"),
         ],
@@ -321,7 +321,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("✗", "excluded: you have it but cannot use it; recommendations skip it"),
             ("space", "select the model; C compares the selected"),
             ("f", "favorite the model for a task, a tier of one, or a task you name"),
-            ("r a", "in f's list: rename a task you named, write what it is about"),
+            ("r a", "in f's grid: rename a task you named, write what it is about"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
             ("S F E", "selected / favorite / excluded only"),
@@ -450,13 +450,14 @@ pub enum Input {
 /// What a choice list chooses: the key that opened it.
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum Kind {
-    /// `f`: the tasks a model is the favorite for; space or enter ticks one and the list stays open.
+    /// `f`: the tasks a model is the favorite for, a row each with a box per tier; space or
+    /// enter ticks the box under the cursor and the grid stays open.
     Fav,
     /// `o`: the site to open the model on.
     Open,
     /// `x`: the harness to open on the model.
     Launch,
-    /// `v` in `f`'s list: the harness a task's favorite runs on; picking one goes back to that list.
+    /// `v` in `f`'s grid: the harness a task's favorite runs on; picking one goes back to that list.
     Via,
     /// `t`: the theme, previewed under the cursor.
     Theme,
@@ -477,11 +478,13 @@ pub struct List {
     pub cur: usize,
     /// Typing into `query`, after `/`.
     pub typing: bool,
-    /// The entry under the cursor being written in place, in `f`'s list.
+    /// The entry under the cursor being written in place, in `f`'s grid.
     pub edit: Option<Edit>,
+    /// The box under the cursor along a row of `f`'s grid: 0 the task's own, then its tiers'.
+    pub col: usize,
 }
 
-/// An entry of `f`'s list written where it is, the list staying open: a task of your own being
+/// An entry of `f`'s grid written where it is, the list staying open: a task of your own being
 /// named, renamed or described.
 #[derive(PartialEq, Debug)]
 pub struct Edit {
@@ -523,7 +526,7 @@ impl List {
 
     /// Write `edit` on entry `at`, among them all: a search is dropped, as it could hide it.
     fn write(&mut self, at: usize, edit: Edit) {
-        *self = List { sel: at, top: self.top, edit: Some(edit), ..Default::default() };
+        *self = List { sel: at, top: self.top, col: self.col, edit: Some(edit), ..Default::default() };
     }
 
     /// The keys a list takes whatever it lists: `/` starts a search, and while searching ↓ ↑
@@ -573,24 +576,28 @@ pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
     (0..items.len()).filter(|&i| i == 0 || items[i].0.to_lowercase().contains(&q)).collect()
 }
 
-/// The last entry of `f`'s list: it asks the name of a task of your own.
+/// The last entry of `f`'s grid: it asks the name of a task of your own.
 const NEW_TASK: &str = "+ new task";
 
-/// The part of a choice's label that `/` searches and marks. `f`'s tasks match by their name
-/// alone, the slot after the box: a tick rewrites the rest of the label, and the entry would
-/// leave the list from under the cursor.
-pub fn searched((label, effect): &(String, Effect)) -> &str {
-    match effect {
-        Effect::Fav(_, slot) => slot,
-        _ => label,
-    }
+/// The boxes along a row of `f`'s grid: the task's own, then one per tier.
+pub const BOXES: usize = 1 + crate::view::TIERS.len();
+
+/// The favorite slot of box `col` on the row of `task`.
+pub fn box_slot(task: &str, col: usize) -> String {
+    crate::store::slot(task, col.checked_sub(1).and_then(|i| crate::view::TIERS.get(i)).map(|x| x.0))
 }
 
-/// Indices of the choice list entries whose searched part contains `query`, any case; empty
-/// when none match, which the overlay says.
+/// A slot's task and the box it has on that task's row.
+fn slot_box(slot: &str) -> (&str, usize) {
+    let (task, tier) = slot.split_once(':').map_or((slot, None), |(t, x)| (t, Some(x)));
+    (task, tier.and_then(|x| crate::view::TIERS.iter().position(|t| t.0 == x)).map_or(0, |i| i + 1))
+}
+
+/// Indices of the choice list entries whose label contains `query`, any case; empty when none
+/// match, which the overlay says.
 pub fn choice_rows(items: &[(String, Effect)], query: &str) -> Vec<usize> {
     let q = query.to_lowercase();
-    (0..items.len()).filter(|&i| searched(&items[i]).to_lowercase().contains(&q)).collect()
+    (0..items.len()).filter(|&i| items[i].0.to_lowercase().contains(&q)).collect()
 }
 
 /// The `n`th index after `cur` that `hit` holds for among `len`, before it for a negative `n`:
@@ -699,8 +706,8 @@ pub enum Effect {
     Refresh,
     /// Run this command in a new terminal window.
     Launch(Vec<String>),
-    /// Favorite the model for the slot: a task, one tier of it, or a task of your own; the `f`
-    /// chooser's items, applied by `App` itself.
+    /// A row of `f`'s grid: the model and a task, built in or your own, whose boxes favorite the
+    /// model for the task or one tier of it; applied by `App` itself.
     Fav(String, String),
     /// Run the model's favorite for the slot on this harness, or on none in particular; the
     /// items of `v`'s list in the `f` chooser, applied by `App` itself.
@@ -721,6 +728,8 @@ pub enum Mouse {
     Scroll(isize),
     /// Click on row `n` of the table (an index into `rows`): highlight it.
     Row(usize),
+    /// Click on box `col` of row `n` of `f`'s grid: tick it, as space there does.
+    Tick(usize, usize),
     /// Double click on the cell of row `n` in the column at cursor index `col`: the name or the
     /// developer opens the details, a number its page in the browser.
     Cell(usize, usize),
@@ -1107,12 +1116,16 @@ impl App {
         }
     }
 
-    /// `]` `[` in `f`'s list and the dropdowns: the cursor to the `n`th ticked entry
+    /// `]` `[` in `f`'s grid and the dropdowns: the cursor to the `n`th ticked entry
     /// below it, up for a negative `n`, as `jump` moves it in the table.
     fn jump_ticked(&mut self, n: isize) {
         let (ticked, what): (Vec<bool>, _) = match &self.input {
             Input::Choose { items, list, .. } => {
-                let on = |i: usize| matches!(&items[i].1, Effect::Fav(k, s) if self.store.favorite(s) == Some(k));
+                // A row with a box ticked.
+                let on = |i: usize| match &items[i].1 {
+                    Effect::Fav(k, t) => (0..BOXES).any(|c| self.store.favorite(&box_slot(t, c)) == Some(k)),
+                    _ => false,
+                };
                 (choice_rows(items, &list.query).into_iter().map(on).collect(), "task")
             }
             Input::Menu { col, items, list } => {
@@ -1396,26 +1409,13 @@ impl App {
         }
     }
 
-    /// A slot's entry in `f`'s list for the model `key`, ticked where it is the favorite.
-    fn fav_label(&self, key: &str, slot: &str) -> String {
-        let name = |k: &str| self.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
-        // What a task of your own is about, cut where a long one would stretch the list.
-        let about = self.store.about(slot).map_or(String::new(), |a| format!("  {}", truncate(a, 48)));
-        let via = self.store.via(slot).map_or(String::new(), |h| format!("  via {h}"));
-        match self.store.favorite(slot) {
-            Some(k) if k == key => format!("✓ {slot}{via}{about}"),
-            Some(k) => format!("☐ {slot}  (now {}){about}", name(k)),
-            None => format!("☐ {slot}{about}"),
-        }
-    }
-
-    /// `f`'s list for the model `key`: every task and each of its tiers, your own tasks, and
-    /// the entry that names a new one. The key, not the current model, since a tick can move
-    /// the rows under the list.
+    /// `f`'s grid for the model `key`: a row per task, built in then your own, and the entry
+    /// that names a new one. The key, not the current model, since a tick can move the rows
+    /// under the grid. The boxes are drawn from the store, so they follow any change to it.
     fn fav_items(&self, key: &str) -> Vec<(String, Effect)> {
-        self.store
-            .all_slots()
-            .map(|s| (self.fav_label(key, &s), Effect::Fav(key.to_string(), s)))
+        let tasks = TASKS.iter().map(|t| t.name).chain(self.store.custom_tasks());
+        tasks
+            .map(|t| (t.to_string(), Effect::Fav(key.to_string(), t.to_string())))
             .chain([(NEW_TASK.to_string(), Effect::NewTask(key.to_string()))])
             .collect()
     }
@@ -1775,17 +1775,15 @@ impl App {
         self.store.is_favorite(self.task_at_hand(), key)
     }
 
-    /// `f`'s list of tasks for the model `key`, starting on a task it is the favorite for, the
-    /// one at hand or its tier before another, else on the task at hand, so f enter toggles it.
+    /// `f`'s grid of tasks for the model `key`, starting on the task at hand, so f enter toggles
+    /// it, on the box the model has there; with no task at hand, on the first box it has.
     fn ask_fav(&mut self, key: &str) {
-        let items = self.fav_items(key);
         let own = if self.view == View::Recommend { self.custom_at() } else { None };
         let at = self.task_at_hand().map(|t| t.name).or(own);
         let favs = self.store.favorite_for(key);
-        let fav = favs.iter().find(|s| s.split(':').next() == at).or(favs.first());
-        let at = fav.map(String::as_str).or(at);
-        let sel = items.iter().position(|(_, e)| matches!(e, Effect::Fav(_, s) if Some(s.as_str()) == at));
-        self.input = Input::choose("favorite for which tasks?", Kind::Fav, items, sel.unwrap_or(0));
+        let fav = favs.iter().find(|s| at.is_none_or(|t| slot_box(s).0 == t));
+        let slot = fav.map(String::as_str).or(at).unwrap_or(TASKS[0].name).to_string();
+        self.fav_at(key, &slot);
     }
 
     /// `f`: favorite the model `key` for the slot, a task, one tier of it or a task of your own,
@@ -1799,26 +1797,11 @@ impl App {
             true => format!("★ {name} favorite for {task}"),
             false => format!("{name} no longer the favorite for {task}"),
         }));
-        self.relabel(key);
         self.rebuild_in_place();
         Some(Effect::Save)
     }
 
-    /// With `f`'s list still open, its boxes follow a change. Each entry stays: a task of your
-    /// own is gone once unticked, and would leave the list from under the cursor.
-    fn relabel(&mut self, key: &str) {
-        let mut input = std::mem::replace(&mut self.input, Input::None);
-        if let Input::Choose { kind: Kind::Fav, items, .. } = &mut input {
-            for (label, effect) in items {
-                if let Effect::Fav(_, slot) = effect {
-                    *label = self.fav_label(key, slot);
-                }
-            }
-        }
-        self.input = input;
-    }
-
-    /// `v` in `f`'s list: the harnesses that have the slot's favorite `key`, to run it on one,
+    /// `v` in `f`'s grid: the harnesses that have the slot's favorite `key`, to run it on one,
     /// as `x` lists them, after "any", with the cursor on the one it has. Only a ticked entry
     /// has a model to run.
     fn ask_via(&mut self, key: &str, slot: &str) {
@@ -1839,9 +1822,10 @@ impl App {
         self.input = Input::choose("run on which harness?", Kind::Via, items, sel);
     }
 
-    /// `f`'s list for the model `key` again, on the entry of `slot`: where `v`'s list came from.
+    /// `f`'s grid for the model `key`, opened on the box of `slot`: where `f` starts, and where
+    /// `v`'s list came from.
     fn fav_at(&mut self, key: &str, slot: &str) {
-        self.ask_fav(key);
+        self.input = Input::choose("favorite for which tasks?", Kind::Fav, vec![], 0);
         self.relist(key, slot, None);
     }
 
@@ -1853,23 +1837,24 @@ impl App {
         }
     }
 
-    /// `f`'s open list made again for the model `key`, with the cursor on the entry of `slot`,
+    /// `f`'s open grid made again for the model `key`, with the cursor on the box of `slot`,
     /// where `edit` goes on writing.
     fn relist(&mut self, key: &str, slot: &str, edit: Option<Edit>) {
         let fresh = self.fav_items(key);
-        let at = fresh.iter().position(|(_, e)| matches!(e, Effect::Fav(_, s) if s == slot)).unwrap_or(0);
+        let (task, col) = slot_box(slot);
+        let at = fresh.iter().position(|(_, e)| matches!(e, Effect::Fav(_, t) if t == task)).unwrap_or(0);
         if let Input::Choose { kind: Kind::Fav, items, list, .. } = &mut self.input {
             *items = fresh;
-            *list = List { sel: at, top: list.top, edit, ..Default::default() };
+            *list = List { sel: at, top: list.top, col, edit, ..Default::default() };
         }
     }
 
-    /// Whether an entry of `f`'s list is being written, when every key is its text's.
+    /// Whether an entry of `f`'s grid is being written, when every key is its text's.
     fn editing(&self) -> bool {
         self.open_list().is_some_and(|l| l.edit.is_some())
     }
 
-    /// Keys while an entry of `f`'s list is written in place.
+    /// Keys while an entry of `f`'s grid is written in place.
     fn edit_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
         let Input::Choose { items, list, .. } = &mut self.input else { return None };
         match code {
@@ -1891,9 +1876,11 @@ impl App {
         None
     }
 
-    /// Enter on an entry written in `f`'s list for the model `key`: the task is named, renamed
+    /// Enter on an entry written in `f`'s grid for the model `key`: the task is named, renamed
     /// or described, and the list stays open on it.
     fn edited(&mut self, key: &str, e: Edit) -> Option<Effect> {
+        // The box the cursor was on, which a name or an about leaves where it is.
+        let col = self.open_list().map_or(0, |l| l.col);
         let name = crate::store::task_name(&e.text);
         match e.what {
             What::New => {
@@ -1919,7 +1906,7 @@ impl App {
                 }
                 self.back_on(on);
                 self.report(Ok(format!("{was} renamed to {name}")));
-                self.relist(key, &name, None);
+                self.relist(key, &box_slot(&name, col), None);
                 Some(Effect::Save)
             }
             What::About(task) => {
@@ -1934,7 +1921,7 @@ impl App {
                 } else {
                     format!("{task}: {now}")
                 }));
-                self.relist(key, &task, None);
+                self.relist(key, &box_slot(&task, col), None);
                 Some(Effect::Save)
             }
         }
@@ -2177,6 +2164,13 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.go_to(usize::MAX),
             // ^e is not `e`: only the keys above take ctrl.
             KeyCode::Char(_) if ctrl => {}
+            // `h l` move along the boxes of a row of f's grid, stopping at its ends.
+            KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if self.choosing_favs() => {
+                let back = matches!(k.code, KeyCode::Char('h') | KeyCode::Left);
+                if let Input::Choose { list, .. } = &mut self.input {
+                    list.col = list.col.saturating_add_signed(if back { -n } else { n }).min(BOXES - 1);
+                }
+            }
             KeyCode::Char(c @ (']' | '[')) if self.choosing_favs() || matches!(self.input, Input::Menu { .. }) => {
                 self.jump_ticked(if c == ']' { n } else { -n })
             }
@@ -2245,12 +2239,15 @@ impl App {
         }
         if list {
             return match m {
-                Mouse::Item(n) => {
+                Mouse::Item(n) | Mouse::Tick(n, _) => {
                     let (sel, len) = self.list()?;
                     if n >= len {
                         return None;
                     }
                     *sel = n;
+                    if let (Mouse::Tick(_, col), Input::Choose { list, .. }) = (m, &mut self.input) {
+                        list.col = col.min(BOXES - 1);
+                    }
                     self.input_key(KeyCode::Enter, KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) => None,
@@ -2922,14 +2919,14 @@ impl App {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     // Not on the first start's choice, which has no table to go back to.
                     KeyCode::Char('q') if list.idle() && !self.first_start => self.ask_quit(),
-                    // Space ticks a task in f's list and keeps it open, as in the Dev and Via
+                    // Space ticks a task in f's grid and keeps it open, as in the Dev and Via
                     // dropdowns, and so does enter. While searching, space is typed.
                     KeyCode::Char(' ') | KeyCode::Enter
                         if *kind == Kind::Fav && (code == KeyCode::Enter || !list.typing) =>
                     {
                         match items.get(at?) {
-                            Some((_, Effect::Fav(key, slot))) => {
-                                let (key, slot) = (key.clone(), slot.clone());
+                            Some((_, Effect::Fav(key, task))) => {
+                                let (key, slot) = (key.clone(), box_slot(task, list.col));
                                 return self.fav(&key, &slot);
                             }
                             // The name of a new task is written right there, the list open.
@@ -2937,20 +2934,24 @@ impl App {
                             _ => {}
                         }
                     }
-                    // `r` renames the task of your own under the cursor and `a` writes what it is
-                    // about, both on its entry, not on a tier's; a built-in one keeps both.
-                    // `v` lists the harnesses for the ticked task under the cursor.
+                    // `v` lists the harnesses for the ticked box under the cursor.
                     KeyCode::Char('v') if *kind == Kind::Fav && !list.typing => {
-                        if let Some((_, Effect::Fav(key, slot))) = items.get(at?) {
-                            let (key, slot) = (key.clone(), slot.clone());
+                        if let Some((_, Effect::Fav(key, task))) = items.get(at?) {
+                            let (key, slot) = (key.clone(), box_slot(task, list.col));
                             self.ask_via(&key, &slot);
                         }
                     }
+                    // `r` renames the task of your own under the cursor and `a` writes what it is
+                    // about, both on its row; a built-in one keeps both, and one with nothing
+                    // ticked is no task yet.
                     KeyCode::Char(c @ ('r' | 'a')) if *kind == Kind::Fav && !list.typing => {
-                        if let Some((_, Effect::Fav(_, slot))) = items.get(at?)
-                            && self.store.custom_tasks().contains(&slot.as_str())
-                        {
-                            let task = slot.clone();
+                        let Some((_, Effect::Fav(_, task))) = items.get(at?) else { return None };
+                        let task = task.clone();
+                        if crate::fit::task(&task).is_some() {
+                            self.refuse(format!("{task} is built in: r and a are for a task of your own"));
+                        } else if !self.store.custom_tasks().contains(&task.as_str()) {
+                            self.refuse(format!("{task} has no model: tick a box of it first"));
+                        } else {
                             let edit = if c == 'r' {
                                 Edit::new(What::Rename(task.clone()), task)
                             } else {
@@ -2996,7 +2997,7 @@ impl App {
                         self.input = Input::None;
                         return self.switch(Source::default());
                     }
-                    // Esc leaves the harnesses for f's list they were opened from, on the same task.
+                    // Esc leaves the harnesses for f's grid they were opened from, on the same task.
                     KeyCode::Esc if *kind == Kind::Via => {
                         if let Some((_, Effect::Via(key, slot, _))) = items.first() {
                             let (key, slot) = (key.clone(), slot.clone());
@@ -3278,15 +3279,14 @@ mod tests {
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
-        // f's tasks are searched by name, so a tick, which rewrites the label, keeps the entry.
+        // f's tasks are searched by name, and a tick keeps the row under the cursor.
         press(&mut a, "f/now");
         assert!(matches!(&a.input, Input::Choose { items, list, .. } if choice_rows(items, &list.query).is_empty()));
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "/coding:l");
+        press(&mut a, "/codi");
         let ticked = |a: &App| match &a.input {
             Input::Choose { items, list, .. } => {
-                let rows = choice_rows(items, &list.query);
-                (rows.len(), items[rows[list.sel]].0.starts_with('✓'))
+                (choice_rows(items, &list.query).len(), a.store.favorite("coding").is_some())
             }
             _ => (0, false),
         };
@@ -3294,7 +3294,7 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         assert_eq!(ticked(&a), (1, true), "ticked, and still under the cursor");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((ticked(&a), a.store.favorite("coding:low")), ((1, false), None), "enter again unticks it");
+        assert_eq!(ticked(&a), (1, false), "enter again unticks it");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         press(&mut a, "?/sort");
@@ -3714,7 +3714,7 @@ mod tests {
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         press(&mut a, "k ");
         assert_eq!(keys(&a), ["gpt55", "mini", "opus5"], "both developers show");
-        // ] [ go round the ticked entries, as in f's list: anthropic at 1, openai at 2.
+        // ] [ go round the ticked entries, as in f's grid: anthropic at 1, openai at 2.
         for sel in [2, 1] {
             press(&mut a, "]");
             assert!(matches!(a.input, Input::Menu { list: List { sel: s, .. }, .. } if s == sel), "] to {sel}");
@@ -4205,7 +4205,7 @@ mod tests {
     fn a_task_of_your_own_has_the_model_you_give_it() {
         let mut a = app();
         let on = a.current().unwrap().key.clone();
-        // The last entry of f's list takes the name of a new task right there, the list open.
+        // The last entry of f's grid takes the name of a new task right there, the list open.
         press(&mut a, "fG");
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         let edit =
@@ -4214,6 +4214,7 @@ mod tests {
             Input::Choose { items, list, .. } => items[list.sel].0.clone(),
             _ => String::new(),
         };
+        let ticked = |a: &App| a.store.favorite("tool-dispatch").is_some();
         assert_eq!(edit(&a), Some(("New".into(), String::new())));
         a.paste("Tool Dispatch:");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
@@ -4222,7 +4223,7 @@ mod tests {
         // nothing is saved.
         assert_eq!(
             (under(&a).as_str(), edit(&a)),
-            ("✓ tool-dispatch", Some((r#"About("tool-dispatch")"#.into(), String::new())))
+            ("tool-dispatch", Some((r#"About("tool-dispatch")"#.into(), String::new())))
         );
         assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.about("tool-dispatch")), (None, None, None));
         assert!(a.choosing_favs(), "the list is open still");
@@ -4230,10 +4231,7 @@ mod tests {
         press(&mut a, "a");
         a.paste("routing tool calls");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!(
-            (a.store.about("tool-dispatch"), under(&a).as_str()),
-            (Some("routing tool calls"), "✓ tool-dispatch  routing tool calls")
-        );
+        assert_eq!((a.store.about("tool-dispatch"), under(&a).as_str()), (Some("routing tool calls"), "tool-dispatch"));
         // While writing, the keys that move are text, the wheel is still and esc leaves the entry alone.
         press(&mut a, "ajk");
         a.mouse(Mouse::Scroll(-3));
@@ -4243,11 +4241,13 @@ mod tests {
             (edit(&a), a.choosing_favs(), a.store.about("tool-dispatch")),
             (None, true, Some("routing tool calls"))
         );
-        // Unticked it is gone, but keeps its entry while the list is open.
+        // Unticked it is gone, but keeps its row while the grid is open; r and a say what it lacks.
         press(&mut a, " ");
-        assert_eq!((a.store.custom_tasks().len(), under(&a).as_str()), (0, "☐ tool-dispatch  routing tool calls"));
+        assert_eq!((a.store.custom_tasks().len(), under(&a).as_str()), (0, "tool-dispatch"));
+        press(&mut a, "r");
+        assert_eq!((edit(&a), a.status.as_str()), (None, "tool-dispatch has no model: tick a box of it first"));
         press(&mut a, " ");
-        assert_eq!(under(&a), "✓ tool-dispatch  routing tool calls");
+        assert!(ticked(&a) && under(&a) == "tool-dispatch");
         // r writes another name on it, starting from its own; one a task has is said under the
         // list, the name still there to change.
         press(&mut a, "r");
@@ -4263,10 +4263,11 @@ mod tests {
         ctrl(&mut a, 'u');
         a.paste("Dispatch");
         assert_eq!((err(&a), code(&mut a, KeyCode::Enter)), (None, Some(Effect::Save)));
-        assert_eq!((a.store.custom_tasks(), under(&a).as_str()), (vec!["dispatch"], "✓ dispatch  routing tool calls"));
+        assert_eq!((a.store.custom_tasks(), under(&a).as_str()), (vec!["dispatch"], "dispatch"));
         assert_eq!(a.status, "tool-dispatch renamed to dispatch");
-        press(&mut a, "ggra");
-        assert_eq!(edit(&a), None, "overall is built in");
+        press(&mut a, "ggr");
+        assert_eq!((edit(&a), a.failed), (None, true), "overall is built in, and r says so");
+        assert!(a.status.starts_with("overall is built in"), "{}", a.status);
         code(&mut a, KeyCode::Esc);
         a.store.rename_task("dispatch", "tool-dispatch").unwrap();
         // Recommend lists it after the built-in tasks, the cursor on its name, its model after
@@ -4285,7 +4286,7 @@ mod tests {
         press(&mut a, "RGf");
         assert!(a.failed && a.input == Input::None, "f on a task's name has no model to favorite");
         press(&mut a, "lf");
-        assert_eq!(under(&a), "✓ tool-dispatch  routing tool calls");
+        assert!(ticked(&a) && under(&a) == "tool-dispatch");
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.task_cur, a.store.favorite("tool-dispatch")), (TASKS.len() - 1, None));
@@ -4295,8 +4296,8 @@ mod tests {
         assert_eq!(edit(&a), Some(("New".into(), String::new())));
         assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.custom_tasks().len()), (None, None, 0));
         code(&mut a, KeyCode::Esc);
-        // A tier of it takes a model of its own, as a built-in task's: its entries follow the
-        // task's in the list, and both models are on its line, cheapest first.
+        // A tier of it takes a model of its own, as a built-in task's: its boxes follow the
+        // task's on its row, and both models are on its line, cheapest first.
         a.store.toggle_favorite("tool-dispatch", &on);
         a.store.toggle_favorite("tool-dispatch:low", "mini");
         a.rebuild();
@@ -4304,12 +4305,16 @@ mod tests {
         assert_eq!((&a.view, a.current().map(|m| m.key.as_str())), (&View::Recommend, Some("mini")));
         press(&mut a, "l");
         assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "h l move along its line");
-        press(&mut a, "fj");
-        assert_eq!(under(&a), "☐ tool-dispatch:low  (now mini)");
-        press(&mut a, "ra");
-        assert_eq!(edit(&a), None, "a tier has the task's name and about");
-        press(&mut a, "3j");
-        assert_eq!(under(&a), "+ new task", "after its three tiers");
+        press(&mut a, "fl");
+        assert_eq!((under(&a).as_str(), a.open_list().map(|l| l.col)), ("tool-dispatch", Some(1)), "l: its low tier");
+        press(&mut a, "a");
+        a.paste(" fast");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.open_list().map(|l| l.col), Some(1), "what it is about leaves the cursor on its box");
+        press(&mut a, "4l5h");
+        assert_eq!(a.open_list().map(|l| l.col), Some(0), "h l stop at the ends of the row");
+        press(&mut a, "j");
+        assert_eq!(under(&a), "+ new task", "after the last task");
         // A task named before it in the order leaves recommend's cursor on its own.
         code(&mut a, KeyCode::Enter);
         a.paste("api");
@@ -4324,55 +4329,52 @@ mod tests {
             let via = m.via.clone();
             m.offers[0].via = via;
         }
-        let label = |a: &App| match &a.input {
-            Input::Choose { items, .. } => items[4].0.clone(),
-            _ => String::new(),
-        };
         let kind = |a: &App| match &a.input {
             Input::Choose { kind, list, .. } => Some((*kind, list.sel)),
             _ => None,
         };
-        press(&mut a, "f4jv");
-        assert_eq!(kind(&a), Some((Kind::Fav, 4)), "not ticked: no model to run, f's list stays");
+        press(&mut a, "fjv");
+        assert_eq!(kind(&a), Some((Kind::Fav, 1)), "not ticked: no model to run, f's grid stays");
         assert!(a.status.starts_with("coding is not ticked"), "{}", a.status);
         press(&mut a, " v");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == 3), "any, opencode and codex");
         assert_eq!(kind(&a), Some((Kind::Via, 0)), "on any: it has none yet");
         press(&mut a, "j");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!((a.store.via("coding"), label(&a).as_str()), (Some("opencode"), "✓ coding  via opencode"));
-        assert_eq!(kind(&a), Some((Kind::Fav, 4)), "back on the task in f's list");
+        assert_eq!(a.store.via("coding"), Some("opencode"));
+        assert_eq!(kind(&a), Some((Kind::Fav, 1)), "back on the task in f's grid");
         press(&mut a, "v");
         assert_eq!(kind(&a), Some((Kind::Via, 1)), "on the one it has");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((kind(&a), a.store.via("coding")), (Some((Kind::Fav, 4)), Some("opencode")), "esc: back, as it was");
+        assert_eq!((kind(&a), a.store.via("coding")), (Some((Kind::Fav, 1)), Some("opencode")), "esc: back, as it was");
         press(&mut a, "vk");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.store.via("coding"), label(&a).as_str()), (None, "✓ coding"), "any: none in particular");
+        assert_eq!(a.store.via("coding"), None, "any: none in particular");
         press(&mut a, "vj");
         code(&mut a, KeyCode::Enter);
         press(&mut a, " ");
         assert_eq!((a.store.favorite("coding"), a.store.via("coding")), (None, None), "gone with the favorite");
+        // A tier's box has a harness of its own, and v comes back to that box.
+        press(&mut a, "2l vj");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.store.via("coding:mid"), a.open_list().map(|l| l.col)), (Some("opencode"), Some(2)));
     }
 
     #[test]
     fn f_favorites_a_model_for_the_task_at_hand() {
         let mut a = app();
-        // No task in context: f asks which, listing every task, each followed by its tiers.
+        // No task in context: f asks which, a row per task with a box for it and for each tier.
         assert_eq!(press(&mut a, "f"), None);
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len() * 4 + 1));
-        press(&mut a, "4j");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len() + 1));
+        press(&mut a, "j");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert!(
-            matches!(&a.input, Input::Choose { items, .. } if items[4].0 == "✓ coding"),
-            "enter ticks as space does"
-        );
+        assert!(a.choosing_favs() && a.store.favorite("coding").is_some(), "enter ticks as space does");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
         assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
         press(&mut a, "f");
         assert!(
-            matches!(&a.input, Input::Choose { list: List { sel: 4, .. }, .. }),
+            matches!(&a.input, Input::Choose { list: List { sel: 1, col: 0, .. }, .. }),
             "f starts on the task it is the favorite for"
         );
         code(&mut a, KeyCode::Esc);
@@ -4380,9 +4382,7 @@ mod tests {
         press(&mut a, "Rjjl");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
-        assert!(
-            matches!(&a.input, Input::Choose { list: List { sel: 4, .. }, items, .. } if items[4].0 == "☐ coding  (now gpt55)")
-        );
+        assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 0, .. }, .. }));
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), Some("mini"));
         assert!(a.status.starts_with("★ mini"));
@@ -4391,22 +4391,22 @@ mod tests {
         press(&mut a, "f");
         assert_eq!(press(&mut a, " "), Some(Effect::Save));
         assert_eq!(a.store.favorite("coding"), None, "again unfavorites");
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items[4].0 == "☐ coding"));
-        // The entry below is coding's low tier: --tier low picks mini, the others the computed one.
-        press(&mut a, "j ");
+        // The next box is coding's low tier: --tier low picks mini, the others the computed one.
+        press(&mut a, "l ");
         assert_eq!((a.store.favorite("coding:low"), a.store.favorite("coding:mid")), (Some("mini"), None));
         assert!(a.status.ends_with("coding:low"));
-        // ] [ go round the ticked tasks: coding:low at 5 and, once ticked, overall at 0.
+        // ] [ go round the rows with a tick: coding at 1 and, once ticked, overall at 0. The
+        // box under the cursor stays the tier's from row to row, until h.
         press(&mut a, "]");
         assert!(a.failed && a.status == "no other ticked task is shown", "{}", a.status);
-        press(&mut a, "5k ");
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "✓ overall"));
-        for (key, sel) in [("]", 5), ("]", 0), ("[", 5), ("2[", 0), ("2]", 5)] {
+        press(&mut a, "kh ");
+        assert_eq!(a.store.favorite("overall"), Some("mini"));
+        for (key, sel) in [("]", 1), ("]", 0), ("[", 1), ("2[", 0), ("2]", 1)] {
             press(&mut a, key);
             assert!(matches!(&a.input, Input::Choose { list: List { sel: s, .. }, .. } if *s == sel), "{key} to {sel}");
         }
-        press(&mut a, " 5k");
-        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "✓ overall"));
+        press(&mut a, "l kh");
+        assert_eq!((a.store.favorite("coding:low"), a.store.favorite("overall")), (None, Some("mini")));
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.input, a.store.favorite_for("mini").len()), (&Input::None, 0));
@@ -4826,9 +4826,11 @@ mod tests {
         assert!(!a.store.is_marked("mini"), "✓ → ☐");
         assert_eq!(a.mouse(Mouse::Star(2)), None);
         assert!(a.choosing_favs() && a.selected() == 2, "the ☆ lists the tasks for its row");
-        assert_eq!(a.mouse(Mouse::Item(4)), Some(Effect::Save));
-        assert!(a.choosing_favs(), "a click ticks a task and keeps the list open");
-        assert_eq!(a.store.favorite("coding"), Some("opus5"));
+        assert_eq!(a.mouse(Mouse::Tick(1, 0)), Some(Effect::Save));
+        assert!(a.choosing_favs(), "a click ticks a box and keeps the grid open");
+        assert_eq!(a.mouse(Mouse::Tick(1, 2)), Some(Effect::Save));
+        assert_eq!((a.store.favorite("coding"), a.store.favorite("coding:mid")), (Some("opus5"), Some("opus5")));
+        a.mouse(Mouse::Tick(1, 2));
         code(&mut a, KeyCode::Esc);
         // A task has one favorite: with several selected or highlighted, f says so and asks nothing.
         a.mouse(Mouse::Box(1));

@@ -8,8 +8,9 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse, NCOLS,
-    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, choice_rows, hidden, menu_rows, on_price, shown,
+    App, BOXES, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse,
+    NCOLS, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, hidden, menu_rows,
+    on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -626,6 +627,17 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             return None;
         }
         let k = top + (m.row - inner.y) as usize;
+        // f's grid: a box is ticked, the name ticks the task's own, and the tiers' heading and
+        // what follows the boxes are nothing to click.
+        if let Input::Choose { kind: Kind::Fav, items, list, .. } = &app.input {
+            let row = k.checked_sub(1).filter(|&r| r < len)?;
+            if !matches!(items[choice_rows(items, &list.query)[row]].1, Effect::Fav(..)) {
+                return Some(Mouse::Item(row));
+            }
+            let x = usize::from(m.column.saturating_sub(rect.x + 2));
+            let col = x.saturating_sub(fav_name_w(items) + 2) / BOX_W;
+            return (col < BOXES).then_some(Mouse::Tick(row, col));
+        }
         return (k < len).then_some(Mouse::Item(k));
     }
     // A click outside the open panel closes it, as one outside a list does, unless it is on a
@@ -1402,7 +1414,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, 0);
+        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, (0, 0));
         // Where each spot landed on screen, scrolled and cut to the box, for a click to find it.
         let top = app.scroll as usize;
         app.spots = spots
@@ -1429,12 +1441,18 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some((key, title)) = ask {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0, Color::Reset, 0);
+        overlay(buf, body, &title, lines, &mut 0, Color::Reset, (0, 0));
     }
     let chooser = chooser(app, area);
-    if let (Some((within, lines)), Input::Choose { title, items, list, .. }) = (chooser, &mut app.input) {
+    if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
         let rect = overlay_rect(within, title, &lines);
         let rows = choice_rows(items, &list.query).len();
+        // f's grid has its tiers' heading over the rows, and its cursor on a box, drawn with it;
+        // a row being written has no box, so the cursor is the row's, as in every list.
+        // ponytail: the heading scrolls off with the rows in a box too short for them all; pin
+        // it if a dozen tasks of your own on a short terminal turn out to be a thing.
+        let grid = *kind == Kind::Fav;
+        let head = usize::from(grid);
         let (sel, top) = (&list.sel, &mut list.top);
         let shown = usize::from(rect.height.saturating_sub(2));
         // At the last entry every line to the end, so the key hint below them shows too, unless
@@ -1443,21 +1461,23 @@ fn draw(app: &mut App, f: &mut Frame) {
         // ponytail: an entry more than a box's height from the end keeps it out of view; the
         // error on the line under the entry if it bites.
         let from = if *sel + 1 >= rows || list.edit.is_some() { lines.len().saturating_sub(shown) } else { *top };
-        let mut scroll = list_top(from, *sel, shown) as u16;
+        let mut scroll = list_top(from, *sel + head, shown) as u16;
         // Under the wordmark the box is muted, as the table's frame; over the table it has
         // the text's colour, as every box there, which parts it from that frame.
         let border = if splash.is_some() { MUTED } else { Color::Reset };
-        let tail = lines.len() - rows;
-        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, border, tail);
+        let ends = (head, lines.len() - rows - head);
+        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, border, ends);
         *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
             // its bar, as there.
-            let y = (rect.y + 1 + *sel as u16 - scroll).min(rect.bottom() - 1);
-            cursor_ends(buf, rect.x, rect.right() - 1, y);
+            let y = (rect.y + 1 + (*sel + head) as u16 - scroll).min(rect.bottom() - 1);
+            if !grid || list.edit.is_some() {
+                cursor_ends(buf, rect.x, rect.right() - 1, y);
+            }
             // An entry being written has the text cursor, after what `edit_line` draws before it.
-            if let (Some(e), Some((label, _))) = (&list.edit, items.get(*sel)) {
-                let prefix = Span::raw(edit_prefix(label, e)).width();
+            if let Some(e) = &list.edit {
+                let prefix = Span::raw(edit_prefix(e)).width();
                 let start = scrolled(prefix, &e.text, e.cur, edit_room(within));
                 let before = prefix + Span::raw(&e.text[start..e.cur]).width();
                 cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
@@ -2192,20 +2212,20 @@ fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> L
     line
 }
 
-/// What stays of an entry of `f`'s list before the text written on it: its box or `+`, and for
-/// what a task is about its name too.
-fn edit_prefix(label: &str, e: &Edit) -> String {
-    let mark = label.chars().next().unwrap_or(' ');
+/// What stays of a row of `f`'s grid before the text written on it: the `+` of the entry that
+/// names a task, and for what a task is about its name.
+fn edit_prefix(e: &Edit) -> String {
     match &e.what {
-        What::About(task) => format!(" {mark} {task}  "),
-        What::New | What::Rename(_) => format!(" {mark} "),
+        What::New => " + ".into(),
+        What::Rename(_) => " ".into(),
+        What::About(task) => format!(" {task}  "),
     }
 }
 
-/// An entry of `f`'s list while it is written in place: `edit_prefix`, then the text, or in
-/// grey what to write while there is none. Text too long for `room` cells scrolls sideways.
-fn edit_line(label: &str, e: &Edit, color: Color, room: usize) -> Line<'static> {
-    let prefix = edit_prefix(label, e);
+/// A row of `f`'s grid while it is written in place: `edit_prefix`, then the text, or in grey
+/// what to write while there is none. Text too long for `room` cells scrolls sideways.
+fn edit_line(e: &Edit, color: Color, room: usize) -> Line<'static> {
+    let prefix = edit_prefix(e);
     let empty = match e.what {
         What::About(_) => "what it is about",
         What::New | What::Rename(_) => "its name",
@@ -2217,32 +2237,126 @@ fn edit_line(label: &str, e: &Edit, color: Color, room: usize) -> Line<'static> 
     Line::from(vec![Span::styled(prefix, fg(color)), text])
 }
 
+/// What `/` left of a list when nothing matches, said as the dropdowns say it.
+fn no_match(query: &str) -> Line<'static> {
+    Line::from(format!(" no entry matches {query} ")).style(fg(MUTED))
+}
+
+/// The cells a box of `f`'s grid takes along its row: the cursor's bars around the mark, and
+/// the gap to the next.
+const BOX_W: usize = 6;
+
+/// How wide the names of `f`'s grid are: its boxes start two cells after.
+fn fav_name_w(items: &[(String, Effect)]) -> usize {
+    items.iter().map(|(label, _)| Span::raw(label.as_str()).width()).max().unwrap_or(0)
+}
+
+/// `f`'s grid: the tiers' heading, a row per task with a box for the task and for each tier,
+/// `✓` where the model is the favorite, `●` where another is and `☐` where none, the entry that
+/// names a new task, what the box under the cursor holds, and the keys. Read from the store at
+/// each draw, so the boxes follow a change made anywhere.
+fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
+    let query = list.query.as_str();
+    let rows = choice_rows(items, query);
+    let w = fav_name_w(items);
+    let tiers = std::iter::once("any").chain(crate::view::TIERS.iter().map(|t| t.0));
+    let head: String = tiers.map(|t| format!(" {t:<0$}", BOX_W - 1)).collect();
+    let mut lines = vec![Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED))];
+    let mut under = String::new();
+    for (i, &k) in rows.iter().enumerate() {
+        let (label, effect) = &items[k];
+        let on = i == list.sel;
+        let Effect::Fav(key, task) = effect else {
+            // The entry that names a new task.
+            lines.push(match (&list.edit, on) {
+                (Some(e), true) => edit_line(e, Color::Reset, room),
+                _ => Line::from(cursor(on, vec![Span::raw(label.clone())])),
+            });
+            continue;
+        };
+        let color = task_color(task);
+        if let (Some(e), true) = (&list.edit, on) {
+            lines.push(edit_line(e, color, room));
+            continue;
+        }
+        let name = lit(Line::from(Span::styled(label.clone(), fg(color))), |s| found(s, query));
+        // Padded by the cells the name takes, so a wide one keeps its boxes under the heading.
+        let pad = w - Span::raw(label.as_str()).width();
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(name.spans);
+        spans.push(Span::raw(" ".repeat(pad + 1)));
+        for col in 0..BOXES {
+            let slot = box_slot(task, col);
+            let mark = match app.store.favorite(&slot) {
+                Some(k) if k == key => Span::styled("✓", fg(MARK).add_modifier(BOLD)),
+                Some(_) => Span::styled("●", fg(MUTED)),
+                None => Span::styled("☐", fg(color)),
+            };
+            let at = on && col == list.col;
+            spans.extend(cursor(at, vec![mark]));
+            spans.push(Span::raw(" ".repeat(BOX_W - 3)));
+            if at {
+                let name =
+                    |k: &str| app.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
+                under = match (app.store.favorite(&slot), app.store.via(&slot)) {
+                    (Some(k), Some(h)) if k == key => format!("{slot}: {}, via {h}", name(k)),
+                    (Some(k), _) if k == key => format!("{slot}: {}", name(k)),
+                    (Some(k), _) => format!("{slot}: now {}", name(k)),
+                    (None, _) => format!("{slot}: no favorite"),
+                };
+            }
+        }
+        // What the task is about, yours in your words, cut to what the row has left of `room`.
+        let left = room.saturating_sub(w + 2 + BOXES * BOX_W).min(48);
+        if let Some(about) = app.store.about(task).or(fit::task(task).map(|t| t.about)).filter(|_| left > 1) {
+            spans.push(Span::styled(truncate(about, left), fg(MUTED)));
+        }
+        lines.push(Line::from(spans));
+    }
+    if rows.is_empty() {
+        lines.push(no_match(query));
+    }
+    let own = items.iter().any(|(_, e)| matches!(e, Effect::Fav(_, t) if fit::task(t).is_none()));
+    let hint = match (list.typing, own) {
+        // While searching the letters are typed, as the status bar says.
+        (true, _) => " ↓ ↑ move · enter toggle · esc clear",
+        // `r` and `a` are said once there is a task of your own. `j k` and enter work too, left
+        // unsaid: with them the line is wider than 80 columns hold.
+        (_, true) => " h l tier · / search · space toggle · v via · r rename · a about · esc close",
+        _ => " j k h l move · / search · space enter toggle · v via · esc close",
+    };
+    // As wide as the hint at most, so the box keeps its width as the cursor moves.
+    let width = hint.chars().count();
+    lines.push(Line::default());
+    lines.push(Line::from(format!(" {}", truncate(&under, width - 1))).style(fg(MUTED)));
+    // A row being written takes every key; a name enter did not take says why. As wide as the
+    // hint it stands for.
+    lines.push(match &list.edit {
+        Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
+        Some(_) => Line::from(format!("{:<width$}", " enter apply · esc cancel")).style(fg(MUTED)),
+        None => Line::from(hint).style(fg(MUTED)),
+    });
+    lines
+}
+
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `first`: the first start's question, where esc picks the default and `B` asks again later.
-/// `room`: the cells an entry being written has for its text.
-fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool, room: usize) -> Vec<Line<'static>> {
+/// `f`'s grid has lines of its own, `fav_lines`.
+fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
         .iter()
-        .enumerate()
-        .map(|(i, &k)| {
+        .map(|&k| {
             let (label, effect) = &items[k];
-            // Where `/` looks: all of the label, or in `f`'s list up to the end of the task.
-            let key = crate::app::searched(&items[k]);
-            let hits = |s: &str| found(&s[..s.find(key).map_or(0, |i| i + key.len())], query);
-            // What has a colour in the table keeps it here: f's tasks and a harness. A site, a
-            // theme and a source have none, so they take the text's and not one their name gives.
+            // What has a colour in the table keeps it here: a harness. A site, a theme and a
+            // source have none, so they take the text's and not one their name gives.
             let color = match effect {
-                Effect::Fav(_, slot) => task_color(slot),
                 Effect::Launch(_) | Effect::Via(_, _, Some(_)) => {
                     dev_color(label.split(' ').next().unwrap_or_default())
                 }
                 _ => Color::Reset,
             };
-            if let (Some(e), true) = (&list.edit, i == list.sel) {
-                return edit_line(label, e, color, room);
-            }
             // A name, then what follows it muted: a source and what it takes, a harness and
             // the command that opens it.
             let name = match effect {
@@ -2258,50 +2372,22 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
                 ]);
                 return lit(line, |s| found(s, query));
             }
-            // A ticked box in the mark's colour, as in the table and the dropdowns; the rest of
-            // the label keeps the task's or the harness's own.
-            let line = match label.strip_prefix('✓') {
-                Some(rest) => Line::from(vec![
-                    Span::styled(" ✓", fg(MARK).add_modifier(BOLD)),
-                    Span::styled(format!("{rest} "), fg(color)),
-                ]),
-                _ => Line::from(format!(" {label} ")).style(fg(color)),
-            };
-            lit(line, hits)
+            lit(Line::from(format!(" {label} ")).style(fg(color)), |s| found(s, query))
         })
         .collect();
-    // What `/` left, said as the dropdowns say it.
     if rows.is_empty() {
-        lines.push(Line::from(format!(" no entry matches {query} ")).style(fg(MUTED)));
+        lines.push(no_match(query));
     }
     let hint = match kind {
-        // While searching the letters are typed, as the status bar says.
-        Kind::Fav if typing => " ↓ ↑ move · enter toggle · esc clear",
         _ if typing => " ↓ ↑ move · enter pick · esc clear",
-        // `r` is said once there is a task of your own to rename.
-        Kind::Fav
-            if items
-                .iter()
-                .any(|(_, e)| matches!(e, Effect::Fav(_, s) if !s.contains(':') && fit::task(s).is_none())) =>
-        {
-            // Enter toggles too, left unsaid: with it the line is wider than 80 columns hold.
-            " j k move · / search · space toggle · v via · r rename · a about · esc close"
-        }
-        Kind::Fav => " j k move · / search · space enter toggle · v via · esc close",
+        Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
         Kind::Source if first => " j k move · / search · enter picks · esc default · B changes it later",
         Kind::Source => " j k move · / search · enter picks · esc close",
         Kind::Via => " j k move · / search · enter picks · esc back",
         Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
     };
-    // An entry being written takes every key; a name enter did not take says why. As wide as
-    // the hint it stands for, so the box keeps its width.
-    let width = hint.chars().count();
-    lines.push(match &list.edit {
-        Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
-        Some(_) => Line::from(format!("{:<width$}", " enter apply · esc cancel")).style(fg(MUTED)),
-        None => Line::from(hint).style(fg(MUTED)),
-    });
+    lines.push(Line::from(hint).style(fg(MUTED)));
     lines
 }
 /// The first line in view of a list `shown` lines tall with the cursor on `sel`: where it was,
@@ -2318,7 +2404,11 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
     let tabs = if area.height < 6 { 0 } else { 2 };
     let body = Rect { y: area.y + tabs, height: area.height - 1 - tabs, ..area };
     let within = splash(app, area).map_or(body, |s| s.1);
-    Some((within, choice_lines(*kind, items, list, app.first_start, edit_room(within))))
+    let lines = match kind {
+        Kind::Fav => fav_lines(app, items, list, edit_room(within)),
+        _ => choice_lines(*kind, items, list, app.first_start),
+    };
+    Some((within, lines))
 }
 
 /// The cells a line has in a box as wide as `within`, between its borders and their margins.
@@ -2361,16 +2451,20 @@ fn overlay(
     lines: Vec<Line<'static>>,
     scroll: &mut u16,
     border: Color,
-    tail: usize,
+    (head, tail): (usize, usize),
 ) -> (Rect, bool, bool) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
     let shown = h.saturating_sub(2) as usize;
     *scroll = (*scroll).min(lines.len().saturating_sub(shown) as u16);
-    // Where you are; the keys are in the status bar. The last `tail` lines, a list's hint, are
-    // none of what is counted.
-    let footer =
-        if lines.len() - tail > shown { position(*scroll as usize, shown, lines.len() - tail) } else { String::new() };
+    // Where you are; the keys are in the status bar. The first `head` lines, a grid's heading,
+    // and the last `tail`, a list's hint, are none of what is counted.
+    let (top, n) = (*scroll as usize, lines.len() - head - tail);
+    let footer = if n + head > shown {
+        position(top.saturating_sub(head), shown - head.saturating_sub(top).min(shown), n)
+    } else {
+        String::new()
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(fg(border))
@@ -3537,6 +3631,19 @@ mod tests {
         assert_eq!(hit(&a, area, drag(any, 4)), None, "a drag over a list does nothing");
         assert_eq!(hit(&a, area, right(w - 2, 3)), Some(Mouse::Outside), "any click outside closes it");
         assert_eq!(hit(&a, area, click(w - 2, 3)), Some(Mouse::Outside), "outside: closes it");
+        // f's grid: a click on a box ticks it, on the name the task's own, on the heading nothing.
+        a.mouse(Mouse::Outside);
+        a.mouse(Mouse::Star(0));
+        let (within, lines) = chooser(&a, area).unwrap();
+        // `click` is two rows down, under the tabs.
+        let rect = overlay_rect(within, "favorite for which tasks?", &lines);
+        let rect = Rect { y: rect.y - 2, ..rect };
+        let Input::Choose { items, .. } = &a.input else { panic!("f's grid is open") };
+        let boxes = rect.x + 2 + fav_name_w(items) as u16 + 2;
+        assert_eq!(hit(&a, area, click(boxes + 2 * BOX_W as u16 + 1, rect.y + 3)), Some(Mouse::Tick(1, 2)));
+        assert_eq!(hit(&a, area, click(rect.x + 3, rect.y + 3)), Some(Mouse::Tick(1, 0)), "the name: the task's");
+        assert_eq!(hit(&a, area, click(boxes + BOXES as u16 * BOX_W as u16, rect.y + 3)), None, "past the boxes");
+        assert_eq!(hit(&a, area, click(boxes, rect.y + 1)), None, "the tiers' heading");
     }
 
     #[test]
@@ -3867,8 +3974,8 @@ mod tests {
         let first = screen(&mut a, "gg");
         assert!(first.contains("best per price: the top model"), "{first}");
         // f's hints fit a terminal 80 columns wide, with a task of your own too.
-        let items = vec![("☐ debugging".to_string(), Effect::Fav("k".into(), "debugging".into()))];
-        let hint = choice_lines(Kind::Fav, &items, &List::default(), false, 80).pop().unwrap();
+        let items = vec![("debugging".to_string(), Effect::Fav("k".into(), "debugging".into()))];
+        let hint = fav_lines(&a, &items, &List::default(), 80).pop().unwrap();
         assert!(hint.width() <= 76 && hint.to_string().contains("r rename"), "{hint}");
     }
 
@@ -4110,14 +4217,23 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, 0);
+        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0));
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
         assert_eq!(scroll as usize, help(&app(), "").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, 0);
+        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0));
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
+        // A grid's heading is no row: the border counts the rows under it, 20 here in a box of 4 lines.
+        let grid = |scroll: &mut u16| {
+            let mut buf = Buffer::empty(area);
+            let lines = (0..22).map(|i| Line::from(format!("{i:<20}"))).collect();
+            overlay(&mut buf, area, "f", lines, scroll, Color::Reset, (1, 1));
+            (0..30).map(|x| buf[(x, 5)].symbol()).collect::<String>()
+        };
+        assert!(grid(&mut 0).contains(" 1-3 of 20 "), "{}", grid(&mut 0));
+        assert!(grid(&mut 5).contains(" 5-8 of 20 "), "{}", grid(&mut 5));
         let a = app();
         let text: Vec<String> =
             detail(&a.data.models[0], &a.store, a.any_available()).1.iter().map(ToString::to_string).collect();
@@ -4150,7 +4266,7 @@ mod tests {
     #[test]
     fn a_list_colours_what_the_table_does() {
         let fgs = |kind, label: &str, effect| {
-            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), false, 80);
+            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), false);
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
         assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
@@ -4173,33 +4289,41 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), false, 80);
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), false);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &search("gr"), false, 80);
+        let lines = choice_lines(Kind::Theme, &items, &search("gr"), false);
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
-        // f's list marks what it searches, the task, not the model that holds it now.
-        let items = vec![("☐ coding:low  (now Solo)".to_string(), Effect::Fav("k".into(), "coding:low".into()))];
-        assert_eq!(lit_text(&choice_lines(Kind::Fav, &items, &search("lo"), false, 80)), ["lo"]);
-        // An entry being written shows its box, the text and how to leave; a name not taken, why.
+        // f's grid marks what it searches, the task's name.
+        let a = app();
+        let items = vec![("coding".to_string(), Effect::Fav("k".into(), "coding".into()))];
+        assert_eq!(lit_text(&fav_lines(&a, &items, &search("od"), 80)), ["od"]);
+        // A wide name takes the cells it shows in, so its boxes stay under the heading.
+        let wide = vec![
+            ("調整".to_string(), Effect::Fav("k".into(), "調整".into())),
+            ("debugging".to_string(), Effect::Fav("k".into(), "debugging".into())),
+        ];
+        let rows = fav_lines(&a, &wide, &List::default(), 80);
+        assert_eq!(rows[1].width(), rows[2].width());
+        // A row being written shows the text and how to leave; a name not taken, why.
         let text = |what: What, text: &str, err: Option<&str>| {
             let edit = Some(Edit { what, text: text.into(), cur: 0, err: err.map(String::from) });
-            let lines = choice_lines(Kind::Fav, &items, &List { edit, ..Default::default() }, false, 80);
-            lines.iter().map(ToString::to_string).collect::<Vec<_>>()
+            let lines = fav_lines(&a, &items, &List { edit, ..Default::default() }, 80);
+            [lines[1].to_string(), lines.last().unwrap().to_string()]
         };
-        let wide = " j k move · / search · space enter toggle · v via · esc close".chars().count();
+        let wide = " j k h l move · / search · space enter toggle · v via · esc close".chars().count();
         assert_eq!(
             text(What::Rename("x".into()), "y", None),
-            [" ☐ y ".to_string(), format!("{:<wide$}", " enter apply · esc cancel")],
+            [" y ".to_string(), format!("{:<wide$}", " enter apply · esc cancel")],
             "as wide as the hint it stands for"
         );
         assert_eq!(
             text(What::About("x".into()), "", Some("no")),
-            [" ☐ x  what it is about ".to_string(), format!("{:<wide$}", " no")]
+            [" x  what it is about ".to_string(), format!("{:<wide$}", " no")]
         );
         let new = Edit { what: What::New, text: String::new(), cur: 0, err: None };
-        assert_eq!(edit_prefix("+ new task", &new), " + ");
+        assert_eq!(edit_prefix(&new), " + ");
     }
 
     #[test]

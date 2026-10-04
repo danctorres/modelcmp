@@ -32,7 +32,7 @@ pub struct Store {
     /// is a task of your own (`custom_tasks`).
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
-    /// `slot` -> the harness you run its favorite on (`fav --via`, `v` in `f`'s list): `--id`
+    /// `slot` -> the harness you run its favorite on (`fav --via`, `v` in `f`'s grid): `--id`
     /// gives the id that one takes. Gone with the favorite.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub via: BTreeMap<String, String>,
