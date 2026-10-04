@@ -295,7 +295,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("0 _ $ w b", "first / last column; next / previous group"),
             ("gg G 3gg", "top / bottom / row 3"),
             ("( ) ^u ^d", "half a page up / down"),
-            ("] [", "next / previous selected model"),
+            ("] [", "next / previous selected model; in f's list and dropdowns, ticked entry"),
             ("} {", "next / previous available model"),
             ("v", "highlight a range; space e C act on all of it"),
         ],
@@ -589,6 +589,19 @@ pub fn searched((label, effect): &(String, Effect)) -> &str {
 pub fn choice_rows(items: &[(String, Effect)], query: &str) -> Vec<usize> {
     let q = query.to_lowercase();
     (0..items.len()).filter(|&i| searched(&items[i]).to_lowercase().contains(&q)).collect()
+}
+
+/// The `n`th index after `cur` that `hit` holds for among `len`, before it for a negative `n`:
+/// as `step` does, a move stops at the last such one, and one that starts there wraps around to
+/// the first. None when that leaves the cursor where it is.
+fn nth_hit(cur: usize, len: usize, n: isize, hit: impl Fn(&usize) -> bool) -> Option<usize> {
+    let count = n.unsigned_abs();
+    let to = if n > 0 {
+        (cur + 1..len).filter(&hit).take(count).last().or_else(|| (0..len).find(&hit))
+    } else {
+        (0..cur.min(len)).rev().filter(&hit).take(count).last().or_else(|| (0..len).rev().find(&hit))
+    };
+    to.filter(|&r| r != cur)
 }
 
 /// Index `i` moved by `n` in a list of `len`: a move stops at an end, and one that starts
@@ -1074,18 +1087,48 @@ impl App {
     /// `n`: as `step` does, a move stops at the last such row, and one that starts there wraps
     /// around to the first. When the cursor stays, says no other `what` model is shown.
     fn jump(&mut self, n: isize, what: &str, hit: impl Fn(&Self, &Model) -> bool) {
-        let (cur, len, count) = (self.selected(), self.rows.len(), n.unsigned_abs());
-        let holds = |r: &usize| hit(self, &self.data.models[self.rows[*r]]);
-        let to = if n > 0 {
-            (cur + 1..len).filter(&holds).take(count).last().or_else(|| (0..len).find(&holds))
-        } else {
-            (0..cur).rev().filter(&holds).take(count).last().or_else(|| (0..len).rev().find(&holds))
-        };
-        match to {
-            Some(r) if r != cur => self.select(r),
-            _ => {
+        let cur = self.selected();
+        match nth_hit(cur, self.rows.len(), n, |r| hit(self, &self.data.models[self.rows[*r]])) {
+            Some(r) => self.select(r),
+            None => {
                 let other = if self.current().is_some_and(|m| hit(self, m)) { "other " } else { "" };
                 self.refuse(format!("no {other}{what} model is shown"));
+            }
+        }
+    }
+
+    /// `]` `[` in `f`'s list and the dropdowns: the cursor to the `n`th ticked entry
+    /// below it, up for a negative `n`, as `jump` moves it in the table.
+    fn jump_ticked(&mut self, n: isize) {
+        let (ticked, what): (Vec<bool>, _) = match &self.input {
+            Input::Choose { items, list, .. } => {
+                let on = |i: usize| matches!(&items[i].1, Effect::Fav(k, s) if self.store.favorite(s) == Some(k));
+                (choice_rows(items, &list.query).into_iter().map(on).collect(), "task")
+            }
+            Input::Menu { col, items, list } => {
+                // The ticks the dropdown draws: "any" has one while nothing is picked.
+                let bench: Vec<String> = self.col_bench(*col).into_iter().map(String::from).collect();
+                let picked = match *col {
+                    1 => &self.dev,
+                    VIA => &self.via,
+                    _ => &bench,
+                };
+                let on = |i: usize| match i {
+                    _ if *col == PRICE => self.price_level() == i.checked_sub(1),
+                    0 => picked.is_empty(),
+                    _ => picked.contains(&items[i].0),
+                };
+                (menu_rows(items, &list.query).into_iter().map(on).collect(), "entry")
+            }
+            _ => return,
+        };
+        let Some((sel, _)) = self.list() else { return };
+        let cur = *sel;
+        match nth_hit(cur, ticked.len(), n, |r| ticked[*r]) {
+            Some(r) => *sel = r,
+            None => {
+                let other = if ticked.get(cur) == Some(&true) { "other " } else { "" };
+                self.refuse(format!("no {other}ticked {what} is shown"));
             }
         }
     }
@@ -1714,11 +1757,15 @@ impl App {
         self.store.is_favorite(self.task_at_hand(), key)
     }
 
-    /// `f`'s list of tasks for the model `key`, starting on the task at hand, so f enter toggles it.
+    /// `f`'s list of tasks for the model `key`, starting on a task it is the favorite for, the
+    /// one at hand or its tier before another, else on the task at hand, so f enter toggles it.
     fn ask_fav(&mut self, key: &str) {
         let items = self.fav_items(key);
         let own = if self.view == View::Recommend { self.custom_at() } else { None };
         let at = self.task_at_hand().map(|t| t.name).or(own);
+        let favs = self.store.favorite_for(key);
+        let fav = favs.iter().find(|s| s.split(':').next() == at).or(favs.first());
+        let at = fav.map(String::as_str).or(at);
         let sel = items.iter().position(|(_, e)| matches!(e, Effect::Fav(_, s) if Some(s.as_str()) == at));
         self.input = Input::choose("favorite for which tasks?", Kind::Fav, items, sel.unwrap_or(0));
     }
@@ -2081,6 +2128,9 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.go_to(usize::MAX),
             // ^e is not `e`: only the keys above take ctrl.
             KeyCode::Char(_) if ctrl => {}
+            KeyCode::Char(c @ (']' | '[')) if self.choosing_favs() || matches!(self.input, Input::Menu { .. }) => {
+                self.jump_ticked(if c == ']' { n } else { -n })
+            }
             _ if list => return self.input_key(k.code, k.modifiers),
             _ => return self.table_key(k.code, n),
         }
@@ -3566,6 +3616,11 @@ mod tests {
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         press(&mut a, "k ");
         assert_eq!(keys(&a), ["gpt55", "mini", "opus5"], "both developers show");
+        // ] [ go round the ticked entries, as in f's list: anthropic at 1, openai at 2.
+        for sel in [2, 1] {
+            press(&mut a, "]");
+            assert!(matches!(a.input, Input::Menu { list: List { sel: s, .. }, .. } if s == sel), "] to {sel}");
+        }
         press(&mut a, "j ");
         assert_eq!((a.dev.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
         press(&mut a, "/open ");
@@ -3576,6 +3631,8 @@ mod tests {
         assert_eq!(a.dev, ["anthropic", "openai"], "esc ends the search on the match, space toggles it");
         press(&mut a, "kk ");
         assert!(a.dev.is_empty(), "space on any drops them all");
+        press(&mut a, "]");
+        assert_eq!(a.status, "no other ticked entry is shown", "any is the ticked one with nothing picked");
         press(&mut a, "j");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.dev, ["anthropic"], "enter toggles one");
@@ -4177,6 +4234,12 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
         assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
+        press(&mut a, "f");
+        assert!(
+            matches!(&a.input, Input::Choose { list: List { sel: 4, .. }, .. }),
+            "f starts on the task it is the favorite for"
+        );
+        code(&mut a, KeyCode::Esc);
         // In recommend, f starts on the task under the cursor, so f enter toggles it.
         press(&mut a, "Rjjl");
         assert_eq!(a.current().unwrap().key, "mini");
@@ -4197,8 +4260,16 @@ mod tests {
         press(&mut a, "j ");
         assert_eq!((a.store.favorite("coding:low"), a.store.favorite("coding:mid")), (Some("mini"), None));
         assert!(a.status.ends_with("coding:low"));
-        press(&mut a, " ");
+        // ] [ go round the ticked tasks: coding:low at 5 and, once ticked, overall at 0.
+        press(&mut a, "]");
+        assert!(a.failed && a.status == "no other ticked task is shown", "{}", a.status);
         press(&mut a, "5k ");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "✓ overall"));
+        for (key, sel) in [("]", 5), ("]", 0), ("[", 5), ("2[", 0), ("2]", 5)] {
+            press(&mut a, key);
+            assert!(matches!(&a.input, Input::Choose { list: List { sel: s, .. }, .. } if *s == sel), "{key} to {sel}");
+        }
+        press(&mut a, " 5k");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == "✓ overall"));
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
