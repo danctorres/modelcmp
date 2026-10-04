@@ -283,7 +283,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: overlay, highlight, filter, S, F, E, task"),
             ("q", "quit; asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
-            ("u", "upgrade modelcmp when a newer version is out; asks first"),
+            ("U", "upgrade modelcmp when a newer version is out; asks first"),
             ("B", "benchmarks from Epoch AI or Artificial Analysis"),
         ],
     ),
@@ -323,7 +323,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("f", "favorite the model for a task, a tier of one, or a task you name"),
             ("r a", "in f's list: rename a task you named, write what it is about"),
             ("e", "exclude the model"),
-            ("U", "deselect every model"),
+            ("u", "deselect every model"),
             ("S F E", "selected / favorite / excluded only"),
         ],
     ),
@@ -435,7 +435,7 @@ pub enum Input {
     },
     /// `q` asks before quitting.
     Quit,
-    /// `u` asks before upgrading.
+    /// `U` asks before upgrading.
     Upgrade,
     /// A choice of what to do, `list.sel` under the cursor: `x` on a model several harnesses
     /// have launches one, `o` opens one of the model's pages. Each item is its label and effect.
@@ -834,7 +834,7 @@ pub struct App {
     /// draws them all.
     fronts: Vec<Front>,
     pub table: TableState,
-    /// How many marks are of models the data has: the ones `S`, `C` and `U` act on, as a
+    /// How many marks are of models the data has: the ones `S`, `C` and `u` act on, as a
     /// refresh or a source switch can drop a selected model while its mark stays. Set by
     /// `rebuild`, so a frame does not scan every model for it.
     pub marked_shown: usize,
@@ -2434,9 +2434,9 @@ impl App {
             KeyCode::Char(c @ ('}' | '{')) if table => {
                 self.jump(if c == '}' { n } else { -n }, "available", |a, m| a.accessible(m));
             }
-            KeyCode::Char('U') if table && !self.any_marked() => self.refuse(NO_SELECTED),
+            KeyCode::Char('u') if table && !self.any_marked() => self.refuse(NO_SELECTED),
             // A mark of a model the data no longer has goes too, else nothing in the TUI clears it.
-            KeyCode::Char('U') if table => {
+            KeyCode::Char('u') if table => {
                 let n = self.marked_shown;
                 let gone = std::mem::take(&mut self.store.marked).len() - n;
                 self.rebuild_in_place();
@@ -2460,11 +2460,11 @@ impl App {
                 self.rebuild();
             }
             KeyCode::Char('q') => self.ask_quit(),
-            KeyCode::Char('u') if self.data.update().is_some() => self.input = Input::Upgrade,
-            KeyCode::Char('u') if self.data.latest.is_empty() => {
+            KeyCode::Char('U') if self.data.update().is_some() => self.input = Input::Upgrade,
+            KeyCode::Char('U') if self.data.latest.is_empty() => {
                 self.refuse("the newest version is not known: r asks again");
             }
-            KeyCode::Char('u') => {
+            KeyCode::Char('U') => {
                 self.status = concat!("no newer version: this is modelcmp v", env!("CARGO_PKG_VERSION")).into();
             }
             KeyCode::Esc => {
@@ -2873,7 +2873,7 @@ impl App {
             }
             Input::Upgrade => {
                 self.input = Input::None;
-                if code == KeyCode::Char('u') {
+                if code == KeyCode::Char('U') {
                     return Some(Effect::Upgrade);
                 }
             }
@@ -4416,14 +4416,14 @@ mod tests {
             (0, false, 3),
             "unmarking every marked model leaves S for every model"
         );
-        press(&mut a, "U");
+        press(&mut a, "u");
         assert_eq!(a.status, NO_SELECTED);
         press(&mut a, "gg j S");
-        assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U saves");
+        assert_eq!(press(&mut a, "u"), Some(Effect::Save), "u saves");
         assert_eq!(
             (a.store.marked.len(), a.only == Some(MARKED), a.rows.len()),
             (0, false, 3),
-            "U unmarks all and leaves S"
+            "u unmarks all and leaves S"
         );
     }
 
@@ -4432,13 +4432,13 @@ mod tests {
         let mut a = app();
         a.store.toggle_marked("gone");
         a.rebuild();
-        for k in ["]", "S", "U"] {
+        for k in ["]", "S", "u"] {
             press(&mut a, k);
             assert_eq!(a.status, NO_SELECTED, "{k}: a model gone is none");
         }
         a.store.toggle_marked("opus5");
         a.rebuild();
-        assert_eq!(press(&mut a, "U"), Some(Effect::Save), "U clears the gone model's mark too");
+        assert_eq!(press(&mut a, "u"), Some(Effect::Save), "u clears the gone model's mark too");
         assert_eq!((a.store.marked.len(), a.status.as_str()), (0, "deselected 1, and 1 no longer listed"));
         a.store.toggle_marked("opus5");
         a.store.toggle_marked("gpt55");
@@ -4727,7 +4727,7 @@ mod tests {
         assert!(!a.refresh_failed, "until one succeeds");
         assert_eq!(a.status, "data refreshed");
         // Nor after a refusal a key has since cleared.
-        press(&mut a, "U");
+        press(&mut a, "u");
         press(&mut a, "j");
         a.status = "benchmarks from Epoch AI · B to change".into();
         a.refreshed(Ok(Data::default()));
@@ -4738,11 +4738,11 @@ mod tests {
         a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }));
         assert_eq!(a.status, "user.json is not valid; pi did not list its models", "nor by a warning");
         // Why a key did nothing is red too, and no error: the refresh's outcome replaces it.
-        press(&mut a, "U");
+        press(&mut a, "u");
         assert!(a.failed && a.status.starts_with("no selected models"));
         a.refreshed(Ok(Data::default()));
         assert_eq!((a.failed, a.status.as_str()), (false, "data refreshed"));
-        press(&mut a, "U");
+        press(&mut a, "u");
         a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }));
         assert_eq!(a.status, "pi did not list its models", "as its warning does");
         // A message set under an open list is no error, whatever stood before it.
@@ -4923,19 +4923,19 @@ mod tests {
     }
 
     #[test]
-    fn u_upgrades_only_to_a_newer_release() {
+    fn upgrade_only_to_a_newer_release() {
         let mut a = app();
-        assert_eq!((press(&mut a, "u"), &a.input), (None, &Input::None), "nothing newer: nothing to ask");
+        assert_eq!((press(&mut a, "U"), &a.input), (None, &Input::None), "nothing newer: nothing to ask");
         assert!(a.status.contains("not known"), "{}", a.status);
         a.data.latest = env!("CARGO_PKG_VERSION").into();
-        press(&mut a, "u");
+        press(&mut a, "U");
         assert!(a.status.contains("no newer version"), "{}", a.status);
         a.data.latest = "99.0.0".into();
-        assert_eq!((press(&mut a, "u"), &a.input), (None, &Input::Upgrade), "u asks");
+        assert_eq!((press(&mut a, "U"), &a.input), (None, &Input::Upgrade), "U asks");
         assert_eq!((press(&mut a, "q"), &a.input), (None, &Input::None), "any other key cancels");
-        assert_eq!(press(&mut a, "uu"), Some(Effect::Upgrade));
+        assert_eq!(press(&mut a, "UU"), Some(Effect::Upgrade));
         assert_eq!(a.input, Input::None, "the TUI stays open when there is no command to run");
-        press(&mut a, "u");
+        press(&mut a, "U");
         a.set_data(Data::default());
         assert_eq!(a.input, Input::None, "a refresh that lost the release takes the question back");
     }

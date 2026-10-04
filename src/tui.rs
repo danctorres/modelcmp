@@ -870,7 +870,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 view.push("c clear");
             }
             if app.any_marked() {
-                view.push("U deselect");
+                view.push("u deselect");
             }
             if stale(app) {
                 view.push("r refresh");
@@ -1269,7 +1269,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         // The refresh state is always in view: under way, failed, or how old the data is.
         let age = format!("{} ", data_age(&app.data));
         let version = match app.data.update() {
-            Some(new) => Line::from(format!(" modelcmp v{new} available: u upgrades ")).style(fg(Color::Yellow)),
+            Some(new) => Line::from(format!(" modelcmp v{new} available: U upgrades ")).style(fg(Color::Yellow)),
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         };
         let source = format!(" models.dev + {} · ", data::source().label());
@@ -1409,10 +1409,10 @@ fn draw(app: &mut App, f: &mut Frame) {
             })
             .collect();
     }
-    // `q` and `u` ask first: the same box, confirmed by the same key again.
+    // `q` and `U` ask first: the same box, confirmed by the same key again.
     let ask = match app.input {
         Input::Quit => Some(("q", "quit?".to_string())),
-        Input::Upgrade => app.data.update().map(|new| ("u", format!("upgrade to v{new}?"))),
+        Input::Upgrade => app.data.update().map(|new| ("U", format!("upgrade to v{new}?"))),
         _ => None,
     };
     if let Some((key, title)) = ask {
@@ -1936,7 +1936,7 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     if stale(app) {
         parts.push(part(data_age(&app.data), BAD));
     }
-    // The marks of models the data has, as S, C and U count them.
+    // The marks of models the data has, as S, C and u count them.
     let selected = format!("{} selected", app.marked_shown);
     if app.any_marked() && app.only != Some(MARKED) {
         parts.push(part(selected.clone(), MARK));
@@ -3055,8 +3055,8 @@ mod tests {
         let (opus, flash) = (row("opus"), row("flash"));
         assert!(lines[flash as usize].contains('✓') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
         a.rebuild();
-        let deselect = |a: &App| hints(a, 200).contains(&"U deselect");
-        assert!(deselect(&a) && !deselect(&app()), "U is a hint while a model is selected");
+        let deselect = |a: &App| hints(a, 200).contains(&"u deselect");
+        assert!(deselect(&a) && !deselect(&app()), "u is a hint while a model is selected");
         let filled = |y: u16| (0..120).all(|x| buf[(x, y)].bg == MARK && buf[(x, y)].fg == Color::Black);
         assert!(filled(flash), "the row is filled through the border, black on the mark colour");
         assert!((0..120).all(|x| buf[(x, opus)].bg != MARK), "and only that row");

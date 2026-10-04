@@ -41,7 +41,7 @@ cargo install --git https://github.com/danctorres/modelcmp
 Linux and macOS; binaries are on the [releases](https://github.com/danctorres/modelcmp/releases)
 page. `cargo install` needs Rust 1.89 or later.
 
-When a newer version is out the TUI says so, and `u` there upgrades to it.
+When a newer version is out the TUI says so, and `U` there upgrades to it.
 
 ## Usage
 
