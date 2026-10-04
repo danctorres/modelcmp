@@ -72,9 +72,12 @@ enum Cmd {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
-        /// Only the provider/model ids opencode takes, one per line: `opencode -m $(modelcmp list --task coding --tier mid --id)`
+        /// Only the provider/model ids opencode takes, one per line: `opencode -m $(modelcmp list --task coding --tier mid --id)`; a favorite given a harness (`fav --via`) prints the id that one takes, unless --via names another
         #[arg(long, conflicts_with = "json")]
         id: bool,
+        /// Only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`; the harness of a favorite given one (`fav --via`), else the first that has the model, among --via's when given
+        #[arg(long, conflicts_with_all = ["json", "id"])]
+        cmd: bool,
     },
     /// Everything about one model
     Show {
@@ -133,6 +136,9 @@ enum Cmd {
         /// Only for `list --tier` with this tier, e.g. a cheap model for low and a strong one for the task
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
+        /// The harness you run it on (opencode, pi, omp, claude, codex, gemini, copilot): `list --task --id` prints the id that one takes
+        #[arg(long, requires = "model")]
+        via: Option<String>,
         /// Clear the task's favorite, or with --tier the tier's; a task of your own is gone with its last model
         #[arg(long, requires = "task")]
         rm: bool,
@@ -209,7 +215,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // Loaded after the download, which can take a minute: what the TUI or an agent saved meanwhile is kept.
     let mut store = Store::load();
     match cmd {
-        Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id } => {
+        Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id, cmd } => {
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
             // Epoch has no speed: a bound on it would drop every model, a sort do nothing.
             if let Some(c) =
@@ -228,7 +234,8 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
             // A name that is no built-in task is one of your own.
             let task = t.as_deref().and_then(fit::task);
             let custom = t.filter(|_| task.is_none());
-            let opts = cli::ListOpts { task, custom, tier, sort, bounds, all, selected, dev, via, limit, json, id };
+            let opts =
+                cli::ListOpts { task, custom, tier, sort, bounds, all, selected, dev, via, limit, json, id, cmd };
             cli::list(&data, &store, &opts)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
@@ -238,8 +245,11 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),
-        Cmd::Fav { task, model, tier, rm, about, .. } => {
-            let (task, tier, model) = (task.as_deref(), tier.as_deref(), model.as_deref());
+        Cmd::Fav { task, model, tier, via, rm, about, .. } => {
+            let (task, tier) = (task.as_deref(), tier.as_deref());
+            // As `list --via` takes a harness: in any case.
+            let via = via.map(|h| h.to_lowercase());
+            let model = model.as_deref().map(|m| (m, via.as_deref()));
             cli::fav(&data, &mut store, task, tier, model, rm, about.as_deref())
         }
         Cmd::Recommend { json } => cli::recommend(&data, &store, json),

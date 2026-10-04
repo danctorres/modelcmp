@@ -47,6 +47,8 @@ modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosi
 modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp fav coding 3.7-flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
+modelcmp fav coding opus-5.5 --via claude       # and the harness you run it on: list --task coding --id prints the id claude takes
+modelcmp list --task coding --tier mid --cmd    # the command that opens a harness on it: the favorite's harness, else the first that has the model
 modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"  # a task of your own: its model and what it is about; --rm clears the model
 modelcmp fav debugging --about "bugs and flaky tests"               # rewrite what it is about; "" clears it
 modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --task debugging --tier low returns it
@@ -73,7 +75,7 @@ evaluated, `mid` the cheapest in the top quarter, `high` the best; the best when
 tier's pick. Every favorite of the task sits on the task's list, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
-`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay. With no match it is an error (exit code 1), so a harness is never started on an empty model.
+`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model; `--via opencode` keeps the id opencode takes, for a script that always starts opencode. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. With no match it is an error (exit code 1), so a harness is never started on an empty model.
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name
@@ -93,7 +95,7 @@ the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
 ```sh
 opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just provider/model
-modelcmp recommend --json                      # choose the task by its "when"; each has its frontier, the user's "favorite" and "tier_favorites"
+modelcmp recommend --json                      # choose the task by its "when"; each has its frontier, the user's "favorite" and "tier_favorites", and their harnesses as "via" and "tier_via"
 modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite for the tier or task when set, else the tier's
 ```
 
@@ -107,4 +109,4 @@ the favorite is marked `not recommended`, and its `recommend --json` entry has `
 A task of your own follows the built-in ones in `recommend --json` with the same fields and
 `"custom": true`: its `about` is what the user wrote (`your own task` when nothing), its `when`
 says it wins over a built-in task that fits too, its `favorite` and `tier_favorites` are the
-models the user gave it, and its `frontier` lists them, cheapest first, with a null `score`.
+models the user gave it, `via` and `tier_via` the harnesses they run on when the user chose one (null and `{}` otherwise, as for a built-in task), and its `frontier` lists them, cheapest first, with a null `score`.

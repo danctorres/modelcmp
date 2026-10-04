@@ -32,6 +32,10 @@ pub struct Store {
     /// is a task of your own (`custom_tasks`).
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
+    /// `slot` -> the harness you run its favorite on (`fav --via`, `v` in `f`'s list): `--id`
+    /// gives the id that one takes. Gone with the favorite.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub via: BTreeMap<String, String>,
     /// What each task of your own is about, in your words, by its name: agents choose it by that.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub about: BTreeMap<String, String>,
@@ -199,6 +203,9 @@ impl Store {
         // A slot of no tier is a task of your own with no model to show, and could not be cleared.
         let tier = |x: &str| crate::view::TIERS.iter().any(|t| t.0 == x);
         s.favorite.retain(|k, _| k.split_once(':').is_none_or(|(_, x)| tier(x)));
+        // A harness is its favorite's: one left by a hand edit has no model to run.
+        let Store { favorite, via, .. } = &mut s;
+        via.retain(|k, _| favorite.contains_key(k));
         // A task gone with its models leaves what it was about, in case one comes back before
         // the file is closed; no longer than that.
         let tasks: Vec<String> = s.custom_tasks().into_iter().map(String::from).collect();
@@ -273,6 +280,21 @@ impl Store {
         self.favorite.get(task).map(String::as_str)
     }
 
+    /// The harness you run the slot's favorite on, when you chose one.
+    pub fn via(&self, slot: &str) -> Option<&str> {
+        self.via.get(slot).map(String::as_str)
+    }
+
+    /// The harness of `key` as a favorite of the task: with a tier, the tier's when it is that
+    /// one's favorite, else the task's, as `--tier` picks; with none, of the first slot it has.
+    pub fn task_via(&self, task: &str, tier: Option<&str>, key: &str) -> Option<&str> {
+        let slots: Vec<String> = match tier {
+            Some(x) => vec![slot(task, Some(x)), slot(task, None)],
+            None => task_slots(task).collect(),
+        };
+        slots.iter().find(|s| self.favorite(s) == Some(key)).and_then(|s| self.via(s))
+    }
+
     /// What `--tier` tries before the computed pick, in order: the tier's favorite, then the task's.
     pub fn tier_favorites(&self, task: &str, tier: &str) -> impl Iterator<Item = &str> {
         [self.favorite(&slot(task, Some(tier))), self.favorite(task)].into_iter().flatten()
@@ -308,6 +330,9 @@ impl Store {
             return Err(format!("there is a task {new} already"));
         }
         for (from, to) in task_slots(old).zip(task_slots(new)) {
+            if let Some(via) = self.via.remove(&from) {
+                self.via.insert(to.clone(), via);
+            }
             if let Some(model) = self.favorite.remove(&from) {
                 self.favorite.insert(to, model);
             }
@@ -341,10 +366,22 @@ impl Store {
     /// Make `key` the favorite for the slot, or nothing when it already was: `f` toggles.
     pub fn toggle_favorite(&mut self, slot: &str, key: &str) {
         if self.favorite.get(slot).is_some_and(|k| k == key) {
-            self.favorite.remove(slot);
+            self.clear_favorite(slot);
         } else {
-            self.favorite.insert(slot.to_string(), key.to_string());
+            self.set_favorite(slot, key, None);
         }
+    }
+
+    /// Make `key` the slot's favorite, run on the harness `via` when one is given.
+    pub fn set_favorite(&mut self, slot: &str, key: &str, via: Option<&str>) {
+        self.favorite.insert(slot.to_string(), key.to_string());
+        set_text(&mut self.via, slot, via.unwrap_or(""));
+    }
+
+    /// The slot left with no favorite, nor its harness; false when it had none.
+    pub fn clear_favorite(&mut self, slot: &str) -> bool {
+        self.via.remove(slot);
+        self.favorite.remove(slot).is_some()
     }
 
     /// Empty text deletes the note.
@@ -418,6 +455,13 @@ mod tests {
         assert_eq!(s.tier_favorites("coding", "mid").collect::<Vec<_>>(), ["gpt55"], "else the task's");
         assert_eq!(s.task_favorites("coding"), ["gpt55", "flash"], "each model once");
         assert_eq!(s.favorite_for("gpt55"), ["coding", "coding:high"]);
+        s.set_favorite("coding", "gpt55", Some("codex"));
+        assert_eq!(s.task_via("coding", Some("mid"), "gpt55"), Some("codex"), "the task's harness");
+        assert_eq!(s.task_via("coding", Some("high"), "gpt55"), None, "the tier's favorite has none of its own");
+        assert_eq!(s.task_via("coding", Some("low"), "gpt55"), Some("codex"), "the tier's hidden: the task's");
+        assert_eq!(s.task_via("coding", None, "gpt55"), Some("codex"), "no tier: the slot it is the favorite of");
+        s.toggle_favorite("coding", "flash");
+        assert_eq!(s.via("coding"), None, "another model: the harness goes with the one it was for");
         // Files written before the renames call favorites "preferred" and pins "favorites".
         let file = br#"{"preferred":{"coding":"old","debugging":"old","debugging:fast":"x","long-context:low":"x"},"favorites":["old"]}"#;
         std::fs::write(&p, file).unwrap();

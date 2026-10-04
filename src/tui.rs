@@ -539,7 +539,7 @@ fn event_loop(
                         app.refreshing = rx.is_some();
                     }
                     // The app applies its own chooser items before they get here.
-                    Some(Effect::Fav(..) | Effect::NewTask(_) | Effect::Theme(_)) | None => {}
+                    Some(Effect::Fav(..) | Effect::Via(..) | Effect::NewTask(_) | Effect::Theme(_)) | None => {}
                 }
                 if matches!(app.input, Input::None) {
                     // The first start's download is for its question: closed without a pick of
@@ -2030,6 +2030,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
+                Kind::Via => "VIA",
                 Kind::Fav => "FAV",
                 Kind::Theme => "THEME",
                 Kind::Source => "SOURCE",
@@ -2234,7 +2235,9 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // theme and a source have none, so they take the text's and not one their name gives.
             let color = match effect {
                 Effect::Fav(_, slot) => task_color(slot),
-                Effect::Launch(_) => dev_color(label.split(' ').next().unwrap_or_default()),
+                Effect::Launch(_) | Effect::Via(_, _, Some(_)) => {
+                    dev_color(label.split(' ').next().unwrap_or_default())
+                }
                 _ => Color::Reset,
             };
             if let (Some(e), true) = (&list.edit, i == list.sel) {
@@ -2244,7 +2247,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // the command that opens it.
             let name = match effect {
                 Effect::Source(src) => Some((label.len() - src.about().len(), Style::new().add_modifier(BOLD))),
-                Effect::Launch(_) => Some((label.find(' ').unwrap_or(label.len()), fg(color))),
+                Effect::Launch(_) | Effect::Via(..) => Some((label.find(' ').unwrap_or(label.len()), fg(color))),
                 _ => None,
             };
             if let Some((end, style)) = name {
@@ -2281,12 +2284,14 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
                 .iter()
                 .any(|(_, e)| matches!(e, Effect::Fav(_, s) if !s.contains(':') && fit::task(s).is_none())) =>
         {
-            " j k move · / search · space enter toggle · r rename · a about · esc close"
+            // Enter toggles too, left unsaid: with it the line is wider than 80 columns hold.
+            " j k move · / search · space toggle · v via · r rename · a about · esc close"
         }
-        Kind::Fav => " j k move · / search · space enter toggle · esc close",
+        Kind::Fav => " j k move · / search · space enter toggle · v via · esc close",
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
         Kind::Source if first => " j k move · / search · enter picks · esc default · B changes it later",
         Kind::Source => " j k move · / search · enter picks · esc close",
+        Kind::Via => " j k move · / search · enter picks · esc back",
         Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
     };
     // An entry being written takes every key; a name enter did not take says why. As wide as
@@ -4183,7 +4188,7 @@ mod tests {
             let lines = choice_lines(Kind::Fav, &items, &List { edit, ..Default::default() }, false, 80);
             lines.iter().map(ToString::to_string).collect::<Vec<_>>()
         };
-        let wide = " j k move · / search · space enter toggle · esc close".chars().count();
+        let wide = " j k move · / search · space enter toggle · v via · esc close".chars().count();
         assert_eq!(
             text(What::Rename("x".into()), "y", None),
             [" ☐ y ".to_string(), format!("{:<wide$}", " enter apply · esc cancel")],

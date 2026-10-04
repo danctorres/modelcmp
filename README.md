@@ -86,6 +86,10 @@ A favorite can also cover one tier of a task, so easy work goes to a cheaper mod
 work: `modelcmp fav coding 3.7-flash --tier low` makes `--tier low` return Gemini 3.7 Flash while the other
 tiers keep your coding favorite. In the TUI, `f` lists each task's tiers under it.
 
+A favorite can name the harness you run it on: `modelcmp fav coding opus-5.5 --via claude`, or
+`v` in `f`'s list. `--id` then prints the id that harness takes, `--cmd` the whole command
+(`claude --model claude-opus-5-5`), and `recommend --json` says which harness it is.
+
 A task can be one you name yourself, with the model you give it and what it is about:
 `modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"`, or `+ new task` at the end
 of `f`'s list. No benchmark ranks it, so `recommend` shows it with that model alone and
@@ -102,7 +106,8 @@ opencode -m $(modelcmp list --task coding --tier mid --id)   # or ask it yoursel
 ```
 
 `recommend --json` gives your model for a task as its `favorite`, and per tier as
-`tier_favorites`; `--tier` returns the tier's, else the task's. Your own tasks are there too,
+`tier_favorites`, with their harnesses as `via` and `tier_via` when you chose one; `--tier`
+returns the tier's, else the task's. Your own tasks are there too,
 marked `"custom": true`, and win over a built-in task that fits the same work. It
 also gives each frontier model's `note` (written with `n` or `modelcmp note`), which the skill
 uses to rule out a model or choose between close ones.
