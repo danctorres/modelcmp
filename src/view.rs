@@ -684,7 +684,9 @@ pub fn detail_rows(m: &Model, store: &Store, any: bool) -> Vec<(Option<&'static 
         v.extend(other.map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
     }
     v.push(String::new());
-    v.push("  providers ($ per 1M tokens in / cached in / out, model id):".into());
+    v.push("  providers ($ per 1M tokens):".into());
+    // Each label over its column of the rows below.
+    v.push(format!("{:26}{:>8} {:>8} {:>8}  model id", "", "in", "cached", "out"));
     let mut offers: Vec<&Offer> = m.offers.iter().collect();
     // Available first, then cheapest; unknown price ("-") last.
     let cost = |o: &Offer| if o.unpriced { f64::MAX } else { o.blended() };
