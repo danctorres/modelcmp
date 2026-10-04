@@ -16,8 +16,8 @@ use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
-    CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, age, compare_rows, custom_priced, detail_rows,
-    frontier_legend, hits, level, level_label, money, priced, truncate, verdict,
+    CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, compare_rows, detail_rows, hits,
+    level, level_label, money, priced, truncate, verdict,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::Show;
@@ -910,16 +910,21 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         View::Compare => {
             vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("enter x o y f e n"), BACK.to_vec()]
         }
-        // On a task's name, enter ranks by it; on a model, it and the others act on the model.
+        // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
         // On the `among` line, the models it ranks.
         View::Recommend if app.among.is_some() => {
             vec![vec!["j k task", "h l 0 $ which models"], vec!["enter pick"], BACK.to_vec()]
         }
         View::Recommend if app.current().is_none() => {
-            let enter = if app.custom_at().is_some() { "enter your model" } else { "enter best models first" };
-            vec![vec!["j k task", "h l 0 $ model"], vec![enter], BACK.to_vec()]
+            // A tier with no model has nothing for enter either.
+            let enter = match (app.task_sel, app.custom_at()) {
+                (1.., _) => vec![],
+                (_, Some(_)) => vec!["enter your model"],
+                _ => vec!["enter best models first"],
+            };
+            vec![vec!["j k task", "h l 0 $ tier"], enter, BACK.to_vec()]
         }
-        View::Recommend => vec![vec!["j k task", "h l 0 $ model"], actions("enter x o y space f e n"), BACK.to_vec()],
+        View::Recommend => vec![vec!["j k task", "h l 0 $ tier"], actions("enter x o y space f e n"), BACK.to_vec()],
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
@@ -1359,13 +1364,13 @@ fn draw(app: &mut App, f: &mut Frame) {
     // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
     let mut cursor = status(buf, bar, app).map(|x| (x, bar.y));
     // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
-    let (mut spots, mut block) = (vec![], None);
+    let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
     let lines = match app.view {
         View::Table => None,
         View::Help => Some(("keys".to_string(), help(app, &app.overlay_query))),
         View::Recommend => {
             let lines;
-            (lines, block) = recommend(app, (area.width as usize).saturating_sub(4).min(130), &mut spots);
+            (lines, block, pin) = recommend(app, (area.width as usize).saturating_sub(4).min(130), &mut spots);
             Some(("recommend".to_string(), lines))
         }
         View::Detail(_) => app.current().map(|m| detail(m, &app.store, app.any_available())),
@@ -1400,27 +1405,30 @@ fn draw(app: &mut App, f: &mut Frame) {
     app.panel = lines.as_ref().map(|(title, lines)| overlay_rect(body, title, lines));
     if let Some((title, lines)) = lines {
         if app.view == View::Recommend {
-            // Keep the cursor's task block in view.
+            // Keep the cursor's task row in view, over the lines pinned under the grid.
             if let Some(std::ops::Range { start, end }) = block {
-                let shown = body.height.saturating_sub(2) as usize;
-                // No cursor goes to the lines above the first block and under the last: they
+                let rows = body.height.saturating_sub(2) as usize;
+                let under = pinned(lines.len(), rows, &pin);
+                let (shown, len) = (rows - under, lines.len() - under);
+                // No cursor goes to the lines above the first row and under the last: they
                 // show with it, where they fit.
                 let (first, last) = (app.task_cur == 0, app.task_cur + 1 >= app.task_count());
                 let (start, end) = (
                     if first && end <= shown { 0 } else { start },
-                    if last && lines.len() - start <= shown { lines.len() } else { end },
+                    if last && len - start <= shown { len } else { end },
                 );
                 let lo = end.saturating_sub(shown).min(start);
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, (0, 0));
+        let under = pinned(lines.len(), body.height.saturating_sub(2) as usize, &pin);
+        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, (0, 0, pin));
         // Where each spot landed on screen, scrolled and cut to the box, for a click to find it.
         let top = app.scroll as usize;
         app.spots = spots
             .into_iter()
             .filter_map(|p| {
-                let ys = p.lines.start.max(top)..p.lines.end.min(top + text.height as usize);
+                let ys = p.lines.start.max(top)..p.lines.end.min(top + text.height as usize - under);
                 let xs = p.x.start..p.x.end.min(text.width as usize);
                 let rect = Rect::new(
                     text.x + xs.start as u16,
@@ -1441,7 +1449,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some((key, title)) = ask {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0, Color::Reset, (0, 0));
+        overlay(buf, body, &title, lines, &mut 0, Color::Reset, (0, 0, 0..0));
     }
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
@@ -1465,7 +1473,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         // Under the wordmark the box is muted, as the table's frame; over the table it has
         // the text's colour, as every box there, which parts it from that frame.
         let border = if splash.is_some() { MUTED } else { Color::Reset };
-        let ends = (head, lines.len() - rows - head);
+        let ends = (head, lines.len() - rows - head, 0..0);
         let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, border, ends);
         *top = usize::from(scroll);
         if rows > 0 {
@@ -2434,6 +2442,14 @@ fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
 
+type Lines = std::ops::Range<usize>;
+
+/// How many of an overlay's `pin` lines stay put under the others, which scroll: all of them in
+/// a box too short for every line, unless they would leave the others no row.
+fn pinned(lines: usize, shown: usize, pin: &Lines) -> usize {
+    if lines > shown && pin.len() < shown { pin.len() } else { 0 }
+}
+
 /// Where overlay lines show something to click: cells `x` of lines `lines`, and what is there.
 struct Spot {
     lines: std::ops::Range<usize>,
@@ -2443,19 +2459,23 @@ struct Spot {
 
 /// A centred rounded box in `border`, its title bold in the text's colour, showing `lines` from
 /// `scroll` on, which is clamped to the content: the accent is left to the table's headers and
-/// the cursor. Returns where the lines went, and whether some are scrolled off above and below.
+/// the cursor. The lines `pin`, which say what the cursor is on, stay at the bottom of a box
+/// too short for every line (`pinned`). Returns where the lines went, and whether some are
+/// scrolled off above and below.
 fn overlay(
     buf: &mut Buffer,
     area: Rect,
     title: &str,
-    lines: Vec<Line<'static>>,
+    mut lines: Vec<Line<'static>>,
     scroll: &mut u16,
     border: Color,
-    (head, tail): (usize, usize),
+    (head, tail, pin): (usize, usize, Lines),
 ) -> (Rect, bool, bool) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
-    let shown = h.saturating_sub(2) as usize;
+    let rows = h.saturating_sub(2) as usize;
+    let pin: Vec<_> = if pinned(lines.len(), rows, &pin) > 0 { lines.drain(pin).collect() } else { vec![] };
+    let shown = rows - pin.len();
     *scroll = (*scroll).min(lines.len().saturating_sub(shown) as u16);
     // Where you are; the keys are in the status bar. The first `head` lines, a grid's heading,
     // and the last `tail`, a list's hint, are none of what is counted.
@@ -2475,12 +2495,12 @@ fn overlay(
     Clear.render(rect, buf);
     block.render(rect, buf);
     let (above, below) = (*scroll > 0, *scroll as usize + shown < lines.len());
-    for (line, y) in lines.into_iter().skip(*scroll as usize).zip(text.y..text.bottom()) {
+    for (line, y) in lines.into_iter().skip(top).take(shown).chain(pin).zip(text.y..text.bottom()) {
         line.render(Rect { y, height: 1, ..text }, buf);
     }
     // A box of one line, under the tabs on a screen of four, has no text to mark.
     if text.height > 0 {
-        vmarks(buf, rect.x, text.y, text.bottom() - 1, above, below);
+        vmarks(buf, rect.x, text.y, text.y + shown as u16 - 1, above, below);
     }
     (text, above, below)
 }
@@ -2527,20 +2547,16 @@ fn help(app: &App, query: &str) -> Vec<Line<'static>> {
     v
 }
 
-/// One block per task: what it is, when to pick a model high on it and its best models per
-/// price, wrapped to `width`. The cursor's block is highlighted; enter
-/// ranks the table by it. Your own tasks follow, each with the model you gave it. Where each
-/// model and task block is goes to `spots`, and the lines of the cursor's block come back too.
-fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'static>>, Option<std::ops::Range<usize>>) {
-    let cur = app.current().map(|m| m.key.clone());
+/// What a box of recommend's grid shows.
+const TIER_LEGEND: &str = "each tier's model: ★ your favorite, else the cheapest that scores enough (high: the best), \
+                           as name $/1M tokens (score on the task)";
+
+/// A row per task, the built-in ones and then your own, with a box per tier for the model it
+/// picks, as `--tier` does, wrapped to `width`; under the grid, what the cursor's task is, when
+/// to use it and its box's model in full. Where each name and box is goes to `spots`, and the
+/// lines of the cursor's row come back too, with the ones under the grid, for `overlay` to pin.
+fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'static>>, Option<Lines>, Lines) {
     let mut block = None;
-    let name = |i: usize, s: &str| {
-        let style = fg(task_color(s)).add_modifier(BOLD);
-        let on = i == app.task_cur && cur.is_none() && app.among.is_none();
-        let mut name = cursor(on, vec![Span::styled(s.to_string(), style)]);
-        name.push(Span::raw(" "));
-        name
-    };
     let label = |s: &'static str| vec![Span::styled(s, fg(MUTED))];
     let words = |s: &str| s.split(' ').map(|w| Line::from(w.to_string())).collect();
     let space = Span::raw(" ");
@@ -2567,65 +2583,74 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         v.last_mut().unwrap().push_span(note);
     }
     let among = v.len();
-    v.extend(wrapped(vec![], words(&frontier_legend(false)), &space, width).into_iter().map(|l| l.style(fg(MUTED))));
-    // Task `t`'s line of models, wrapped onto the end of `v`, each model a spot, and the rest
-    // of its block from line `start` one too; with none it says "no data".
-    let mut models = |v: &mut Vec<Line<'static>>, t: usize, start: usize, label, items: Vec<Line<'static>>| {
-        let none = items.is_empty();
-        let items =
-            if none { vec![Line::from(cursor(false, vec![Span::styled("no data", fg(MUTED))]))] } else { items };
-        let (lines, at) = wrapped_at(label, items, &Span::styled("·", fg(MUTED)), width);
+    v.extend(wrapped(vec![], words(TIER_LEGEND), &space, width).into_iter().map(|l| l.style(fg(MUTED))));
+    v.push(Line::default());
+    let own = app.store.custom_tasks();
+    let about = |t| app.store.about(t).unwrap_or(CUSTOM_ABOUT);
+    let tasks: Vec<(&str, &str, &str)> = TASKS
+        .iter()
+        .map(|t| (t.name, t.about, t.when))
+        .chain(own.iter().map(|&t| (t, about(t), CUSTOM_WHEN)))
+        .collect();
+    let picks: Vec<_> = (0..tasks.len()).map(|i| app.tier_picks(i)).collect();
+    let (tasks, picks) = (&tasks, &picks);
+    let cells = |i: usize, room| (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], room));
+    // The names' column, then a box per tier: as wide as the widest entry, or as `width` leaves
+    // each, where a name is cut to fit.
+    let w = tasks.iter().map(|t| Span::raw(t.0).width()).max().unwrap_or(0).min(20);
+    let mut grid: Vec<Vec<_>> = (0..tasks.len()).map(|i| cells(i, Some(usize::MAX)).collect()).collect();
+    let widest = grid.iter().flatten().map(|e| e.iter().map(Span::width).sum::<usize>()).max().unwrap_or(0);
+    let room = (width.saturating_sub(w + 2) / TIERS.len()).saturating_sub(2).clamp(3, widest.max(4));
+    // Made again, cut, only where the width leaves a box less than its entry takes.
+    if widest > room {
+        grid = (0..tasks.len()).map(|i| cells(i, Some(room)).collect()).collect();
+    }
+    let head: String = TIERS.iter().map(|t| format!(" {:<room$} ", t.0)).collect();
+    v.push(Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED)));
+    let cur = app.among.is_none().then_some((app.task_cur, app.task_sel));
+    for (i, (t, row)) in tasks.iter().zip(grid).enumerate() {
         let y = v.len();
-        if !none {
-            let at = at.into_iter().enumerate();
-            spots.extend(at.map(|(i, (l, x))| Spot { lines: y + l..y + l + 1, x, at: Stop::Recommend(t, i + 1) }));
+        let name = truncate(t.0, w);
+        let pad = w.saturating_sub(Span::raw(name.as_str()).width());
+        let mut spans = cursor(cur == Some((i, 0)), vec![Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD))]);
+        spans.push(Span::raw(" ".repeat(pad)));
+        for (c, mut cell) in row.into_iter().enumerate() {
+            // Padded to the box, so the cursor's fill is as wide on every one.
+            cell.push(Span::raw(" ".repeat(room.saturating_sub(cell.iter().map(Span::width).sum()))));
+            let x = w + 2 + c * (room + 2);
+            spots.push(Spot { lines: y..y + 1, x: x..x + room + 2, at: Stop::Recommend(i, c + 1) });
+            spans.extend(cursor(cur == Some((i, c + 1)), cell));
         }
-        v.extend(lines);
-        spots.push(Spot { lines: start..v.len(), x: 0..width, at: Stop::Recommend(t, 0) });
-        if t == app.task_cur && app.among.is_none() {
-            block = Some(start..v.len());
+        spots.push(Spot { lines: y..y + 1, x: 0..width, at: Stop::Recommend(i, 0) });
+        if cur.is_some_and(|c| c.0 == i) {
+            block = Some(y..y + 1);
         }
-    };
-    for (i, t) in TASKS.iter().enumerate() {
-        v.push(Line::default());
-        let start = v.len();
-        v.extend(wrapped(name(i, t.name), words(t.about), &space, width));
-        v.extend(wrapped(label("  use for:         "), words(t.when), &space, width));
-        let picked = (i == app.task_cur).then_some(cur.as_deref()).flatten();
-        // Each entry brings a cell for the cursor's bar at either end, the gaps between them.
-        models(&mut v, i, start, label("  best per price: "), frontier_spans(app, t, picked));
+        v.push(Line::from(spans));
     }
-    for (i, t) in app.store.custom_tasks().into_iter().enumerate() {
-        v.push(Line::default());
-        let start = v.len();
-        v.extend(wrapped(name(TASKS.len() + i, t), words(app.store.about(t).unwrap_or(CUSTOM_ABOUT)), &space, width));
-        v.extend(wrapped(label("  use for:         "), words(CUSTOM_WHEN), &space, width));
-        // No benchmark ranks it, so its line is the models you gave it, each with the tier it
-        // is for and no score.
-        let picked = (TASKS.len() + i == app.task_cur).then_some(cur.as_deref()).flatten();
-        let line: Vec<Line> = app
-            .custom_line(t)
-            .iter()
-            .map(|m| {
-                let said = custom_priced(m, &app.store, t, false);
-                let price =
-                    fg(m.quoted().filter(|q| !q.1 && app.accessible(m)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]));
-                let mut spans = vec![
-                    Span::styled("★ ", fg(task_color(t)).add_modifier(BOLD)),
-                    Span::styled(said.trim_start_matches("★ ").to_string(), price),
-                ];
-                spans.extend(out_of_reach(app, m));
-                Line::from(cursor(picked == Some(m.key.as_str()), spans))
-            })
-            .collect();
-        models(&mut v, TASKS.len() + i, start, label("  your model:     "), line);
+    let pin = v.len();
+    v.push(Line::default());
+    let mut under = Vec::new();
+    if let Some((i, sel)) = cur.filter(|c| c.0 < tasks.len()) {
+        let t = tasks[i];
+        let name = vec![Span::styled(t.0.to_string(), fg(task_color(t.0)).add_modifier(BOLD)), space.clone()];
+        under.extend(wrapped(name, words(t.1), &space, width));
+        under.extend(wrapped(label("  use for: "), words(t.2), &space, width));
+        if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
+            let mut line = vec![Span::styled(format!("  {:<9}", format!("{}:", TIERS[c].0)), fg(MUTED))];
+            line.extend(entry(app, t.0, c, picks[i][c], None));
+            under.push(Line::from(line));
+        }
     }
+    // Three lines whatever the cursor is on, so the box keeps its height as it moves.
+    under.resize(under.len().max(3), Line::default());
+    v.extend(under);
+    let pin = pin..v.len();
     v.push(Line::default());
     let cli = words(
         "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model> [--tier low|mid|high]",
     );
     v.extend(wrapped(vec![], cli, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
-    (v, block.or(Some(0..among)))
+    (v, block.or(Some(0..among)), pin)
 }
 
 /// `label` then `items` joined by `glue`, broken between items at `width`, continuation
@@ -2671,34 +2696,57 @@ fn wrapped_at(
     (lines, at)
 }
 
-/// `name $price (score)` for each entry of the task's price frontier, cheapest first and the
-/// best last, each in its price level's colour as in the Price column, the favorite's ★ in
-/// the task's colour, or grey and marked not recommended when it is on the line only as the
-/// favorite; grey too and marked not available when out of reach, as its row in the table. The
-/// `picked` model is under the cursor, keeping its colours as in the table.
-fn frontier_spans(app: &App, t: &fit::Task, picked: Option<&str>) -> Vec<Line<'static>> {
-    app.task_frontier(t)
-        .iter()
-        .map(|(m, s)| {
-            let fav = app.store.is_favorite(Some(t), &m.key);
-            let off = fav && app.favorite_unrecommended(t, &m.key);
-            let mut spans = Vec::with_capacity(3);
-            if fav {
-                spans.push(Span::styled("★ ", fg(task_color(t.name)).add_modifier(BOLD)));
-            }
-            let out = out_of_reach(app, m);
-            let grey = fav && off || out.is_some();
-            let price = m.quoted().filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]);
-            spans.push(Span::styled(priced(m, fit::shown(m, t, *s), false, false), fg(price)));
-            if fav && off {
-                // Both read as a list: "not recommended, not available".
-                let said = if out.is_some() { " not recommended," } else { " not recommended" };
-                spans.push(Span::styled(said, fg(MUTED).add_modifier(Modifier::ITALIC)));
-            }
-            spans.extend(out);
-            Line::from(cursor(picked == Some(m.key.as_str()), spans))
-        })
-        .collect()
+/// What tier `col` of `task` picks, for its box of recommend's grid: `name $price (score)` in
+/// its price level's colour as in the Price column, with no score on a task of your own, after
+/// a ★ in the task's colour when it is your favorite for the tier; grey when that favorite is
+/// not one recommended, or is out of reach as its row in the table, and `-` with no model. With
+/// `room` the name is cut from its start to fit it; without, the entry is whole and says why it
+/// is grey.
+fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, room: Option<usize>) -> Vec<Span<'static>> {
+    let built_in = fit::task(task);
+    let Some((m, s)) = pick else {
+        let none = if room.is_some() {
+            "-"
+        } else if built_in.is_some() {
+            "no data"
+        } else {
+            "no favorite"
+        };
+        return vec![Span::styled(none, fg(MUTED))];
+    };
+    let fav = app.store.tier_favorites(task, TIERS[col].0).any(|k| k == m.key);
+    let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
+    let out = out_of_reach(app, m);
+    let grey = off || out.is_some();
+    let price = m.quoted().filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]);
+    let rest = match built_in {
+        Some(t) => priced(m, fit::shown(m, t, s), false, false)[m.name.len()..].to_string(),
+        None => format!(" {}", crate::view::price(m)),
+    };
+    let n = m.name.chars().count();
+    let text = match room.map(|r| r.saturating_sub(if fav { 2 } else { 0 })) {
+        Some(r) if n + rest.chars().count() > r => match r.saturating_sub(rest.chars().count()) {
+            // No room for a name: what fits of the whole, so the box keeps its width.
+            0 | 1 => truncate(&format!("{}{rest}", m.name), r.max(1)),
+            // The end of a name tells it from the others, as in `Claude Opus 5.5`, so the cut keeps that.
+            k => format!("…{}{rest}", m.name.chars().skip(n + 1 - k).collect::<String>().trim_start()),
+        },
+        _ => format!("{}{rest}", m.name),
+    };
+    let mut spans = Vec::with_capacity(4);
+    if fav {
+        spans.push(Span::styled("★ ", fg(task_color(task)).add_modifier(BOLD)));
+    }
+    spans.push(Span::styled(text, fg(price)));
+    if room.is_none() {
+        if off {
+            // Both read as a list: "not recommended, not available".
+            let said = if out.is_some() { " not recommended," } else { " not recommended" };
+            spans.push(Span::styled(said, fg(MUTED).add_modifier(Modifier::ITALIC)));
+        }
+        spans.extend(out);
+    }
+    spans
 }
 
 /// What follows a recommend entry out of reach: "not available", as its Via in the table.
@@ -3471,17 +3519,16 @@ mod tests {
         );
         a.key(KeyCode::Esc.into());
         a.key(KeyCode::Char('R').into());
-        // Overall's line, cheapest first, after the task's name.
+        // Overall's row: flash for low, then opus for mid and high.
         assert_eq!(
             (at(&mut a, "opus $", none), at(&mut a, "flash $", none)),
             (Some(Mouse::Open(Stop::Recommend(0, 2))), Some(Mouse::Open(Stop::Recommend(0, 1))))
         );
         assert_eq!(at(&mut a, "✓ selected", none), Some(Mouse::Open(Stop::Among(MARKED))), "a tab of the among line");
-        let block = Some(Mouse::Open(Stop::Recommend(1, 0)));
-        assert_eq!(at(&mut a, &TASKS[1].about[..20], none), block, "the rest of a block is its task");
-        let last = TASKS.len() - 1;
-        let block = Some(Mouse::Open(Stop::Recommend(last, 0)));
-        assert_eq!(at(&mut a, "no data", none), block, "and \"no data\" is no model");
+        let name = Some(Mouse::Open(Stop::Recommend(1, 0)));
+        assert_eq!(at(&mut a, TASKS[1].name, none), name, "a task's name is its task");
+        let empty = Some(Mouse::Open(Stop::Recommend(TASKS.len() - 1, 1)));
+        assert_eq!(at(&mut a, " - ", none), empty, "and a box with no model is still its tier");
         a.mouse(Mouse::Model(Stop::Recommend(1, 0)));
         assert_eq!((a.task_cur, a.task_sel, a.current().is_none()), (1, 0, true), "a click moves to the task");
         a.mouse(Mouse::Model(Stop::Compare(2)));
@@ -3723,9 +3770,11 @@ mod tests {
         data.models.iter_mut().find(|m| m.key == "flash").unwrap().fit.insert("coding".into(), 40.0);
         a.store.toggle_favorite("coding", "flash");
         a.set_data(data);
+        // Under the grid, the box under the cursor says why.
+        (a.view, a.among, a.task_cur, a.task_sel) = (View::Recommend, None, 1, 1);
         let lines = recommend(&a, 200, &mut vec![]).0;
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
-        let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
+        let star = spans.iter().rposition(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert!(spans[star + 1].content.starts_with("flash "));
         assert_eq!(spans[star + 1].style.fg, Some(MUTED));
         assert_eq!(spans[star + 2].content, " not recommended");
@@ -3972,7 +4021,15 @@ mod tests {
         let last = screen(&mut a, "RG");
         assert!(last.contains("CLI: modelcmp recommend"), "{last}");
         let first = screen(&mut a, "gg");
-        assert!(first.contains("best per price: the top model"), "{first}");
+        assert!(first.contains("each tier's model:"), "{first}");
+        // The lines under the grid, which say what the cursor is on, stay under the rows that scroll.
+        let top = screen(&mut a, "jl");
+        assert!(top.contains("overall") && top.contains("  low:     no data"), "{top}");
+        let last = screen(&mut a, "G");
+        assert!(
+            last.contains("vision") && last.contains("  use for: screenshots") && !last.contains("among:"),
+            "{last}"
+        );
         // f's hints fit a terminal 80 columns wide, with a task of your own too.
         let items = vec![("debugging".to_string(), Effect::Fav("k".into(), "debugging".into()))];
         let hint = fav_lines(&a, &items, &List::default(), 80).pop().unwrap();
@@ -4217,19 +4274,19 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0));
+        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
         assert_eq!(scroll as usize, help(&app(), "").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0));
+        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         // A grid's heading is no row: the border counts the rows under it, 20 here in a box of 4 lines.
         let grid = |scroll: &mut u16| {
             let mut buf = Buffer::empty(area);
             let lines = (0..22).map(|i| Line::from(format!("{i:<20}"))).collect();
-            overlay(&mut buf, area, "f", lines, scroll, Color::Reset, (1, 1));
+            overlay(&mut buf, area, "f", lines, scroll, Color::Reset, (1, 1, 0..0));
             (0..30).map(|x| buf[(x, 5)].symbol()).collect::<String>()
         };
         assert!(grid(&mut 0).contains(" 1-3 of 20 "), "{}", grid(&mut 0));
@@ -4327,7 +4384,7 @@ mod tests {
     }
 
     #[test]
-    fn recommend_panel_wraps_and_highlights_the_cursor() {
+    fn recommend_panel_is_a_grid_of_tasks_and_tiers() {
         let mut a = app();
         (a.view, a.task_cur) = (View::Recommend, TASKS.iter().position(|t| t.name == "vision").unwrap());
         let lines = recommend(&a, 60, &mut vec![]).0;
@@ -4337,15 +4394,25 @@ mod tests {
             "the models it ranks come first, the dot on the ones in use"
         );
         let gap = text.iter().position(String::is_empty).unwrap();
-        assert!(gap > 2 && text[1..gap].join(" ") == frontier_legend(false), "the legend wraps: {:?}", &text[..gap]);
+        assert!(gap > 2 && text[1..gap].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..gap]);
+        let head = gap + 1;
+        assert_eq!(text[head].split_whitespace().collect::<Vec<_>>(), ["low", "mid", "high"], "a box per tier");
+        // A row per task, the cursor on the cursor task's name alone.
+        let names: Vec<&str> = text[head + 1..].iter().map_while(|l| l.split_whitespace().next()).collect();
+        let bare: Vec<&str> = names.iter().map(|n| n.trim_matches(['▌', '▐'])).collect();
+        assert_eq!(bare, TASKS.iter().map(|t| t.name).collect::<Vec<_>>());
+        assert_eq!(names.iter().filter(|n| n.starts_with('▌')).collect::<Vec<_>>(), [&"▌vision▐"]);
+        let cursor = &lines[head + 1 + a.task_cur].spans[1];
         assert_eq!(
-            text.iter().filter(|l| l.is_empty()).count(),
-            TASKS.len() + 1,
-            "a block per task, then the CLI line"
+            (cursor.content.as_ref(), cursor.style.fg, cursor.style.bg),
+            ("vision", Some(TASK[a.task_cur]), Some(CURSOR))
         );
-        let names: Vec<&str> = text.iter().filter_map(|l| l.strip_prefix(' ')?.split_whitespace().next()).collect();
-        assert_eq!(names[..2], ["overall", "use"], "overall comes first");
-        // The cursor is on the cursor task's name or one of its models, not both; other tasks have none.
+        // Under the grid, what that task is and when to use it.
+        let under = head + 1 + TASKS.len() + 1;
+        assert!(text[under].starts_with("vision image input"), "{}", text[under]);
+        assert!(text[under + 1].starts_with("  use for: screenshots"), "{}", text[under + 1]);
+        let long: Vec<&String> = text.iter().filter(|l| l.chars().count() > 60).collect();
+        assert!(long.is_empty(), "wrapped to the width: {long:?}");
         let mut b = app();
         let mut data = std::mem::take(&mut b.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
@@ -4355,7 +4422,7 @@ mod tests {
         (b.view, b.task_sel) = (View::Recommend, 2);
         // On the `among` line it is on a tab alone, the one in use bold, and "(filtered)" says a search narrows them.
         (b.among, b.query) = (Some(1), "o".into());
-        let (top, block) = recommend(&b, 200, &mut vec![]);
+        let (top, block, _) = recommend(&b, 200, &mut vec![]);
         let on: Vec<&Span> = top.iter().flat_map(|l| l.spans.iter()).filter(|s| s.style.bg == Some(CURSOR)).collect();
         assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..1), "{on:?} {block:?}");
         let yours = top[0].spans.iter().find(|s| s.content == "● yours").unwrap();
@@ -4366,16 +4433,24 @@ mod tests {
         );
         let narrow = recommend(&b, 60, &mut vec![]).0;
         assert_eq!(narrow[1].to_string(), "       (filtered)", "it wraps where the tabs fill the line");
+        // On a tier, the cursor is on its box, as wide as every other, and not on the name.
         (b.among, b.query) = (None, String::new());
-        let bars: Vec<String> = recommend(&b, 200, &mut vec![])
-            .0
+        let all = recommend(&b, 200, &mut vec![]).0;
+        let bars: Vec<&str> = all
             .iter()
             .flat_map(|l| l.spans.iter())
             .filter(|s| s.style.bg == Some(CURSOR))
-            .map(|s| s.content.to_string())
+            .map(|s| &*s.content)
             .collect();
-        assert!(bars.len() == 3 && bars[1].starts_with("opus "), "the best of overall, its name not: {bars:?}");
-        // Among all, a model out of reach is grey and says so, one of yours keeps its price's colour.
+        assert_eq!(bars, ["▌", "opus $5.0 (150)", "  ", "▐"], "mid of overall, padded to the widest entry");
+        let row = all.iter().map(ToString::to_string).find(|l| l.starts_with(" overall")).unwrap();
+        let picks: Vec<&str> = row.split_whitespace().filter(|w| w.ends_with(['s', 'h'])).collect();
+        assert_eq!(picks, ["flash", "▌opus", "opus"], "what each tier picks: low, mid and high");
+        assert!(all.iter().any(|l| l.to_string() == "  mid:     opus $5.0 (150)"), "under the grid, the box's model");
+        // A name is cut from its start to the room its box has, the price and score kept.
+        let cut: String = entry(&b, "overall", 1, b.tier_picks(0)[1], Some(14)).iter().map(|s| &*s.content).collect();
+        assert_eq!(cut, "…us $5.0 (150)");
+        // Among all, a model out of reach is grey, and says so under the grid; one of yours keeps its price's colour.
         let mut data = std::mem::take(&mut b.data);
         data.models[0].available = false;
         b.set_data(data);
@@ -4391,39 +4466,27 @@ mod tests {
         );
         let said = |n: &str| all.iter().any(|l| l.to_string().contains(&format!("{n} not available")));
         assert!(said("(150)") && !said("(120)"), "opus says so, flash does not");
-        let vision = text.iter().position(|l| l.starts_with("▌vision▐ ")).unwrap();
-        let models = text[vision..].iter().position(|l| l.starts_with("  best per price:  "));
-        assert!(models.is_some_and(|n| n <= 3), "every task lists its models: {:?}", &text[vision..vision + 4]);
-        let long: Vec<&String> = text.iter().filter(|l| l.chars().count() > 60).collect();
-        assert!(long.is_empty(), "wrapped to the width: {long:?}");
-        let cursor = &lines[vision].spans[1];
-        assert_eq!(
-            (cursor.content.as_ref(), cursor.style.fg, cursor.style.bg),
-            ("vision", Some(TASK[a.task_cur]), Some(CURSOR))
-        );
-        // A task of your own is the last block, in a colour of its own: its name, what you wrote it is about, that
-        // it is picked over a built-in task, and the model you gave it.
+        // A task of your own is the last row, in a colour of its own, every tier with the model you gave it; under
+        // the grid, what you wrote it is about and that it is picked over a built-in task.
         a.store.toggle_favorite("debugging", "opus");
         a.store.set_about("debugging", "finding and fixing a bug");
         (a.view, a.task_cur) = (View::Recommend, TASKS.len());
         let lines = recommend(&a, 80, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        let own = text.iter().position(|l| l.starts_with("▌debugging▐ finding and fixing a bug")).unwrap();
-        assert_eq!(
-            (lines[own].spans[1].style.fg, text[own + 3].as_str()),
-            (Some(task_color("debugging")), ""),
-            "a built-in task's three lines, the last block"
-        );
+        let own = text.iter().position(|l| l.starts_with("▌debugging▐")).unwrap();
+        assert_eq!((lines[own].spans[1].style.fg, text[own + 1].as_str()), (Some(task_color("debugging")), ""));
         assert_ne!(task_color("debugging"), task_color("docs"), "tasks of your own can differ in colour");
         assert!(
             OWN.iter().all(|c| !TASK.contains(c) && ![STAR, BAD].contains(c)),
             "and none has a built-in task's, nor the gold ★'s, nor the red ✗'s"
         );
-        assert_eq!(text[own + 1], format!("  use for:         {CUSTOM_WHEN}"));
-        assert!(text[own + 2].starts_with("  your model:      ★ opus $5.0 "), "{}", text[own + 2]);
-        // A tier's model joins the line, cheapest first, and says its tier.
+        let models = |row: &str| row.split("★ ").skip(1).map(|s| s.trim().to_string()).collect::<Vec<_>>();
+        assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0", "opus $5.0"]);
+        assert_eq!(text[own + 2], "debugging finding and fixing a bug");
+        assert_eq!(text[own + 3], format!("  use for: {CUSTOM_WHEN}"));
+        // A tier's model is in that tier's box, the task's in the others.
         a.store.toggle_favorite("debugging:low", "flash");
         let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();
-        assert_eq!(text[own + 2], "  your model:      ★ flash $0.10 (low) · ★ opus $5.0 ");
+        assert_eq!(models(&text[own]), ["flash $0.10", "opus $5.0", "opus $5.0"]);
     }
 }

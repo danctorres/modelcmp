@@ -441,9 +441,24 @@ pub fn by_value(x: Option<f64>, y: Option<f64>, desc: bool) -> std::cmp::Orderin
 pub const TIERS: [(&str, f64); 3] = [("low", 50.0), ("mid", 75.0), ("high", f64::INFINITY)];
 
 /// The entry of a cheapest-first frontier that `tier` picks; `None` for an empty frontier.
-pub fn pick<'a, T>(front: &'a [(T, f64)], tier: &str) -> Option<&'a (T, f64)> {
+pub fn pick<'a, T: 'a>(front: impl Iterator<Item = &'a (T, f64)> + Clone, tier: &str) -> Option<&'a (T, f64)> {
     let floor = TIERS.iter().find(|t| t.0 == tier).map_or(f64::INFINITY, |t| t.1);
-    front.iter().find(|(_, s)| s.round() >= floor).or(front.last())
+    front.clone().find(|(_, s)| s.round() >= floor).or(front.last())
+}
+
+/// The entry of a task's line (`task_line`) that `tier` picks, as `--tier` does: your favorite
+/// for the tier, else for the task, beats the pick on merit, which a favorite on the line only
+/// for being one (`off`) is neither best nor good enough for; one the line lacks gives way to
+/// the next.
+pub fn tier_pick<'m>(
+    front: &[(&'m Model, f64)],
+    off: &[&str],
+    store: &Store,
+    task: &str,
+    tier: &str,
+) -> Option<(&'m Model, f64)> {
+    let fav = store.tier_favorites(task, tier).find_map(|k| front.iter().find(|(m, _)| m.key == k)).copied();
+    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), tier).copied())
 }
 
 /// `$1.5`, or `free`.
@@ -452,18 +467,13 @@ pub fn usd(x: f64) -> String {
 }
 
 /// A model's blended price as `usd`: after a `~` when it is the list one (`Model::listed`), `-` when unknown.
-fn price(m: &Model) -> String {
+pub fn price(m: &Model) -> String {
     m.quoted().map_or("-".into(), |(o, listed)| format!("{}{}", if listed { "~" } else { "" }, usd(o.blended())))
 }
 
-/// What a frontier line shows, for the recommend panel and `modelcmp recommend`, which adds the key.
-pub fn frontier_legend(keyed: bool) -> String {
-    format!(
-        "best per price: the top model at each price level, cheapest first, as name{} $/1M tokens (score on the task), \
-         plus ★ your favorite, marked not recommended when it is not one",
-        if keyed { " [key]" } else { "" }
-    )
-}
+/// What a frontier line of `modelcmp recommend` shows.
+pub const FRONTIER_LEGEND: &str = "best per price: the top model at each price level, cheapest first, as name [key] $/1M tokens (score on the task), \
+     plus ★ your favorite, marked not recommended when it is not one";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
 pub const CUSTOM_ABOUT: &str = "your own task";
@@ -858,12 +868,12 @@ mod tests {
     #[test]
     fn tiers_pick_the_cheapest_good_enough() {
         let front = [("free", 30.0), ("mini", 60.0), ("sonnet", 74.8), ("opus", 90.0)];
-        let key = |t| pick(&front, t).map(|e| e.0);
+        let key = |t| pick(front.iter(), t).map(|e| e.0);
         assert_eq!(key("low"), Some("mini"));
         assert_eq!(key("mid"), Some("sonnet"), "74.8 shows as 75");
         assert_eq!(key("high"), Some("opus"));
-        assert_eq!(pick(&front[..2], "mid").map(|e| e.0), Some("mini"), "none reaches it: the best");
-        assert_eq!(pick::<&str>(&[], "low"), None);
+        assert_eq!(pick(front[..2].iter(), "mid").map(|e| e.0), Some("mini"), "none reaches it: the best");
+        assert_eq!(pick::<&str>([].iter(), "low"), None);
     }
 
     #[test]

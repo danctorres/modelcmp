@@ -5,8 +5,8 @@ use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
-    CUSTOM_ABOUT, CUSTOM_WHEN, TIERS, by_value, compare_rows, custom_line, custom_priced, detail_lines,
-    frontier_legend, pick, priced, shown_via, task_line, truncate, verdict, via, visible,
+    CUSTOM_ABOUT, CUSTOM_WHEN, FRONTIER_LEGEND, TIERS, by_value, compare_rows, custom_line, custom_priced,
+    detail_lines, priced, shown_via, task_line, tier_pick, truncate, verdict, via, visible,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -274,18 +274,9 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         };
     } else if let Some(t) = o.task {
         let (front, off) = task_line(models.iter().copied(), models.iter().copied(), store, t);
-        // The tier picks on merit: a favorite appended to the line is neither best nor good enough.
-        let merit: Vec<_> = front.iter().copied().filter(|(m, _)| !off.contains(&m.key.as_str())).collect();
         models = match &o.tier {
-            // Your favorite for the tier, else for the task, beats the tier's pick; one the
-            // filters hide gives way to the next.
-            Some(tier) => store
-                .tier_favorites(t.name, tier)
-                .find_map(|k| front.iter().find(|(m, _)| m.key == k))
-                .or_else(|| pick(&merit, tier))
-                .map(|e| e.0)
-                .into_iter()
-                .collect(),
+            // One the filters hide gives way to the next.
+            Some(tier) => tier_pick(&front, &off, store, t.name, tier).map(|e| e.0).into_iter().collect(),
             None => front.into_iter().map(|(m, _)| m).collect(),
         };
     } else if let Some(c) = o.sort.map(|c| &COLS[c]) {
@@ -617,7 +608,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     if json {
         return print_json(&recommend_json(data, store));
     }
-    println!("{}\n", frontier_legend(true));
+    println!("{FRONTIER_LEGEND}\n");
     for t in TASKS {
         println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
