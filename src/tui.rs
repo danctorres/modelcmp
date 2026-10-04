@@ -657,9 +657,11 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             }
         }));
     }
-    // A drag past the table's edges still extends the range to its nearest row.
+    // A drag past the table's edges still extends the range to its nearest row; a shift click
+    // there is on no row.
     if extend {
-        if inner.height <= head {
+        let drag = m.kind == MouseEventKind::Drag(MouseButton::Left);
+        if inner.height <= head || !(drag || (inner.y + head..inner.bottom()).contains(&m.row)) {
             return None;
         }
         let y = m.row.clamp(inner.y + head, inner.bottom() - 1);
@@ -1400,7 +1402,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 app.scroll = (app.scroll as usize).clamp(lo, start) as u16;
             }
         }
-        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset);
+        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, 0);
         // Where each spot landed on screen, scrolled and cut to the box, for a click to find it.
         let top = app.scroll as usize;
         app.spots = spots
@@ -1427,7 +1429,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some((key, title)) = ask {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0, Color::Reset);
+        overlay(buf, body, &title, lines, &mut 0, Color::Reset, 0);
     }
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, items, list, .. }) = (chooser, &mut app.input) {
@@ -1445,7 +1447,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         // Under the wordmark the box is muted, as the table's frame; over the table it has
         // the text's colour, as every box there, which parts it from that frame.
         let border = if splash.is_some() { MUTED } else { Color::Reset };
-        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, border);
+        let tail = lines.len() - rows;
+        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, border, tail);
         *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
@@ -1566,11 +1569,16 @@ fn layout(width: u16, app: &App) -> Layout {
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
         let part = if started { sep(k) == 1 } else { k > 0 };
         x += u16::from(part);
+        // The first shown column is cut to the room left rather than dropped: it may be the
+        // one under the cursor, wider than all the room right of Dev. Via and Notes only: a
+        // number cut short reads as another number.
+        let w = if started || k < COLS.len() { w } else { w.min(width.saturating_sub(x)) };
         started = true;
-        if x + w > width {
+        if w == 0 || x + w > width {
             more = true;
             break;
         }
+        more = w < ws[k];
         if part {
             seps.push(x - 2);
         }
@@ -1819,8 +1827,12 @@ fn menu_x(area: Rect, l: &Layout, col: usize) -> u16 {
 fn menu_box(area: Rect, x: u16, items: &[(String, usize)], rows: usize) -> Option<(Rect, (usize, usize))> {
     let label_w = items.iter().map(|(s, _)| s.chars().count()).max().unwrap_or(0);
     let n_w = items.iter().map(|(_, n)| n.to_string().len()).max().unwrap_or(0);
-    let w = ((label_w + n_w + 8) as u16).min(area.width);
     let h = (rows as u16 + 2).min(area.height.saturating_sub(1));
+    // Room for where you are, when the entries may not all fit: by all of them, so the box
+    // keeps still while typing.
+    let n = items.len();
+    let foot = if n + 2 > area.height.saturating_sub(1) as usize { position(n, 0, n).len() + 2 } else { 0 };
+    let w = ((label_w + n_w + 8).max(foot) as u16).min(area.width);
     if h < 3 {
         return None;
     }
@@ -1843,14 +1855,19 @@ fn dropdown(
     let (query, sel, top) = (list.query.as_str(), list.sel, &mut list.top);
     let rows = &menu_rows(items, query);
     let Some((rect, (label_w, n_w))) = menu_box(area, x, items, rows.len()) else { return };
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(Color::Reset));
-    let inner = block.inner(rect);
-    Clear.render(rect, buf);
-    block.render(rect, buf);
-    let shown = inner.height as usize;
+    let shown = rect.height.saturating_sub(2) as usize;
     // No blank lines under the last entry when a search shortens the list.
     *top = list_top(*top, sel, shown).min(rows.len().saturating_sub(shown));
     let top = *top;
+    // Where you are, as every box says it.
+    let footer = if rows.len() > shown { position(top, shown, rows.len()) } else { String::new() };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(fg(Color::Reset))
+        .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
+    let inner = block.inner(rect);
+    Clear.render(rect, buf);
+    block.render(rect, buf);
     for (k, &i) in rows.iter().enumerate().skip(top).take(shown) {
         let (label, n) = &items[i];
         let y = inner.y + (k - top) as u16;
@@ -2339,17 +2356,16 @@ fn overlay(
     lines: Vec<Line<'static>>,
     scroll: &mut u16,
     border: Color,
+    tail: usize,
 ) -> (Rect, bool, bool) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
     let shown = h.saturating_sub(2) as usize;
     *scroll = (*scroll).min(lines.len().saturating_sub(shown) as u16);
-    // Where you are; the keys are in the status bar.
-    let footer = if lines.len() > shown {
-        format!(" {}-{} of {} ", *scroll + 1, *scroll as usize + shown, lines.len())
-    } else {
-        String::new()
-    };
+    // Where you are; the keys are in the status bar. The last `tail` lines, a list's hint, are
+    // none of what is counted.
+    let footer =
+        if lines.len() - tail > shown { position(*scroll as usize, shown, lines.len() - tail) } else { String::new() };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(fg(border))
@@ -2368,6 +2384,11 @@ fn overlay(
         vmarks(buf, rect.x, text.y, text.bottom() - 1, above, below);
     }
     (text, above, below)
+}
+
+/// Where a box scrolled to `top` is among its `n` lines or entries, for its bottom border.
+fn position(top: usize, shown: usize, n: usize) -> String {
+    format!(" {}-{} of {n} ", (top + 1).min(n), (top + shown).min(n))
 }
 
 fn heading(text: &str) -> Line<'static> {
@@ -3271,6 +3292,8 @@ mod tests {
         assert_eq!(buf[(dev as u16, 2)].bg, CURSOR, "the cursor runs through the border");
         assert_ne!(buf[(dev as u16, 3)].bg, CURSOR);
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
+        let (_, short) = render(&mut a, 170, 6);
+        assert!(short.iter().any(|l| l.contains(" 1-2 of 3 ")), "a list scrolled says where it is: {short:?}");
         for c in "/anth".chars() {
             a.key(KeyCode::Char(c).into());
         }
@@ -3472,6 +3495,7 @@ mod tests {
         let shift = |x, y| MouseEvent { modifiers: KeyModifiers::SHIFT, ..click(x, y) };
         assert_eq!(hit(&a, area, shift(3, 5)), Some(Mouse::Extend(2)), "shift click extends like a drag");
         assert_eq!(hit(&a, area, drag(3, 0)), Some(Mouse::Extend(0)), "a drag above the table: the first row");
+        assert_eq!(hit(&a, area, shift(3, 0)), None, "a shift click on the tabs is on no row");
         assert_eq!(hit(&a, area, drag(3, h)), Some(Mouse::Extend(h as usize - 8)), "below: the last row");
         assert_eq!(hit(&a, Rect::new(0, 0, w, 7), drag(3, 2)), None, "no rows to extend over");
         assert_eq!(hit(&a, area, click(1, 1)), Some(Mouse::Top), "the # header: the first row");
@@ -3631,6 +3655,13 @@ mod tests {
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "Notes"]);
+        // A column wider than the room right of Dev is cut, not dropped.
+        a.store.set_note("opus", &"x".repeat(40));
+        for w in 44..80 {
+            let l = layout(w, &a);
+            assert!(l.notes.is_some_and(|(x, nw)| nw > 0 && x + nw <= w), "Notes under the cursor shows: {w}");
+        }
+        a.store.set_note("opus", "");
         a.col = VIA;
         let (_, lines) = render(&mut a, 47, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "Via", "▾"]);
@@ -3906,6 +3937,8 @@ mod tests {
         }
         term.draw(|f| draw(&mut a, f)).unwrap();
         let buf = term.backend().buffer();
+        let text: String = (0..9).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
+        assert!(text.contains(&format!(" of {} ", THEMES.len())), "the hint is not one of the themes counted: {text}");
         let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.bg == CURSOR);
         assert_eq!(below.map(|c| c.fg), Some(ACCENT), "themes below the cursor");
         let tabs: String = (0..2).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
@@ -4072,13 +4105,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset);
+        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, 0);
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
         assert_eq!(scroll as usize, help(&app(), "").len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset);
+        overlay(&mut buf, area, "keys", help(&app(), ""), &mut scroll, Color::Reset, 0);
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         let a = app();
         let text: Vec<String> =

@@ -1348,7 +1348,14 @@ impl App {
         // A panel's key opens it from the table; compare with fewer than 2 selected says how to
         // select them, as `C` does.
         if i >= RECOMMEND {
-            return self.table_key(key, 1);
+            // From a panel the highlight is set aside: it is not what gets compared there, as
+            // `C` from the panel leaves the selected models alone.
+            let held = (view != View::Table).then(|| (self.visual.take(), std::mem::take(&mut self.picked)));
+            let effect = self.table_key(key, 1);
+            if let Some(held) = held {
+                (self.visual, self.picked) = held;
+            }
+            return effect;
         }
         // An empty one's key says why as it does in the table, and the panel stays open.
         if !self.tab_has(i) {
@@ -2161,21 +2168,29 @@ impl App {
         if let Mouse::Key(code) = m {
             return self.on_key(code.into());
         }
-        // An entry or a note being written keeps the wheel still, and a click anywhere leaves
-        // it as esc does.
-        if self.editing() || matches!(self.input, Input::Note { .. }) {
-            return match m {
-                Mouse::Scroll(_) | Mouse::Cols(_) => None,
-                _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
-            };
-        }
-        // A prompt over the panel and the panel's filter take an esc of their own first.
-        if m == Mouse::Close {
+        // A prompt over the panel and the panel's filter take an esc of their own first. The
+        // details have no filter: the one of the compare they were opened from stays, as esc
+        // leaves it. An entry or a note being written is only left, its panel staying open.
+        let writing = self.editing() || matches!(self.input, Input::Note { .. });
+        if m == Mouse::Close && !writing {
             if self.input != Input::None {
                 self.on_key(KeyCode::Esc.into());
             }
-            self.overlay_query.clear();
+            if self.overlay_search() {
+                self.overlay_query.clear();
+            }
             return self.on_key(KeyCode::Esc.into());
+        }
+        // A prompt keeps the wheel still, and a click anywhere else leaves it as esc does: an
+        // entry or a note being written, a bound, the key, and what `q` and `U` ask. A search
+        // is kept as enter keeps it, and the click is then on what it found.
+        if self.editing() || (self.input != Input::None && self.open_list().is_none()) {
+            let search = matches!(self.input, Input::Search { .. });
+            match m {
+                Mouse::Scroll(_) | Mouse::Cols(_) => return None,
+                _ if search => drop(self.input_key(KeyCode::Enter, KeyModifiers::NONE)),
+                _ => return self.input_key(KeyCode::Esc, KeyModifiers::NONE),
+            }
         }
         let typing = self.open_list().is_some_and(|l| l.typing);
         let list = self.open_list().is_some();
@@ -2246,6 +2261,11 @@ impl App {
             && (self.view != View::Table || !(MARKED..RECOMMEND).contains(&i))
             && i < TABS.len()
         {
+            // With access to none a click on yours or all in recommend says so and stays, as `a`.
+            if self.view == View::Recommend && i < MARKED && self.no_access() {
+                self.refuse(NO_ACCESS);
+                return None;
+            }
             return self.set_tab(i);
         }
         if self.view != View::Table || self.input != Input::None {
@@ -2270,7 +2290,9 @@ impl App {
                 }
                 self.select(n);
                 // Marking the range only adds marks, so no row drops out.
-                if !inside {
+                if inside {
+                    self.rebuild_in_place();
+                } else {
                     self.toggle_mark();
                 }
                 return Some(Effect::Save);
@@ -2403,6 +2425,11 @@ impl App {
         // On recommend's `among` line the cursor runs over the tabs, and enter or space picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
         match (code, among) {
+            // With access to none `a` and `A` say so and stay, as in the table.
+            (KeyCode::Char('a' | 'A'), _) if self.view == View::Recommend && self.no_access() => {
+                self.refuse(NO_ACCESS);
+                return None;
+            }
             // A tab's key leaves recommend for it, as a click on it does.
             (KeyCode::Char(c), _) if self.view == View::Recommend && TABS[..RECOMMEND].iter().any(|t| t.1 == c) => {
                 return self.set_tab(TABS.iter().position(|t| t.1 == c).unwrap_or(YOURS));
@@ -4583,6 +4610,12 @@ mod tests {
         a.any_available = false;
         press(&mut a, "}");
         assert_eq!(a.status, NO_ACCESS, "as a says with access to no model");
+        press(&mut a, "Ra");
+        assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, NO_ACCESS), "and in recommend, which stays open");
+        a.status.clear();
+        a.mouse(Mouse::Tab(ALL));
+        assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, NO_ACCESS), "a click on the tab too");
+        press(&mut a, "R");
         // A refresh's early data, a harness yet to list its models: too soon to say so.
         a.data.listing = true;
         assert!(!a.no_access());
@@ -4858,11 +4891,32 @@ mod tests {
         assert_eq!(a.scroll, 3);
         assert_eq!(a.mouse(Mouse::Row(0)), None, "clicks do nothing behind an overlay");
         assert_eq!(a.view, View::Detail(Back::Table));
+        press(&mut a, "n");
+        a.mouse(Mouse::Close);
+        assert_eq!((&a.view, &a.input), (&View::Detail(Back::Table), &Input::None), "a note being written: only it");
         a.mouse(Mouse::Close);
         assert_eq!(a.view, View::Table, "a click outside the panel closes it");
         press(&mut a, "?/sort");
         a.mouse(Mouse::Close);
         assert_eq!((&a.view, &a.input, a.overlay_query.as_str()), (&View::Table, &Input::None, ""), "filtered too");
+        // Every prompt is left by a click, as esc leaves it, and the wheel keeps it.
+        for keys in ["q", ">", "/"] {
+            press(&mut a, keys);
+            a.mouse(Mouse::Scroll(1));
+            assert_ne!(a.input, Input::None, "{keys}: the wheel keeps it open");
+            a.mouse(Mouse::Row(0));
+            assert_eq!(a.input, Input::None, "{keys}: a click leaves it");
+        }
+        // A search is kept, as enter keeps it, and the click is on what it found.
+        let name = a.data.models[a.rows[1]].name.clone();
+        press(&mut a, "/");
+        press(&mut a, &name);
+        a.mouse(Mouse::Row(0));
+        let found = a.current().map(|m| m.name.clone());
+        assert_eq!((&a.input, a.query.as_str(), found), (&Input::None, name.as_str(), Some(name.clone())));
+        a.query.clear();
+        a.rebuild();
+        a.mouse(Mouse::Row(2));
         // Back in the details, for what follows.
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
@@ -4924,6 +4978,23 @@ mod tests {
         a.mouse(Mouse::Extend(1));
         a.mouse(Mouse::Mark(0));
         assert_eq!((a.selecting(), a.store.marked.len(), a.selected()), (false, 2, 0), "inside the range: no unmark");
+        assert_eq!(a.marked_shown, 2, "and the count of selected models follows");
+        // From a panel, tab to compare keeps the selected models, as `C` there does.
+        a.mouse(Mouse::Row(0));
+        press(&mut a, "v");
+        press(&mut a, "R");
+        a.set_tab(COMPARE);
+        assert_eq!((&a.view, a.store.marked.len()), (&View::Compare, 2), "the highlight is not what gets compared");
+        // The details opened from a filtered compare go back to it filtered, by esc or a click.
+        press(&mut a, "/pri");
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Enter);
+        assert!(matches!(a.view, View::Detail(_)));
+        a.mouse(Mouse::Close);
+        assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Compare, "pri"), "a click outside keeps the filter");
+        a.overlay_query.clear();
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
         a.store.marked.clear();
         a.mouse(Mouse::Row(1));
         a.mouse(Mouse::Header(1));
