@@ -242,7 +242,8 @@ enum Probe {
     Table(&'static [&'static str]),
     /// No such command: being installed means access to every model of this provider.
     Provider(&'static str),
-    /// No such command either, but GitHub's API lists what the account may use (`copilot_ids`).
+    /// No such command either, but its CLI lists what the account may use to an Agent Client
+    /// Protocol client (`copilot_ids`).
     Copilot,
 }
 
@@ -713,79 +714,80 @@ fn table_ids(out: &str) -> Option<Vec<String>> {
     Some(lines.filter(|f| f.len() == cols).map(|f| format!("{}/{}", f[0], f[1])).collect())
 }
 
-/// The `github-copilot/model` ids Copilot's CLI takes on your plan, asked of GitHub as it
-/// does, which has no command for it. With the tokens that takes from the environment,
-/// then the one `gh` stored: the first GitHub answers with a model, as a token set for
-/// something else may not reach Copilot, or reach an account with none.
+/// The `github-copilot/model` ids Copilot's CLI takes on your plan, asked of the CLI itself
+/// over the Agent Client Protocol, which has no command for it: a new session's answer lists
+/// them. In the temp dir, so it loads no repository's instructions.
 fn copilot_ids(stop: &AtomicBool) -> Option<Vec<String>> {
-    let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
-    let host = env("COPILOT_GH_HOST").or_else(|| env("GH_HOST")).unwrap_or_else(|| "github.com".into());
-    // Without the environment's, which `gh` would print in place of its own.
-    let gh = ["-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "gh", "auth", "token", "--hostname", &host];
-    let gh = std::iter::once_with(|| run("env", &gh, Duration::from_secs(10), stop)).flatten();
-    let tokens = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"].into_iter().filter_map(env).chain(gh);
-    // All of them in the time any other harness has, however many GitHub leaves unanswered.
-    let end = Instant::now() + Duration::from_secs(30);
-    first_listing(tokens.take_while(|_| Instant::now() < end).filter_map(|token| {
-        let host = host.clone();
-        unless_stopped(stop, end, move || copilot_models(&host, token.trim()))
-    }))
+    let dir = std::env::temp_dir();
+    let asks = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": 1, "clientCapabilities": {}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": {"cwd": dir.to_str()?, "mcpServers": []}}),
+    ];
+    let asks = format!("{}\n{}\n", asks[0], asks[1]);
+    copilot_enabled(&answer("copilot", &["--acp"], &dir, &asks, 2, Duration::from_secs(30), stop)?)
 }
 
-/// The first answer with a model in it, else an empty one if there was any answer.
-fn first_listing(answers: impl Iterator<Item = Vec<String>>) -> Option<Vec<String>> {
-    let mut empty = None;
-    for a in answers {
-        if !a.is_empty() {
-            return Some(a);
-        }
-        empty = Some(a);
-    }
-    empty
-}
-
-/// Copilot's `models` answer for the account of `token`, from the API host GitHub names for
-/// it, which is another for a business or an enterprise.
-fn copilot_models(host: &str, token: &str) -> Option<Vec<String>> {
-    let agent = agent(Duration::from_secs(15));
-    let get = |url: &str| {
-        let req = agent.get(url).header("Authorization", format!("Bearer {token}"));
-        let body = req.header("Copilot-Integration-Id", "copilot-developer-cli").call().ok()?.body_mut().read_to_vec();
-        serde_json::from_slice::<serde_json::Value>(&body.ok()?).ok()
-    };
-    let user = get(&format!("https://api.{host}/copilot_internal/user"))?;
-    copilot_enabled(&get(&format!("{}/models", user["endpoints"]["api"].as_str()?))?)
-}
-
-/// `ask`'s answer, or none once `stop` is set or `end` has come: a download cannot be killed
-/// as a command is, so it is left to end on its own.
-fn unless_stopped<T: Send + 'static>(
-    stop: &AtomicBool,
-    end: Instant,
-    ask: impl FnOnce() -> Option<T> + Send + 'static,
-) -> Option<T> {
-    use std::sync::mpsc::RecvTimeoutError::Timeout;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || tx.send(ask()));
-    loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(answer) => return answer,
-            Err(Timeout) if !stop.load(Relaxed) && Instant::now() < end => {}
-            Err(_) => return None,
-        }
-    }
-}
-
-/// The ids of Copilot's `models` answer that its CLI takes, under models.dev's provider for
-/// them: the ones its picker offers and no policy keeps off, switched off or not yet on. A policy that enables a model
-/// is not enough, as a plan may leave the CLI with none but `auto`.
-fn copilot_enabled(models: &serde_json::Value) -> Option<Vec<String>> {
+/// The ids of a new session's answer that Copilot's CLI takes, under models.dev's provider
+/// for them: the ones no policy keeps off, switched off or not yet on. None for an answer
+/// without models, as an error or the one of a CLI not logged in.
+fn copilot_enabled(answer: &serde_json::Value) -> Option<Vec<String>> {
     let taken = |m: &&serde_json::Value| {
-        let policy = &m["policy"]["state"];
-        m["model_picker_enabled"] == true && (policy.is_null() || policy == "enabled")
+        let state = &m["_meta"]["copilotEnablement"];
+        state.is_null() || state == "enabled"
     };
-    let ids = models["data"].as_array()?.iter().filter(taken).filter_map(|m| m["id"].as_str());
-    Some(ids.map(|id| format!("{COPILOT}/{id}")).collect())
+    let ids = answer["result"]["models"]["availableModels"].as_array()?.iter().filter(taken);
+    Some(ids.filter_map(|m| m["modelId"].as_str()).map(|id| format!("{COPILOT}/{id}")).collect())
+}
+
+/// The JSON-RPC response `id` of `bin args`, run in `cwd` and sent the lines `asks`, or `None`
+/// when it is missing, ends without answering, or is killed at `limit` or on `stop`, which
+/// also keeps it from starting.
+fn answer(
+    bin: &str,
+    args: &[&str],
+    cwd: &std::path::Path,
+    asks: &str,
+    id: u64,
+    limit: Duration,
+    stop: &AtomicBool,
+) -> Option<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc::RecvTimeoutError::Timeout;
+    if stop.load(Relaxed) {
+        return None;
+    }
+    let (io, null) = (Stdio::piped, Stdio::null());
+    let mut child = Command::new(bin).args(args).current_dir(cwd).stdin(io()).stdout(io()).stderr(null).spawn().ok()?;
+    let (mut stdin, out) = (child.stdin.take()?, child.stdout.take()?);
+    // One that has already gone takes nothing, and has no answer to read either.
+    let _ = stdin.write_all(asks.as_bytes()).and_then(|()| stdin.flush());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Not its notifications, nor a request of its own, which has a method.
+        let lines = BufReader::new(out).lines().map_while(Result::ok);
+        let mut answers = lines.filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok());
+        answers.find(|v| v["id"] == id && v.get("method").is_none()).map(|v| tx.send(v))
+    });
+    let start = Instant::now();
+    let answer = loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(answer) => break Some(answer),
+            Err(Timeout) if start.elapsed() < limit && !stop.load(Relaxed) => {}
+            Err(_) => break None,
+        }
+    };
+    // Its input closed, it ends on its own: killed only when it has not, or gave no answer.
+    drop(stdin);
+    let end = Instant::now() + Duration::from_secs(2);
+    while answer.is_some() && Instant::now() < end && matches!(child.try_wait(), Ok(None)) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    answer
 }
 
 /// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit` or on `stop`,
@@ -2157,35 +2159,40 @@ mod tests {
 
     #[test]
     fn copilot_lists_what_its_cli_takes() {
-        let models = serde_json::json!({"data": [
-            {"id": "gpt-5-mini", "model_picker_enabled": true},
-            {"id": "claude-haiku-4.5", "model_picker_enabled": true, "policy": {"state": "enabled"}},
-            {"id": "claude-opus-5.5", "model_picker_enabled": true, "policy": {"state": "disabled"}},
-            {"id": "gpt-6-sol", "model_picker_enabled": true, "policy": {"state": "unconfigured"}},
-            {"id": "kimi-k3", "model_picker_enabled": false, "policy": {"state": "enabled"}},
-            {"id": "copilot-search-a"},
-        ]});
+        let session = serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s", "models": {
+            "currentModelId": "gpt-5-mini",
+            "availableModels": [
+                {"modelId": "gpt-5-mini", "name": "GPT-5 mini"},
+                {"modelId": "claude-haiku-4.5", "_meta": {"copilotEnablement": "enabled"}},
+                {"modelId": "claude-opus-5.5", "_meta": {"copilotEnablement": "disabled"}},
+                {"modelId": "gpt-6-sol", "_meta": {"copilotEnablement": "unconfigured"}},
+            ],
+        }}});
         let ids = ["github-copilot/gpt-5-mini", "github-copilot/claude-haiku-4.5"].map(String::from).to_vec();
-        assert_eq!(copilot_enabled(&models), Some(ids), "enabled by a policy is not offered by the picker");
-        assert_eq!(copilot_enabled(&serde_json::json!({"message": "Bad credentials"})), None, "not a listing");
-        // A token that answers with no model does not stop the next one from being asked.
-        let (none, some) = (vec![], vec!["github-copilot/gpt".to_string()]);
-        assert_eq!(first_listing([none.clone(), some.clone()].into_iter()), Some(some));
-        assert_eq!((first_listing([none.clone()].into_iter()), first_listing([].into_iter())), (Some(none), None));
+        assert_eq!(copilot_enabled(&session), Some(ids), "not the ones a policy keeps off");
+        let error = serde_json::json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "no"}});
+        assert_eq!(copilot_enabled(&error), None, "not a listing");
+        let out = serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s"}});
+        assert_eq!(copilot_enabled(&out), None, "nor is a session without models, as when logged out");
     }
 
     #[test]
-    fn a_download_is_left_behind_once_stopped() {
-        let (t, go) = (Instant::now(), &AtomicBool::new(false));
-        let end = t + Duration::from_secs(5);
-        assert_eq!(unless_stopped(go, end, || Some(1)), Some(1));
-        let slow = || {
-            std::thread::sleep(Duration::from_secs(10));
-            Some(1)
-        };
-        assert_eq!(unless_stopped(&AtomicBool::new(true), end, slow), None);
-        assert_eq!(unless_stopped(go, t, slow), None, "nor past its time");
-        assert!(t.elapsed() < Duration::from_secs(5), "not waited for");
+    fn answer_returns_the_response_and_gives_up_on_hangs() {
+        let (go, dir, s5) = (&AtomicBool::new(false), std::env::temp_dir(), Duration::from_secs(5));
+        let ask =
+            |bin: &str, args: &[&str], limit, stop| answer(bin, args, &dir, "{\"id\":1}\n{\"id\":2}\n", 2, limit, stop);
+        // It answers once it has read both lines, after a notification and a request of its own.
+        let cli = r#"read a; read b; echo '{"id":1,"result":1}'; echo '{"method":"session/update"}'
+            echo '{"id":2,"method":"ask"}'; echo "not json"; echo '{"id":2,"result":{"cwd":"'$PWD'"}}'; cat >/dev/null"#;
+        let t = Instant::now();
+        let cwd = ask("sh", &["-c", cli], s5, go).map(|v| v["result"]["cwd"].as_str().map(PathBuf::from));
+        assert_eq!(cwd.flatten().and_then(|p| p.canonicalize().ok()), dir.canonicalize().ok(), "run in its cwd");
+        assert!(t.elapsed() < Duration::from_secs(1), "it ends when its input closes, with no wait to kill it");
+        assert_eq!(ask("sh", &["-c", "echo '{\"id\":1}'"], s5, go), None, "one that exits without answering");
+        assert_eq!(ask("no-such-binary-xyz", &[], s5, go), None, "so does a missing harness");
+        assert_eq!(ask("sleep", &["10"], Duration::from_millis(200), go), None, "a hang is killed");
+        assert_eq!(ask("sleep", &["10"], s5, &AtomicBool::new(true)), None, "so is a stopped one");
+        assert!(t.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
