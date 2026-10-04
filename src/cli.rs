@@ -260,10 +260,12 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
                 && !(task && store.is_excluded(&m.key))
         })
         .collect();
+    // Your favorites stay on a task's line whatever the filters, as in the recommend panel.
+    let pool = || visible(data, store, o.all, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key));
     if let Some(c) = &o.custom {
         // A task of your own has no ranking: the models you gave it, or with a tier that
         // tier's, else the task's.
-        let line = custom_line(models.iter().copied(), store, c);
+        let line = custom_line(pool(), store, c);
         models = match &o.tier {
             Some(tier) => store
                 .tier_favorites(c, tier)
@@ -273,9 +275,8 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             None => line,
         };
     } else if let Some(t) = o.task {
-        let (front, off) = task_line(models.iter().copied(), models.iter().copied(), store, t);
+        let (front, off) = task_line(models.iter().copied(), pool(), store, t);
         models = match &o.tier {
-            // One the filters hide gives way to the next.
             Some(tier) => tier_pick(&front, &off, store, t.name, tier).map(|e| e.0).into_iter().collect(),
             None => front.into_iter().map(|(m, _)| m).collect(),
         };
@@ -685,6 +686,34 @@ mod tests {
             id: true,
             cmd: false,
         };
+        assert!(list(&data, &store, &o).is_ok());
+    }
+
+    /// A favorite is the tier's model whatever the filters, as in the recommend panel.
+    #[test]
+    fn a_favorite_a_filter_hides_is_still_the_tier_s() {
+        let mut data =
+            Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
+        data.models[0].developer = "openai".into();
+        data.models[0].fit.clear();
+        let mut store = Store::default();
+        let o = ListOpts {
+            task: fit::task("coding"),
+            custom: None,
+            tier: Some("low".into()),
+            sort: None,
+            bounds: vec![],
+            all: false,
+            selected: false,
+            dev: vec!["openai".into()],
+            via: vec![],
+            limit: 0,
+            json: false,
+            id: true,
+            cmd: false,
+        };
+        assert!(list(&data, &store, &o).is_err(), "openai has no model for coding");
+        store.set_favorite("coding", "mini", None);
         assert!(list(&data, &store, &o).is_ok());
     }
 

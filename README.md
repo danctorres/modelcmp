@@ -62,7 +62,7 @@ best per price: the top model at each price level, cheapest first, as name [key]
 ...
 coding  writing and fixing code  (modelcmp list --task coding)
   use for:         fixing a bug, adding a feature to an existing repo, refactors
-  best per price:  Gemini 3.1 Flash-Lite [gemini31flashlite] $0.41 (145) · Gemini 3.7 Flash [gemini37flash] $1.0 (158) · Claude Sonnet 5.5 [claudesonnet55] $2.8 (164) · Claude Opus 5.5 [claudeopus55] $5.4 (168)
+  best per price:  Gemini 3.7 Flash [gemini37flash] $1.0 (158) · Claude Sonnet 5.5 [claudesonnet55] $2.8 (165) · Claude Opus 5.5 [claudeopus55] $5.4 (167)
 
 ...
 ```
