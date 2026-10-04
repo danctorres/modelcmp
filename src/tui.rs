@@ -892,6 +892,12 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if app.any_marked() {
                 view.push("u deselect");
             }
+            if app.only == Some(FAV) {
+                view.push("D unfavorite all");
+            }
+            if app.only == Some(EXCLUDED) {
+                view.push("X unexclude all");
+            }
             if stale(app) {
                 view.push("r refresh");
             }
@@ -1440,10 +1446,12 @@ fn draw(app: &mut App, f: &mut Frame) {
             })
             .collect();
     }
-    // `q` and `U` ask first: the same box, confirmed by the same key again.
+    // `q`, `U`, `D` and `X` ask first: the same box, confirmed by the same key again.
     let ask = match app.input {
         Input::Quit => Some(("q", "quit?".to_string())),
         Input::Upgrade => app.data.update().map(|new| ("U", format!("upgrade to v{new}?"))),
+        Input::Unfavorite => Some(("D", "unfavorite every model?".to_string())),
+        Input::Unexclude => Some(("X", "unexclude every model?".to_string())),
         _ => None,
     };
     if let Some((key, title)) = ask {
@@ -2055,6 +2063,8 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
         (Input::Upgrade, _) => ("UPGRADE", Color::Yellow),
+        (Input::Unfavorite, _) => ("UNFAVORITE", Color::Red),
+        (Input::Unexclude, _) => ("UNEXCLUDE", Color::Red),
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
@@ -2081,7 +2091,14 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let (mode, color) = mode(app);
     let end = pill(buf, area.x, area.y, mode, color, area.width);
     let mut x = end + 1;
-    if matches!(&app.input, Input::Quit | Input::Upgrade | Input::Choose { list: List { typing: false, .. }, .. }) {
+    if matches!(
+        &app.input,
+        Input::Quit
+            | Input::Upgrade
+            | Input::Unfavorite
+            | Input::Unexclude
+            | Input::Choose { list: List { typing: false, .. }, .. }
+    ) {
         // The question is in a box in the middle of the screen. Under the first start's, the
         // start's warning shows until the pick reports it.
         // And what a pick could not save, which the next key clears.
@@ -2113,7 +2130,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             _ => (format!("{} ▾ /", app.col_name(*col)), &list.query, list.cur),
         }),
         Input::Choose { title, list, .. } => Some((format!("{title} /"), &list.query, list.cur)),
-        Input::Quit | Input::Upgrade | Input::None => None,
+        Input::Quit | Input::Upgrade | Input::Unfavorite | Input::Unexclude | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
         // Ctx is bounded in thousands of tokens, as its cells read: `Ctx ≥ 200k`.
@@ -3214,6 +3231,20 @@ mod tests {
         assert!(DEVS.len() >= n, "the terminal's own: {} for {n}", DEVS.len());
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
             assert!(p.accents.len() >= n, "{name}: {} accents for {n}", p.accents.len());
+        }
+    }
+
+    #[test]
+    fn f_and_e_hint_the_key_that_empties_them() {
+        let mut a = app();
+        a.store.toggle_favorite("coding", "flash");
+        a.store.toggle_excluded("flash");
+        a.rebuild();
+        for (tab, hint) in [('F', "D unfavorite all"), ('E', "X unexclude all")] {
+            assert!(!hints(&a, 200).contains(&hint), "{hint}: not outside {tab}");
+            a.key(KeyCode::Char(tab).into());
+            assert!(hints(&a, 200).contains(&hint), "{hint}: a hint in {tab}");
+            a.key(KeyCode::Char(tab).into());
         }
     }
 

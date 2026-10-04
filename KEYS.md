@@ -54,6 +54,8 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 | `e` | exclude the model: you have it but cannot use it. It stays in the table, greyed out as a model you have no access to is, but recommendations (`R` and `--task`) skip it. A greyed row keeps only the colours of its `✓`, `★` and `✗`: best and worst are those of the other rows, and compare greys its column the same way. Every row has a grey `✗`, red when excluded, and a click on it toggles the exclusion of that row alone, even on a selected one |
 | `e` on a selected model | act on every selected model, not just the one under the cursor |
 | `u` | deselect every model; a hint in the status bar while one is selected |
+| `DD` | unfavorite every model, for every task and tier, tasks of your own included, which go with their models; the first `D` asks, and any other key cancels; a hint in the status bar in `F` |
+| `XX` | unexclude every model; the first `X` asks, and any other key cancels; a hint in the status bar in `E` |
 | `S` | selected models only; `S` again or `esc`: every model |
 | `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked), the ones you have no access to too, from `yours` as from `all`; `F` again or `esc`: every model |
 | `E` | excluded models only, the rows with a red `✗`, the ones you have no access to too, from `yours` as from `all`; `E` again or `esc`: every model |

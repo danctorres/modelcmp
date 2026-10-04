@@ -324,6 +324,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("f: r a", "rename a task you named, write what it is about"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
+            ("D", "unfavorite every model; asks first"),
+            ("X", "unexclude every model; asks first"),
             ("S F E", "selected / favorite / excluded only"),
         ],
     ),
@@ -437,6 +439,10 @@ pub enum Input {
     Quit,
     /// `U` asks before upgrading.
     Upgrade,
+    /// `D` asks before unfavoriting every model.
+    Unfavorite,
+    /// `X` asks before unexcluding every model.
+    Unexclude,
     /// A choice of what to do, `list.sel` under the cursor: `x` on a model several harnesses
     /// have launches one, `o` opens one of the model's pages. Each item is its label and effect.
     Choose {
@@ -2075,7 +2081,8 @@ impl App {
     /// Text pasted in the terminal: typed into the search, note or bound being written, and
     /// nothing anywhere else, where its letters would run as keys.
     pub fn paste(&mut self, text: &str) {
-        if matches!(self.input, Input::None | Input::Quit | Input::Upgrade) || self.open_list().is_some_and(List::idle)
+        if matches!(self.input, Input::None | Input::Quit | Input::Upgrade | Input::Unfavorite | Input::Unexclude)
+            || self.open_list().is_some_and(List::idle)
         {
             self.refuse("nothing to paste into: / searches, n writes a note");
             return;
@@ -2209,7 +2216,7 @@ impl App {
             return self.on_key(KeyCode::Esc.into());
         }
         // A prompt keeps the wheel still, and a click anywhere else leaves it as esc does: an
-        // entry or a note being written, a bound, the key, and what `q` and `U` ask. A search
+        // entry or a note being written, a bound, the key, and what `q`, `U`, `D` and `X` ask. A search
         // is kept as enter keeps it, and the click is then on what it found.
         if self.editing() || (self.input != Input::None && self.open_list().is_none()) {
             let search = matches!(self.input, Input::Search { .. });
@@ -2566,6 +2573,14 @@ impl App {
                 };
                 return Some(Effect::Save);
             }
+            KeyCode::Char('D') if table && self.store.favorite.is_empty() => {
+                self.refuse("no favorites: f favorites the one under the cursor");
+            }
+            KeyCode::Char('D') if table => self.input = Input::Unfavorite,
+            KeyCode::Char('X') if table && self.store.excluded.is_empty() => {
+                self.refuse("no excluded models: e excludes the one under the cursor");
+            }
+            KeyCode::Char('X') if table => self.input = Input::Unexclude,
             KeyCode::Char('c') if table => {
                 self.query.clear();
                 self.bounds.clear();
@@ -3027,6 +3042,26 @@ impl App {
                 self.input = Input::None;
                 if code == KeyCode::Char('U') {
                     return Some(Effect::Upgrade);
+                }
+            }
+            Input::Unfavorite => {
+                self.input = Input::None;
+                if code == KeyCode::Char('D') {
+                    // A harness is its favorite's, and goes with it.
+                    self.store.favorite.clear();
+                    self.store.via.clear();
+                    self.rebuild_in_place();
+                    self.status = "unfavorited every model".into();
+                    return Some(Effect::Save);
+                }
+            }
+            Input::Unexclude => {
+                self.input = Input::None;
+                if code == KeyCode::Char('X') {
+                    self.store.excluded.clear();
+                    self.rebuild_in_place();
+                    self.status = "unexcluded every model".into();
+                    return Some(Effect::Save);
                 }
             }
             Input::None => {}
@@ -5216,6 +5251,36 @@ mod tests {
         press(&mut a, "U");
         a.set_data(Data::default());
         assert_eq!(a.input, Input::None, "a refresh that lost the release takes the question back");
+    }
+
+    #[test]
+    fn dd_unfavorites_every_model() {
+        let mut a = app();
+        assert_eq!((press(&mut a, "D"), &a.input), (None, &Input::None), "no favorites: nothing to ask");
+        assert!(a.status.contains("no favorites"), "{}", a.status);
+        a.store.set_favorite("coding", "gpt55", Some("opencode"));
+        a.store.set_favorite("coding:low", "flash", None);
+        a.rebuild();
+        press(&mut a, "F");
+        assert_eq!((press(&mut a, "D"), &a.input), (None, &Input::Unfavorite), "D asks");
+        assert_eq!((press(&mut a, "q"), a.store.favorite.len()), (None, 2), "any other key cancels");
+        assert_eq!(press(&mut a, "DD"), Some(Effect::Save));
+        assert!(a.store.favorite.is_empty() && a.store.via.is_empty() && a.only.is_none(), "and F is left");
+    }
+
+    #[test]
+    fn xx_unexcludes_every_model() {
+        let mut a = app();
+        assert_eq!((press(&mut a, "X"), &a.input), (None, &Input::None), "none excluded: nothing to ask");
+        assert!(a.status.contains("no excluded"), "{}", a.status);
+        a.store.toggle_excluded("gpt55");
+        a.store.toggle_excluded("flash");
+        a.rebuild();
+        press(&mut a, "E");
+        assert_eq!((press(&mut a, "X"), &a.input), (None, &Input::Unexclude), "X asks");
+        assert_eq!((press(&mut a, "q"), a.store.excluded.len()), (None, 2), "any other key cancels");
+        assert_eq!(press(&mut a, "XX"), Some(Effect::Save));
+        assert!(a.store.excluded.is_empty() && a.only.is_none(), "and E is left");
     }
 
     #[test]
