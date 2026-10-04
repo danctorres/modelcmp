@@ -1240,11 +1240,15 @@ fn aa_words(slug: &str, effort: bool) -> Vec<String> {
         })
         .filter(|w| !SKIP.contains(&w.as_str()))
         .collect();
-    // Names first, sorted; numbers keep their order, as "gpt-4-5" is not "gpt-5-4".
+    names_first(&mut k);
+    k
+}
+
+/// Names first, sorted; numbers keep their order, as "gpt-4-5" is not "gpt-5-4".
+fn names_first(k: &mut [String]) {
     k.sort_by_key(|w| w.starts_with(|c: char| c.is_ascii_digit()));
     let names = k.iter().take_while(|w| !w.starts_with(|c: char| c.is_ascii_digit())).count();
     k[..names].sort();
-    k
 }
 
 /// Where the reasoning setting a name ends in starts among its words: their count when it ends
@@ -1386,23 +1390,49 @@ fn offer_name(id: &str, name: &str) -> String {
 /// `granite-4.0-h-micro`. Only each row's most common id counts, as providers mislabel models
 /// (Vercel calls `gpt-5.2-pro` "GPT 5.2") and one such offer must not merge two models.
 /// The row OpenRouter or Epoch knows (`known`) absorbs the others, else the first by key.
-/// Returns each absorbed key and the key it went into.
+/// So are rows named by the same words in another order, as providers write "Claude 4.7 Opus"
+/// for "Claude Opus 4.7".
+/// Returns each absorbed key and the key it went into, in the order they went.
 // ponytail: ids without a digit ("deepseek-chat", "sonar") are too generic to trust and never merge.
 fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> bool) -> Vec<(String, String)> {
-    let mut order: Vec<String> = by_key.keys().cloned().collect();
-    order.sort_by_cached_key(|k| (!known(k), k.clone()));
-    let mut owner: HashMap<String, String> = HashMap::new(); // main id -> key of the row absorbing it
-    let mut moved = Vec::new();
-    for k in order {
+    let main_id = |m: &Model| {
         let mut counts: HashMap<String, usize> = HashMap::new();
-        for o in &by_key[&k].offers {
+        for o in &m.offers {
             *counts.entry(slug(&o.id)).or_default() += 1;
         }
         // A clear winner only: a row of several ids, one offer each, has no main id.
-        let Some(main) = winner(counts) else { continue };
-        if !main.bytes().any(|b| b.is_ascii_digit()) {
-            continue;
-        }
+        winner(counts).filter(|main| main.bytes().any(|b| b.is_ascii_digit()))
+    };
+    // The names sorted, then the numbers as written, those side by side as one: "Grok 4.1 Fast"
+    // is not "Grok 4 Fast 1". A name without a digit is too generic, as an id without one.
+    // ponytail: where a number sat among the names is lost; compare the positions too if two
+    // models ever differ only by that.
+    let any_order = |m: &Model| {
+        let w = words(&m.name);
+        let num = |w: &String| w.starts_with(|c: char| c.is_ascii_digit());
+        let mut k: Vec<String> = w.iter().filter(|w| !num(w)).cloned().collect();
+        k.sort();
+        k.extend(w.chunk_by(|a, b| num(a) && num(b)).filter(|r| num(&r[0])).map(|r| r.join(".")));
+        let k = k.join("-");
+        k.bytes().any(|b| b.is_ascii_digit()).then_some(k)
+    };
+    let mut moved = merge_by(by_key, &known, main_id);
+    moved.extend(merge_by(by_key, &known, any_order));
+    moved
+}
+
+/// Merges the rows `same` gives the same value into the first of them, the known ones first.
+fn merge_by(
+    by_key: &mut HashMap<String, Model>,
+    known: &impl Fn(&str) -> bool,
+    same: impl Fn(&Model) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut order: Vec<String> = by_key.keys().cloned().collect();
+    order.sort_by_cached_key(|k| (!known(k), k.clone()));
+    let mut owner: HashMap<String, String> = HashMap::new(); // value -> key of the row absorbing it
+    let mut moved = Vec::new();
+    for k in order {
+        let Some(main) = same(&by_key[&k]) else { continue };
         let to = owner.entry(main).or_insert_with(|| k.clone()).clone();
         if to != k {
             let m = by_key.remove(&k).unwrap();
@@ -1583,6 +1613,9 @@ struct Scores {
     groups: BTreeMap<String, Group>,
     /// "Gemini 2.5 Pro (Jun 2025)" is reachable as "gemini25pro"; newest dated version wins.
     alias: HashMap<String, String>,
+    /// Epoch's model ids, for a model it names otherwise: `grok-4.3` is "Grok 4.3 Beta". Apart
+    /// from `alias`, as an id only finds the scores: it does not choose which row keeps its key.
+    ids: HashMap<String, String>,
     /// group -> organization.
     org: HashMap<String, String>,
     /// Benchmark -> Epoch's fit of it.
@@ -1787,13 +1820,20 @@ impl Scores {
     fn group(&self, key: &str) -> Option<&String> {
         self.groups.get_key_value(key).map(|(k, _)| k).or_else(|| self.alias.get(key))
     }
+
+    /// The group a key reaches as one of its model ids, unless a row has it by name (`owned`):
+    /// "Grok 4.3" is not given the scores of the "Grok 4.3 Beta" listed beside it.
+    fn by_id(&self, key: &str, owned: &HashSet<&String>) -> Option<&String> {
+        self.ids.get(key).filter(|g| !owned.contains(g))
+    }
 }
 
 /// The page Epoch would have for each model it knows, whichever source scores it; `epoch_listed`
 /// keeps the ones it has.
 fn epoch_named(models: &mut [Model], ep: &Scores) {
+    let owned: HashSet<&String> = models.iter().filter_map(|m| ep.group(&m.key)).collect();
     for m in models {
-        m.epoch = ep.group(&m.key).map(|k| epoch_slug(&ep.groups[k].0));
+        m.epoch = ep.group(&m.key).or_else(|| ep.by_id(&m.key, &owned)).map(|k| epoch_slug(&ep.groups[k].0));
     }
 }
 
@@ -1890,6 +1930,42 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         if short != *k && newest.get(&short).is_none_or(|r| rank > *r) {
             newest.insert(short.clone(), rank);
             ep.alias.insert(short, k.clone());
+        }
+    }
+    // A model's id reaches its group too, where the names differ: `grok-4.3_high` is "Grok 4.3
+    // Beta" and `gemini-3-pro-preview` "Gemini 3 Pro". The id without a setting first, then in
+    // order; one without a digit ("deepseek-chat") is whichever release it points to, and none.
+    // The provider before a `/` is not the model's, and what follows a `_` is a setting only at
+    // the end, as a word or a budget: `InternVL2_5-78B` is whole.
+    let base = |v: &str| {
+        let v = slug(v);
+        let setting = |s: &str| {
+            s.bytes().all(|b| b.is_ascii_lowercase()) || s.strip_suffix('k').is_some_and(|n| n.parse::<u32>().is_ok())
+        };
+        v.rsplit_once('_').filter(|(_, s)| !s.is_empty() && setting(s)).map_or(v.clone(), |(b, _)| b.to_string())
+    };
+    // An id that says it is another kind of model than its group is not joined: Epoch files
+    // `gpt-5-chat` under "GPT-5" and `Qwen2.5-VL-72B-Instruct` under "Qwen2.5-72B".
+    // ponytail: the two words seen; a list of the words an id may add, if more turn up.
+    let other =
+        |v: &str, g: &str| words(v).iter().any(|w| ["chat", "vl"].contains(&w.as_str()) && !words(g).contains(w));
+    let ids = version_group.iter().filter(|(v, g)| !other(v, g) && ep.groups.contains_key(&norm(g)));
+    // Of several groups an id reaches, the one `alias` would keep: with an index, then scored
+    // on a task, then the newest.
+    let rank = |g: &String| {
+        let (_, eci, scores) = &ep.groups[g];
+        std::cmp::Reverse((eci.is_some(), !scores.is_empty(), dates.get(g).cloned().unwrap_or_default()))
+    };
+    let mut ids: Vec<_> = ids
+        .map(|(v, g)| {
+            let g = norm(g);
+            (norm(&base(v)), base(v) != slug(v), rank(&g), g)
+        })
+        .collect();
+    ids.sort();
+    for (id, _, _, g) in ids {
+        if id.bytes().any(|b| b.is_ascii_digit()) {
+            ep.ids.entry(id).or_insert(g);
         }
     }
     if ep.groups.values().all(|(_, eci, scores)| eci.is_none() && scores.is_empty()) {
@@ -2065,7 +2141,10 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     // The keys each row absorbed: the source may score the model under one of them.
     let mut absorbed: HashMap<String, Vec<String>> = HashMap::new();
     for (from, to) in moved {
-        absorbed.entry(to.clone()).or_default().push(from.clone());
+        // A row merged into one that is merged in turn takes what it absorbed along.
+        let mut keys = absorbed.remove(&from).unwrap_or_default();
+        keys.push(from.clone());
+        absorbed.entry(to.clone()).or_default().extend(keys);
         if let Some(id) = openrouter.remove(&from) {
             openrouter.entry(to.clone()).or_insert(id);
         }
@@ -2085,6 +2164,15 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     }
     let mut models: Vec<Model> = by_key.into_values().collect();
     let plain = plain(&models);
+    // A row's key, then the keys it absorbed.
+    fn with_absorbed<'a>(
+        k: &'a String,
+        absorbed: &'a HashMap<String, Vec<String>>,
+    ) -> impl Iterator<Item = &'a String> {
+        std::iter::once(k).chain(absorbed.get(k).into_iter().flatten())
+    }
+    let owned: HashSet<&String> =
+        models.iter().filter_map(|m| with_absorbed(&m.key, &absorbed).find_map(|k| ep.group(k))).collect();
     for m in &mut models {
         // The family in the name is surest; else what most offers' ids say.
         m.developer = match developer_from_name(&m.name) {
@@ -2140,6 +2228,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         let gk = ep
             .group(&m.key)
             .or_else(|| absorbed.get(&m.key)?.iter().find_map(|k| ep.group(k)))
+            .or_else(|| with_absorbed(&m.key, &absorbed).find_map(|k| ep.by_id(k, &owned)))
             .or(aa.as_ref().filter(|k| ep.groups.contains_key(*k)))
             .map(String::as_str);
         // A reasoning model of its own is not the model it is named after, unless Artificial
@@ -2345,6 +2434,30 @@ mod tests {
         let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.eci)).collect();
         assert_eq!(rows, [("gemma9", Some(140.0))]);
         assert!(merge(b"{}", &ep, None).is_err(), "no models is a reply in another shape, not data");
+        // The same words in another order, under ids of its own: still one row, and scored.
+        let json = br#"{"openrouter": {"models": {"x/opus-9": {"name": "Claude Opus 9"}}},
+                        "b": {"models": {"opus9-a": {"name": "Claude 9 Opus"}, "opus9-b": {"name": "Claude 9 Opus"}}}}"#;
+        ep.groups.insert("claudeopus9".into(), ("Claude Opus 9".into(), Some(150.0), BTreeMap::new()));
+        let d = merge(json, &ep, None).unwrap();
+        let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.eci, m.offers.len())).collect();
+        assert_eq!(rows, [("claudeopus9", Some(150.0), 3)]);
+        // Numbers apart are not numbers side by side, and a name without one merges with none.
+        let json = br#"{"b": {"models": {"a": {"name": "Grok 4.1 Fast"}, "b": {"name": "Grok 4 Fast 1"},
+                        "c": {"name": "Sonar Pro"}, "d": {"name": "Pro Sonar"}}}}"#;
+        assert_eq!(merge(json, &ep, None).unwrap().models.len(), 4);
+        // An id reaches a group no row has by name, and only then.
+        ep.groups.insert("grok9beta".into(), ("Grok 9 Beta".into(), Some(160.0), BTreeMap::new()));
+        ep.ids.insert("grok9".into(), "grok9beta".into());
+        let eci = |json: &[u8]| {
+            let d = merge(json, &ep, None).unwrap();
+            d.models.iter().map(|m| (m.key.clone(), m.eci)).collect::<Vec<_>>()
+        };
+        assert_eq!(eci(br#"{"b": {"models": {"a": {"name": "Grok 9"}}}}"#), [("grok9".into(), Some(160.0))]);
+        let both = eci(br#"{"b": {"models": {"a": {"name": "Grok 9"}, "b": {"name": "Grok 9 Beta"}}}}"#);
+        assert!(
+            both.contains(&("grok9".into(), None)) && both.contains(&("grok9beta".into(), Some(160.0))),
+            "{both:?}"
+        );
     }
 
     #[test]
@@ -2942,6 +3055,7 @@ mod tests {
             file(
                 "model_metadata.csv",
                 b"model_version,model_group,date\ngoogle/flash-9,Flash 9 (Jun 2025),2025-06-17\n\
+                  flash-9-chat,Flash 9 (Sep 2025),2025-09-25\n\
                   flash-9-preview-09,Flash 9 (Sep 2025),2025-09-25\nchat-4o-03,GPT-4o (Mar 2025),2025-03-27\n\
                   gpt-4o-11,GPT-4o (Nov 2024),2024-11-20\nfoo-2,Foo 2 (Jun 2025),2025-06-01\n\
                   foo-2-09,Foo 2 (Sep 2025),2025-09-01\nbar-3-07,Bar 3 (Jul 2025),2025-07-01\n\
@@ -2967,6 +3081,10 @@ mod tests {
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
         assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
         assert_eq!(ep.alias["bar3"], "bar3jul2025", "and before a newer one scored on a task");
+        assert_eq!(ep.ids["flash9preview09"], "flash9sep2025", "a model's id reaches its group, named otherwise");
+        assert_eq!(ep.group("foo2").unwrap(), "foo2sep2025", "the name before the id, an older release's");
+        assert!(!ep.ids.contains_key("flash9chat"), "an id of another kind of model is not its group's");
+        assert!(ep.ids.contains_key("flash9") && !ep.ids.contains_key("googleflash9"), "without its provider");
     }
 
     #[test]
