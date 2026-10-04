@@ -683,10 +683,10 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             Mouse::Pick(n)
         } else {
             // A cell opens what it shows, on a double click (`double`): Via the harness under
-            // the pointer, and Notes nothing.
+            // the pointer, and Notes the note to write.
             match col_at(&l, x) {
                 Some((VIA, vx, _)) => harness_at(app, n, x - vx).map_or(Mouse::Row(n), |j| Mouse::Harness(n, j)),
-                Some((col, ..)) if col != NOTES => Mouse::Cell(n, col),
+                Some((col, ..)) => Mouse::Cell(n, col),
                 _ => Mouse::Row(n),
             }
         });
@@ -3451,7 +3451,7 @@ mod tests {
         assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
         assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 9)), "a benchmark score");
         assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Cell(1, PRICE)), "a price");
-        assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Row(1)), "the notes open nothing");
+        assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Cell(1, NOTES)), "the note to write");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
         assert_eq!(hit(&a, area, wheel(MouseEventKind::ScrollLeft)), Some(Mouse::Cols(-1)));
         let shifted = MouseEvent { modifiers: KeyModifiers::SHIFT, ..wheel(MouseEventKind::ScrollDown) };

@@ -2076,7 +2076,8 @@ impl App {
 
     /// The wheel scrolls whatever `j k` move and sideways moves the column cursor; a click
     /// selects a row, and a double click opens what its cell shows: the details from the name or
-    /// the developer, a harness in Via, as `x` does, and from a number the page it comes from;
+    /// the developer, a harness in Via, as `x` does, from a number the page it comes from, and
+    /// the note to write, as `n` does;
     /// a click on a header sorts by it, as `s` does, and on its ▾ opens the dropdown. A click on
     /// an entry does what enter does: in a dropdown and `f`'s tasks it toggles the entry and the
     /// list stays open until a click outside; in the other choice lists it picks the entry. In
@@ -2092,8 +2093,9 @@ impl App {
         if let Mouse::Key(code) = m {
             return self.on_key(code.into());
         }
-        // An entry being written keeps the wheel still, and a click anywhere leaves it as esc does.
-        if self.editing() {
+        // An entry or a note being written keeps the wheel still, and a click anywhere leaves
+        // it as esc does.
+        if self.editing() || matches!(self.input, Input::Note { .. }) {
             return match m {
                 Mouse::Scroll(_) | Mouse::Cols(_) => None,
                 _ => self.input_key(KeyCode::Esc, KeyModifiers::NONE),
@@ -2235,10 +2237,12 @@ impl App {
             Mouse::Cell(n, col) if n < self.rows.len() => {
                 self.deselect();
                 self.select(n);
-                if col < TEXT {
-                    return self.table_key(KeyCode::Enter, 1);
+                match col {
+                    ..TEXT => return self.table_key(KeyCode::Enter, 1),
+                    NOTES => return self.table_key(KeyCode::Char('n'), 1),
+                    _ => {}
                 }
-                // An empty cell, as Notes, has nothing to open.
+                // An empty cell has nothing to open.
                 self.val(self.rows[n], col)?;
                 let m = self.current()?;
                 // The groups of `GROUPS` and where each comes from: the release, prices and context,
@@ -4761,7 +4765,16 @@ mod tests {
         let said = (a.mouse(Mouse::Cell(0, ECI)), a.status.as_str());
         assert_eq!(said, (None, "gpt55 has no page on epoch.ai"), "a score Epoch has no page for says so");
         assert_eq!(a.mouse(Mouse::Cell(2, ECI)), None, "an empty cell opens nothing");
-        assert_eq!(a.mouse(Mouse::Cell(2, NOTES)), None, "nor do the notes");
+        let key = a.data.models[a.rows[2]].key.clone();
+        a.store.set_note(&key, "slow");
+        a.mouse(Mouse::Row(0));
+        assert_eq!(a.mouse(Mouse::Cell(2, NOTES)), None);
+        assert_eq!(a.input, Input::Note { key: key.clone(), text: "slow".into(), cur: 4 }, "a note: written, as n");
+        assert_eq!(a.mouse(Mouse::Scroll(1)), None);
+        assert!(matches!(a.input, Input::Note { .. }), "the wheel keeps it open");
+        a.mouse(Mouse::Row(0));
+        assert_eq!((&a.input, a.selected()), (&Input::None, 2), "a click leaves it, as esc does");
+        a.store.set_note(&key, "");
         a.mouse(Mouse::Row(1));
         a.mouse(Mouse::Mark(2));
         assert_eq!((a.selected(), a.store.marked.len()), (2, 1), "right click marks and stays");
