@@ -1922,7 +1922,7 @@ fn parts(app: &App) -> Vec<Line<'static>> {
         (true, _) => "all",
     };
     let part = |s: String, c: Color| Line::styled(s, fg(c));
-    // Selected models show out of reach too, so they are counted apart, as their Via says.
+    // Selected models show out of reach too, as `F` and `E` show theirs, so they are counted apart, as their Via says.
     let out = app.rows.iter().filter(|&&r| !app.in_reach(&app.data.models[r])).count();
     let count = match out {
         0 => format!("{} {scope}", app.rows.len()),

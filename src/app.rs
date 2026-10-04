@@ -841,7 +841,7 @@ pub struct App {
     /// How many of them are out of reach whatever `a`, which yours shows too: its tab's `+N`.
     pub marked_out: usize,
     /// Whether `F` and `E` have a model to show, set by `rebuild` as the marks' count is: one
-    /// the data no longer has, or that is out of reach, is none.
+    /// the data no longer has is none, one out of reach still is.
     fav_shown: bool,
     excluded_shown: bool,
     /// The one of `S` `F` `E` that is on, as its tab in `TABS`: its models only.
@@ -1363,9 +1363,10 @@ impl App {
     /// Price's minimum (its dropdown only replaces the maximum; a task's drops both bounds), so
     /// a dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
-        // A selected model shows even out of reach, so it can be compared.
+        // A selected model shows even out of reach, so it can be compared, and `S` `F` `E` show
+        // theirs whatever `a`: the same models from yours as from all.
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
-            (self.in_reach(m) || self.store.is_marked(&m.key))
+            (self.only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
                 && hits(
                     &self.query,
                     [&m.name, &m.developer, &m.via.join(", "), self.store.note(&m.key).unwrap_or("")],
@@ -1396,10 +1397,9 @@ impl App {
         (self.marked_shown, self.marked_out) = (marked().count(), marked().filter(|m| !self.accessible(m)).count());
         // Unmarking the last marked model, or a refresh dropping it, leaves S (and unfavoriting
         // the last, F) for every model rather than an empty table.
-        // A selected model shows out of reach too, as `filtered` keeps it.
-        let shows = |m: &&Model| self.in_reach(m) || self.store.is_marked(&m.key);
-        let fav = self.data.models.iter().filter(shows).any(|m| self.is_fav(&m.key));
-        let excluded = self.data.models.iter().filter(shows).any(|m| self.store.is_excluded(&m.key));
+        // One out of reach shows in them too, as `filtered` keeps it.
+        let fav = self.data.models.iter().any(|m| self.is_fav(&m.key));
+        let excluded = self.data.models.iter().any(|m| self.store.is_excluded(&m.key));
         (self.fav_shown, self.excluded_shown) = (fav, excluded);
         self.only = self.only.filter(|&i| [self.any_marked(), fav, excluded][i - MARKED]);
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
@@ -1436,7 +1436,8 @@ impl App {
         };
         self.fronts = TASKS.iter().map(|t| self.front(t, pool)).collect();
         let ms = &self.data.models;
-        if let Some(t) = self.task {
+        // `F` and `E` keep theirs off the line too: one out of reach or excluded is on none.
+        if let Some(t) = self.task.filter(|_| !matches!(self.only, Some(FAV | EXCLUDED))) {
             // The same line the recommend panel and `list --task` show.
             let front = &self.fronts[TASKS.iter().position(|x| x.name == t.name).unwrap_or(0)].0;
             rows.retain(|i| front.iter().any(|(k, _)| k == i));
@@ -1636,7 +1637,7 @@ impl App {
     }
 
     /// Whether `m` is one to use: accessible, or any with `a` or none available. Only these are
-    /// recommended: a selected model out of reach shows, but is never a pick.
+    /// recommended: a selected model out of reach shows, as `F` and `E` show theirs, but is never a pick.
     pub fn in_reach(&self, m: &Model) -> bool {
         in_reach(m, self.all, self.any_available)
     }
@@ -2407,24 +2408,15 @@ impl App {
                 self.only = (self.only != Some(MARKED)).then_some(MARKED);
                 self.rebuild();
             }
-            // One out of reach is under `a`, as an excluded one is.
             KeyCode::Char('F') if table && self.only != Some(FAV) && !self.fav_shown => {
-                let out = self.data.models.iter().any(|m| self.is_fav(&m.key));
-                self.refuse(match out {
-                    true => "no favorites you have access to: a shows all",
-                    false => "no favorites: f favorites the one under the cursor",
-                });
+                self.refuse("no favorites: f favorites the one under the cursor");
             }
             KeyCode::Char('F') if table => {
                 self.only = (self.only != Some(FAV)).then_some(FAV);
                 self.rebuild();
             }
             KeyCode::Char('E') if table && self.only != Some(EXCLUDED) && !self.excluded_shown => {
-                let out = self.data.models.iter().any(|m| self.store.is_excluded(&m.key));
-                self.refuse(match out {
-                    true => "no excluded models you have access to: a shows all",
-                    false => "no excluded models: e excludes the one under the cursor",
-                });
+                self.refuse("no excluded models: e excludes the one under the cursor");
             }
             KeyCode::Char('E') if table => {
                 self.only = (self.only != Some(EXCLUDED)).then_some(EXCLUDED);
@@ -3023,10 +3015,19 @@ mod tests {
         a.store.toggle_excluded(&out);
         a.rebuild();
         press(&mut a, "E");
-        assert!(!a.tab_has(EXCLUDED) && a.only != Some(EXCLUDED), "an excluded model out of reach is none to show");
-        assert_eq!(a.status, "no excluded models you have access to: a shows all");
+        assert_eq!(
+            (a.only == Some(EXCLUDED), a.rows.len()),
+            (true, 1),
+            "E shows an excluded model out of reach from yours"
+        );
         press(&mut a, "aE");
-        assert_eq!((a.only == Some(EXCLUDED), a.rows.len()), (true, 1), "in all it is one");
+        assert_eq!((a.only == Some(EXCLUDED), a.rows.len()), (true, 1), "and the same from all");
+        a.store.toggle_excluded(&out);
+        a.store.toggle_favorite("coding", &out);
+        a.task = TASKS.iter().find(|t| t.name == "coding");
+        press(&mut a, "AF");
+        assert_eq!(keys(&a), [out.as_str()], "F shows a picked task's favorite out of reach, off its line");
+        a.task = None;
         a.data.models.retain(|m| m.key != out);
         a.rebuild();
         assert!(!a.tab_has(EXCLUDED) && a.only != Some(EXCLUDED), "and gone from the data it is none again");

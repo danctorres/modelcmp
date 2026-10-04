@@ -55,8 +55,8 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 | `e` on a selected model | act on every selected model, not just the one under the cursor |
 | `U` | deselect every model |
 | `S` | selected models only; `S` again or `esc`: every model |
-| `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked); `F` again or `esc`: every model |
-| `E` | excluded models only, the rows with a red `✗`; `E` again or `esc`: every model |
+| `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked), the ones you have no access to too, from `yours` as from `all`; `F` again or `esc`: every model |
+| `E` | excluded models only, the rows with a red `✗`, the ones you have no access to too, from `yours` as from `all`; `E` again or `esc`: every model |
 
 ## Model under the cursor
 
