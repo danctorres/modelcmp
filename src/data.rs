@@ -769,7 +769,11 @@ fn answer(
         // Not its notifications, nor a request of its own, which has a method.
         let lines = BufReader::new(out).lines().map_while(Result::ok);
         let mut answers = lines.filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok());
-        answers.find(|v| v["id"] == id && v.get("method").is_none()).map(|v| tx.send(v))
+        if let Some(answer) = answers.find(|v| v["id"] == id && v.get("method").is_none()) {
+            let _ = tx.send(answer);
+        }
+        // Read to its end: it writes on after answering, which a closed pipe would fail.
+        answers.for_each(drop);
     });
     let start = Instant::now();
     let answer = loop {
@@ -782,7 +786,7 @@ fn answer(
     // Its input closed, it ends on its own: killed only when it has not, or gave no answer.
     drop(stdin);
     let end = Instant::now() + Duration::from_secs(2);
-    while answer.is_some() && Instant::now() < end && matches!(child.try_wait(), Ok(None)) {
+    while answer.is_some() && !stop.load(Relaxed) && Instant::now() < end && matches!(child.try_wait(), Ok(None)) {
         std::thread::sleep(Duration::from_millis(50));
     }
     let _ = child.kill();
