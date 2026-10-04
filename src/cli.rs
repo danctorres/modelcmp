@@ -294,14 +294,16 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     if o.limit > 0 {
         models.truncate(o.limit);
     }
+    // `--tier` is the one model to use: none is a failure however it is printed, as a script
+    // reading `[0]` of an empty list would go on with no model. So is an empty `--id`, whose
+    // substitution would start the harness on no model at all.
+    if models.is_empty() && (o.tier.is_some() || o.id) {
+        return Err("no models match".to_string().into());
+    }
     if o.json {
         return print_json(&models.iter().map(|m| out(m, store, false)).collect::<Vec<_>>());
     }
     if o.id {
-        // An empty substitution would start the harness on no model at all.
-        if models.is_empty() {
-            return Err("no models match".to_string().into());
-        }
         for m in &models {
             println!("{}", model_id(m, &data.harness));
         }
@@ -460,10 +462,22 @@ pub fn fav(
         }
         (Some(t), None, false) => match store.favorite(t) {
             Some(k) => println!("{}", line(store, t, k)),
-            None => println!("no favorite for {t}"),
+            // A model's name where the task goes, or a typo, is no task: not a task with no favorite.
+            None => {
+                let name = t.split(':').next().unwrap_or(t);
+                if fit::task(name).is_none() && !store.custom_tasks().contains(&name) {
+                    let msg = format!("no task '{name}': modelcmp fav {name} <model> makes it one of your own");
+                    return Err(Exit { code: 2, msg });
+                }
+                println!("no favorite for {t}");
+            }
         },
+        // Clearing what is clear already is no failure: a script's reset step runs twice.
         (Some(t), None, true) => {
-            store.favorite.remove(t);
+            if store.favorite.remove(t).is_none() {
+                println!("no favorite for {t}");
+                return Ok(());
+            }
             store.save()?;
             println!("cleared {t}");
         }
