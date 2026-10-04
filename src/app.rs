@@ -1415,12 +1415,18 @@ impl App {
         // A task of your own is gone with its model, from under recommend's cursor too.
         self.task_cur = self.task_cur.min(self.task_count() - 1);
         // Before a task keeps only its line: the models every task's line is drawn from. `E`
-        // narrows none, as an excluded model is never recommended.
-        let unnarrowed;
+        // narrows none, as an excluded model is never recommended, and its exact matches come
+        // before the typos the table's rows took.
+        let mut unnarrowed;
         let pool = if self.only == Some(EXCLUDED) {
+            let typos = std::mem::take(&mut self.typos);
             self.only = None;
             unnarrowed = matching(self);
-            self.only = Some(EXCLUDED);
+            if unnarrowed.is_empty() && typos {
+                self.typos = true;
+                unnarrowed = matching(self);
+            }
+            (self.only, self.typos) = (Some(EXCLUDED), typos);
             &unnarrowed
         } else {
             &rows
@@ -3815,6 +3821,20 @@ mod tests {
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["gpt55", "flash"], "enter shows the same line as the panel");
+    }
+
+    #[test]
+    fn a_search_on_excluded_ranks_its_exact_matches_alone() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        data.models.push(model("mint", true, Some(99.0), 0.01));
+        a.set_data(data);
+        press(&mut a, "eE/mini");
+        code(&mut a, KeyCode::Enter);
+        let front: Vec<&str> =
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
+        assert_eq!((a.only, a.typos), (Some(EXCLUDED), true), "no excluded model is mini, so the table takes typos");
+        assert_eq!(front, ["mini"], "recommend has mini itself, so not mint, a typo away");
     }
 
     #[test]
