@@ -1783,6 +1783,11 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 _ if listed && on_price(i) => tint(MUTED).add_modifier(Modifier::ITALIC),
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
                 _ if i + 2 == PRICE => soft(LEVEL[level(v)]),
+                // Free is green and no more, in $in, $cache and $out as in Price: every free model
+                // ties for the best, and a column of them in bold says nothing of any one.
+                _ if COLS[i].price && COLS[i].lower_better && v == 0.0 => soft(GOOD),
+                // Nor is the largest context bold: it is a size many models share, as free is.
+                Some((best, _)) if !dim && v == best && COLS[i].id == "ctx" => tint(GOOD),
                 Some((best, _)) if !dim && v == best => tint(GOOD).add_modifier(BOLD),
                 Some((_, worst)) if !dim && v == worst => tint(BAD),
                 _ => text,
