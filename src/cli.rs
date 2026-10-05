@@ -355,29 +355,35 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
 /// model of each tier as `--tier` picks it, with its context and your note. With `via` the id
 /// that harness takes, else the command that starts the harness you run the model on. Tiers
 /// with the same model share a line. The models `not` names are left out, as ones a note rules out.
-pub fn pick(data: &Data, store: &Store, via: &[String], bounds: &[(usize, f64, f64)], not: &[String]) -> Result {
+pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result {
     let not = not.iter().map(|q| Ok(resolve(data, q)?.key.clone())).collect::<Result<Vec<_>>>()?;
-    check("--via", via, data.models.iter().flat_map(|m| shown_via(m, data.any_available())))?;
+    // An agent told only what is known goes on to guess a model for its harness.
+    check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, data.any_available())))
+        .map_err(|e| Exit { msg: format!("{}: choose no model for it, tell the user", e.msg), ..e })?;
     let own = store.custom_tasks();
     let own = own.iter().map(|&c| (c, None, format!("the user's own task, {}", store.about(c).unwrap_or(CUSTOM_WHEN))));
-    for (name, task, when) in TASKS.iter().map(|t| (t.name, Some(t), t.when.to_string())).chain(own) {
+    let tasks: Vec<_> = TASKS.iter().map(|t| (t.name, Some(t), t.when.to_string())).chain(own).collect();
+    // One task, or one tier, for an agent that chose it already.
+    if let Some(c) = o.custom.as_deref().filter(|c| !tasks.iter().any(|t| t.0 == *c)) {
+        let names = tasks.iter().map(|t| t.0).collect::<Vec<_>>().join(", ");
+        return Err(Exit { code: 2, msg: format!("no task '{c}': there are {names}") });
+    }
+    for (name, task, when) in tasks.into_iter().filter(|t| o.custom.as_deref().is_none_or(|c| c == t.0)) {
         println!("{name}: {when}");
         let mut lines: Vec<(String, String)> = Vec::new();
-        for (tier, _) in TIERS {
+        for (tier, _) in TIERS.iter().filter(|x| o.tier.as_deref().is_none_or(|t| t == x.0)) {
             let o = ListOpts {
                 task,
                 custom: task.is_none().then(|| name.to_string()),
-                tier: Some(tier.into()),
-                via: via.to_vec(),
-                bounds: bounds.to_vec(),
+                tier: Some((*tier).into()),
                 not: not.clone(),
-                cmd: via.is_empty(),
-                ..Default::default()
+                cmd: o.via.is_empty(),
+                ..o.clone()
             };
             let line = tier_line(data, store, &o)?;
             match lines.last_mut() {
                 Some((tiers, l)) if *l == line => *tiers = format!("{tiers}/{tier}"),
-                _ => lines.push((tier.into(), line)),
+                _ => lines.push(((*tier).into(), line)),
             }
         }
         for (tiers, line) in lines {

@@ -106,7 +106,7 @@ pick for work that fits it, even when a built-in task fits too: for a bug, your 
 `coding`. It is gone when its last model is cleared, and `--rename` gives it another name, one no
 task has yet.
 Columns for `--sort`, `--min` and `--max`: `price`, `in`, `cache`, `out`, `ctx` (thousands of
-tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value`, and with Artificial Analysis `tps` and `ttft`. `--task` and
+tokens, and a value of 10000 or more is read as tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value`, and with Artificial Analysis `tps` and `ttft`. `--task` and
 `recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
 model from the task's list: `low` the cheapest within 8 months of progress of your best model on the task,
 `mid` the cheapest within 3, `high` your best. The list keeps the best model of
@@ -128,7 +128,8 @@ takes, and a favorite the harness lacks follows the tier's own pick, with the co
 it where it runs: `(★ favorite Ling 3.1 Flash is not on claude, start: opencode --model
 opencode/ling-3.1-flash-free)`. Without `--via` each line has the command `--cmd` prints, or the
 id when no harness has the model. `--min` and `--not` leave a favorite out too, and a task of your
-own whose model is out says `no model`.
+own whose model is out says `no model`. `--task` and `--tier` print only that task or tier, for an agent
+that chose it already.
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name

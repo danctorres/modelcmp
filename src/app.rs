@@ -160,6 +160,8 @@ pub const COLS: [Col; 13] = [
     },
     Col {
         show: |v| ctx((v * 1000.0) as u64),
+        // Typed in tokens, as an agent does: no window is 10M tokens wide.
+        read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()).map(|v| if v >= 10_000.0 { v / 1000.0 } else { v }),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
     // Named by the source in use: `Col::text`.
@@ -3120,6 +3122,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--min ctx=600` and `--min ctx=600000` are the same 600,000 tokens.
+    #[test]
+    fn a_context_bound_reads_tokens_or_thousands() {
+        let read = COLS.iter().find(|c| c.id == "ctx").unwrap().read;
+        assert_eq!((read("600", false), read("600000", false)), (Some(600.0), Some(600.0)));
+    }
     use crate::data::Offer;
     use crate::fit;
     use crate::view::frontier;

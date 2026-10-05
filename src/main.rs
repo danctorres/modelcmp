@@ -48,7 +48,7 @@ enum Cmd {
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
         #[arg(short, long, value_parser = PossibleValuesParser::new(app::COLS.map(|c| c.id)))]
         sort: Option<String>,
-        /// Keep models at or above a value, e.g. --min coding=155; columns as in --sort, ctx in thousands of tokens, release as a date (2026-06); repeatable (`>` in the TUI)
+        /// Keep models at or above a value, e.g. --min coding=155; columns as in --sort, ctx in thousands of tokens (or in tokens from 10000), release as a date (2026-06); repeatable (`>` in the TUI)
         #[arg(long, value_parser = |s: &str| bound(s, false))]
         min: Vec<(usize, f64)>,
         /// Keep models at or below a value, e.g. --max price=2; a release up to the end of its month or year; repeatable (`<` in the TUI)
@@ -93,6 +93,12 @@ enum Cmd {
         /// Leave a model out, a favorite too, e.g. one your note rules out for this work: its name or the id printed; repeatable
         #[arg(long, value_name = "MODEL")]
         not: Vec<String>,
+        /// Only this task, for one chosen already
+        #[arg(short, long, value_parser = store::task_name)]
+        task: Option<String>,
+        /// Only this tier
+        #[arg(long, value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
+        tier: Option<String>,
     },
     /// Everything about one model
     Show {
@@ -281,9 +287,11 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
             };
             cli::list(&data, &store, &opts)
         }
-        Cmd::Pick { via, min, not } => {
-            let bounds: Vec<_> = min.into_iter().map(|(c, v)| (c, v, f64::INFINITY)).collect();
-            cli::pick(&data, &store, &via, &bounds, &not)
+        Cmd::Pick { via, min, not, task, tier } => {
+            let bounds = min.into_iter().map(|(c, v)| (c, v, f64::INFINITY)).collect();
+            // The task asked for, built in or yours, goes by its name.
+            let opts = cli::ListOpts { via, bounds, custom: task, tier, ..Default::default() };
+            cli::pick(&data, &store, &opts, &not)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
