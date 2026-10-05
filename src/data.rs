@@ -32,8 +32,9 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 11: prices at the tier an agent's session reaches. 12: a row's scores are of the release
 /// its offers are. 13: Artificial Analysis's coding score is `fit::AA_CODING`, where it was its
 /// Coding Index, and `Model::ttft` is to the first answer token. 14: its scores are all of one
-/// reasoning setting.
-const FORMAT: u32 = 14;
+/// reasoning setting. 15: Epoch's tasks without the benchmarks it no longer runs, and no task
+/// score for a model without an ECI scored on few benchmarks.
+const FORMAT: u32 = 15;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -3256,7 +3257,7 @@ mod tests {
             );
             file(
                 "benchmark_metadata.csv",
-                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,SWE-Bench verified,1\n",
+                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,DeepSWE,1\n",
             );
             file(
                 "ocr.csv",

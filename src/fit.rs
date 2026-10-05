@@ -18,6 +18,9 @@ const WEIGHT: f64 = 16.0;
 // ponytail: one spread for every task, fit it per task if one shows much more than the others.
 const TASK_SD: f64 = 2.0;
 
+/// The scores a model without an ECI needs for its tasks' to show: what Epoch asks for an ECI.
+const MIN_SCORES: usize = 4;
+
 /// Months over which the source's best score is taken to have risen steadily (`add_lag`).
 const WINDOW: f64 = 12.0;
 
@@ -64,7 +67,8 @@ pub const AA_INDEX: &str = "artificial_analysis_intelligence_index";
 pub const AA_CODING: &str = "terminalbench_scicode_mean";
 
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
-/// not be about code. Math and factual-recall benchmarks stay out.
+/// not be about code. Math and factual-recall benchmarks stay out, and those Epoch no longer
+/// runs on new models: SWE-Bench verified, Terminal Bench, GSO-Bench, DeepResearch Bench (2026-10).
 /// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
 /// Listed with the general pick first, then in the table's column order: coding, agentic, reasoning, the cheaper pick, vision.
 pub const TASKS: &[Task] = &[
@@ -84,16 +88,7 @@ pub const TASKS: &[Task] = &[
         need: Need::None,
         aa: Some(AA_CODING),
         aa_more: &["terminalbench_v4_0", "scicode"],
-        benches: &[
-            "DeepSWE",
-            "FrontierCode",
-            "FrontierSWE",
-            "SWE-Bench verified",
-            "Terminal Bench",
-            "WeirdML",
-            "MirrorCode",
-            "GSO-Bench",
-        ],
+        benches: &["DeepSWE", "FrontierCode", "FrontierSWE", "WeirdML", "MirrorCode"],
     },
     Task {
         name: "agentic",
@@ -102,7 +97,7 @@ pub const TASKS: &[Task] = &[
         need: Need::Tools,
         aa: Some("terminalbench_v4_0"),
         aa_more: &[],
-        benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0", "DeepResearch Bench", "Terminal Bench"],
+        benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0"],
     },
     Task {
         name: "reasoning",
@@ -246,12 +241,15 @@ pub fn percentiles<'a>(
         .iter()
         .map(|(_, eci, scores)| {
             // A model Epoch gave no ECI starts from one fit to all its scores.
-            let center = eci.unwrap_or_else(|| capability(&obs(&all, scores), mean, sd));
+            let known = obs(&all, scores);
+            let center = eci.unwrap_or_else(|| capability(&known, mean, sd));
+            // From a score or two that start is some 5 points off, and so is any task's.
+            let centered = eci.is_some() || known.len() >= MIN_SCORES;
             let tasks = TASKS
                 .iter()
                 .map(|t| {
                     let o = obs(t.benches, scores);
-                    (capability(&o, center, TASK_SD), !o.is_empty())
+                    (capability(&o, center, TASK_SD), !o.is_empty() && centered)
                 })
                 .collect();
             (center, tasks)
@@ -471,6 +469,12 @@ mod tests {
         assert!(!p["b"].contains_key("coding"));
         assert!((shown["a"]["coding"] - 170.0).abs() < 0.01, "shown in ECI points: {}", shown["a"]["coding"]);
         assert!(!shown["b"].contains_key("coding"));
+        // Without an ECI, a score alone is no task's; one among four is.
+        let names = ["DeepSWE", "HLE", "LMCA", "DTBench"];
+        let four = scores(&names.map(|b| (b, 0.5)));
+        let e = benches(&names.map(|b| (b, bench(170.0, 0.1, 0.0))));
+        let (p, _) = percentiles([("one", None, &a), ("four", None, &four)].into_iter(), &e);
+        assert!(!p["one"].contains_key("coding") && p["four"].contains_key("coding"));
     }
 
     #[test]

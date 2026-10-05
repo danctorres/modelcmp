@@ -17,14 +17,14 @@ on the developer's own API, or across providers when it has none. A model's scor
 columns are the model's capability on the task's benchmarks, in ECI points, fitted from its
 ECI and its scores (a model with few scores stays near its ECI):
 
-- Coding: DeepSWE, FrontierCode, FrontierSWE, SWE-Bench verified, Terminal Bench, WeirdML, MirrorCode, GSO-Bench
-- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, DeepResearch Bench, Terminal Bench
+- Coding: DeepSWE, FrontierCode, FrontierSWE, WeirdML, MirrorCode
+- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0
 - Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles, LMCA, DTBench
 
 The capability starts at the model's ECI and moves toward what its scores on those benchmarks
 say, using Epoch's difficulty and slope for each benchmark, with guessing counted as 0. One score
 moves it a little, many that agree move it more. A model without an ECI starts from a fit to
-all its scores.
+all its scores, and has task scores only when it was run on at least four of these benchmarks.
 
 `modelcmp recommend --json` gives the same lists as `benchmarks`; with Artificial Analysis, the one field the score is. In the TUI, move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
