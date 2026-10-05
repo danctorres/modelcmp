@@ -90,6 +90,9 @@ modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --
 modelcmp list --task debugging --tier mid --id # that tier's provider/model, else the task's
 modelcmp fav debugging --rename triage         # another name for a task of your own; its models stay
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
+modelcmp pick --via opencode                   # for an agent, one call: each task, what it is for, and the id opencode takes for its low, mid and high tier
+modelcmp pick --via claude --min ctx=600       # only models that hold a 600,000-token prompt, favorites too
+modelcmp pick --not opus-5.5                   # without a model, as one your note rules out for the work
 modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
 ```
 
@@ -117,6 +120,15 @@ tier's pick. Every favorite of the task that you have and did not exclude sits o
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
 `list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model, else your default harness's (`modelcmp harness`) when it has it. `--via` naming a harness prints the id that one takes instead (`--via claude --id` gives `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts opencode), and is an error when the harness lacks the model. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else your default one, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. `--tier` with `--no-fav` gives the tier's pick without your favorites, for when a favorite is on no harness you can start (`--tier mid --via claude --no-fav --id`). A task of your own has none. With no match it is an error (exit code 1), so a harness is never started on an empty model. With `--tier`, `--id` and `--cmd` also say the model's context and your note on stderr (`Claude Opus 5.5: context 1000000, note: slow`), which an agent checks and a `$(...)` does not read.
+
+`pick` is `list --task --tier` for every task and tier at once, your own tasks last: under each
+task and what it is for, a line per tier with the model, its context and your note, and tiers with
+the same model share a line (`low/mid`). With `--via` the model is named by the id that harness
+takes, and a favorite the harness lacks follows the tier's own pick, with the command that starts
+it where it runs: `(★ favorite Ling 3.1 Flash is not on claude, start: opencode --model
+opencode/ling-3.1-flash-free)`. Without `--via` each line has the command `--cmd` prints, or the
+id when no harness has the model. `--min` and `--not` leave a favorite out too, and a task of your
+own whose model is out says `no model`.
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name

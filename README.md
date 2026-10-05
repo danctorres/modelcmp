@@ -22,9 +22,9 @@ need them. modelcmp puts prices and software-engineering benchmarks side by side
 kind of task (coding, agentic runs, reasoning, ...), names the best model at each price.
 
 - **You** get a TUI to compare models, keep a shortlist and set the model you want for each task.
-- **Your agent** gets your model for the task from `modelcmp recommend --json` if you set one.
-  Otherwise it gets the best model at each price and decides whether the subtask needs the top
-  one or a cheaper one will do.
+- **Your agent** gets your model for the task from `modelcmp pick` if you set one. Otherwise it
+  gets a model for each of three tiers, cheapest to best, and decides whether the subtask needs
+  the top one or a cheaper one will do.
 
 ![modelcmp TUI](https://github.com/user-attachments/assets/6ffde581-f8f1-4b06-b35d-a79c3ecb6277)
 
@@ -104,14 +104,19 @@ hard.
 ```sh
 npx skills add danctorres/modelcmp -g                        # teach your agent to ask modelcmp
 opencode -m $(modelcmp list --task coding --tier mid --id)   # or ask it yourself
+modelcmp pick --via opencode                                 # what the skill runs: one call, every task and tier
 ```
+
+`pick` prints each task with what it is for, and the model for its `low`, `mid` and `high` tier:
+your favorite, else the cheapest that is good enough, as the id the `--via` harness takes, with
+its context and your note.
 
 `recommend --json` gives your model for a task as its `favorite`, and per tier as
 `tier_favorites`, with their harnesses as `via` and `tier_via` when you chose one; `--tier`
 returns the tier's, else the task's. Your own tasks are there too,
-marked `"custom": true`, and win over a built-in task that fits the same work. It
-also gives each frontier model's `note` (written with `n` or `modelcmp note`), which the skill
-uses to rule out a model or choose between close ones.
+marked `"custom": true`, and win over a built-in task that fits the same work. Both
+give each model's `note` (written with `n` or `modelcmp note`), which the skill uses to rule
+out a model.
 
 The [skill](skills/modelcmp/SKILL.md) works in Claude Code, opencode, Codex and any other agent
 the [skills CLI](https://skills.sh) supports; `npx skills update` updates it. An agent without

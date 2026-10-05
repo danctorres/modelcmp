@@ -223,6 +223,7 @@ fn resolve<'a>(data: &'a Data, q: &str) -> Result<&'a Model> {
     })
 }
 
+#[derive(Clone, Default)]
 pub struct ListOpts {
     pub task: Option<&'static Task>,
     /// A task of your own instead of a built-in one: its model.
@@ -245,9 +246,12 @@ pub struct ListOpts {
     pub id: bool,
     /// With a tier: its pick on merit, your favorites aside.
     pub no_fav: bool,
+    /// Keys of models to leave out, favorites too: `pick --not`.
+    pub not: Vec<String>,
 }
 
-pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
+/// The models `o` asks for, and how many before `--limit` cut them.
+fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'a Model>, usize)> {
     check("--dev", &o.dev, data.models.iter().map(|m| m.developer.as_str()))?;
     // Via as the table shows it, so "not available" can be picked too.
     let any = data.any_available();
@@ -268,10 +272,14 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
                 && (o.via.is_empty() || shown_via(m, any).iter().any(|v| has(&o.via, v)))
                 && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
                 && !(task && store.is_excluded(&m.key))
+                && !o.not.contains(&m.key)
         })
         .collect();
     // Your favorites stay on a task's line whatever the filters, as in the recommend panel.
-    let pool = || visible(data, store, o.all, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key));
+    let pool = || {
+        let usable = |m: &&Model| !store.is_excluded(&m.key) && !o.not.contains(&m.key);
+        visible(data, store, o.all, false).map(|(_, m)| m).filter(usable)
+    };
     if let Some(c) = &o.custom {
         // A task of your own has no ranking: the models you gave it, or with a tier that
         // tier's, else the task's.
@@ -304,6 +312,12 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     if o.limit > 0 {
         models.truncate(o.limit);
     }
+    Ok((models, total))
+}
+
+pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
+    let (models, total) = matched(data, store, o)?;
+    let any = data.any_available();
     // `--tier` is the one model to use: none is a failure however it is printed, as a script
     // reading `[0]` of an empty list would go on with no model. So is an empty `--id` or
     // `--cmd`, whose substitution would start the harness on no model at all, or nothing.
@@ -314,35 +328,8 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         return print_json(&models.iter().map(|m| out(m, store, false)).collect::<Vec<_>>());
     }
     if o.id || o.cmd {
-        // The harness you run a favorite of the task on, while it has the model; not one
-        // `--via` leaves out, which asks for another's.
-        let name = o.task.map(|t| t.name).or(o.custom.as_deref());
-        let via = |m: &Model| {
-            let h = store.task_via(name?, o.tier.as_deref(), &m.key)?;
-            Some(h).filter(|h| o.via.is_empty() || has(&o.via, h))
-        };
-        // Your default harness, after a favorite's own; not one `--via` leaves out either.
-        let default = Some(store.harness.as_str()).filter(|h| !h.is_empty() && (o.via.is_empty() || has(&o.via, h)));
-        // `--via` naming a harness asks for the id that one takes, so one without the model is
-        // an error for `--id` as for `--cmd`, not another harness's id.
-        let named = o.via.iter().any(|v| vias().any(|h| h != "env" && h.eq_ignore_ascii_case(v)));
-        let line = |m: &&Model| match o.cmd || named {
-            true => command(m, &[via(m), default], &o.via, &data.harness)
-                .and_then(|mut c| if o.cmd { Some(c.join(" ")) } else { c.pop() })
-                .ok_or_else(|| {
-                    // A favorite stays the pick though `--via` asks for a harness without it.
-                    let on =
-                        if o.via.is_empty() { "no harness has".into() } else { format!("{} lacks", o.via.join(", ")) };
-                    Exit::from(format!("{on} {}: there is no command to start it", m.name))
-                }),
-            false => Ok([via(m), default]
-                .into_iter()
-                .flatten()
-                .find_map(|h| launch_cmd(m, h, &data.harness)?.pop())
-                .unwrap_or_else(|| model_id(m, &data.harness))),
-        };
         // All or none: a script must not start on the first of two commands.
-        for l in models.iter().map(line).collect::<Result<Vec<_>>>()? {
+        for l in models.iter().map(|m| launch(data, store, o, m)).collect::<Result<Vec<_>>>()? {
             println!("{l}");
         }
         // What an agent checks before it uses a tier's pick, on stderr so a `$(...)` reads
@@ -362,6 +349,105 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         println!("\n{} of {total} shown; -n 0 for all", models.len());
     }
     Ok(())
+}
+
+/// For an agent, in one call: every task with what it is for, yours last, and under it the
+/// model of each tier as `--tier` picks it, with its context and your note. With `via` the id
+/// that harness takes, else the command that starts the harness you run the model on. Tiers
+/// with the same model share a line. The models `not` names are left out, as ones a note rules out.
+pub fn pick(data: &Data, store: &Store, via: &[String], bounds: &[(usize, f64, f64)], not: &[String]) -> Result {
+    let not = not.iter().map(|q| Ok(resolve(data, q)?.key.clone())).collect::<Result<Vec<_>>>()?;
+    check("--via", via, data.models.iter().flat_map(|m| shown_via(m, data.any_available())))?;
+    let own = store.custom_tasks();
+    let own = own.iter().map(|&c| (c, None, format!("the user's own task, {}", store.about(c).unwrap_or(CUSTOM_WHEN))));
+    for (name, task, when) in TASKS.iter().map(|t| (t.name, Some(t), t.when.to_string())).chain(own) {
+        println!("{name}: {when}");
+        let mut lines: Vec<(String, String)> = Vec::new();
+        for (tier, _) in TIERS {
+            let o = ListOpts {
+                task,
+                custom: task.is_none().then(|| name.to_string()),
+                tier: Some(tier.into()),
+                via: via.to_vec(),
+                bounds: bounds.to_vec(),
+                not: not.clone(),
+                cmd: via.is_empty(),
+                ..Default::default()
+            };
+            let line = tier_line(data, store, &o)?;
+            match lines.last_mut() {
+                Some((tiers, l)) if *l == line => *tiers = format!("{tiers}/{tier}"),
+                _ => lines.push((tier.into(), line)),
+            }
+        }
+        for (tiers, line) in lines {
+            println!("  {tiers}  {line}");
+        }
+    }
+    Ok(())
+}
+
+/// A tier's line in `pick`: your favorite when `o`'s harness has it and its bounds allow it,
+/// else the tier's pick on merit, followed by the favorite's command on the harness that has it.
+fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
+    let allowed = |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi));
+    // With no harness asked for, one no harness has is called by its id.
+    let call = |o: &ListOpts, m: &Model| {
+        launch(data, store, o, m).or_else(|e| match o.via.is_empty() {
+            true => launch(data, store, &ListOpts { cmd: false, ..o.clone() }, m),
+            false => Err(e),
+        })
+    };
+    let said = |m: &Model, id: String| {
+        let ctx = COLS.iter().find(|c| c.id == "ctx").and_then(|c| Some((c.show)((c.get)(m)?)));
+        let note = store.note(&m.key).map(|n| format!("  note: {n}")).unwrap_or_default();
+        format!("{id}  {}{note}", ctx.unwrap_or("-".into()))
+    };
+    let fav = matched(data, store, o)?.0.first().copied().filter(allowed);
+    if let Some((m, Ok(id))) = fav.map(|m| (m, call(o, m))) {
+        return Ok(said(m, id));
+    }
+    let merit = matched(data, store, &ListOpts { no_fav: true, ..o.clone() })?.0.first().copied();
+    let merit = merit.and_then(|m| Some(said(m, call(o, m).ok()?))).unwrap_or("no model".into());
+    let anywhere = ListOpts { via: vec![], cmd: true, ..o.clone() };
+    let elsewhere = fav.and_then(|m| {
+        Some(format!(
+            "  (★ favorite {} is not on {}, start: {})",
+            m.name,
+            o.via.join(", "),
+            launch(data, store, &anywhere, m).ok()?
+        ))
+    });
+    Ok(merit + &elsewhere.unwrap_or_default())
+}
+
+/// What `--id` or `--cmd` prints for `m`: the id a harness takes, or the command that starts it.
+fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String> {
+    let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
+    // The harness you run a favorite of the task on, while it has the model; not one
+    // `--via` leaves out, which asks for another's.
+    let name = o.task.map(|t| t.name).or(o.custom.as_deref());
+    let via =
+        name.and_then(|n| store.task_via(n, o.tier.as_deref(), &m.key)).filter(|h| o.via.is_empty() || has(&o.via, h));
+    // Your default harness, after a favorite's own; not one `--via` leaves out either.
+    let default = Some(store.harness.as_str()).filter(|h| !h.is_empty() && (o.via.is_empty() || has(&o.via, h)));
+    // `--via` naming a harness asks for the id that one takes, so one without the model is
+    // an error for `--id` as for `--cmd`, not another harness's id.
+    let named = o.via.iter().any(|v| vias().any(|h| h != "env" && h.eq_ignore_ascii_case(v)));
+    match o.cmd || named {
+        true => command(m, &[via, default], &o.via, &data.harness)
+            .and_then(|mut c| if o.cmd { Some(c.join(" ")) } else { c.pop() })
+            .ok_or_else(|| {
+                // A favorite stays the pick though `--via` asks for a harness without it.
+                let on = if o.via.is_empty() { "no harness has".into() } else { format!("{} lacks", o.via.join(", ")) };
+                Exit::from(format!("{on} {}: there is no command to start it", m.name))
+            }),
+        false => Ok([via, default]
+            .into_iter()
+            .flatten()
+            .find_map(|h| launch_cmd(m, h, &data.harness)?.pop())
+            .unwrap_or_else(|| model_id(m, &data.harness))),
+    }
 }
 
 /// The command that starts a harness on `m`: the first of `first` to have the model (the
@@ -747,6 +833,7 @@ mod tests {
             id: true,
             cmd: false,
             no_fav: false,
+            not: vec![],
         };
         assert!(list(&data, &store, &o).is_ok());
     }
@@ -774,6 +861,7 @@ mod tests {
             id: true,
             cmd: false,
             no_fav: false,
+            not: vec![],
         };
         assert!(list(&data, &store, &o).is_err(), "openai has no model for coding");
         store.set_favorite("coding", "mini", None);
@@ -805,12 +893,33 @@ mod tests {
             id: true,
             cmd: false,
             no_fav: false,
+            not: vec![],
         };
         assert!(list(&data, &store, &o).is_ok());
         o.via = vec!["pi".into()];
         assert!(list(&data, &store, &o).is_err(), "pi lacks it");
         o.no_fav = true;
         assert!(list(&data, &store, &o).is_ok(), "the tier's pick among pi's");
+        // `pick` gives both: pi's own, then the favorite where it runs.
+        o.no_fav = false;
+        let line = |data: &Data, store: &Store, o: &ListOpts| tier_line(data, store, o).ok();
+        let elsewhere = "p/gpt55  -  (★ favorite mini is not on pi, start: opencode --model p/mini)";
+        assert_eq!(line(&data, &store, &o).as_deref(), Some(elsewhere));
+        store.set_note("mini", "slow");
+        o.via = vec!["opencode".into()];
+        assert_eq!(line(&data, &store, &o).as_deref(), Some("p/mini  -  note: slow"));
+        o.not = vec!["mini".into()];
+        assert_eq!(line(&data, &store, &o).as_deref(), Some("no model"), "ruled out, and opencode has no other");
+        (o.not, o.via, o.cmd) = (vec![], vec![], true);
+        assert_eq!(
+            line(&data, &store, &o).as_deref(),
+            Some("opencode --model p/mini  -  note: slow"),
+            "any harness: the command"
+        );
+        // A bound is for the favorite too: a prompt it cannot hold rules it out.
+        data.models[1].context = 1_000_000;
+        o.bounds = vec![(COLS.iter().position(|c| c.id == "ctx").unwrap(), 600.0, f64::INFINITY)];
+        assert_eq!(line(&data, &store, &o).as_deref(), Some("pi --model p/gpt55  1M"));
     }
 
     fn keys(v: &Value) -> Vec<&str> {

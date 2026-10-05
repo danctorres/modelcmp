@@ -82,6 +82,18 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
     },
+    /// For an agent, one call: each task with what it is for, and the model for its low, mid and high tier (your favorite, else the cheapest good enough), with its context and your note
+    Pick {
+        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot): prints the ids it takes, and a favorite it lacks after the tier's own pick. Without it, the command that starts the harness you run each model on
+        #[arg(long)]
+        via: Vec<String>,
+        /// Only models at or above a value, favorites too: --min ctx=600 for a prompt of 600,000 tokens
+        #[arg(long, value_parser = |s: &str| bound(s, false))]
+        min: Vec<(usize, f64)>,
+        /// Leave a model out, a favorite too, e.g. one your note rules out for this work: its name or the id printed; repeatable
+        #[arg(long, value_name = "MODEL")]
+        not: Vec<String>,
+    },
     /// Everything about one model
     Show {
         model: String,
@@ -265,8 +277,13 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
                 id,
                 cmd,
                 no_fav,
+                not: vec![],
             };
             cli::list(&data, &store, &opts)
+        }
+        Cmd::Pick { via, min, not } => {
+            let bounds: Vec<_> = min.into_iter().map(|(c, v)| (c, v, f64::INFINITY)).collect();
+            cli::pick(&data, &store, &via, &bounds, &not)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
