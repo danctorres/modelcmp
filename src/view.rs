@@ -629,7 +629,7 @@ fn one_typo(a: &[u8], b: &[u8]) -> bool {
 pub const OUT_OF_REACH: &str = "not available";
 
 /// Said with access to no model, when every model is shown instead.
-pub const NO_ACCESS: &str = "no harness models or provider API keys found, showing all models";
+pub const NO_ACCESS: &str = "no harness models found, showing all models";
 
 /// Said by a key that acts on the selected models when none is.
 pub const NO_SELECTED: &str = "no selected models: space selects the one under the cursor";
@@ -645,7 +645,7 @@ pub fn shown_via(m: &Model, any: bool) -> Vec<&str> {
     if in_reach(m, false, any) { m.via.iter().map(String::as_str).collect() } else { vec![OUT_OF_REACH] }
 }
 
-/// `shown_via` on one line, "-" with no harness: `claude, opencode, env`.
+/// `shown_via` on one line, "-" with no harness: `claude, opencode, pi`.
 pub fn via(m: &Model, any: bool) -> String {
     or_dash(&shown_via(m, any).join(", ")).into()
 }

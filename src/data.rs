@@ -299,9 +299,9 @@ pub fn canonical(harness: &str, id: &str) -> String {
     }
 }
 
-/// Every name the Via column can show: the harnesses, then "env".
+/// Every name the Via column can show: the harnesses.
 pub fn vias() -> impl Iterator<Item = &'static str> {
-    HARNESSES.iter().map(|h| h.0).chain(["env"])
+    HARNESSES.iter().map(|h| h.0)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -309,7 +309,6 @@ pub struct Offer {
     pub provider: String,
     pub provider_name: String,
     pub id: String,
-    pub env: Vec<String>,
     pub input: f64,
     pub output: f64,
     /// $ per 1M cached input tokens, when the provider lists a discount.
@@ -320,7 +319,7 @@ pub struct Offer {
     pub unpriced: bool,
     #[serde(skip)]
     pub available: bool,
-    /// Where you have access: the harnesses listing it, then "env" if the provider's API key is set.
+    /// Where you have access: the harnesses listing it.
     #[serde(skip)]
     pub via: Vec<String>,
 }
@@ -547,13 +546,10 @@ impl Data {
         self.age() > MAX_AGE || self.format != FORMAT || self.benches != source().benches()
     }
 
-    /// Mark offers the user can use, and where: listed by an installed harness, or the
-    /// provider's API key is set.
+    /// Mark offers the user can use, and where: listed by an installed harness.
     pub fn apply_available(&mut self) {
         let harness: Vec<(&str, HashSet<String>)> =
             self.harness.iter().map(|(h, ids)| (h.as_str(), ids.iter().map(|i| canonical(h, i)).collect())).collect();
-        // ponytail: "any env var set" – providers needing several vars (bedrock) may false-positive.
-        let mut env: HashMap<&str, bool> = HashMap::new();
         for m in &mut self.models {
             m.via.clear();
             for o in &mut m.offers {
@@ -563,14 +559,6 @@ impl Data {
                     .filter(|(_, ids)| ids.contains(id.as_str()) || ids.contains(all.as_str()))
                     .map(|(h, _)| h.to_string())
                     .collect();
-                // Not Copilot's: its key is any GitHub token, which says nothing of what the plan takes.
-                let by_env = o.provider != COPILOT
-                    && *env
-                        .entry(&o.provider)
-                        .or_insert_with(|| o.env.iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty())));
-                if by_env {
-                    o.via.push("env".into());
-                }
                 o.available = !o.via.is_empty();
                 for v in &o.via {
                     if !m.via.contains(v) {
@@ -643,6 +631,31 @@ fn installed(bin: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
 }
 
+/// The shell line that runs `cmd` in the shell's place, each argument quoted whatever it holds.
+fn exec_line(cmd: &[String]) -> String {
+    let quoted: Vec<String> = cmd.iter().map(|a| format!("'{}'", a.replace('\'', r"'\''"))).collect();
+    format!("exec {}", quoted.join(" "))
+}
+
+/// `cmd` as a new WSL session starts it, under WSL with `wsl.exe` on `PATH`: bare, so a login
+/// shell sets up PATH and keys as for a typed command. A harness is asked for its models the way
+/// it is launched, as a key exported by hand in this shell, which opencode would list a provider
+/// for, is not in the new tab.
+pub fn wsl_session(cmd: &[String]) -> Option<Vec<String>> {
+    let distro = std::env::var("WSL_DISTRO_NAME").ok().filter(|_| installed("wsl.exe"))?;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
+    Some(["wsl.exe", "-d", &distro, "--cd", &cwd, "-e", &shell, "-lic", &exec_line(cmd)].map(String::from).to_vec())
+}
+
+/// What `bin` prints for `args`, asked in a new session under WSL (`wsl_session`), else here.
+fn listing(bin: &str, args: &[&str], stop: &AtomicBool) -> Option<String> {
+    let cmd: Vec<String> = std::iter::once(bin).chain(args.iter().copied()).map(String::from).collect();
+    let argv = wsl_session(&cmd).unwrap_or(cmd);
+    let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    run(&argv[0], &args, Duration::from_secs(30), stop)
+}
+
 /// What a harness answered: its ids, or none when its listing failed, hung or was cut short.
 type Listing = (String, Option<Vec<String>>);
 
@@ -653,11 +666,11 @@ fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &S
     let ids = |bin: &str, probe: &Probe| match probe {
         Probe::Provider(p) => Some(vec![format!("{p}/*")]),
         Probe::List(args) => {
-            let out = run(bin, args, Duration::from_secs(30), stop)?;
+            let out = listing(bin, args, stop)?;
             Some(out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect())
         }
-        Probe::Table(args) => table_ids(&run(bin, args, Duration::from_secs(30), stop)?),
-        Probe::Json(args) => selector_ids(&run(bin, args, Duration::from_secs(30), stop)?),
+        Probe::Table(args) => table_ids(&listing(bin, args, stop)?),
+        Probe::Json(args) => selector_ids(&listing(bin, args, stop)?),
         Probe::Copilot => copilot_ids(stop),
     };
     std::thread::scope(|s| {
@@ -1614,8 +1627,6 @@ fn fold_vendor(key: &str, keys: &HashSet<String>, orgs: &HashSet<String>) -> Str
 struct MdProvider {
     #[serde(default)]
     name: String,
-    #[serde(default)]
-    env: Vec<String>,
     /// Ordered, as `merge` keeps the first id and the last name it meets.
     #[serde(default)]
     models: BTreeMap<String, MdModel>,
@@ -2262,7 +2273,6 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             provider: pid.clone(),
             provider_name: p.name.clone(),
             id: if md.id.is_empty() { mid.clone() } else { md.id.clone() },
-            env: p.env.clone(),
             input: cost.map_or(0.0, |c| c.0),
             output: cost.map_or(0.0, |c| c.1),
             // A few list a paid model's cache as 0, a placeholder; a cache never costs more than input.
@@ -2412,6 +2422,12 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_line_quotes_every_argument() {
+        let cmd = ["opencode", "--model", "p/it's $HOME"].map(String::from);
+        assert_eq!(exec_line(&cmd), r"exec 'opencode' '--model' 'p/it'\''s $HOME'");
+    }
 
     #[test]
     fn table_ids_start_after_the_header() {

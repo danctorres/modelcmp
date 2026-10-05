@@ -264,7 +264,7 @@ pub fn base_col_about(col: usize) -> String {
     match col {
         0 => "model name (dimmed if Via is empty)".into(),
         1 => "company that trained the model".into(),
-        VIA => "harnesses listing it, env if API key set".into(),
+        VIA => "harnesses listing it".into(),
         NOTES => "your own note on the model".into(),
         PRICE => format!(
             "{}, {:.0}% of the input cached, ~ list price when yours has none",
@@ -810,7 +810,7 @@ pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
 /// `provider/model` as they listed it (`listed`, pi's `openai-codex/...` for models.dev's `openai/...`),
 /// the others (claude, codex, gemini, copilot) the bare model id.
 pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
-    let o = m.offer_via(harness).filter(|_| harness != "env")?;
+    let o = m.offer_via(harness)?;
     let id = if matches!(harness, "opencode" | "pi" | "omp") {
         let id = format!("{}/{}", o.provider, o.id);
         let own = listed.get(harness).and_then(|ids| ids.iter().find(|i| crate::data::canonical(harness, i) == id));
@@ -853,7 +853,7 @@ pub struct App {
     pub bounds: Vec<(usize, f64, f64)>,
     /// Developers picked from the Dev dropdown; empty is any.
     pub dev: Vec<String>,
-    /// Harnesses (or "env") picked from the Via dropdown; empty is any.
+    /// Harnesses picked from the Via dropdown; empty is any.
     pub via: Vec<String>,
     /// Task whose price frontier the table shows, picked in the recommend overlay.
     pub task: Option<&'static Task>,
@@ -1837,12 +1837,7 @@ impl App {
     fn ask_harness(&mut self) {
         let mine = |h: &&str| *h == self.store.harness || self.data.models.iter().any(|m| m.via.iter().any(|v| v == h));
         let items: Vec<_> = std::iter::once(("any harness".to_string(), Effect::Harness(None)))
-            .chain(
-                crate::data::vias()
-                    .filter(|h| *h != "env")
-                    .filter(mine)
-                    .map(|h| (h.to_string(), Effect::Harness(Some(h)))),
-            )
+            .chain(crate::data::vias().filter(mine).map(|h| (h.to_string(), Effect::Harness(Some(h)))))
             .collect();
         let has = |e: &Effect| matches!(e, Effect::Harness(Some(h)) if *h == self.store.harness);
         let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
@@ -2403,12 +2398,7 @@ impl App {
                 self.select(n);
                 let m = self.current()?;
                 let h = m.via.get(j)?;
-                let cmd = launch_cmd(m, h, &self.data.harness);
-                // `env` is an API key, not a harness.
-                if cmd.is_none() {
-                    self.refuse(format!("{h} cannot be opened on {}", m.name));
-                }
-                return cmd.map(Effect::Launch);
+                return launch_cmd(m, h, &self.data.harness).map(Effect::Launch);
             }
             Mouse::Cell(n, col) if n < self.rows.len() => {
                 self.deselect();
@@ -3707,10 +3697,6 @@ mod tests {
         press(&mut a, "j");
         assert_eq!(a.mouse(Mouse::Harness(0, 1)), cmd("opencode", "p/gpt55"), "a double click on it in Via opens it");
         assert_eq!((a.selected(), &a.input), (0, &Input::None), "its row highlighted");
-        let gpt = a.rows[0];
-        a.data.models[gpt].via.push("env".into());
-        assert_eq!(a.mouse(Mouse::Harness(0, 2)), None);
-        assert_eq!(a.status, "env cannot be opened on gpt55", "env is no harness, and says so");
         press(&mut a, "xj");
         assert_eq!(code(&mut a, KeyCode::Enter), cmd("opencode", "p/gpt55"), "opencode takes provider/model");
         assert_eq!(a.input, Input::None);

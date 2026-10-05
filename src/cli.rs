@@ -38,7 +38,7 @@ struct Price<'a> {
     /// The provider's model id: what a harness or API call takes
     id: &'a str,
     available: bool,
-    /// Where you have access: harnesses (opencode, claude, ...) and "env" for an API key
+    /// Where you have access: the harnesses (opencode, claude, ...) listing it
     via: &'a [String],
     /// Null when the provider lists no price
     input_per_mtok: Option<f64>,
@@ -433,7 +433,7 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
     let default = Some(store.harness.as_str()).filter(|h| !h.is_empty() && (o.via.is_empty() || has(&o.via, h)));
     // `--via` naming a harness asks for the id that one takes, so one without the model is
     // an error for `--id` as for `--cmd`, not another harness's id.
-    let named = o.via.iter().any(|v| vias().any(|h| h != "env" && h.eq_ignore_ascii_case(v)));
+    let named = o.via.iter().any(|v| vias().any(|h| h.eq_ignore_ascii_case(v)));
     match o.cmd || named {
         true => command(m, &[via, default], &o.via, &data.harness)
             .and_then(|mut c| if o.cmd { Some(c.join(" ")) } else { c.pop() })
@@ -552,7 +552,7 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
 /// Show your default harness, or set or clear it: the one `--cmd` and `--id` go by when none is
 /// asked for and it has the model.
 pub fn harness(store: &mut Store, name: Option<&str>, rm: bool) -> Result {
-    let known = || vias().filter(|v| *v != "env");
+    let known = vias;
     match name.map(str::to_lowercase) {
         Some(h) if !known().any(|v| v == h) => {
             let msg = format!("no harness '{h}': there are {}", known().collect::<Vec<_>>().join(", "));
@@ -656,7 +656,7 @@ pub fn fav(
             let m = resolve(data, q)?;
             // A harness that cannot run the model would leave `--id` with nothing to give.
             if let Some(h) = via.filter(|h| launch_cmd(m, h, &data.harness).is_none()) {
-                let has: Vec<&str> = m.via.iter().map(String::as_str).filter(|v| *v != "env").collect();
+                let has: Vec<&str> = m.via.iter().map(String::as_str).collect();
                 let has =
                     if has.is_empty() { "no harness has it".into() } else { format!("it is on {}", has.join(", ")) };
                 return Err(format!("{h} does not have {}: {has}", m.name).into());
@@ -992,7 +992,7 @@ mod tests {
         let mut m = model("gpt55", 90.0, 10.0);
         let none = BTreeMap::new();
         assert_eq!(command(&m, &[], &[], &none), None, "no harness has it");
-        m.offers[0].via = vec!["codex".into(), "opencode".into(), "env".into()];
+        m.offers[0].via = vec!["codex".into(), "opencode".into()];
         let cmd = |first: &[Option<&str>], only: &[&str]| {
             let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
             command(&m, first, &only, &none).map(|c| c.join(" "))
@@ -1011,7 +1011,6 @@ mod tests {
             "after the favorite's"
         );
         assert_eq!(cmd(&[], &["Codex"]).as_deref(), Some("codex --model gpt55"), "--via's, in any case");
-        assert_eq!(cmd(&[], &["env"]), None, "an API key starts nothing");
     }
 
     #[test]

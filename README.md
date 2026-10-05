@@ -134,9 +134,10 @@ skills can take its body in `AGENTS.md`.
   if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,
   only its sitemap is read, to link models that have a page there (`o`), as Epoch AI's is.
 - What you have: the models `opencode models`, `pi --list-models` and `omp models` list, the `claude`, `codex`
-  and `gemini` binaries on `PATH` (each counts as its own provider), the models GitHub Copilot's
+  and `gemini` binaries on `PATH` (each counts as its own provider), and the models GitHub Copilot's
   CLI takes on your plan when `copilot` is on `PATH` (asked of the CLI itself with `copilot --acp`,
-  under its own login; each refresh leaves an empty folder in `~/.copilot/session-state/`), and providers whose API key is set in the environment. The Via column says which. A
+  under its own login; each refresh leaves an empty folder in `~/.copilot/session-state/`). The Via column says which. Under WSL the harnesses
+  are asked in a new session, as `x` launches them, so a key exported by hand in your shell does not count. A
   harness that fails to list its models
   keeps the ones from the last refresh, and the refresh says so.
 

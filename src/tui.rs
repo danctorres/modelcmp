@@ -817,14 +817,9 @@ fn new_terminal(cmd: &[String]) -> std::io::Result<()> {
     if cmd.iter().any(|a| a.contains(';')) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "a model id holding ';' is refused"));
     }
-    let mut term = if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") {
-        // A new WSL session starts bare, so a login shell sets up PATH and keys as for a typed
-        // command.
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let line: Vec<String> = cmd.iter().map(|a| format!("'{}'", a.replace('\'', r"'\''"))).collect();
+    let mut term = if let Some(session) = data::wsl_session(cmd) {
         let mut c = Command::new("wt.exe");
-        c.args(["new-tab", "wsl.exe", "-d", &distro, "--cd"]).arg(std::env::current_dir()?);
-        c.args(["-e", &shell, "-lic", &format!("exec {}", line.join(" "))]);
+        c.arg("new-tab").args(session);
         c
     } else {
         let mut c = Command::new(std::env::var("TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".into()));
