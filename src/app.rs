@@ -881,7 +881,7 @@ fn tools() -> Tools {
 pub enum Download {
     /// Asked, and no answer yet.
     Awaited,
-    /// No answer came, or `x` offered no download when it was time to ask: `x` asks again.
+    /// No answer came: `x` asks again.
     NoAnswer,
     /// There is no GGUF copy to download: `x` offers none. Kept from one run to the next, for a
     /// week (`data::load_gone`) or until a refresh you ask for.
@@ -1631,10 +1631,8 @@ impl App {
             };
             // Under Via, the ones that read alike go by the size their `↓` says, as all do with
             // `not available` picked.
-            let size = |m: &Model| match self.downloads.get(&m.key) {
-                Some(Download::Size(b)) if self.sort_col == VIA && getters(m, &self.tools).next().is_some() => Some(*b),
-                _ => None,
-            };
+            let marked = |m: &Model| self.sort_col == VIA && getters(m, &self.tools).next().is_some();
+            let size = |m: &Model| self.size(m).filter(|_| marked(m));
             // Blanks last either way, as with numbers.
             rows.sort_by_cached_key(|&i| {
                 let (t, size) = (text(&ms[i]), size(&ms[i]));
@@ -1831,23 +1829,16 @@ impl App {
         self.unsized_models().next().is_some()
     }
 
-    /// The questions of those sizes, each a model's key and repo, where `x` offers its download.
+    /// The questions of those sizes, each a model's key and repo: of one a runner here has
+    /// too, as its details say the size.
     // ponytail: a screenful asked at once, two requests each, to queue if Hugging Face
     // starts refusing (429).
     pub fn size_ask(&mut self) -> Vec<(String, String)> {
-        let models: Vec<_> = self
-            .unsized_models()
-            .map(|m| (m.key.clone(), m.hf_repo().unwrap_or("").to_string(), getters(m, &self.tools).next().is_some()))
-            .collect();
-        let mut asked = vec![];
-        for (key, repo, offered) in models {
-            // The model under the cursor is a row on screen too.
-            let answer = if offered { Download::Awaited } else { Download::NoAnswer };
-            if self.downloads.insert(key.clone(), answer).is_none() && offered {
-                asked.push((key, repo));
-            }
-        }
-        asked
+        let models: Vec<_> =
+            self.unsized_models().map(|m| (m.key.clone(), m.hf_repo().unwrap_or("").to_string())).collect();
+        // Once each: the model under the cursor is a row on screen too.
+        let new = |(key, _): &(String, String)| self.downloads.insert(key.clone(), Download::Awaited).is_none();
+        models.into_iter().filter(new).collect()
     }
 
     /// Hugging Face's answer on the download of the model `key`, which `x` goes by from now
@@ -1884,6 +1875,14 @@ impl App {
         self.downloads.extend(sizes.into_iter().map(|(k, b)| (k, Download::Size(b))));
     }
 
+    /// The size of the model's GGUF copy on Hugging Face, once known, which its details say.
+    pub fn size(&self, m: &Model) -> Option<u64> {
+        match self.downloads.get(&m.key) {
+            Some(Download::Size(b)) => Some(*b),
+            _ => None,
+        }
+    }
+
     /// What Via says of a model `x` can download: `↓`, and the download's size once known. None
     /// for one it offers no download of, as Hugging Face has no GGUF copy of it or a runner
     /// here has it already.
@@ -1891,8 +1890,7 @@ impl App {
         getters(m, &self.tools).next()?;
         match self.downloads.get(&m.key) {
             Some(Download::Gone) => None,
-            Some(Download::Size(b)) => Some(format!("↓ {}", crate::data::gb(*b))),
-            _ => Some("↓".into()),
+            _ => Some(self.size(m).map_or("↓".into(), |b| format!("↓ {}", crate::data::gb(b)))),
         }
     }
 
@@ -3929,8 +3927,10 @@ mod tests {
         // The local rows on screen are asked with it, each once.
         let other = a.rows.iter().map(|&i| a.data.models[i].key.clone()).find(|k| *k != key && k != "mini").unwrap();
         a.data.models.iter_mut().for_each(|m| m.via.push(crate::data::OLLAMA.into()));
-        a.tools = (vec![crate::data::LLAMA], None);
+        // Of one ollama has too, with no download to offer: its details say the size.
+        a.tools = (vec![crate::data::OLLAMA], None);
         let asked: Vec<String> = a.size_ask().into_iter().map(|q| q.0).collect();
+        a.tools = (vec![crate::data::LLAMA], None);
         assert!(asked.contains(&key) && asked.contains(&other), "{asked:?}");
         assert_eq!(asked.iter().filter(|k| **k == key).count(), 1, "the cursor's row is asked once");
         assert!(!asked.contains(&"mini".to_string()) && !a.size_wanted(), "not the ones known");

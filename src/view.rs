@@ -676,11 +676,19 @@ pub fn visible<'a>(
 
 /// Everything about one model, one line per entry; `any` is whether you have access to a model.
 pub fn detail_lines(m: &Model, store: &Store, any: bool) -> Vec<String> {
-    detail_rows(m, store, any, None).into_iter().map(|r| r.1).collect()
+    detail_rows(m, store, any, None, None).into_iter().map(|r| r.1).collect()
 }
 
-/// `detail_lines`, each task's fit line with the task's name, for the TUI to colour it.
-pub fn detail_rows(m: &Model, store: &Store, any: bool, get: Option<&str>) -> Vec<(Option<&'static str>, String)> {
+/// `detail_lines`, each task's fit line with the task's name, for the TUI to colour it. `get`
+/// is the mark of its download (`via`) and `size` the bytes of its GGUF copy, which the TUI
+/// knows (`App::size`).
+pub fn detail_rows(
+    m: &Model,
+    store: &Store,
+    any: bool,
+    get: Option<&str>,
+    size: Option<u64>,
+) -> Vec<(Option<&'static str>, String)> {
     let yes = |b: bool| if b { "yes" } else { "no" };
     let source = crate::data::source();
     // With Artificial Analysis a task's score is one benchmark, so none are listed under it.
@@ -705,6 +713,8 @@ pub fn detail_rows(m: &Model, store: &Store, any: bool, get: Option<&str>) -> Ve
         ),
         format!("  context:    {} (max output {})", ctx(m.context), ctx(m.max_output)),
     ];
+    // What it takes on your machine, next to what it holds.
+    v.extend(size.map(|b| format!("  size:       {} (GGUF copy on Hugging Face)", crate::data::gb(b))));
     // Under context: what the model costs in time, next to what it holds.
     if m.tps.is_some() || m.ttft.is_some() {
         let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
@@ -1076,6 +1086,8 @@ mod tests {
         assert_eq!(compare_rows(&[&a], true, &|_| None)[1].cells, vec![OUT_OF_REACH]);
         assert_eq!(via(&a, true, Some("↓ 2.5 GB")), "↓ 2.5 GB", "a download stands for it");
         assert!(detail_lines(&a, &Store::default(), true).contains(&format!("  via:        {OUT_OF_REACH}")));
+        let sized = detail_rows(&a, &Store::default(), true, None, Some(2_500_000_000));
+        assert_eq!(sized[5].1, "  size:       2.5 GB (GGUF copy on Hugging Face)", "under context, once known");
         assert_eq!(find("context").ext, Some((200.0, 100.0)));
         assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);

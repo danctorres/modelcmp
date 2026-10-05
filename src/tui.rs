@@ -1449,7 +1449,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             Some(("recommend".to_string(), lines))
         }
         View::Detail(_) => {
-            app.current().map(|m| detail(m, &app.store, app.any_available(), app.download(m).as_deref()))
+            let get = |m| (app.download(m), app.size(m));
+            app.current().map(|m| detail(m, &app.store, app.any_available(), get(m)))
         }
         View::Compare if app.marked_shown < 2 => {
             let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
@@ -2891,9 +2892,14 @@ fn out_of_reach(app: &App, m: &Model) -> Option<Span<'static>> {
 
 /// The model's name, the title, then every detail line, with `key:` labels and section headings
 /// coloured.
-fn detail(m: &Model, store: &Store, any: bool, get: Option<&str>) -> (String, Vec<Line<'static>>) {
+fn detail(
+    m: &Model,
+    store: &Store,
+    any: bool,
+    (get, size): (Option<String>, Option<u64>),
+) -> (String, Vec<Line<'static>>) {
     let is_label = |k: &str| k.len() < 16 && k.trim().chars().all(|c| c.is_alphabetic() || c == ' ');
-    let mut lines = detail_rows(m, store, any, get).into_iter();
+    let mut lines = detail_rows(m, store, any, get.as_deref(), size).into_iter();
     let title = lines.next().map(|r| r.1).unwrap_or_default();
     // A task's name in its colour, as its ★ in the table: on its fit line and after `favorite:`.
     let named = |t: &str| Span::styled(t.to_string(), fg(task_color(t)).add_modifier(BOLD));
@@ -4481,12 +4487,15 @@ mod tests {
         assert!(grid(&mut 0).contains(" 1-3 of 20 "), "{}", grid(&mut 0));
         assert!(grid(&mut 5).contains(" 5-8 of 20 "), "{}", grid(&mut 5));
         let a = app();
-        let text: Vec<String> =
-            detail(&a.data.models[0], &a.store, a.any_available(), None).1.iter().map(ToString::to_string).collect();
+        let text: Vec<String> = detail(&a.data.models[0], &a.store, a.any_available(), (None, None))
+            .1
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         assert!(text.iter().any(|l| l.starts_with("  developer:  anthropic")), "{text:?}");
         let mut m = a.data.models[0].clone();
         m.fit.insert("coding".into(), 50.0);
-        let lines = detail(&m, &a.store, a.any_available(), None).1;
+        let lines = detail(&m, &a.store, a.any_available(), (None, None)).1;
         let coding = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == "coding").expect("a coding fit line");
         assert_eq!(coding.style.fg, Some(task_color("coding")), "a task's name is in its colour");
         let rows =
