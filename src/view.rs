@@ -647,9 +647,16 @@ pub fn shown_via(m: &Model, any: bool) -> Vec<&str> {
     if in_reach(m, false, any) { m.via.iter().map(String::as_str).collect() } else { vec![OUT_OF_REACH] }
 }
 
-/// `shown_via` on one line, "-" with no harness: `claude, opencode, pi`.
-pub fn via(m: &Model, any: bool) -> String {
-    or_dash(&shown_via(m, any).join(", ")).into()
+/// `shown_via` on one line, "-" with no harness: `claude, opencode, pi`. `get` is the mark of a
+/// download `x` offers in the TUI (`↓ 2.5 GB`, `App::download`), which follows the harnesses
+/// and stands for `OUT_OF_REACH`, as in the table.
+pub fn via(m: &Model, any: bool, get: Option<&str>) -> String {
+    let harnesses = shown_via(m, any).into_iter().filter(|v| get.is_none() || *v != OUT_OF_REACH);
+    let mut said = harnesses.collect::<Vec<_>>().join(", ");
+    if let Some(get) = get {
+        said = format!("{said} {get}").trim_start().into();
+    }
+    or_dash(&said).into()
 }
 
 /// Models the user should see: the ones in reach, with `marked_only` only the selected ones.
@@ -669,11 +676,11 @@ pub fn visible<'a>(
 
 /// Everything about one model, one line per entry; `any` is whether you have access to a model.
 pub fn detail_lines(m: &Model, store: &Store, any: bool) -> Vec<String> {
-    detail_rows(m, store, any).into_iter().map(|r| r.1).collect()
+    detail_rows(m, store, any, None).into_iter().map(|r| r.1).collect()
 }
 
 /// `detail_lines`, each task's fit line with the task's name, for the TUI to colour it.
-pub fn detail_rows(m: &Model, store: &Store, any: bool) -> Vec<(Option<&'static str>, String)> {
+pub fn detail_rows(m: &Model, store: &Store, any: bool, get: Option<&str>) -> Vec<(Option<&'static str>, String)> {
     let yes = |b: bool| if b { "yes" } else { "no" };
     let source = crate::data::source();
     // With Artificial Analysis a task's score is one benchmark, so none are listed under it.
@@ -681,7 +688,7 @@ pub fn detail_rows(m: &Model, store: &Store, any: bool) -> Vec<(Option<&'static 
     let mut v = vec![
         format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.developer)),
-        format!("  via:        {}", via(m, any)),
+        format!("  via:        {}", via(m, any, get)),
         // What you'd pay and to whom, `~` as in the table; the list price when it is not yours.
         // Per 1M tokens, as the providers below say.
         format!(
@@ -813,8 +820,11 @@ pub struct Row {
     pub section: &'static str,
 }
 
+/// The mark of a model's download, when `x` offers one in the TUI (`App::download`).
+pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
+
 /// Rows for side-by-side comparison; Via as the table shows it (`shown_via`).
-pub fn compare_rows(models: &[&Model], any: bool) -> Vec<Row> {
+pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
         let mut it = vals.iter().flatten();
         let ext = it.next().and_then(|&first| {
@@ -838,7 +848,11 @@ pub fn compare_rows(models: &[&Model], any: bool) -> Vec<Row> {
     };
     let mut rows = vec![
         Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), ..Default::default() },
-        Row { label: "via".into(), cells: models.iter().map(|m| via(m, any)).collect(), ..Default::default() },
+        Row {
+            label: "via".into(),
+            cells: models.iter().map(|m| via(m, any, get(m).as_deref())).collect(),
+            ..Default::default()
+        },
         price("$ in / 1M", |o| o.input),
         // No cache discount: cached input costs full price.
         price("$ cached in / 1M", |o| o.cache_read.unwrap_or(o.input)),
@@ -1055,24 +1069,25 @@ mod tests {
     fn compare_marks_best() {
         let mk = |n: &str, c: u64, eci: Option<f64>| Model { name: n.into(), context: c, eci, ..Default::default() };
         let (a, b) = (mk("a", 100, Some(150.0)), mk("b", 200, None));
-        let rows = compare_rows(&[&a, &b], false);
+        let rows = compare_rows(&[&a, &b], false, &|_| None);
         let find = |l: &str| rows.iter().find(|r| r.label == l).unwrap();
         // With access to no model, Via is empty; with access to another, it says so, as the table.
         assert_eq!(find("via").cells, vec!["-", "-"]);
-        assert_eq!(compare_rows(&[&a], true)[1].cells, vec![OUT_OF_REACH]);
+        assert_eq!(compare_rows(&[&a], true, &|_| None)[1].cells, vec![OUT_OF_REACH]);
+        assert_eq!(via(&a, true, Some("↓ 2.5 GB")), "↓ 2.5 GB", "a download stands for it");
         assert!(detail_lines(&a, &Store::default(), true).contains(&format!("  via:        {OUT_OF_REACH}")));
         assert_eq!(find("context").ext, Some((200.0, 100.0)));
         assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);
         assert_eq!((find("context").section, find("ECI").section), ("", "scores"));
-        let same = compare_rows(&[&a, &a], false);
+        let same = compare_rows(&[&a, &a], false, &|_| None);
         assert_eq!(same.iter().find(|r| r.label == "context").unwrap().ext, None, "equal values are not marked");
         // A list price is neither the best nor the worst, as in the table.
         let at = |p: f64| Offer { input: p, output: p, available: true, ..Default::default() };
         let yours = |p: f64| Model { offers: vec![at(p)], ..Default::default() };
         let unpriced = Offer { unpriced: true, ..at(0.0) };
         let listed = Model { offers: vec![unpriced, Offer { available: false, ..at(1.0) }], ..Default::default() };
-        let rows = compare_rows(&[&yours(3.0), &yours(5.0), &listed], false);
+        let rows = compare_rows(&[&yours(3.0), &yours(5.0), &listed], false, &|_| None);
         let price = rows.iter().find(|r| r.label == "$ in / 1M").unwrap();
         assert_eq!((price.cells[2].as_str(), price.ext), ("~1.0", Some((3.0, 5.0))));
     }

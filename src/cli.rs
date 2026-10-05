@@ -196,7 +196,7 @@ fn table(models: &[&Model], store: &Store, any: bool) {
         } else {
             "  "
         };
-        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(m, any));
+        line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(m, any, None));
     }
 }
 
@@ -499,7 +499,7 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
         println!("  {q:<w0$}  {win:<w1$}  {margin}");
     }
     println!();
-    let table = compare_rows(&models, data.any_available());
+    let table = compare_rows(&models, data.any_available(), &|_| None);
     // Artificial Analysis names its benchmarks at length.
     let lw = table.iter().map(|r| r.label.chars().count() + 1).max().unwrap_or(0).max(22);
     let mut section = "";

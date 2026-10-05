@@ -266,7 +266,7 @@ pub fn base_col_about(col: usize) -> String {
     match col {
         0 => "model name (dimmed if Via is empty)".into(),
         1 => "company that trained the model".into(),
-        VIA => "harnesses listing it".into(),
+        VIA => "harnesses listing it (↓ can be downloaded)".into(),
         NOTES => "your own note on the model".into(),
         PRICE => format!(
             "{}, {:.0}% of the input cached, ~ list price when yours has none",
@@ -847,18 +847,20 @@ pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String
 /// `modelcmp get` that does it in a new terminal: one per runner installed here that lacks the
 /// model, else the one that can be installed. None for a model with no repo on Hugging Face.
 /// `size` is the download's, ` (4.7 GB)`, once known.
-fn get_items(m: &Model, size: &str, (have, install): &Tools) -> Vec<(String, Effect)> {
-    if m.hf_repo().is_none() {
-        return vec![];
-    }
+fn get_items(m: &Model, size: &str, tools: &Tools) -> Vec<(String, Effect)> {
     let exe = std::env::current_exe().map_or_else(|_| "modelcmp".into(), |p| p.to_string_lossy().into_owned());
-    let item = |h: &str, how: &str| {
+    let item = |(h, how): (&str, &str)| {
         let cmd = [&exe, "get", &m.key, "--via", h, "--pause"].map(String::from).to_vec();
         (format!("{h} {how}{size}"), Effect::Launch(cmd))
     };
+    getters(m, tools).map(item).collect()
+}
+
+/// The runners `get_items` gets the model by, each with how it is said.
+fn getters<'a>(m: &'a Model, (have, install): &'a Tools) -> impl Iterator<Item = (&'static str, &'static str)> + 'a {
     let lacking = have.iter().filter(|h| !m.via.iter().any(|v| v == *h));
-    let got = lacking.map(|h| item(h, "download and run"));
-    got.chain(install.map(|h| item(h, "install, download and run"))).collect()
+    let got = lacking.map(|h| (*h, "download and run"));
+    got.chain(install.map(|h| (h, "install, download and run"))).filter(|_| m.hf_repo().is_some())
 }
 
 /// The runners installed here, ollama then llama.cpp, and with neither the one that can be
@@ -1627,10 +1629,16 @@ impl App {
                 NOTES => self.store.note(&m.key).unwrap_or("").to_lowercase(),
                 _ => String::new(),
             };
+            // Under Via, the ones that read alike go by the size their `↓` says, as all do with
+            // `not available` picked.
+            let size = |m: &Model| match self.downloads.get(&m.key) {
+                Some(Download::Size(b)) if self.sort_col == VIA && getters(m, &self.tools).next().is_some() => Some(*b),
+                _ => None,
+            };
             // Blanks last either way, as with numbers.
             rows.sort_by_cached_key(|&i| {
-                let t = text(&ms[i]);
-                (t.is_empty() != self.descending, t, ms[i].name.to_lowercase())
+                let (t, size) = (text(&ms[i]), size(&ms[i]));
+                (t.is_empty() != self.descending, t, size.is_none() != self.descending, size, ms[i].name.to_lowercase())
             });
             if self.descending {
                 rows.reverse();
@@ -1829,7 +1837,7 @@ impl App {
     pub fn size_ask(&mut self) -> Vec<(String, String)> {
         let models: Vec<_> = self
             .unsized_models()
-            .map(|m| (m.key.clone(), m.hf_repo().unwrap_or("").to_string(), !get_items(m, "", &self.tools).is_empty()))
+            .map(|m| (m.key.clone(), m.hf_repo().unwrap_or("").to_string(), getters(m, &self.tools).next().is_some()))
             .collect();
         let mut asked = vec![];
         for (key, repo, offered) in models {
@@ -1846,6 +1854,10 @@ impl App {
     /// on. Its open list says it too, on the entry, which stays where it is under the cursor.
     pub fn sized(&mut self, key: &str, answer: Download) {
         self.downloads.insert(key.into(), answer);
+        // Via sorts by it.
+        if self.sort_col == VIA && matches!(answer, Download::Size(_)) {
+            self.rebuild();
+        }
         let said = match answer {
             Download::Size(b) => format!(" ({})", crate::data::gb(b)),
             Download::Gone => " (no GGUF copy)".into(),
@@ -1870,6 +1882,18 @@ impl App {
     /// The sizes kept by a run before.
     pub fn set_sizes(&mut self, sizes: std::collections::HashMap<String, u64>) {
         self.downloads.extend(sizes.into_iter().map(|(k, b)| (k, Download::Size(b))));
+    }
+
+    /// What Via says of a model `x` can download: `↓`, and the download's size once known. None
+    /// for one it offers no download of, as Hugging Face has no GGUF copy of it or a runner
+    /// here has it already.
+    pub fn download(&self, m: &Model) -> Option<String> {
+        getters(m, &self.tools).next()?;
+        match self.downloads.get(&m.key) {
+            Some(Download::Gone) => None,
+            Some(Download::Size(b)) => Some(format!("↓ {}", crate::data::gb(*b))),
+            _ => Some("↓".into()),
+        }
     }
 
     /// The models a run before found no GGUF copy of.
@@ -3910,6 +3934,11 @@ mod tests {
         assert!(asked.contains(&key) && asked.contains(&other), "{asked:?}");
         assert_eq!(asked.iter().filter(|k| **k == key).count(), 1, "the cursor's row is asked once");
         assert!(!asked.contains(&"mini".to_string()) && !a.size_wanted(), "not the ones known");
+        // Via marks the ones `x` can download, with the size once known.
+        let marks = ["mini", "llama4", &key].map(|k| a.download(a.data.models.iter().find(|m| m.key == k).unwrap()));
+        assert_eq!(marks, [Some("↓ 2.5 GB".into()), None, Some("↓".into())], "none where there is no copy");
+        a.tools = (vec![crate::data::OLLAMA], None);
+        assert_eq!(a.download(a.current().unwrap()), None, "nor where ollama has it and is all there is");
         assert_eq!(press(&mut a, "r"), Some(Effect::Refresh));
         assert!(!a.downloads.contains_key("llama4") && a.sizes().len() == 1, "r asks again of a lack of a copy");
     }
@@ -5296,6 +5325,16 @@ mod tests {
         (a.sort_col, a.descending) = (VIA, false);
         a.rebuild();
         assert_eq!(keys(&a), ["opus5", "gpt55", "mini", "llama4"], "not available after codex");
+        // The ones that read alike by the size of their download, one with none last either way.
+        a.data.models.iter_mut().for_each(|m| m.hf = Some(format!("o/{}", m.key)));
+        a.tools = (vec![crate::data::OLLAMA], None);
+        a.sized("mini", Download::Size(1));
+        assert_eq!(keys(&a), ["opus5", "mini", "gpt55", "llama4"], "a size coming in sorts again");
+        a.sized("gpt55", Download::Size(2));
+        assert_eq!(keys(&a), ["opus5", "mini", "gpt55", "llama4"], "the smaller first");
+        a.descending = true;
+        a.rebuild();
+        assert_eq!(keys(&a), ["llama4", "gpt55", "mini", "opus5"], "and the larger");
     }
 
     #[test]
