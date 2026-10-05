@@ -874,6 +874,24 @@ fn tools() -> Tools {
     (have, install)
 }
 
+/// What Hugging Face said of a model's download, which `x` offers.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Download {
+    /// Asked, and no answer yet.
+    Awaited,
+    /// No answer came, or `x` offered no download when it was time to ask: `x` asks again.
+    NoAnswer,
+    /// There is no GGUF copy to download: `x` offers none, until a refresh.
+    Gone,
+    /// Its size in bytes, which `x` says: kept from one run to the next.
+    Size(u64),
+}
+
+/// Said of a model with no GGUF copy on Hugging Face.
+fn no_copy(name: &str) -> String {
+    format!("Hugging Face has no GGUF copy of {name} to download")
+}
+
 /// The key of the model a `modelcmp get` of `get_items` downloads.
 fn got(e: &Effect) -> Option<&str> {
     match e {
@@ -918,12 +936,8 @@ pub struct App {
     pub via: Vec<String>,
     /// `L`: only the models your machine runs, or only the ones it does not; none is any.
     pub local: Option<bool>,
-    /// The size in bytes of each model's download, by key, which `x` says: kept from one run to
-    /// the next by the shell (`data::load_sizes`).
-    pub sizes: std::collections::HashMap<String, u64>,
-    /// The models whose size was asked for since the last refresh: true while Hugging Face's
-    /// answer is awaited, false when none came, or when `x` offers no download of the model.
-    asked: std::collections::HashMap<String, bool>,
+    /// What is known of each model's download, by key (`Download`).
+    downloads: std::collections::HashMap<String, Download>,
     tools: Tools,
     /// Task whose price frontier the table shows, picked in the recommend overlay.
     pub task: Option<&'static Task>,
@@ -1025,8 +1039,7 @@ impl App {
             dev: vec![],
             via: vec![],
             local: None,
-            sizes: Default::default(),
-            asked: Default::default(),
+            downloads: Default::default(),
             tools: tools(),
             task: None,
             task_cur: 0,
@@ -1655,7 +1668,7 @@ impl App {
     pub fn refreshed(&mut self, res: Result<Data, Failure>) {
         // A runner may be installed since, and the sizes that did not come are asked for again.
         self.tools = tools();
-        self.asked.retain(|_, awaited| *awaited);
+        self.downloads.retain(|_, d| matches!(d, Download::Awaited | Download::Size(_)));
         self.refreshing = false;
         self.refresh_failed = res.is_err();
         match res {
@@ -1795,7 +1808,7 @@ impl App {
     /// Whether the size of the download of the model under the cursor is still to ask for.
     /// Asked ahead of `x`, once the cursor rests on the model, and once until a refresh.
     pub fn size_wanted(&self) -> bool {
-        let new = |m: &&Model| !self.sizes.contains_key(&m.key) && !self.asked.contains_key(&m.key);
+        let new = |m: &&Model| !self.downloads.contains_key(&m.key);
         self.current().filter(new).is_some_and(|m| m.hf_repo().is_some())
     }
 
@@ -1804,24 +1817,38 @@ impl App {
         let m = self.current().filter(|_| self.size_wanted())?;
         let (key, repo) = (m.key.clone(), m.hf_repo()?.to_string());
         let offered = !get_items(m, "", &self.tools).is_empty();
-        self.asked.insert(key.clone(), offered);
+        self.downloads.insert(key.clone(), if offered { Download::Awaited } else { Download::NoAnswer });
         offered.then_some(Effect::Size(key, repo))
     }
 
-    /// Hugging Face's answer on the download of the model `key`: with its `bytes`, `x` says so
-    /// from now on, in its open list too. With none, `x` asks again.
-    pub fn sized(&mut self, key: &str, bytes: Option<u64>) {
-        let Some(bytes) = bytes else {
-            self.asked.insert(key.into(), false);
-            return;
+    /// Hugging Face's answer on the download of the model `key`, which `x` goes by from now
+    /// on. Its open list says it too, on the entry, which stays where it is under the cursor.
+    pub fn sized(&mut self, key: &str, answer: Download) {
+        self.downloads.insert(key.into(), answer);
+        let said = match answer {
+            Download::Size(b) => format!(" ({})", crate::data::gb(b)),
+            Download::Gone => " (no GGUF copy)".into(),
+            _ => return,
         };
-        self.asked.remove(key);
         if let Input::Choose { kind: Kind::Launch, items, .. } = &mut self.input {
             for (label, _) in items.iter_mut().filter(|i| got(&i.1) == Some(key)) {
-                label.push_str(&format!(" ({})", crate::data::gb(bytes)));
+                label.push_str(&said);
             }
         }
-        self.sizes.insert(key.into(), bytes);
+    }
+
+    /// The sizes known, bytes by model key, for the shell to keep (`data::save_sizes`).
+    pub fn sizes(&self) -> std::collections::HashMap<String, u64> {
+        let size = |(k, d): (&String, &Download)| match d {
+            Download::Size(b) => Some((k.clone(), *b)),
+            _ => None,
+        };
+        self.downloads.iter().filter_map(size).collect()
+    }
+
+    /// The sizes kept by a run before.
+    pub fn set_sizes(&mut self, sizes: std::collections::HashMap<String, u64>) {
+        self.downloads.extend(sizes.into_iter().map(|(k, b)| (k, Download::Size(b))));
     }
 
     /// Whether you have access to a model, as the data last set had it.
@@ -2847,28 +2874,36 @@ impl App {
             // A list even of one, as `o`'s.
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
-                let size = self.sizes.get(&m.key).map(|b| format!(" ({})", crate::data::gb(*b)));
+                let known = self.downloads.get(&m.key).copied();
+                let size = match known {
+                    Some(Download::Size(b)) => format!(" ({})", crate::data::gb(b)),
+                    _ => String::new(),
+                };
+                let gone = known == Some(Download::Gone);
                 let items: Vec<_> = m
                     .via
                     .iter()
                     .filter_map(|h| launch_cmd(m, h, &self.data.harness))
                     .map(|c| (c.join(" "), Effect::Launch(c)))
-                    .chain(get_items(m, size.as_deref().unwrap_or(""), &self.tools))
+                    .chain(get_items(m, &size, &self.tools).into_iter().filter(|_| !gone))
                     .collect();
                 // Asked already where the cursor rested on the model, and again here when no
                 // answer came.
-                let ask = (size.is_none() && items.iter().any(|i| got(&i.1).is_some()))
-                    .then(|| (m.key.clone(), m.hf_repo().unwrap_or("").to_string()))
-                    .filter(|(key, _)| self.asked.get(key) != Some(&true));
+                let ask = (matches!(known, None | Some(Download::NoAnswer))
+                    && items.iter().any(|i| got(&i.1).is_some()))
+                .then(|| (m.key.clone(), m.hf_repo().unwrap_or("").to_string()));
                 if items.is_empty() {
-                    self.refuse(format!("no harness has {}; Via shows where you have access", m.name));
+                    let none = format!("no harness has {}; Via shows where you have access", m.name);
+                    // A download was all there was to offer.
+                    let why = if gone && !get_items(m, "", &self.tools).is_empty() { no_copy(&m.name) } else { none };
+                    self.refuse(why);
                 } else {
                     // On your default harness when it has the model.
                     let on = |e: &Effect| matches!(e, Effect::Launch(c) if c[0] == self.store.harness);
                     let sel = items.iter().position(|(_, e)| on(e)).unwrap_or(0);
                     self.input = Input::choose("open in which harness?", Kind::Launch, items, sel);
                     let (key, repo) = ask?;
-                    self.asked.insert(key.clone(), true);
+                    self.downloads.insert(key.clone(), Download::Awaited);
                     return Some(Effect::Size(key, repo));
                 }
             }
@@ -3821,12 +3856,25 @@ mod tests {
         let mut a = app();
         let get = |k: &str| Effect::Launch(["modelcmp", "get", k, "--via", "ollama"].map(String::from).to_vec());
         let run = Effect::Launch(vec!["codex".into(), "--model".into(), "mini".into()]);
-        let items = vec![("codex".to_string(), run), ("get".into(), get("mini")), ("other".into(), get("gpt55"))];
+        let items = vec![("codex".to_string(), run), ("get".into(), get("mini")), ("other".into(), get("llama4"))];
         a.input = Input::choose("open in which harness?", Kind::Launch, items, 0);
-        a.sized("mini", Some(2_500_000_000));
+        a.sized("mini", Download::Size(2_500_000_000));
+        a.sized("llama4", Download::Gone);
         let Input::Choose { items, .. } = &a.input else { panic!("the list stays open") };
         let labels: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
-        assert_eq!(labels, ["codex", "get (2.5 GB)", "other"], "on that model's download alone");
+        assert_eq!(labels, ["codex", "get (2.5 GB)", "other (no GGUF copy)"], "each on its model's download");
+        assert_eq!(a.sizes(), [("mini".to_string(), 2_500_000_000)].into(), "the size is kept, not the lack of one");
+        // Hugging Face is asked once for the model under the cursor, and again after a refresh
+        // when it had no copy or did not answer.
+        a.input = Input::None;
+        let key = a.current().unwrap().key.clone();
+        assert!(key != "mini" && key != "llama4", "{key}");
+        a.data.models.iter_mut().for_each(|m| m.hf = Some(format!("o/{}", m.key)));
+        assert!(a.size_wanted());
+        a.sized(&key, Download::NoAnswer);
+        assert!(!a.size_wanted(), "not while the cursor stays");
+        a.refreshed(Err("offline".to_string().into()));
+        assert!(a.size_wanted() && a.sizes().len() == 1, "a refresh asks again, the sizes staying");
     }
 
     #[test]

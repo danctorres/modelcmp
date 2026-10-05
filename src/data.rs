@@ -331,38 +331,96 @@ pub fn get_cmd(runner: &str, repo: &str) -> Vec<String> {
 
 /// The GGUF repo to download for the model `key`, whose weights are in the Hugging Face repo
 /// `base`: `base` when it is one, else the most downloaded one quantized from it whose name is
-/// the model's (`local_tags`), so the copy shows as that model here.
-pub fn gguf_repo(base: &str, key: &str) -> Result<String, String> {
+/// the model's (`local_tags`), else is `base`'s (`gguf_named`). None when Hugging Face has no
+/// such copy, an error when it did not answer.
+pub fn gguf_repo(base: &str, key: &str) -> Result<Option<String>, String> {
     if base.to_ascii_lowercase().ends_with("-gguf") {
-        return Ok(base.to_string());
+        return Ok(Some(base.to_string()));
     }
     let url = format!(
         "https://huggingface.co/api/models?filter=gguf&filter=base_model:quantized:{base}&sort=downloads&direction=-1&limit=20"
     );
     let list = fetch_within(&url, None, HF_WAIT).map_err(|e| e.to_string())?;
-    gguf_named(&list, key).ok_or_else(|| format!("Hugging Face has no GGUF copy of {base}"))
+    Ok(gguf_named(&list, base, key))
 }
 
-/// The first repo of Hugging Face's `[{"id": "owner/name"}]` whose name is the model `key`'s.
-fn gguf_named(list: &[u8], key: &str) -> Option<String> {
+/// The repo to download out of Hugging Face's `[{"id": "owner/name"}]`: the first whose name is
+/// the model `key`'s, else the first named as the repo `base` it is quantized from, as
+/// `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF` for the model `llama318b`. Its name is then
+/// `base`'s and no more, but for what of `base`'s owner some put before it
+/// (`deepseek-ai_DeepSeek-R1-0528-GGUF`): a name with more to it (`-abliterated`) is another
+/// model's, as a fine-tune's copy is listed among them at times.
+fn gguf_named(list: &[u8], base: &str, key: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Repo {
         id: String,
     }
     let keys = HashSet::from([key]);
-    let named = |id: &String| local_tags(&[format!("{LLAMA}/{id}")], &keys).contains_key(key);
-    serde_json::from_slice::<Vec<Repo>>(list).ok()?.into_iter().map(|r| r.id).find(named)
+    let named = |id: &&String| local_tags(&[format!("{LLAMA}/{id}")], &keys, &HashMap::new()).contains_key(key);
+    let base = base.to_ascii_lowercase();
+    let (owner, base) = base.split_once('/').unwrap_or(("", &base));
+    let of_base = |id: &&String| {
+        let id = id.to_ascii_lowercase();
+        let name = id.rsplit('/').next().unwrap_or(&id).trim_end_matches("-gguf");
+        name.strip_suffix(base).is_some_and(|before| owner.starts_with(before.trim_end_matches(['-', '_', '.'])))
+    };
+    let ids: Vec<String> = serde_json::from_slice::<Vec<Repo>>(list).ok()?.into_iter().map(|r| r.id).collect();
+    ids.iter().find(named).or_else(|| ids.iter().find(of_base)).cloned()
+}
+
+/// A file of modelcmp's cache folder.
+fn cache_file(name: &str) -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join(name)
+}
+
+/// A map kept in modelcmp's cache folder from one run to the next, empty when there is none.
+fn kept<T: serde::de::DeserializeOwned>(name: &str) -> HashMap<String, T> {
+    std::fs::read(cache_file(name)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Keeps `map` for `kept`. Not being able to is no error: what it holds is asked for again.
+fn keep<T: Serialize>(name: &str, map: &HashMap<String, T>) {
+    if let Ok(json) = serde_json::to_vec(map) {
+        let _ = crate::store::write_atomic(&cache_file(name), &json);
+    }
+}
+
+/// Model key -> the GGUF repo `modelcmp get` downloaded it from, in lower case: a copy of that
+/// repo on this machine is that model, whatever the repo is called (`local_tags`). As
+/// `repos.json` had them when the data was last loaded or refreshed (`load_repos`).
+static REPOS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// Reads `REPOS` anew: `get` in another terminal may have downloaded one since.
+fn load_repos() {
+    *REPOS.lock().unwrap_or_else(PoisonError::into_inner) = Some(kept("repos.json"));
+}
+
+/// The model `key` is downloaded from `repo`: kept, so that the copy is that model here.
+pub fn keep_repo(key: &str, repo: &str) {
+    // Held from the read to the write, so two downloads started at once both stay.
+    let _held = crate::store::lock(&cache_file("repos.json"));
+    let mut all: HashMap<String, String> = kept("repos.json");
+    all.insert(key.into(), repo.to_ascii_lowercase());
+    keep("repos.json", &all);
+}
+
+/// The Hugging Face repo a tag of ollama's or llama.cpp's was pulled from, in lower case:
+/// `unsloth/qwen3.5-4b-gguf` of `hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_M`.
+fn tag_repo(tag: &str) -> String {
+    let tag = tag.strip_prefix("hf.co/").or_else(|| tag.strip_prefix("huggingface.co/")).unwrap_or(tag);
+    tag.split_once(':').map_or(tag, |(repo, _)| repo).to_ascii_lowercase()
 }
 
 /// How long Hugging Face has to say which repo to download, and its size: it answers in a
 /// fraction of a second, and `x` and `get` wait on it.
 const HF_WAIT: Duration = Duration::from_secs(10);
 
-/// The bytes the GGUF `repo` takes to download, as Hugging Face lists its files.
-pub fn gguf_size(repo: &str) -> Result<u64, String> {
+/// The bytes the GGUF `repo` takes to download, as Hugging Face lists its files: none when it
+/// lists no `.gguf` one, so there is nothing to download.
+pub fn gguf_size(repo: &str) -> Result<Option<u64>, String> {
     let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true");
     let tree = fetch_within(&url, None, HF_WAIT).map_err(|e| e.to_string())?;
-    gguf_bytes(&tree).ok_or_else(|| format!("{repo} lists no .gguf file"))
+    Ok(gguf_bytes(&tree))
 }
 
 /// The size of the files ollama and llama.cpp take from a repo named with no quantization, out
@@ -401,24 +459,17 @@ pub fn gb(bytes: u64) -> String {
     if b < 1e9 { format!("{:.0} MB", b / 1e6) } else { format!("{:.1} GB", b / 1e9) }
 }
 
-/// Where the sizes of downloads are kept from one run to the next, next to the data.
-fn sizes_path() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join("sizes.json")
-}
-
 /// The size in bytes of each model's download, by key, as Hugging Face said it in a run
 /// before, so it is asked once for a model.
 // ponytail: kept for good, so a repo uploaded again at another size reads stale: date the
 // entries and ask again past some age if that ever shows.
 pub fn load_sizes() -> HashMap<String, u64> {
-    std::fs::read(sizes_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    kept("sizes.json")
 }
 
-/// Keeps `sizes` for the next run. Not being able to is no error: they are asked again.
+/// Keeps `sizes` for the next run.
 pub fn save_sizes(sizes: &HashMap<String, u64>) {
-    if let Ok(json) = serde_json::to_vec(sizes) {
-        let _ = crate::store::write_atomic(&sizes_path(), &json);
-    }
+    keep("sizes.json", sizes);
 }
 
 /// Whether `harness` runs its models on this machine.
@@ -455,8 +506,13 @@ fn local_key(tag: &str) -> String {
 /// the shortest tag naming a model, so the one ollama pulls by default, whatever was pulled last.
 /// One naming no model in `keys` names its instruct one, which is what ollama's plain tags hold.
 /// One that says `it` names the instruction-tuned model, never the base one beside it: under
-/// that name, else as the instruct one, else as the only one there is.
-fn local_tags<'a>(listed: &'a [String], keys: &HashSet<&str>) -> HashMap<String, &'a str> {
+/// that name, else as the instruct one, else as the only one there is. A tag pulled from a repo
+/// of `repos`, model key -> repo, names that model too, whatever the repo is called.
+fn local_tags<'a>(
+    listed: &'a [String],
+    keys: &HashSet<&str>,
+    repos: &HashMap<String, String>,
+) -> HashMap<String, &'a str> {
     let mut tags: Vec<&str> = listed.iter().filter_map(|i| Some(i.split_once('/')?.1)).collect();
     tags.sort_by_key(|t| (t.len(), *t));
     let mut by_key = HashMap::new();
@@ -466,6 +522,10 @@ fn local_tags<'a>(listed: &'a [String], keys: &HashSet<&str>) -> HashMap<String,
         let named = std::iter::once(key.clone()).chain(tuned.into_iter().flatten());
         let key = named.into_iter().find(|k| keys.contains(k.as_str())).unwrap_or_else(|| format!("{key}instruct"));
         by_key.entry(key).or_insert(tag);
+        let from = tag_repo(tag);
+        for (key, _) in repos.iter().filter(|(k, repo)| **repo == from && keys.contains(k.as_str())) {
+            by_key.entry(key.clone()).or_insert(tag);
+        }
     }
     by_key
 }
@@ -794,8 +854,9 @@ impl Data {
     /// (`local_key`).
     pub fn apply_available(&mut self) {
         let keys: HashSet<&str> = self.models.iter().map(|m| m.key.as_str()).collect();
-        let local: Vec<_> =
-            LOCAL.iter().filter_map(|(h, name)| Some((*h, *name, local_tags(self.harness.get(*h)?, &keys)))).collect();
+        let repos = REPOS.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap_or_default();
+        let tags = |h: &str| Some(local_tags(self.harness.get(h)?, &keys, &repos));
+        let local: Vec<_> = LOCAL.iter().filter_map(|(h, name)| Some((*h, *name, tags(h)?))).collect();
         let harness: Vec<(&str, HashSet<String>)> =
             self.harness.iter().map(|(h, ids)| (h.as_str(), ids.iter().map(|i| canonical(h, i)).collect())).collect();
         for m in &mut self.models {
@@ -872,10 +933,11 @@ fn cache_path(src: Source) -> PathBuf {
         Source::Epoch => "data.json".to_string(),
         s => format!("data-{}.json", s.id()),
     };
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join(name)
+    cache_file(&name)
 }
 
 pub fn load_cache() -> Option<Data> {
+    load_repos();
     let bytes = std::fs::read(cache_path(source())).ok()?;
     // One written in another format reads wrong here (a missing price as free), so it is no fallback.
     let mut d = serde_json::from_slice::<Data>(&bytes).ok().filter(|d| d.format == FORMAT)?;
@@ -1226,6 +1288,7 @@ fn progress_text(total: usize, awaited: &[&str]) -> String {
 /// still listing their models, which have the ones the cache had until the whole answer: they
 /// are not waited for to show the rest.
 pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
+    load_repos();
     let src = source();
     let key = match src {
         Source::Epoch => None,
@@ -3387,9 +3450,28 @@ mod tests {
     fn a_gguf_repo_named_as_the_model_is_the_one_to_download() {
         let list = br#"[{"id": "prism-ml/Ternary-Bonsai-27B-gguf"}, {"id": "unsloth/Qwen3.6-27B-MTP-GGUF"},
             {"id": "unsloth/Qwen3.6-27B-GGUF"}, {"id": "bartowski/Qwen3.6-27B-GGUF"}]"#;
-        assert_eq!(gguf_named(list, "qwen3627b").as_deref(), Some("unsloth/Qwen3.6-27B-GGUF"), "the first so named");
-        assert_eq!(gguf_named(list, "glm53"), None);
-        assert_eq!(gguf_named(b"[]", "glm53"), None);
+        let found = |list, base, key| gguf_named(list, base, key);
+        let first = Some("unsloth/Qwen3.6-27B-GGUF".to_string());
+        assert_eq!(found(list, "Qwen/Qwen3.6-27B", "qwen3627b"), first, "the first so named");
+        assert_eq!(found(list, "zai-org/GLM-5.3", "glm53"), None);
+        assert_eq!(found(b"[]", "zai-org/GLM-5.3", "glm53"), None);
+        // A model keyed by a shorter name than its repo's: the first copy named as the repo and
+        // no more, but for what of its owner's name some put before it.
+        let list = br#"[{"id": "TheDrummer/Rocinante-X-12B-v1-GGUF"}, {"id": "meta-llama/Llama-3.1-8B-Instruct-abliterated-GGUF"},
+            {"id": "x/Llama-3.1-8B-Instruct-GGUF-UD"}, {"id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"}]"#;
+        let copy = Some("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF".to_string());
+        assert_eq!(found(list, "meta-llama/Llama-3.1-8B-Instruct", "llama318b"), copy, "not a fine-tune's");
+        let list = br#"[{"id": "mlabonne/DeepSeek-R1-0528-abliterated-GGUF"}, {"id": "bartowski/deepseek-ai_DeepSeek-R1-0528-GGUF"}]"#;
+        let copy = Some("bartowski/deepseek-ai_DeepSeek-R1-0528-GGUF".to_string());
+        assert_eq!(found(list, "deepseek-ai/DeepSeek-R1-0528", "r10528"), copy, "its owner before it");
+        // Downloaded, it is that model here, by the repo kept for it, and the one its name says.
+        let listed = ["x/hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:latest".to_string()];
+        let keys = HashSet::from(["llama318b", "metallama318binstruct", "glm53"]);
+        let repos = [("llama318b", "bartowski/meta-llama-3.1-8b-instruct-gguf"), ("glm53", "a/b-gguf")];
+        let repos = repos.map(|(k, r)| (k.to_string(), r.to_string())).into();
+        let mut named: Vec<_> = local_tags(&listed, &keys, &repos).into_keys().collect();
+        named.sort();
+        assert_eq!(named, ["llama318b", "metallama318binstruct"]);
         let tree = br#"[{"path":"README.md","size":9},{"path":"mmproj-F16.gguf","size":800},
             {"path":"m-Q8_0.gguf","size":4270000000},{"path":"Q4_K_M/m-Q4_K_M-00001-of-00002.gguf","size":2000000000},
             {"path":"Q4_K_M/m-Q4_K_M-00002-of-00002.gguf","size":500000000}]"#;
@@ -3403,7 +3485,8 @@ mod tests {
             (gb(40_000_000), gb(999_000_000), gb(1_000_000_000)),
             ("40 MB".into(), "999 MB".into(), "1.0 GB".into())
         );
-        assert_eq!(gguf_repo("unsloth/GLM-5.3-GGUF", "glm53").as_deref(), Ok("unsloth/GLM-5.3-GGUF"), "one already");
+        let own = Ok(Some("unsloth/GLM-5.3-GGUF".to_string()));
+        assert_eq!(gguf_repo("unsloth/GLM-5.3-GGUF", "glm53"), own, "one already");
         assert_eq!(get_cmd(LLAMA, "a/b-GGUF"), ["llama-cli", "-hf", "a/b-GGUF"]);
         assert_eq!(get_cmd(OLLAMA, "a/b-GGUF"), ["ollama", "run", "hf.co/a/b-GGUF"]);
         assert_eq!(local_key("hf.co/unsloth/Qwen3.6-27B-GGUF:latest"), "qwen3627b", "as ollama lists that copy");
@@ -3489,7 +3572,7 @@ mod tests {
         let listed = ["gemma3:4b-it-qat", "gemma-3-12b-it-Q4_K_M.gguf", "gemma-4-12b-it-Q4_K_M.gguf", "gemma3:1b"];
         let listed = listed.map(|t| format!("x/{t}"));
         let keys = HashSet::from(["gemma34b", "gemma34bit", "gemma312b", "gemma412b", "gemma412binstruct", "gemma31b"]);
-        let mut named: Vec<_> = local_tags(&listed, &keys).into_keys().collect();
+        let mut named: Vec<_> = local_tags(&listed, &keys, &HashMap::new()).into_keys().collect();
         named.sort();
         assert_eq!(named, ["gemma312b", "gemma31b", "gemma34bit", "gemma412binstruct"]);
     }

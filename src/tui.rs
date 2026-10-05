@@ -8,9 +8,9 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, BOXES, COLS, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse,
-    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, hidden, menu_rows, on_price,
-    shown,
+    App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED,
+    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, hidden, menu_rows,
+    on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -391,14 +391,19 @@ fn event_loop(
 ) -> Result<Option<Vec<Vec<String>>>, String> {
     let mut dirty = true;
     // The sizes of downloads Hugging Face is asked for (`Effect::Size`), and how many are awaited.
-    let (size_tx, size_rx) = mpsc::channel::<(String, Option<u64>)>();
+    let (size_tx, size_rx) = mpsc::channel::<(String, Download)>();
     let mut sizing = 0usize;
-    app.sizes = data::load_sizes();
+    app.set_sizes(data::load_sizes());
     let ask_size = |key: String, base: String| {
         let tx = size_tx.clone();
         std::thread::spawn(move || {
-            let bytes = data::gguf_repo(&base, &key).and_then(|r| data::gguf_size(&r)).ok();
-            let _ = tx.send((key, bytes));
+            let size = data::gguf_repo(&base, &key).and_then(|r| r.map_or(Ok(None), |r| data::gguf_size(&r)));
+            let answer = match size {
+                Ok(Some(bytes)) => Download::Size(bytes),
+                Ok(None) => Download::Gone,
+                Err(_) => Download::NoAnswer,
+            };
+            let _ = tx.send((key, answer));
         });
     };
     // The last press on a cell, which a second one makes a double click (`double`), and the
@@ -421,12 +426,12 @@ fn event_loop(
             }
             None => {}
         }
-        while let Ok((key, bytes)) = size_rx.try_recv() {
+        while let Ok((key, answer)) = size_rx.try_recv() {
             sizing -= 1;
-            app.sized(&key, bytes);
-            if bytes.is_some() {
-                data::save_sizes(&app.sizes);
-                dirty = true;
+            app.sized(&key, answer);
+            dirty |= answer != Download::NoAnswer;
+            if let Download::Size(_) = answer {
+                data::save_sizes(&app.sizes());
             }
         }
         // The count of a refresh under way moves on its own, with no key pressed.

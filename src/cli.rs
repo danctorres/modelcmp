@@ -548,7 +548,7 @@ pub fn open(data: &Data, q: &str, on: Option<&str>) -> Result {
 /// installed here, installing one first, once you agree, where there is none: the copy it
 /// already has, else the GGUF one Hugging Face has of the model's repo (`data::gguf_repo`).
 pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
-    use crate::data::{LLAMA, OLLAMA, gb, get_cmd, gguf_repo, gguf_size, has, install_cmd};
+    use crate::data::{LLAMA, OLLAMA, gb, get_cmd, gguf_repo, gguf_size, has, install_cmd, keep_repo};
     let m = resolve(data, q)?;
     let local = [LLAMA, OLLAMA];
     let runner = match via {
@@ -570,9 +570,10 @@ pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
         Some(cmd) => cmd.clone(),
         None => {
             let none = || format!("{} has no repo on Hugging Face to download", m.name);
-            let repo = gguf_repo(m.hf_repo().ok_or_else(none)?, &m.key)?;
+            let base = m.hf_repo().ok_or_else(none)?;
+            let repo = gguf_repo(base, &m.key)?.ok_or_else(|| format!("Hugging Face has no GGUF copy of {base}"))?;
             // Said before anything is installed or downloaded, and the download goes on without it.
-            if let Ok(bytes) = gguf_size(&repo) {
+            if let Ok(Some(bytes)) = gguf_size(&repo) {
                 eprintln!("{repo} is a download of about {}", gb(bytes));
             }
             get_cmd(runner, &repo)
@@ -597,7 +598,9 @@ pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
         }
     }
     eprintln!("$ {}", cmd.join(" "));
-    if here.is_none() {
+    if let (None, Some(repo)) = (&here, cmd.last()) {
+        // The copy is that model here from now on, whatever its repo is called.
+        keep_repo(&m.key, repo.trim_start_matches("hf.co/"));
         eprintln!("Once it is downloaded, `modelcmp --refresh`, or `r` in the TUI, shows it as on your machine.");
     }
     let mut run = std::process::Command::new(&cmd[0]);
