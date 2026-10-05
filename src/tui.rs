@@ -934,6 +934,11 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         }
         View::Table => {
             let mut view = vec!["B benchmarks", "H harness", "/ filter", "s sort"];
+            view.push(match app.local {
+                None => "L local",
+                Some(true) => "L not local",
+                Some(false) => "L every model",
+            });
             if app.menu(app.col) {
                 view.push("d dropdown");
             }
@@ -3174,12 +3179,12 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 4);
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
-        assert!(lines[3].contains("s sort  d dropdown  % no cache  r refresh  │  enter details"), "{}", lines[3]);
+        assert!(lines[3].contains("s sort  L local  d dropdown  % no cache  r refresh  │  enter details"), "{}", lines[3]);
         a.refreshing = true;
         data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
         assert!(
-            lines[3].contains("s sort  d dropdown  % 90% cached  │"),
+            lines[3].contains("s sort  L local  d dropdown  % 90% cached  │"),
             "off the default, the way back: {}",
             lines[3]
         );
@@ -3557,7 +3562,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  B benchmarks  H harness  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "h l column  │  B benchmarks  H harness  / filter  s sort  L local  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]

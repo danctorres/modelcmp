@@ -311,7 +311,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
             ("d", "dropdown on a header with ▾; space enter toggle"),
             ("a A", "all models, including ones you have no access to / yours only"),
-            ("L", "local models only: your machine runs them, or in all can, and again the rest"),
+            ("L", "cycle: local models only (ollama, llama.cpp), not local, every model"),
             ("tab", "next tab; shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
             ("c", "clear filters, bounds, L, task, S, F and E, and the selection stays"),
