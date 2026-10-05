@@ -3179,7 +3179,11 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 4);
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
-        assert!(lines[3].contains("s sort  L local  d dropdown  % no cache  r refresh  │  enter details"), "{}", lines[3]);
+        assert!(
+            lines[3].contains("s sort  L local  d dropdown  % no cache  r refresh  │  enter details"),
+            "{}",
+            lines[3]
+        );
         a.refreshing = true;
         data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
