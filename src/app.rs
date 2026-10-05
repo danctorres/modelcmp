@@ -802,17 +802,22 @@ pub enum Stop {
 }
 
 /// `provider/model` as opencode takes it, else pi, else omp, when one has the model (`launch_cmd`):
-/// the offer you'd pay may be one only another harness reaches. With neither, that offer's.
+/// the offer you'd pay may be one only another harness reaches. With neither, that offer's, or
+/// the bare tag `ollama run` takes.
 pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
     let harness = ["opencode", "pi", "omp"].iter().find_map(|h| launch_cmd(m, h, listed)?.pop());
-    harness.unwrap_or_else(|| m.price().map_or_else(|| m.key.clone(), |o| format!("{}/{}", o.provider, o.id)))
+    let own = |o: &crate::data::Offer| if o.local { o.id.clone() } else { format!("{}/{}", o.provider, o.id) };
+    harness.unwrap_or_else(|| m.price().map_or_else(|| m.key.clone(), own))
 }
 
 /// The command that starts `harness` on `m`, if the harness has it: opencode, pi and omp take
 /// `provider/model` as they listed it (`listed`, pi's `openai-codex/...` for models.dev's `openai/...`),
-/// the others (claude, codex, gemini, copilot) the bare model id.
+/// the others (claude, codex, gemini, copilot) the bare model id. ollama runs its tag.
 pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
     let o = m.offer_via(harness)?;
+    if o.local && harness == crate::data::OLLAMA {
+        return Some(vec![harness.into(), "run".into(), o.id.clone()]);
+    }
     let id = if matches!(harness, "opencode" | "pi" | "omp") {
         let id = format!("{}/{}", o.provider, o.id);
         let own = listed.get(harness).and_then(|ids| ids.iter().find(|i| crate::data::canonical(harness, i) == id));

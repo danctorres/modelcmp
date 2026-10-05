@@ -136,7 +136,10 @@ skills can take its body in `AGENTS.md`.
 - What you have: the models `opencode models`, `pi --list-models` and `omp models` list, the `claude`, `codex`
   and `gemini` binaries on `PATH` (each counts as its own provider), and the models GitHub Copilot's
   CLI takes on your plan when `copilot` is on `PATH` (asked of the CLI itself with `copilot --acp`,
-  under its own login; each refresh leaves an empty folder in `~/.copilot/session-state/`). The Via column says which. Under WSL the harnesses
+  under its own login; each refresh leaves an empty folder in `~/.copilot/session-state/`), and the models
+  `ollama list` shows on your machine, matched by tag (`qwen3.5:4b`, not `:latest`) and free. Their scores and
+  context are the full weights', which a quantized copy with ollama's own context falls short of, so a model
+  only your machine runs is recommended for a task only as your favorite. The Via column says which. Under WSL the harnesses
   are asked in a new session, as `x` launches them, so a key exported by hand in your shell does not count. A
   harness that fails to list its models
   keeps the ones from the last refresh, and the refresh says so.

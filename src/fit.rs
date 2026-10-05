@@ -367,12 +367,15 @@ pub fn add_lag(models: &mut [Model], now: f64) {
 /// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
 /// model with both. The task's line only takes the models close to your best on coding (see `Need::Coder`).
 pub fn add_value(models: &mut [Model]) {
-    let raw: Vec<Option<f64>> = models.iter().map(|m| Some(m.fit.get("coding")? / m.cost()?.max(FREE))).collect();
+    // Not one only your machine runs: the score is not that copy's, and free it would top the rank.
+    let value = |m: &Model| Some(m.fit.get("coding").filter(|_| !m.local())? / m.cost()?.max(FREE));
+    let raw: Vec<Option<f64>> = models.iter().map(value).collect();
     let all: Vec<f64> = raw.iter().flatten().copied().collect();
     for (m, v) in models.iter_mut().zip(raw) {
-        if let Some(v) = v {
-            m.fit.insert("value".into(), pct_rank(v, &all));
-        }
+        match v {
+            Some(v) => m.fit.insert("value".into(), pct_rank(v, &all)),
+            None => m.fit.remove("value"),
+        };
     }
 }
 

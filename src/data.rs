@@ -254,6 +254,9 @@ enum Probe {
     Table(&'static [&'static str]),
     /// A command that prints JSON: `models`, each with its `provider/model` id as `selector`.
     Json(&'static [&'static str]),
+    /// A command that prints a table of the models it runs on this machine under a `NAME ...`
+    /// header, the name first (`name_ids`).
+    Names(&'static [&'static str]),
     /// No such command: being installed means access to every model of this provider.
     Provider(&'static str),
     /// No such command either, but its CLI lists what the account may use to an Agent Client
@@ -272,7 +275,44 @@ const HARNESSES: &[(&str, Probe)] = &[
     ("codex", Probe::Provider("openai")),
     ("gemini", Probe::Provider("google")),
     ("copilot", Probe::Copilot),
+    (OLLAMA, Probe::Names(&["list"])),
 ];
+
+/// Ollama, and the provider of the offer made for a model it runs here (`Offer::local`).
+pub const OLLAMA: &str = "ollama";
+
+/// The key of the model an ollama tag names, `qwen3.5:4b` or `llama3.2:1b-instruct-Q4_K_M-128k`:
+/// without its quantization or a context size after it. A tag that says no size
+/// (`llama3.2:latest`) names none.
+// ponytail: by the tag alone; read the size from `ollama show` if `:latest` tags should match.
+fn local_key(tag: &str) -> String {
+    let digit = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
+    let extra = |p: &str| {
+        matches!(p, "qat" | "it")
+            || ["q", "fp", "bf", "f"].iter().any(|q| p.strip_prefix(q).is_some_and(digit))
+            || (digit(p) && p.ends_with('k'))
+    };
+    // Whoever it was pulled from, `hf.co/bartowski/Qwen3.5-4B-GGUF:Q4_K_M` or `someone/qwen3.5:4b`.
+    let tag = tag.rsplit('/').next().unwrap_or(tag).to_ascii_lowercase();
+    let (name, variant) = tag.split_once(':').unwrap_or((&tag, ""));
+    let name = name.trim_end_matches("-gguf");
+    norm(&format!("{name}{}", variant.split('-').filter(|p| !extra(p)).collect::<String>()))
+}
+
+/// Model key -> the ollama tag that runs it, of the `ollama/tag` ids `listed`: the shortest tag
+/// naming a model, so the one ollama pulls by default, whatever was pulled last. One naming no
+/// model in `keys` names its instruct one, which is what ollama's plain tags hold.
+fn local_tags<'a>(listed: &'a [String], keys: &HashSet<&str>) -> HashMap<String, &'a str> {
+    let mut tags: Vec<&str> = listed.iter().filter_map(|i| Some(i.split_once('/')?.1)).collect();
+    tags.sort_by_key(|t| (t.len(), *t));
+    let mut by_key = HashMap::new();
+    for tag in tags {
+        let key = local_key(tag);
+        let key = if keys.contains(key.as_str()) { key } else { format!("{key}instruct") };
+        by_key.entry(key).or_insert(tag);
+    }
+    by_key
+}
 
 /// pi's names for providers models.dev names otherwise, paired by the model ids they share.
 /// omp, a fork of pi, names them the same.
@@ -319,6 +359,10 @@ pub struct Offer {
     pub unpriced: bool,
     #[serde(skip)]
     pub available: bool,
+    /// Made for a model ollama runs on this machine (`Data::apply_available`), free: models.dev
+    /// lists none.
+    #[serde(skip)]
+    pub local: bool,
     /// Where you have access: the harnesses listing it.
     #[serde(skip)]
     pub via: Vec<String>,
@@ -412,8 +456,12 @@ impl Model {
     /// else one of yours with no listed price, else the `list` one. It may be `unpriced`,
     /// still naming the id to use; `priced_offer` is the one with prices to show.
     pub fn price(&self) -> Option<&Offer> {
-        let free = || self.offers.iter().find(|o| !o.unpriced);
-        cheapest(self.offers.iter().filter(|o| o.available))
+        // Your machine's copy is the price of a model nothing else runs for you: free, it
+        // would be what one of yours with no listed price costs.
+        let local = self.local();
+        let yours = |o: &&Offer| local || !o.local;
+        let free = || self.offers.iter().filter(yours).find(|o| !o.unpriced);
+        cheapest(self.offers.iter().filter(yours).filter(|o| o.available))
             .or_else(|| self.list())
             .or_else(free)
             .or(self.offers.first())
@@ -466,9 +514,17 @@ impl Model {
     }
 
     /// Where models.dev shows the price you'd pay: the model's page, else the provider's, which
-    /// lists its models with their prices.
+    /// lists its models with their prices. Your own machine is no provider of its.
     pub fn price_page(&self) -> Option<String> {
-        self.md_page().or_else(|| Some(format!("https://models.dev/providers/{}/", self.price()?.provider)))
+        let provider = || self.price().filter(|o| !o.local);
+        self.md_page().or_else(|| Some(format!("https://models.dev/providers/{}/", provider()?.provider)))
+    }
+
+    /// Only your own machine runs it for you: a quantized copy with the context ollama gives
+    /// it, which the scores and the context here are not of.
+    pub fn local(&self) -> bool {
+        let mut yours = self.offers.iter().filter(|o| o.available);
+        self.offers.iter().any(|o| o.local) && yours.all(|o| o.local)
     }
 
     /// The model's page on a benchmark source, when it has one there (`epoch`, `aa`).
@@ -531,9 +587,10 @@ impl Data {
         Duration::from_secs(now().saturating_sub(self.fetched))
     }
 
-    /// Whether you have access to any model: with none, every model counts as in reach.
+    /// Whether you have access to any model: with none, every model counts as in reach. One
+    /// only your machine runs is none, as no task picks it (`Model::local`).
     pub fn any_available(&self) -> bool {
-        self.models.iter().any(|m| m.available)
+        self.models.iter().any(|m| m.available && !m.local())
     }
 
     /// The newest release when it is newer than this build.
@@ -546,12 +603,23 @@ impl Data {
         self.age() > MAX_AGE || self.format != FORMAT || self.benches != source().benches()
     }
 
-    /// Mark offers the user can use, and where: listed by an installed harness.
+    /// Mark offers the user can use, and where: listed by an installed harness. A model ollama
+    /// runs here gets an offer of its own, free, for the tag that names it (`local_key`).
     pub fn apply_available(&mut self) {
+        let keys: HashSet<&str> = self.models.iter().map(|m| m.key.as_str()).collect();
+        let local = self.harness.get(OLLAMA).map(|ids| local_tags(ids, &keys)).unwrap_or_default();
         let harness: Vec<(&str, HashSet<String>)> =
             self.harness.iter().map(|(h, ids)| (h.as_str(), ids.iter().map(|i| canonical(h, i)).collect())).collect();
         for m in &mut self.models {
             m.via.clear();
+            // Made anew each time, as the cache does not hold it.
+            m.offers.retain(|o| !o.local);
+            if let Some(tag) = local.get(&m.key) {
+                // The scores are the full weights', which a quantized copy falls short of.
+                let provider_name = "Ollama (local quant)".into();
+                let (provider, id) = (OLLAMA.into(), tag.to_string());
+                m.offers.push(Offer { provider, provider_name, id, local: true, ..Default::default() });
+            }
             for o in &mut m.offers {
                 let (id, all) = (format!("{}/{}", o.provider, o.id), format!("{}/*", o.provider));
                 o.via = harness
@@ -670,6 +738,8 @@ fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &S
             Some(out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect())
         }
         Probe::Table(args) => table_ids(&listing(bin, args, stop)?),
+        // One that does not answer runs none: no model is kept for a server that is down.
+        Probe::Names(args) => Some(listing(bin, args, stop).and_then(|out| name_ids(&out)).unwrap_or_default()),
         Probe::Json(args) => selector_ids(&listing(bin, args, stop)?),
         Probe::Copilot => copilot_ids(stop),
     };
@@ -749,6 +819,14 @@ fn table_ids(out: &str) -> Option<Vec<String>> {
         .skip_while(|f| !f.starts_with(&["provider", "model"]));
     let cols = lines.next()?.len();
     Some(lines.filter(|f| f.len() == cols).map(|f| format!("{}/{}", f[0], f[1])).collect())
+}
+
+/// The `ollama/tag` ids of a table under a `NAME ...` header, as `ollama list` prints; `None`
+/// without that header.
+fn name_ids(out: &str) -> Option<Vec<String>> {
+    let mut names = out.lines().filter_map(|l| l.split_whitespace().next()).skip_while(|n| *n != "NAME");
+    names.next()?;
+    Some(names.map(|n| format!("{OLLAMA}/{n}")).collect())
 }
 
 /// The `provider/model` ids of `{"models": [{"selector": ...}]}`, as `omp models --json` prints;
@@ -2987,6 +3065,55 @@ mod tests {
         assert_eq!(d.models[1].via, ["claude"], "a provider-wide harness covers every model of it");
         assert_eq!(d.models[2].via, ["pi"], "pi's openai-codex is models.dev's openai");
         assert!(!d.models[3].available && d.models[3].via.is_empty());
+    }
+
+    #[test]
+    fn ollama_tags_mark_the_models_they_name() {
+        let out = "motd\nNAME  ID  SIZE  MODIFIED\nqwen3.5:4b-fp16  aa  9 GB  now\nqwen3.5:4b  d8b0  3.3 GB  2 hours ago\nllama3.2:latest  baf6  1.3 GB  now\nphi5:3b  cc  2 GB  now\n";
+        let ids = name_ids(out).unwrap();
+        assert_eq!(ids, ["ollama/qwen3.5:4b-fp16", "ollama/qwen3.5:4b", "ollama/llama3.2:latest", "ollama/phi5:3b"]);
+        assert_eq!(name_ids("Error: could not connect\n"), None, "no header, no ids");
+        for tag in ["llama3.2:1b-instruct-q4_K_M", "llama3.2:1b-instruct-Q4_K_M-128k", "llama3.2:1b-instruct-qat"] {
+            assert_eq!(local_key(tag), "llama321binstruct", "{tag} without its quantization");
+        }
+        let paid =
+            |p: &str| Offer { provider: p.into(), id: "m".into(), input: 1.0, output: 1.0, ..Default::default() };
+        let fit = BTreeMap::from([("coding".to_string(), 50.0)]);
+        let m = |key: &str, p: &str| Model {
+            key: key.into(),
+            offers: vec![paid(p)],
+            fit: fit.clone(),
+            ..Default::default()
+        };
+        let mut d = Data {
+            harness: BTreeMap::from([(OLLAMA.into(), ids), ("opencode".into(), vec!["alibaba/m".into()])]),
+            models: vec![m("qwen354b", "alibaba"), m("llama32", "meta"), m("phi53binstruct", "azure")],
+            ..Default::default()
+        };
+        d.apply_available();
+        d.apply_available();
+        let q = &d.models[0];
+        assert_eq!(
+            (q.offers.len(), &q.via),
+            (2, &vec!["opencode".to_string(), OLLAMA.into()]),
+            "one offer, however often"
+        );
+        assert_eq!(q.offers[1].id, "qwen3.5:4b", "the default tag, not the one pulled last");
+        assert_eq!((q.cost(), q.local()), (Some(1.0), false), "the harness that pays may be the one started");
+        assert_eq!(d.models[1].offers.len(), 1, "a tag without a size names no model");
+        let phi = &d.models[2];
+        assert_eq!((phi.cost(), phi.local()), (Some(0.0), true), "a plain tag is the instruct model, free here alone");
+        assert_eq!(phi.price_page(), None, "models.dev has no page for your machine");
+        assert_eq!((phi.fit.get("value"), d.models[0].fit.contains_key("value")), (None, true), "nor a value");
+        for tag in ["hf.co/bartowski/Llama3.2-1B-Instruct-GGUF:Q4_K_M", "someone/llama3.2:1b-instruct-f16"] {
+            assert_eq!(local_key(tag), "llama321binstruct", "{tag} whoever it is from");
+        }
+        assert_eq!(local_key("gemma3:4b-it-qat"), "gemma34b");
+        d.models[0].offers[0].unpriced = true;
+        assert_eq!(d.models[0].cost(), None, "your machine's copy is not the price of one with none listed");
+        d.harness.remove("opencode");
+        d.apply_available();
+        assert!(d.models[0].local() && !d.any_available(), "ollama alone leaves every model in reach");
     }
 
     #[test]

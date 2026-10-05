@@ -407,7 +407,9 @@ pub fn task_frontier<'a>(
     t: &fit::Task,
     favorites: &[&'a Model],
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
-    let ranked = fit::rank(models, t);
+    // Not one only your machine runs, whose scores and context are not that copy's: free, it
+    // would take every tier it has the score for. A favorite is still on the line.
+    let ranked = fit::rank(models.filter(|m| !m.local()), t);
     // Behind the best the frontier can take, which has a price; "value" on coding, with no
     // line while coding has no pace.
     let coder = matches!(t.need, fit::Need::Coder);
@@ -1146,6 +1148,10 @@ mod tests {
             (vec!["a", "mini", "b", "top"], vec![]),
             "a favorite of the frontier"
         );
+        let mut ms = ms;
+        ms[0].offers = vec![Offer { local: true, available: true, ..Default::default() }];
+        assert_eq!(keys(&ms, &[], "coding").0, ["mini", "b", "top"], "one only your machine runs is not picked");
+        assert_eq!(keys(&ms, &[&ms[0]], "coding"), (vec!["a", "mini", "b", "top"], vec!["a"]), "but as a favorite");
         // The level past the last edge has no top: $16 within 8 months, not the $75 best.
         let dear = [model("a", 157.0, 16.0, 8.0), model("top", 165.0, 75.0, 0.0)];
         assert_eq!(pick(&dear, "low"), "a");
