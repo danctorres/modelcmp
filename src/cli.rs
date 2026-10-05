@@ -544,6 +544,72 @@ pub fn open(data: &Data, q: &str, on: Option<&str>) -> Result {
     Ok(())
 }
 
+/// Download a copy of the model to this machine and run it there, on `via` or the runner
+/// installed here, installing one first, once you agree, where there is none: the copy it
+/// already has, else the GGUF one Hugging Face has of the model's repo (`data::gguf_repo`).
+pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
+    use crate::data::{LLAMA, OLLAMA, get_cmd, gguf_repo, has, install_cmd};
+    let m = resolve(data, q)?;
+    let local = [LLAMA, OLLAMA];
+    let runner = match via {
+        Some(v) => *local
+            .iter()
+            .find(|h| **h == v)
+            .ok_or_else(|| format!("{v} runs no model on this machine: --via takes {OLLAMA} or {LLAMA}"))?,
+        // The one that has the model, else one installed, else one that can be.
+        None => {
+            let can = |f: &dyn Fn(&str) -> bool| local.into_iter().find(|h| f(h));
+            can(&|h| launch_cmd(m, h, &data.harness).is_some())
+                .or_else(|| can(&has))
+                .or_else(|| can(&|h| install_cmd(h).is_some()))
+                .unwrap_or(LLAMA)
+        }
+    };
+    let here = launch_cmd(m, runner, &data.harness);
+    let cmd = match &here {
+        Some(cmd) => cmd.clone(),
+        None => {
+            let none = || format!("{} has no repo on Hugging Face to download", m.name);
+            get_cmd(runner, &gguf_repo(m.hf_repo().ok_or_else(none)?, &m.key)?)
+        }
+    };
+    if !has(runner) {
+        let install = install_cmd(runner).ok_or_else(|| {
+            let page =
+                if runner == OLLAMA { "https://ollama.com/download" } else { "https://github.com/ggml-org/llama.cpp" };
+            format!("{runner} is not installed, and modelcmp knows no command that installs it here: see {page}")
+        })?;
+        let line = install.strip_prefix(&["sh", "-c"]).unwrap_or(install).join(" ");
+        eprint!("{runner} is not installed. Run `{line}`? [y/N] ");
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            return Err(format!("{runner} is not installed").into());
+        }
+        let done = std::process::Command::new(install[0]).args(&install[1..]).status();
+        if !done.is_ok_and(|s| s.success()) {
+            return Err(format!("{line} failed").into());
+        }
+    }
+    eprintln!("$ {}", cmd.join(" "));
+    if here.is_none() {
+        eprintln!("Once it is downloaded, `modelcmp --refresh`, or `r` in the TUI, shows it as on your machine.");
+    }
+    let mut run = std::process::Command::new(&cmd[0]);
+    run.args(&cmd[1..]);
+    // In a terminal opened for it, an error of the runner's own is waited on too.
+    #[cfg(unix)]
+    if !wait {
+        let e = std::os::unix::process::CommandExt::exec(&mut run);
+        return Err(format!("could not start {}: {e}", cmd[0]).into());
+    }
+    match run.status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("{} ended with {s}", cmd[0]).into()),
+        Err(e) => Err(format!("could not start {}: {e}", cmd[0]).into()),
+    }
+}
+
 pub fn select(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     let m = resolve(data, q)?;
     if rm == store.is_marked(&m.key) {
@@ -585,6 +651,35 @@ pub fn harness(store: &mut Store, name: Option<&str>, rm: bool) -> Result {
         }
         None if store.harness.is_empty() => println!("no default harness, modelcmp harness <name> sets one"),
         None => println!("{}", store.harness),
+    }
+    Ok(())
+}
+
+/// Show the folder of the `.gguf` files you downloaded, or set or clear it: llama.cpp runs the
+/// models in it, and a refresh lists them.
+pub fn models_dir(store: &mut Store, dir: Option<&str>, rm: bool) -> Result {
+    let set =
+        std::env::var_os("LLAMA_ARG_MODELS_DIR").filter(|d| !d.is_empty()).map(|d| d.to_string_lossy().into_owned());
+    match dir {
+        Some(d) => {
+            let path = std::fs::canonicalize(d).ok().filter(|p| p.is_dir());
+            let path = path.ok_or_else(|| Exit { code: 2, msg: format!("{d} is not a folder") })?;
+            store.models_dir = path.to_string_lossy().into_owned();
+            store.save()?;
+            println!("models folder: {}, modelcmp --refresh lists its models", store.models_dir);
+            if let Some(env) = set {
+                println!("LLAMA_ARG_MODELS_DIR is set, so {env} is read instead");
+            }
+        }
+        None if rm => {
+            store.models_dir.clear();
+            store.save()?;
+            println!("no models folder");
+        }
+        None => match set.as_deref().or(Some(store.models_dir.as_str())).filter(|d| !d.is_empty()) {
+            Some(d) => println!("{d}"),
+            None => println!("no models folder, modelcmp models-dir <folder> sets one"),
+        },
     }
     Ok(())
 }

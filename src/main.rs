@@ -123,6 +123,16 @@ enum Cmd {
         #[arg(long)]
         on: Option<String>,
     },
+    /// Download a copy of the model to your machine and run it there: the GGUF one Hugging Face has of it, by `llama-cli -hf` or `ollama run`, after installing one of them, once you agree, when you have neither (`x` in the TUI)
+    Get {
+        model: String,
+        /// The one that runs it (ollama or llama-cli), the one you have when left out
+        #[arg(long)]
+        via: Option<String>,
+        /// Wait for enter after an error, which a terminal opened for this would close on
+        #[arg(long, hide = true)]
+        pause: bool,
+    },
     /// Select a model, to shortlist it until the TUI closes: `list --selected` shows them (space in the TUI)
     #[command(alias = "mark")]
     Select {
@@ -151,6 +161,14 @@ enum Cmd {
     Harness {
         #[arg(conflicts_with = "rm")]
         name: Option<String>,
+        /// Clear it
+        #[arg(long)]
+        rm: bool,
+    },
+    /// The folder of the `.gguf` files you downloaded: llama.cpp runs the models in it and a refresh lists them, when `LLAMA_ARG_MODELS_DIR` is not set. Alone, shows it
+    ModelsDir {
+        #[arg(conflicts_with = "rm")]
+        dir: Option<String>,
         /// Clear it
         #[arg(long)]
         rm: bool,
@@ -201,6 +219,7 @@ fn main() {
     let args = Args::parse();
     data::set_cached(f64::from(args.cache) / 100.0);
     let store = Store::load();
+    data::set_models_dir(&store.models_dir);
     let picked = args.source.as_deref().unwrap_or(&store.source);
     let source = if picked.is_empty() { Some(data::Source::preferred()) } else { data::Source::parse(picked) };
     data::set_source(source.unwrap_or_default());
@@ -241,7 +260,12 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // A command that saves holds the lock from load to save.
     let _lock = matches!(
         cmd,
-        Cmd::Select { .. } | Cmd::Exclude { .. } | Cmd::Note { .. } | Cmd::Fav { .. } | Cmd::Harness { .. }
+        Cmd::Select { .. }
+            | Cmd::Exclude { .. }
+            | Cmd::Note { .. }
+            | Cmd::Fav { .. }
+            | Cmd::Harness { .. }
+            | Cmd::ModelsDir { .. }
     )
     .then(|| store::lock(&store::path()))
     .transpose()
@@ -296,9 +320,18 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
         Cmd::Open { model, on } => cli::open(&data, &model, on.as_deref()),
+        Cmd::Get { model, via, pause } => cli::get(&data, &model, via.as_deref(), pause).inspect_err(|e| {
+            if pause {
+                eprintln!("modelcmp: {}", e.msg);
+                eprintln!("press enter to close");
+                let _ = std::io::stdin().read_line(&mut String::new());
+                std::process::exit(e.code);
+            }
+        }),
         Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Harness { name, rm } => cli::harness(&mut store, name.as_deref(), rm),
+        Cmd::ModelsDir { dir, rm } => cli::models_dir(&mut store, dir.as_deref(), rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),
         Cmd::Fav { task, model, tier, via, rm, about, .. } => {

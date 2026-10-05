@@ -302,6 +302,58 @@ pub fn llama_cmd() -> Option<&'static [&'static str]> {
     [&[LLAMA][..], &["llama", "cli"], &["llama-server"]].into_iter().find(|c| installed(c[0]))
 }
 
+/// Whether `harness` is installed here.
+pub fn has(harness: &str) -> bool {
+    if harness == LLAMA { llama_cmd().is_some() } else { installed(harness) }
+}
+
+/// The command that installs `runner`, ollama or llama.cpp, where one is known to: Homebrew's
+/// formula, or on Linux ollama's own script. None where it is yours to install.
+pub fn install_cmd(runner: &str) -> Option<&'static [&'static str]> {
+    let brew = installed("brew");
+    match runner {
+        LLAMA if brew => Some(&["brew", "install", "llama.cpp"]),
+        OLLAMA if cfg!(target_os = "linux") => Some(&["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]),
+        OLLAMA if brew => Some(&["brew", "install", "ollama"]),
+        _ => None,
+    }
+}
+
+/// The command by which `runner` downloads the GGUF `repo` from Hugging Face and runs it.
+pub fn get_cmd(runner: &str, repo: &str) -> Vec<String> {
+    if runner == LLAMA {
+        // Not installed yet, it is `llama-cli` that the install brings.
+        let bin = llama_cmd().unwrap_or(&[LLAMA]);
+        return [bin, &["-hf", repo]].concat().into_iter().map(String::from).collect();
+    }
+    vec![OLLAMA.into(), "run".into(), format!("hf.co/{repo}")]
+}
+
+/// The GGUF repo to download for the model `key`, whose weights are in the Hugging Face repo
+/// `base`: `base` when it is one, else the most downloaded one quantized from it whose name is
+/// the model's (`local_tags`), so the copy shows as that model here.
+pub fn gguf_repo(base: &str, key: &str) -> Result<String, String> {
+    if base.to_ascii_lowercase().ends_with("-gguf") {
+        return Ok(base.to_string());
+    }
+    let url = format!(
+        "https://huggingface.co/api/models?filter=gguf&filter=base_model:quantized:{base}&sort=downloads&direction=-1&limit=20"
+    );
+    let list = fetch(&url, None).map_err(|e| e.to_string())?;
+    gguf_named(&list, key).ok_or_else(|| format!("Hugging Face has no GGUF copy of {base}"))
+}
+
+/// The first repo of Hugging Face's `[{"id": "owner/name"}]` whose name is the model `key`'s.
+fn gguf_named(list: &[u8], key: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Repo {
+        id: String,
+    }
+    let keys = HashSet::from([key]);
+    let named = |id: &String| local_tags(&[format!("{LLAMA}/{id}")], &keys).contains_key(key);
+    serde_json::from_slice::<Vec<Repo>>(list).ok()?.into_iter().map(|r| r.id).find(named)
+}
+
 /// Whether `harness` runs its models on this machine.
 pub fn runs_here(harness: &str) -> bool {
     LOCAL.iter().any(|l| l.0 == harness)
@@ -313,8 +365,11 @@ pub fn runs_here(harness: &str) -> bool {
 // ponytail: by the tag alone; read the size from `ollama show` if `:latest` tags should match.
 fn local_key(tag: &str) -> String {
     let digit = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
+    // A Hugging Face repo says the size in its name, so ollama's `:latest` for it is no part of it.
+    let hub = tag.starts_with("hf.co/") || tag.starts_with("huggingface.co/");
     let extra = |p: &str| {
         p == "qat"
+            || (hub && p == "latest")
             || ["q", "fp", "bf", "f"].iter().any(|q| p.strip_prefix(q).is_some_and(digit))
             || (digit(p) && p.ends_with('k'))
     };
@@ -579,7 +634,7 @@ impl Model {
     /// llama.cpp's `owner/repo:quant`), else the one Hugging Face serves it from, whose id
     /// there is the repo, else the one OpenRouter names (`hf`). A tag of ollama's own library
     /// or a file downloaded by hand names none.
-    fn hf_repo(&self) -> Option<&str> {
+    pub fn hf_repo(&self) -> Option<&str> {
         let pulled = self.offers.iter().filter(|o| o.local && !o.id.ends_with(".gguf"));
         let served = self.offers.iter().filter(|o| o.provider == HF);
         let offered = pulled.chain(served).find_map(|o| {
@@ -904,11 +959,22 @@ fn cache_ids(out: &str) -> Option<Vec<String>> {
     Some(lines.filter_map(|l| l.split_whitespace().nth(1)).map(|n| format!("{LLAMA}/{n}")).collect())
 }
 
+/// The folder saved with `modelcmp models-dir`, set once at the start.
+static MODELS_DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_models_dir(dir: &str) {
+    let _ = MODELS_DIR.set(dir.to_string());
+}
+
 /// The `llama-cli/path` ids of the `.gguf` files in llama.cpp's own models folder
-/// (`LLAMA_ARG_MODELS_DIR`): the ones downloaded by hand, which its cache does not list. Not a
-/// vision projector, which is no model.
+/// (`LLAMA_ARG_MODELS_DIR`), else in the one saved here (`set_models_dir`): the ones downloaded
+/// by hand, which its cache does not list. Not a vision projector, which is no model.
 fn gguf_ids() -> Vec<String> {
-    let dir = std::env::var_os("LLAMA_ARG_MODELS_DIR").and_then(|d| std::fs::read_dir(d).ok());
+    let saved = || MODELS_DIR.get().filter(|d| !d.is_empty()).map(Into::into);
+    let dir = std::env::var_os("LLAMA_ARG_MODELS_DIR")
+        .filter(|d| !d.is_empty())
+        .or_else(saved)
+        .and_then(|d| std::fs::read_dir(d).ok());
     let files = dir.into_iter().flatten().flatten().map(|e| e.path());
     let model = |p: &PathBuf| {
         p.extension().is_some_and(|e| e == "gguf")
@@ -1096,8 +1162,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, answers) = std::sync::mpsc::channel();
     // The installed ones: one not installed is left out.
-    let asked: Vec<_> =
-        HARNESSES.iter().filter(|h| if h.0 == LLAMA { llama_cmd().is_some() } else { installed(h.0) }).collect();
+    let asked: Vec<_> = HARNESSES.iter().filter(|h| has(h.0)).collect();
     let harness = {
         let (asked, stop, steps) = (asked.clone(), Arc::clone(&stop), Arc::clone(steps));
         std::thread::spawn(move || harness_models(&asked, &stop, &steps, &tx))
@@ -3238,6 +3303,20 @@ mod tests {
         assert_eq!(d.models[1].via, ["claude"], "a provider-wide harness covers every model of it");
         assert_eq!(d.models[2].via, ["pi"], "pi's openai-codex is models.dev's openai");
         assert!(!d.models[3].available && d.models[3].via.is_empty());
+    }
+
+    #[test]
+    fn a_gguf_repo_named_as_the_model_is_the_one_to_download() {
+        let list = br#"[{"id": "prism-ml/Ternary-Bonsai-27B-gguf"}, {"id": "unsloth/Qwen3.6-27B-MTP-GGUF"},
+            {"id": "unsloth/Qwen3.6-27B-GGUF"}, {"id": "bartowski/Qwen3.6-27B-GGUF"}]"#;
+        assert_eq!(gguf_named(list, "qwen3627b").as_deref(), Some("unsloth/Qwen3.6-27B-GGUF"), "the first so named");
+        assert_eq!(gguf_named(list, "glm53"), None);
+        assert_eq!(gguf_named(b"[]", "glm53"), None);
+        assert_eq!(gguf_repo("unsloth/GLM-5.3-GGUF", "glm53").as_deref(), Ok("unsloth/GLM-5.3-GGUF"), "one already");
+        assert_eq!(get_cmd(LLAMA, "a/b-GGUF"), ["llama-cli", "-hf", "a/b-GGUF"]);
+        assert_eq!(get_cmd(OLLAMA, "a/b-GGUF"), ["ollama", "run", "hf.co/a/b-GGUF"]);
+        assert_eq!(local_key("hf.co/unsloth/Qwen3.6-27B-GGUF:latest"), "qwen3627b", "as ollama lists that copy");
+        assert_eq!(local_key("llama3.2:latest"), "llama32latest", "its own library's still names no size");
     }
 
     #[test]

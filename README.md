@@ -108,9 +108,15 @@ llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`,
 |---|---|
 | a model pulled by ollama | `ollama list` shows it, with ollama running. The tag must say the size: `qwen3.5:4b`, not `:latest` |
 | a model llama.cpp downloaded | `llama-cli --cache-list` shows it, as after `llama-cli -hf unsloth/Qwen3.5-4B-GGUF:Q4_K_M` |
-| a `.gguf` file you downloaded | its folder is in `LLAMA_ARG_MODELS_DIR`, llama.cpp's own variable: `export LLAMA_ARG_MODELS_DIR=~/models` in your shell profile. Subfolders are not read |
+| a `.gguf` file you downloaded | `modelcmp models-dir ~/models` names its folder, or `LLAMA_ARG_MODELS_DIR`, llama.cpp's own variable, does when it is set. Subfolders are not read |
 
 Then run `modelcmp --refresh`.
+
+To get a model you do not have yet, press `x` on it and pick `download and run`, or run
+`modelcmp get <model>`. It finds the most downloaded GGUF copy of the model's Hugging Face repo and starts
+`llama-cli -hf <repo>` or `ollama run hf.co/<repo>`, which download it. With neither installed it asks
+before installing one: llama.cpp with Homebrew, else ollama with its own script on Linux. It does not
+check that the model fits your machine. A model with no repo on Hugging Face has no such option.
 
 A model is matched by its tag, repo or file name, without the quantization, so the name must be the
 one the model has here (`modelcmp list --all` shows them): `gemma-3-4b-it-Q4_K_M.gguf` is Gemma 3 4B IT.

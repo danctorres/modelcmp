@@ -40,6 +40,10 @@ pub struct Store {
     /// (`modelcmp harness`); a favorite's own comes first.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub harness: String,
+    /// The folder of the `.gguf` files you downloaded (`modelcmp models-dir`), read when
+    /// llama.cpp's own `LLAMA_ARG_MODELS_DIR` is not set.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub models_dir: String,
     /// What each task of your own is about, in your words, by its name: agents choose it by that.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub about: BTreeMap<String, String>,

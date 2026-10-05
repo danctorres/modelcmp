@@ -839,6 +839,26 @@ pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String
     Some(vec![harness.into(), "--model".into(), id])
 }
 
+/// The ways to get a model no runner on this machine has yet, each as its label and the
+/// `modelcmp get` that does it in a new terminal: one per runner installed here that lacks the
+/// model, else the one that can be installed. None for a model with no repo on Hugging Face.
+fn get_items(m: &Model) -> Vec<(String, Effect)> {
+    use crate::data::{LLAMA, OLLAMA, has, install_cmd};
+    if m.hf_repo().is_none() {
+        return vec![];
+    }
+    let exe = std::env::current_exe().map_or_else(|_| "modelcmp".into(), |p| p.to_string_lossy().into_owned());
+    let item = |h: &str, how: &str| {
+        let cmd = [&exe, "get", &m.key, "--via", h, "--pause"].map(String::from).to_vec();
+        (format!("{h} {how}"), Effect::Launch(cmd))
+    };
+    let lacking: Vec<_> = [OLLAMA, LLAMA].into_iter().filter(|h| has(h) && !m.via.iter().any(|v| v == h)).collect();
+    let none = ![OLLAMA, LLAMA].into_iter().any(has);
+    let install = [LLAMA, OLLAMA].into_iter().find(|h| none && install_cmd(h).is_some());
+    let got = lacking.into_iter().map(|h| item(h, "download and run"));
+    got.chain(install.map(|h| item(h, "install, download and run"))).collect()
+}
+
 /// A task's line as (index into `Data::models`, score), and the models on it only for being
 /// favorites (`view::task_line`).
 type Front = (Vec<(usize, f64)>, Vec<usize>);
@@ -2740,6 +2760,7 @@ impl App {
                     .iter()
                     .filter_map(|h| launch_cmd(m, h, &self.data.harness))
                     .map(|c| (c.join(" "), Effect::Launch(c)))
+                    .chain(get_items(m))
                     .collect();
                 if items.is_empty() {
                     self.refuse(format!("no harness has {}; Via shows where you have access", m.name));
