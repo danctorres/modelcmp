@@ -1327,6 +1327,15 @@ fn epoch_pages(index: &str) -> Result<Vec<u8>, Failure> {
     Ok(all)
 }
 
+/// Repos OpenRouter names that Hugging Face has no page for, gone or private, as of 2026-10-05.
+// ponytail: kept by hand, as Hugging Face lists no repos to check against and limits requests.
+// Ask it for each repo once a refresh if these keep turning up.
+const HF_GONE: &[&str] = &[
+    "inference-net/schematron-v2-llama-3.2-3b",
+    "inference-net/schematron-v2-granite-4.0-h-micro",
+    "microsoft/WizardLM-2-8x22B",
+];
+
 /// Whether `id` is shaped as a Hugging Face repo, `owner/name`.
 fn is_repo(id: &str) -> bool {
     let part = |p: &str| !p.is_empty() && !p.contains(['/', ' ']);
@@ -1334,7 +1343,8 @@ fn is_repo(id: &str) -> bool {
 }
 
 /// Gives each model OpenRouter lists the Hugging Face repo its `list` names for it, when it
-/// names one: `{"data": [{"id": ..., "hugging_face_id": ...}]}`. False when it is not that.
+/// names one that has a page (`HF_GONE`): `{"data": [{"id": ..., "hugging_face_id": ...}]}`.
+/// False when it is not that.
 fn hf_listed(models: &mut [Model], list: &[u8]) -> bool {
     #[derive(Deserialize)]
     struct Rows {
@@ -1346,7 +1356,10 @@ fn hf_listed(models: &mut [Model], list: &[u8]) -> bool {
         hugging_face_id: Option<String>,
     }
     let Ok(rows) = serde_json::from_slice::<Rows>(list) else { return false };
-    let named = rows.data.into_iter().filter_map(|r| Some((r.id, r.hugging_face_id.filter(|id| is_repo(id))?)));
+    let named = rows
+        .data
+        .into_iter()
+        .filter_map(|r| Some((r.id, r.hugging_face_id.filter(|id| is_repo(id) && !HF_GONE.contains(&id.as_str()))?)));
     let named: HashMap<String, String> = named.collect();
     for m in models {
         m.hf = m.openrouter.as_ref().and_then(|id| named.get(id)).cloned();
@@ -2953,14 +2966,16 @@ mod tests {
             Model::default(),
             Model { openrouter: Some("a/b".into()), ..Default::default() },
             Model { openrouter: Some("a/c".into()), ..Default::default() },
+            Model { openrouter: Some("a/d".into()), ..Default::default() },
         ];
         let list = br#"{"data": [{"id": "moonshotai/kimi-k2", "hugging_face_id": "moonshotai/Kimi-K2-Instruct"},
             {"id": "openai/gpt-5.5", "hugging_face_id": ""}, {"id": "x/y", "hugging_face_id": null}, {"id": "x/z"},
-            {"id": "a/b", "hugging_face_id": "not a repo"}, {"id": "a/c", "hugging_face_id": "a/b/c"}]}"#;
+            {"id": "a/b", "hugging_face_id": "not a repo"}, {"id": "a/c", "hugging_face_id": "a/b/c"},
+            {"id": "a/d", "hugging_face_id": "microsoft/WizardLM-2-8x22B"}]}"#;
         assert!(hf_listed(&mut ms, list) && !hf_listed(&mut [], b"<html>"), "only a list of models is one");
         assert_eq!(
             ms.each_ref().map(|m| m.hf.as_deref()),
-            [Some("moonshotai/Kimi-K2-Instruct"), None, None, None, None]
+            [Some("moonshotai/Kimi-K2-Instruct"), None, None, None, None, None]
         );
         let named = ("huggingface.co", "https://huggingface.co/moonshotai/Kimi-K2-Instruct".to_string());
         assert_eq!(ms[0].links().last(), Some(&named), "the repo OpenRouter names, where no offer names one");
