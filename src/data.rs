@@ -472,6 +472,30 @@ pub fn save_sizes(sizes: &HashMap<String, u64>) {
     keep("sizes.json", sizes);
 }
 
+/// How long Hugging Face's "no GGUF copy" of a model is gone by before it is asked again, in
+/// seconds: one may be uploaded since.
+const GONE_FOR: u64 = 7 * 24 * 3600;
+
+/// When Hugging Face said it had no GGUF copy of each model, in seconds, by key: the answers
+/// of a run before that are no older than `GONE_FOR`, so those models are not asked for again.
+pub fn load_gone() -> HashMap<String, u64> {
+    let mut gone: HashMap<String, u64> = kept("gone.json");
+    gone.retain(|_, at| now().saturating_sub(*at) < GONE_FOR);
+    gone
+}
+
+/// Hugging Face said just now that it has no GGUF copy of the model `key`: kept with `gone`.
+pub fn save_gone(gone: &mut HashMap<String, u64>, key: &str) {
+    gone.insert(key.into(), now());
+    keep("gone.json", gone);
+}
+
+/// Forgets them all: a refresh you ask for has Hugging Face asked again.
+pub fn clear_gone(gone: &mut HashMap<String, u64>) {
+    gone.clear();
+    keep("gone.json", gone);
+}
+
 /// Whether `harness` runs its models on this machine.
 pub fn runs_here(harness: &str) -> bool {
     LOCAL.iter().any(|l| l.0 == harness)

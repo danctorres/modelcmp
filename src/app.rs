@@ -881,7 +881,8 @@ pub enum Download {
     Awaited,
     /// No answer came, or `x` offered no download when it was time to ask: `x` asks again.
     NoAnswer,
-    /// There is no GGUF copy to download: `x` offers none, until a refresh.
+    /// There is no GGUF copy to download: `x` offers none. Kept from one run to the next, for a
+    /// week (`data::load_gone`) or until a refresh you ask for.
     Gone,
     /// Its size in bytes, which `x` says: kept from one run to the next.
     Size(u64),
@@ -1668,7 +1669,7 @@ impl App {
     pub fn refreshed(&mut self, res: Result<Data, Failure>) {
         // A runner may be installed since, and the sizes that did not come are asked for again.
         self.tools = tools();
-        self.downloads.retain(|_, d| matches!(d, Download::Awaited | Download::Size(_)));
+        self.downloads.retain(|_, d| *d != Download::NoAnswer);
         self.refreshing = false;
         self.refresh_failed = res.is_err();
         match res {
@@ -1768,6 +1769,8 @@ impl App {
             return None;
         }
         self.refreshing = true;
+        // One may be uploaded since, or found by a newer modelcmp: the shell forgets them too.
+        self.downloads.retain(|_, d| *d != Download::Gone);
         Some(Effect::Refresh)
     }
 
@@ -1805,20 +1808,38 @@ impl App {
         m.here() || self.all && m.hf_repo().is_some()
     }
 
-    /// Whether the size of the download of the model under the cursor is still to ask for.
-    /// Asked ahead of `x`, once the cursor rests on the model, and once until a refresh.
-    pub fn size_wanted(&self) -> bool {
-        let new = |m: &&Model| !self.downloads.contains_key(&m.key);
-        self.current().filter(new).is_some_and(|m| m.hf_repo().is_some())
+    /// The models whose download's size is still to ask for: the one under the cursor, and the
+    /// local ones among the table's rows on screen, so `x` has it by the time it is pressed.
+    fn unsized_models(&self) -> impl Iterator<Item = &Model> {
+        let (top, page) = (self.table.offset(), self.page as usize);
+        let seen = self.rows.iter().skip(top).take(page).map(|&i| &self.data.models[i]).filter(|m| self.local(m));
+        let new = |m: &&Model| m.hf_repo().is_some() && !self.downloads.contains_key(&m.key);
+        self.current().into_iter().chain(seen).filter(new)
     }
 
-    /// The question of that size, when `x` offers the model's download.
-    pub fn size_ask(&mut self) -> Option<Effect> {
-        let m = self.current().filter(|_| self.size_wanted())?;
-        let (key, repo) = (m.key.clone(), m.hf_repo()?.to_string());
-        let offered = !get_items(m, "", &self.tools).is_empty();
-        self.downloads.insert(key.clone(), if offered { Download::Awaited } else { Download::NoAnswer });
-        offered.then_some(Effect::Size(key, repo))
+    /// Whether a size is still to ask for. Asked ahead of `x`, once the cursor rests, and once
+    /// until a refresh.
+    pub fn size_wanted(&self) -> bool {
+        self.unsized_models().next().is_some()
+    }
+
+    /// The questions of those sizes, each a model's key and repo, where `x` offers its download.
+    // ponytail: a screenful asked at once, two requests each, to queue if Hugging Face
+    // starts refusing (429).
+    pub fn size_ask(&mut self) -> Vec<(String, String)> {
+        let models: Vec<_> = self
+            .unsized_models()
+            .map(|m| (m.key.clone(), m.hf_repo().unwrap_or("").to_string(), !get_items(m, "", &self.tools).is_empty()))
+            .collect();
+        let mut asked = vec![];
+        for (key, repo, offered) in models {
+            // The model under the cursor is a row on screen too.
+            let answer = if offered { Download::Awaited } else { Download::NoAnswer };
+            if self.downloads.insert(key.clone(), answer).is_none() && offered {
+                asked.push((key, repo));
+            }
+        }
+        asked
     }
 
     /// Hugging Face's answer on the download of the model `key`, which `x` goes by from now
@@ -1849,6 +1870,11 @@ impl App {
     /// The sizes kept by a run before.
     pub fn set_sizes(&mut self, sizes: std::collections::HashMap<String, u64>) {
         self.downloads.extend(sizes.into_iter().map(|(k, b)| (k, Download::Size(b))));
+    }
+
+    /// The models a run before found no GGUF copy of.
+    pub fn set_gone(&mut self, keys: impl Iterator<Item = String>) {
+        self.downloads.extend(keys.map(|k| (k, Download::Gone)));
     }
 
     /// Whether you have access to a model, as the data last set had it.
@@ -3865,7 +3891,7 @@ mod tests {
         assert_eq!(labels, ["codex", "get (2.5 GB)", "other (no GGUF copy)"], "each on its model's download");
         assert_eq!(a.sizes(), [("mini".to_string(), 2_500_000_000)].into(), "the size is kept, not the lack of one");
         // Hugging Face is asked once for the model under the cursor, and again after a refresh
-        // when it had no copy or did not answer.
+        // when it did not answer.
         a.input = Input::None;
         let key = a.current().unwrap().key.clone();
         assert!(key != "mini" && key != "llama4", "{key}");
@@ -3875,6 +3901,17 @@ mod tests {
         assert!(!a.size_wanted(), "not while the cursor stays");
         a.refreshed(Err("offline".to_string().into()));
         assert!(a.size_wanted() && a.sizes().len() == 1, "a refresh asks again, the sizes staying");
+        assert_eq!(a.downloads["llama4"], Download::Gone, "and the lack of a copy");
+        // The local rows on screen are asked with it, each once.
+        let other = a.rows.iter().map(|&i| a.data.models[i].key.clone()).find(|k| *k != key && k != "mini").unwrap();
+        a.data.models.iter_mut().for_each(|m| m.via.push(crate::data::OLLAMA.into()));
+        a.tools = (vec![crate::data::LLAMA], None);
+        let asked: Vec<String> = a.size_ask().into_iter().map(|q| q.0).collect();
+        assert!(asked.contains(&key) && asked.contains(&other), "{asked:?}");
+        assert_eq!(asked.iter().filter(|k| **k == key).count(), 1, "the cursor's row is asked once");
+        assert!(!asked.contains(&"mini".to_string()) && !a.size_wanted(), "not the ones known");
+        assert_eq!(press(&mut a, "r"), Some(Effect::Refresh));
+        assert!(!a.downloads.contains_key("llama4") && a.sizes().len() == 1, "r asks again of a lack of a copy");
     }
 
     #[test]

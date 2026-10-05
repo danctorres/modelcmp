@@ -394,6 +394,8 @@ fn event_loop(
     let (size_tx, size_rx) = mpsc::channel::<(String, Download)>();
     let mut sizing = 0usize;
     app.set_sizes(data::load_sizes());
+    let mut gone = data::load_gone();
+    app.set_gone(gone.keys().cloned());
     let ask_size = |key: String, base: String| {
         let tx = size_tx.clone();
         std::thread::spawn(move || {
@@ -430,8 +432,10 @@ fn event_loop(
             sizing -= 1;
             app.sized(&key, answer);
             dirty |= answer != Download::NoAnswer;
-            if let Download::Size(_) = answer {
-                data::save_sizes(&app.sizes());
+            match answer {
+                Download::Size(_) => data::save_sizes(&app.sizes()),
+                Download::Gone => data::save_gone(&mut gone, &key),
+                _ => {}
             }
         }
         // The count of a refresh under way moves on its own, with no key pressed.
@@ -445,8 +449,9 @@ fn event_loop(
         }
         // Block on input; wake every 200ms while a refresh is in flight, else once a minute to
         // repaint the data age in the frame.
-        // A size awaited is looked for often, as `x`'s list is open for it, and one still to ask
-        // for is asked once the cursor has rested on its model, not for each row it passes.
+        // A size awaited is looked for often, as `x`'s list is open for it, and the ones still to
+        // ask for, of the local rows on screen, are asked once the cursor has rested, not for
+        // each row it passes.
         let rest = app.size_wanted();
         let timeout = match (sizing > 0, rest, rx.is_some()) {
             (true, ..) => Duration::from_millis(30),
@@ -548,7 +553,10 @@ fn event_loop(
                     } else {
                         Err("no clipboard tool found".into())
                     }),
-                    Some(Effect::Refresh) => rx = Some(spawn_refresh()),
+                    Some(Effect::Refresh) => {
+                        data::clear_gone(&mut gone);
+                        rx = Some(spawn_refresh());
+                    }
                     Some(Effect::Launch(cmd)) => {
                         let line = cmd.join(" ");
                         app.report(match new_terminal(&cmd) {
@@ -596,13 +604,12 @@ fn event_loop(
             }
             dirty = true;
         }
-        // No input in that time: the cursor rested on the model.
-        if fire
-            && wait > Duration::ZERO
-            && let Some(Effect::Size(key, base)) = app.size_ask()
-        {
-            sizing += 1;
-            ask_size(key, base);
+        // No input in that time: the cursor rested.
+        if fire && wait > Duration::ZERO {
+            for (key, base) in app.size_ask() {
+                sizing += 1;
+                ask_size(key, base);
+            }
         }
     }
 }
