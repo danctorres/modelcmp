@@ -286,6 +286,8 @@ const HARNESSES: &[(&str, Probe)] = &[
 pub const OLLAMA: &str = "ollama";
 /// llama.cpp's CLI, and the provider of the offer made for a model it runs here.
 pub const LLAMA: &str = "llama-cli";
+/// models.dev's provider for the models Hugging Face serves, by their repo there.
+const HF: &str = "huggingface";
 /// The harnesses that run models on this machine, and what each is called.
 const LOCAL: &[(&str, &str)] = &[(OLLAMA, "Ollama"), (LLAMA, "llama.cpp")];
 
@@ -566,13 +568,33 @@ impl Model {
         Some(format!("https://{}/models/{id}", s.site()))
     }
 
+    /// The model's Hugging Face repo: the one the copy on this machine was pulled from,
+    /// `unsloth/Qwen3.5-4B-GGUF`, when its tag says (ollama's `hf.co/owner/repo:quant`,
+    /// llama.cpp's `owner/repo:quant`), else the one Hugging Face serves it from, whose id
+    /// there is the repo. A tag of ollama's own library or a file downloaded by hand names none.
+    fn hf_repo(&self) -> Option<&str> {
+        let part = |p: &str| !p.is_empty() && !p.contains('/');
+        let pulled = self.offers.iter().filter(|o| o.local && !o.id.ends_with(".gguf"));
+        let served = self.offers.iter().filter(|o| o.provider == HF);
+        pulled.chain(served).find_map(|o| {
+            let id = o.id.split_once(':').map_or(o.id.as_str(), |(repo, _)| repo);
+            let repo = match o.provider.as_str() {
+                OLLAMA => id.strip_prefix("hf.co/").or_else(|| id.strip_prefix("huggingface.co/"))?,
+                _ => id,
+            };
+            repo.split_once('/').filter(|(owner, name)| part(owner) && part(name)).map(|_| repo)
+        })
+    }
+
     /// The model's pages, (site, url), of the sites that have one: models.dev, the benchmark
-    /// sources, then OpenRouter. None is a guess: a model no site has a page for has no link.
+    /// sources, OpenRouter, then Hugging Face (`hf_repo`). None is a guess: a model no site has
+    /// a page for has no link.
     pub fn links(&self) -> Vec<(&'static str, String)> {
         let md = self.md_page().map(|url| ("models.dev", url));
         let sources = Source::ALL.into_iter().filter_map(|s| Some((s.site(), self.page(s)?)));
         let or = self.openrouter.as_ref().map(|id| ("openrouter.ai", format!("https://openrouter.ai/{id}")));
-        md.into_iter().chain(sources).chain(or).collect()
+        let hf = self.hf_repo().map(|repo| ("huggingface.co", format!("https://huggingface.co/{repo}")));
+        md.into_iter().chain(sources).chain(or).chain(hf).collect()
     }
 
     /// The first of `links`, which `o` then `enter` opens. Err says that no site has the model.
@@ -2866,6 +2888,27 @@ mod tests {
         m.openrouter = None;
         assert_eq!(sites(&m).len(), 3, "no search on OpenRouter for a model it does not list");
         assert!(Model::default().links().is_empty(), "no site has it: no link");
+        let local = |provider: &str, id: &str| Model {
+            offers: vec![Offer { provider: provider.into(), id: id.into(), local: true, ..Default::default() }],
+            ..Default::default()
+        };
+        let hf = [("huggingface.co", "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF".to_string())];
+        assert_eq!(local(LLAMA, "unsloth/Qwen3.5-4B-GGUF:Q4_K_M").links(), hf, "the repo llama.cpp pulled");
+        assert_eq!(local(OLLAMA, "hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_M").links(), hf, "and ollama");
+        for (provider, id) in [(OLLAMA, "qwen3.5:4b"), (OLLAMA, "someone/qwen3.5:4b"), (LLAMA, "models/qwen.gguf")] {
+            assert!(local(provider, id).links().is_empty(), "{id} names no repo");
+        }
+        let mut own = local(LLAMA, "models/gemma-3-4b-it-Q4_K_M.gguf");
+        own.offers.push(Offer { provider: HF.into(), id: "google/gemma-3-4b-it".into(), ..Default::default() });
+        let served = [("huggingface.co", "https://huggingface.co/google/gemma-3-4b-it".to_string())];
+        assert_eq!(own.links(), served, "else the repo Hugging Face serves it from");
+        own.offers.push(Offer {
+            provider: OLLAMA.into(),
+            id: "hf.co/unsloth/Qwen3.5-4B-GGUF".into(),
+            local: true,
+            ..Default::default()
+        });
+        assert_eq!(own.links(), hf, "the copy you have first");
         let paid = |p: &str, price: f64| Offer {
             provider: p.into(),
             available: true,

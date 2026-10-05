@@ -89,8 +89,8 @@ struct ModelOut<'a> {
     knowledge: &'a str,
     /// The model's page, the one `open` opens: the first site of `pages` to have one, null when none has
     url: Option<String>,
-    /// Site -> the model's page there, for each of models.dev, epoch.ai, artificialanalysis.ai
-    /// and openrouter.ai that has one
+    /// Site -> the model's page there, for each of models.dev, epoch.ai, artificialanalysis.ai,
+    /// openrouter.ai and huggingface.co that has one
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<BTreeMap<&'static str, String>>,
     /// The overall index of `source`: Epoch Capabilities Index, or Artificial Analysis Intelligence Index
@@ -521,11 +521,15 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
 
 /// The page `open --on` asks for: the first, as `o` then `enter` in the TUI, when it names no
 /// site, else that of the site `on` starts the name of, in any case; "aa" is Artificial
-/// Analysis, as in `--source`. Err says which sites have the model.
+/// Analysis, as in `--source`, and "hf" Hugging Face. Err says which sites have the model.
 fn page(m: &Model, on: Option<&str>) -> std::result::Result<String, String> {
     let Some(on) = on else { return m.url() };
     let links = m.links();
-    let site = Some(on.to_lowercase()).filter(|s| s != "aa").unwrap_or("artificialanalysis".into());
+    let site = match on.to_lowercase().as_str() {
+        "aa" => "artificialanalysis".into(),
+        "hf" => "huggingface".into(),
+        site => site.to_string(),
+    };
     let sites = links.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", ");
     let found = links.into_iter().find(|(s, _)| !site.is_empty() && s.starts_with(&site));
     let has = if sites.is_empty() { "no site has one".into() } else { format!("it has {sites}") };
@@ -1039,6 +1043,10 @@ mod tests {
         let none = "gpt55 has no page on models; it has epoch.ai, artificialanalysis.ai, openrouter.ai";
         assert_eq!(page(&m, Some("models")), Err(none.into()));
         assert!(page(&m, Some("")).is_err(), "no site is not every site");
+        m.offers.push(Offer { provider: "huggingface".into(), id: "openai/gpt-5.5".into(), ..Default::default() });
+        for site in ["hf", "HF", "hugging"] {
+            assert_eq!(page(&m, Some(site)).as_deref(), Ok("https://huggingface.co/openai/gpt-5.5"), "{site}");
+        }
         let json = serde_json::to_value(out(&m, &Store::default(), true)).unwrap();
         assert_eq!((&json["url"], &json["pages"]["epoch.ai"]), (&Value::from(epoch), &Value::from(epoch)));
     }
