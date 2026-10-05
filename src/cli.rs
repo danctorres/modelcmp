@@ -159,8 +159,12 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
     }
 }
 
+/// Indented for a person at a terminal, one line for an agent or a pipe: it reads the same
+/// and costs a third less context.
 fn print_json<T: Serialize>(v: &T) -> Result {
-    println!("{}", serde_json::to_string_pretty(v).map_err(|e| e.to_string())?);
+    let pretty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let s = if pretty { serde_json::to_string_pretty(v) } else { serde_json::to_string(v) };
+    println!("{}", s.map_err(|e| e.to_string())?);
     Ok(())
 }
 
@@ -340,6 +344,12 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         // All or none: a script must not start on the first of two commands.
         for l in models.iter().map(line).collect::<Result<Vec<_>>>()? {
             println!("{l}");
+        }
+        // What an agent checks before it uses a tier's pick, on stderr so a `$(...)` reads
+        // the id alone.
+        for m in models.iter().filter(|_| o.tier.is_some()) {
+            let note = store.note(&m.key).map(|n| format!(", note: {n}")).unwrap_or_default();
+            eprintln!("{}: context {}{note}", m.name, m.context);
         }
         return Ok(());
     }
