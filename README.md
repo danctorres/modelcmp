@@ -154,6 +154,7 @@ skills can take its body in `AGENTS.md`.
   Needs a free API key: the TUI's first start asks which source to use, then for the key
   if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,
   only its sitemap is read, to link models that have a page there (`o`), as Epoch AI's is.
+- [OpenRouter](https://openrouter.ai): only its list of models is read, for the Hugging Face repo it names for each, to link it (`o`).
 - What you have: the models `opencode models`, `pi --list-models` and `omp models` list, the `claude`, `codex`
   and `gemini` binaries on `PATH` (each counts as its own provider), and the models GitHub Copilot's
   CLI takes on your plan when `copilot` is on `PATH` (asked of the CLI itself with `copilot --acp`,

@@ -17,6 +17,8 @@ const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
 const EPOCH_PAGES_URL: &str = "https://epoch.ai/sitemap-index.xml";
 /// Artificial Analysis's page names, to link a model there that its API did not name one for.
 const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
+/// OpenRouter's models, for the Hugging Face repo it names for each (`hf_listed`).
+const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
 /// Artificial Analysis's scores, with an API key (`aa_key`).
 const AA_API_URL: &str = "https://artificialanalysis.ai/api/v2/data/llms/models";
 /// modelcmp's newest release, fetched with the data so a new version is told once a day at most.
@@ -33,8 +35,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// its offers are. 13: Artificial Analysis's coding score is `fit::AA_CODING`, where it was its
 /// Coding Index, and `Model::ttft` is to the first answer token. 14: its scores are all of one
 /// reasoning setting. 15: Epoch's tasks without the benchmarks it no longer runs, and no task
-/// score for a model without an ECI scored on few benchmarks.
-const FORMAT: u32 = 15;
+/// score for a model without an ECI scored on few benchmarks. 16: `Model::hf`.
+const FORMAT: u32 = 16;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -446,6 +448,10 @@ pub struct Model {
     /// Its id on OpenRouter, `anthropic/claude-opus-5.5`, when OpenRouter lists it.
     #[serde(default)]
     pub openrouter: Option<String>,
+    /// Its repo on Hugging Face, `moonshotai/Kimi-K2-Instruct`, when OpenRouter names one for
+    /// it (`hf_listed`).
+    #[serde(default)]
+    pub hf: Option<String>,
     pub offers: Vec<Offer>,
     /// Epoch Capabilities Index: overall capability, roughly 100..170.
     pub eci: Option<f64>,
@@ -571,19 +577,20 @@ impl Model {
     /// The model's Hugging Face repo: the one the copy on this machine was pulled from,
     /// `unsloth/Qwen3.5-4B-GGUF`, when its tag says (ollama's `hf.co/owner/repo:quant`,
     /// llama.cpp's `owner/repo:quant`), else the one Hugging Face serves it from, whose id
-    /// there is the repo. A tag of ollama's own library or a file downloaded by hand names none.
+    /// there is the repo, else the one OpenRouter names (`hf`). A tag of ollama's own library
+    /// or a file downloaded by hand names none.
     fn hf_repo(&self) -> Option<&str> {
-        let part = |p: &str| !p.is_empty() && !p.contains('/');
         let pulled = self.offers.iter().filter(|o| o.local && !o.id.ends_with(".gguf"));
         let served = self.offers.iter().filter(|o| o.provider == HF);
-        pulled.chain(served).find_map(|o| {
+        let offered = pulled.chain(served).find_map(|o| {
             let id = o.id.split_once(':').map_or(o.id.as_str(), |(repo, _)| repo);
             let repo = match o.provider.as_str() {
                 OLLAMA => id.strip_prefix("hf.co/").or_else(|| id.strip_prefix("huggingface.co/"))?,
                 _ => id,
             };
-            repo.split_once('/').filter(|(owner, name)| part(owner) && part(name)).map(|_| repo)
-        })
+            is_repo(repo).then_some(repo)
+        });
+        offered.or(self.hf.as_deref())
     }
 
     /// The model's pages, (site, url), of the sites that have one: models.dev, the benchmark
@@ -1098,7 +1105,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let res = download(src, key.as_deref(), steps);
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
-    let (mut data, [aa, epoch], release) = match res {
+    let (mut data, [aa, epoch, openrouter], release) = match res {
         Ok(d) => d,
         Err(e) => {
             let _ = harness.join();
@@ -1125,6 +1132,10 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     }
     aa_pages(&mut data.models, &aa);
     epoch_listed(&mut data.models, &epoch);
+    // ponytail: no repo is kept from the last refresh, as the pages are. Read them from the
+    // cache in `cached_pages` if a refresh without OpenRouter should keep its links.
+    let unnamed = (!hf_listed(&mut data.models, &openrouter.unwrap_or_default()))
+        .then(|| "openrouter.ai did not list its models: links to huggingface.co may be missing".to_string());
     // Only the update notice hangs on it, so without it the refresh still succeeds.
     data.latest = release
         .ok()
@@ -1167,15 +1178,15 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let renamed = data.warning.take();
     let warnings =
         [renamed, unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
-    let warnings = warnings.into_iter().chain(unpaged);
+    let warnings = warnings.into_iter().chain(unpaged).chain([unnamed]);
     data.warning = Some(warnings.flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
 
-/// What `download` gives: the merged data, then Artificial Analysis's and Epoch's sitemaps and
-/// modelcmp's newest release, which a refresh can do without.
-type Downloaded = (Data, [Result<Vec<u8>, Failure>; 2], Result<Vec<u8>, Failure>);
+/// What `download` gives: the merged data, then Artificial Analysis's and Epoch's sitemaps,
+/// OpenRouter's models and modelcmp's newest release, which a refresh can do without.
+type Downloaded = (Data, [Result<Vec<u8>, Failure>; 3], Result<Vec<u8>, Failure>);
 
 /// How long the downloads a refresh can do without are waited for once it has the others.
 const GRACE: Duration = Duration::from_secs(10);
@@ -1185,7 +1196,7 @@ const GRACE: Duration = Duration::from_secs(10);
 /// their own: none is waited for once the refresh cannot finish, and the links and the newest
 /// release no longer than `GRACE` once it can.
 fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded, Failure> {
-    const URLS: [&str; 6] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, EPOCH_PAGES_URL, RELEASE_URL];
+    const URLS: [&str; 7] = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, EPOCH_PAGES_URL, OPENROUTER_URL, RELEASE_URL];
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
     let (tx, rx) = std::sync::mpsc::channel();
     let mut sites = vec![];
@@ -1208,7 +1219,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         });
     }
     drop(tx);
-    let mut got: [Result<Vec<u8>, Failure>; 6] = URLS.map(|url| Err(format!("{url}: no reply").into()));
+    let mut got: [Result<Vec<u8>, Failure>; 7] = URLS.map(|url| Err(format!("{url}: no reply").into()));
     // Once the first three that were asked for are in, the rest get `GRACE` and no more. Epoch's
     // is among them under Artificial Analysis too, though not needed: its names decide which
     // key a merged row keeps, and your favorites and notes hang on the key.
@@ -1232,7 +1243,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     }
     // A download not waited for is awaited no more, before the merge and not after it.
     sites.into_iter().for_each(|site| answered(steps, site));
-    let [models, epoch, api, aa, epoch_pages, release] = got;
+    let [models, epoch, api, aa, epoch_pages, openrouter, release] = got;
     let data = match src {
         Source::Epoch => {
             let ep = parse_epoch(&epoch?)?;
@@ -1255,7 +1266,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
             data
         }
     };
-    Ok((data, [aa, epoch_pages], release))
+    Ok((data, [aa, epoch_pages, openrouter], release))
 }
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
@@ -1314,6 +1325,33 @@ fn epoch_pages(index: &str) -> Result<Vec<u8>, Failure> {
         all.extend(fetch(url, None)?);
     }
     Ok(all)
+}
+
+/// Whether `id` is shaped as a Hugging Face repo, `owner/name`.
+fn is_repo(id: &str) -> bool {
+    let part = |p: &str| !p.is_empty() && !p.contains(['/', ' ']);
+    id.split_once('/').is_some_and(|(owner, name)| part(owner) && part(name))
+}
+
+/// Gives each model OpenRouter lists the Hugging Face repo its `list` names for it, when it
+/// names one: `{"data": [{"id": ..., "hugging_face_id": ...}]}`. False when it is not that.
+fn hf_listed(models: &mut [Model], list: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct Rows {
+        data: Vec<Row>,
+    }
+    #[derive(Deserialize)]
+    struct Row {
+        id: String,
+        hugging_face_id: Option<String>,
+    }
+    let Ok(rows) = serde_json::from_slice::<Rows>(list) else { return false };
+    let named = rows.data.into_iter().filter_map(|r| Some((r.id, r.hugging_face_id.filter(|id| is_repo(id))?)));
+    let named: HashMap<String, String> = named.collect();
+    for m in models {
+        m.hf = m.openrouter.as_ref().and_then(|id| named.get(id)).cloned();
+    }
+    true
 }
 
 /// "Claude Opus 4.5" -> ["claude", "opus", "4", "5"]: its lowercase alphanumeric runs, a "+"
@@ -2909,6 +2947,23 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(own.links(), hf, "the copy you have first");
+        let mut ms = [
+            Model { openrouter: Some("moonshotai/kimi-k2".into()), ..Default::default() },
+            Model { openrouter: Some("openai/gpt-5.5".into()), hf: Some("stale/repo".into()), ..Default::default() },
+            Model::default(),
+            Model { openrouter: Some("a/b".into()), ..Default::default() },
+            Model { openrouter: Some("a/c".into()), ..Default::default() },
+        ];
+        let list = br#"{"data": [{"id": "moonshotai/kimi-k2", "hugging_face_id": "moonshotai/Kimi-K2-Instruct"},
+            {"id": "openai/gpt-5.5", "hugging_face_id": ""}, {"id": "x/y", "hugging_face_id": null}, {"id": "x/z"},
+            {"id": "a/b", "hugging_face_id": "not a repo"}, {"id": "a/c", "hugging_face_id": "a/b/c"}]}"#;
+        assert!(hf_listed(&mut ms, list) && !hf_listed(&mut [], b"<html>"), "only a list of models is one");
+        assert_eq!(
+            ms.each_ref().map(|m| m.hf.as_deref()),
+            [Some("moonshotai/Kimi-K2-Instruct"), None, None, None, None]
+        );
+        let named = ("huggingface.co", "https://huggingface.co/moonshotai/Kimi-K2-Instruct".to_string());
+        assert_eq!(ms[0].links().last(), Some(&named), "the repo OpenRouter names, where no offer names one");
         let paid = |p: &str, price: f64| Offer {
             provider: p.into(),
             available: true,
