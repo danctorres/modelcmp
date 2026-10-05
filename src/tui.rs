@@ -1141,8 +1141,9 @@ const CURSOR: Color = ACCENT;
 const FILL: Style = Style::new().bg(CURSOR);
 /// The bars at the cursor's two ends.
 const EDGE: Style = Style::new().fg(ACCENT).bg(CURSOR).add_modifier(BOLD);
-/// The share of the mark colour in a marked row's fill, in percent, the rest being the theme's
-/// background: faint, as the row's colours are read on it.
+/// The share of the mark colour in a marked row's fill with the terminal's own colours, in
+/// percent, the rest being its background: faint, as the row's colours are read on it. A theme
+/// has its own (`Palette::wash`).
 /// ponytail: text on it reads at 2.2:1 or better, not the 3:1 it has on the background; past
 /// that the palettes need retuning (`every_theme_reads_on_its_own_background`).
 const WASH: u32 = 12;
@@ -1217,7 +1218,7 @@ fn lum(c: u32) -> f64 {
 fn fill(c: Color, p: &Palette) -> Color {
     match c {
         CURSOR => wash(Color::from_u32(p.text), p.bg, CURSOR_WASH),
-        c => wash(resolve(c, Some(p)), p.bg, WASH),
+        c => wash(resolve(c, Some(p)), p.bg, p.wash),
     }
 }
 
@@ -3117,6 +3118,9 @@ mod tests {
 
     /// Text a theme paints must be legible on what is behind it: the WCAG ratio for bold text,
     /// 3:1, for every colour a row or a pill can take, and 2.2:1 on a marked row's faint fill.
+    /// Dark text on a light background is thinner to the eye than light on dark, so a light
+    /// theme's colours need 5:1, or they are thin next to its plain text; gameboy's four shades
+    /// of one green have no room for it.
     #[test]
     fn every_theme_reads_on_its_own_background() {
         let lum = |c: u32| {
@@ -3131,8 +3135,9 @@ mod tests {
             // A marked row's fill, or the cursor's when that leaves a colour harder to read.
             let fills = [MARK, CURSOR].map(|c| hex(fill(c, p)));
             let on_fill = |c: u32| fills.iter().map(|f| ratio(c, *f)).fold(f64::MAX, f64::min);
+            let min = if lum(p.bg) > 0.5 && *name != "gameboy" { 5.0 } else { 3.0 };
             for c in p.accents.iter().chain([&p.text]) {
-                assert!(ratio(*c, p.bg) >= 3.0, "{name}: {c:06x} on the background, {:.1}:1", ratio(*c, p.bg));
+                assert!(ratio(*c, p.bg) >= min, "{name}: {c:06x} on the background, {:.1}:1", ratio(*c, p.bg));
                 assert!(on_fill(*c) >= 2.2, "{name}: {c:06x} on a fill, {:.1}:1", on_fill(*c));
             }
             // Every colour the drawing code names, as text on the background and as a pill's fill.
@@ -3151,7 +3156,7 @@ mod tests {
                 Color::LightCyan,
             ] {
                 let (text, fill) = (hex(resolve(c, Some(p))), hex(contrasting(c, p)));
-                assert!(ratio(text, p.bg) >= 3.0, "{name}: {c:?} as text, {:.1}:1", ratio(text, p.bg));
+                assert!(ratio(text, p.bg) >= min, "{name}: {c:?} as text, {:.1}:1", ratio(text, p.bg));
                 assert!(ratio(fill, p.bg) >= 3.0, "{name}: {c:?} as a pill, {:.1}:1", ratio(fill, p.bg));
                 assert!(on_fill(text) >= 2.2, "{name}: {c:?} on a fill, {:.1}:1", on_fill(text));
             }
@@ -3224,6 +3229,11 @@ mod tests {
             p.accents.iter().for_each(|&x| far("a developer and muted", x, of(MUTED), 60.0));
             let [mark, cursor] = [MARK, CURSOR].map(|c| hex(fill(c, p)));
             far("the fills", mark, cursor, 14.0);
+            // A match is told from the name around it by its yellow, as a gold ★ and a mid price
+            // are from plain text. Amber is one hue, where the underline and the bold say it.
+            if *name != "amber" {
+                far("yellow and plain text", of(MATCH), p.text, 100.0);
+            }
         }
     }
 

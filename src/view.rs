@@ -31,6 +31,9 @@ pub struct Palette {
     pub text: u32,
     /// Painted under everything, so a dark theme stays dark on a light terminal and the other way round.
     pub bg: u32,
+    /// The share of the mark colour in a marked row's fill, in percent (`tui::fill`): 12, but on
+    /// sepia's cream, where that much blue is the grey of the cursor's fill.
+    pub wash: u32,
     pub accents: &'static [u32],
 }
 
@@ -41,7 +44,7 @@ pub struct Palette {
 /// A theme's own palette is only the starting point:
 /// what a colour is here has to read on the background and stay apart from its neighbours, so a
 /// light theme keeps the darker half of a pair and a monochrome one drifts in hue as it ramps.
-pub const THEMES: [(&str, Option<Palette>); 18] = [
+pub const THEMES: [(&str, Option<Palette>); 19] = [
     ("terminal", None),
     (
         "gruvbox",
@@ -52,6 +55,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xebdbb2,
             bg: 0x282828,
+            wash: 12,
             accents: &[
                 0xfb4934, 0xb8bb26, 0xfabd2f, 0xd3869b, 0xfe8019, 0xea6962, 0x98971a, 0xd79921, 0x458588, 0xb16286,
                 0x689d6a, 0xd65d0e, 0xa89984, 0x7daea3,
@@ -67,6 +71,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xd8dee9,
             bg: 0x2e3440,
+            wash: 12,
             accents: &[
                 0xbf616a, 0xd08770, 0xebcb8b, 0xa3be8c, 0xb48ead, 0x88c0d0, 0x81a1c1, 0xe5e9f0, 0xd6c1d2, 0x5fa8a0,
             ],
@@ -81,6 +86,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xcdd6f4,
             bg: 0x1e1e2e,
+            wash: 12,
             accents: &[
                 0xf5e0dc, 0xf5c2e7, 0xcba6f7, 0xf38ba8, 0xfab387, 0xf9e2af, 0xa6e3a1, 0x94e2d5, 0x89b4fa, 0xbac2de,
             ],
@@ -95,6 +101,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xf8f8f2,
             bg: 0x282a36,
+            wash: 12,
             accents: &[
                 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xffb86c, 0xf8f8f2, 0x6a9fe8, 0xd6acff,
             ],
@@ -109,6 +116,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xc0caf5,
             bg: 0x1a1b26,
+            wash: 12,
             accents: &[
                 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0x2ac3de, 0x73daca, 0xc0caf5, 0xff007c,
             ],
@@ -123,6 +131,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xdcd7ba,
             bg: 0x1f1f28,
+            wash: 12,
             accents: &[
                 0xe46876, 0x98bb6c, 0xe6c384, 0x957fb8, 0xffa066, 0xdcd7ba, 0x7fb4ca, 0xc0a36e, 0xd27e99, 0x6a9589,
             ],
@@ -137,6 +146,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xf8f8f2,
             bg: 0x272822,
+            wash: 12,
             accents: &[
                 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xfd971f, 0xf8f8f2, 0xcc7833, 0xff5c9b,
             ],
@@ -151,6 +161,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xe6edf3,
             bg: 0x0d1117,
+            wash: 12,
             accents: &[
                 0xff7b72, 0x3fb950, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xf0883e, 0xdb61a2, 0xb1bac4, 0xa5d6ff, 0xe3b341,
             ],
@@ -165,6 +176,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0x93a1a1,
             bg: 0x002b36,
+            wash: 12,
             accents: &[
                 0xdc322f, 0xd33682, 0x6c71c4, 0x268bd2, 0x2aa198, 0x859900, 0xd4a520, 0x48c4b8, 0x93a1a1, 0x6c9fd8,
             ],
@@ -179,6 +191,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xf0eff1,
             bg: 0x241b2f,
+            wash: 12,
             accents: &[
                 0xff7edb, 0xfede5d, 0xf97e72, 0x72f1b8, 0xfe4450, 0xb893ce, 0x2de2e6, 0x6be8ff, 0x9cf7cf, 0xff8b39,
             ],
@@ -193,6 +206,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0x0abdc6,
             bg: 0x000b1e,
+            wash: 12,
             accents: &[
                 0xfcee0c, 0xff0055, 0x00ff9c, 0xea00d9, 0xff8a00, 0xb14aeb, 0x3dd8ff, 0xff5cf0, 0x5fffb8, 0xd7d7d5,
             ],
@@ -202,13 +216,14 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
         "github-light",
         Some(Palette {
             ansi: [
-                0xffffff, 0xcf222e, 0x116329, 0x4d2d00, 0x0969da, 0x8250df, 0x1b7c83, 0x6e7781, 0x57606a, 0xa40e26,
-                0x1a7f37, 0x633c01, 0x218bff, 0xa475f9, 0x3192aa, 0x1f2328,
+                0xffffff, 0xca212d, 0x116329, 0x8f5f00, 0x0550ae, 0x7b4cd3, 0x0f6b5f, 0x6e7781, 0x57606a, 0xa40e26,
+                0x4d6f00, 0x633c01, 0x0865d3, 0xb53682, 0x1a6e96, 0x1f2328,
             ],
             text: 0x1f2328,
             bg: 0xffffff,
+            wash: 12,
             accents: &[
-                0xcf222e, 0x9a6700, 0x1a7f37, 0x0969da, 0x8250df, 0xbf3989, 0x1b7c83, 0x953800, 0x6639ba, 0x4d2d00,
+                0xca212d, 0x8f5f00, 0x187834, 0x0865d3, 0x7b4cd3, 0xb53682, 0x197379, 0x953800, 0x6639ba, 0x4d2d00,
             ],
         }),
     ),
@@ -216,13 +231,29 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
         "sepia",
         Some(Palette {
             ansi: [
-                0xf4ecd8, 0xa33a2a, 0x5f7a2e, 0x9a6a00, 0x2f5f8a, 0x7b4a7a, 0x3f7570, 0x5b4636, 0xa08c74, 0xb0305a,
-                0x3d5510, 0x8b4513, 0x24506f, 0x663c66, 0x33605c, 0x3b2d22,
+                0xf4ecd8, 0xa33a2a, 0x2f6a1a, 0x7e5600, 0x2f5f8a, 0x7b4a7a, 0x1f6b55, 0x5b4636, 0x8a7660, 0xaa2e57,
+                0x5a5c00, 0x8b4513, 0x24506f, 0x8a3a6a, 0x33605c, 0x3b2d22,
             ],
             text: 0x5b4636,
             bg: 0xf4ecd8,
+            wash: 16,
             accents: &[
-                0xa33a2a, 0x9a6a00, 0x7b4a7a, 0x3f7570, 0x5b4636, 0x24506f, 0x4c631f, 0x2f6b4f, 0x6b4f9e, 0x3b2d22,
+                0xa33a2a, 0x7e5600, 0x7b4a7a, 0x376662, 0x5b4636, 0x1f4f8f, 0x4c631f, 0xaa2e57, 0x6b4f9e, 0x3b2d22,
+            ],
+        }),
+    ),
+    (
+        "catppuccin-light",
+        Some(Palette {
+            ansi: [
+                0xeff1f5, 0xc10d34, 0x296e1b, 0x795b00, 0x1957d2, 0x7b33d9, 0x106a6f, 0x6c6f85, 0x7a7d91, 0xae343f,
+                0x546600, 0xa34207, 0x07669a, 0x9a3c7f, 0x4858b7, 0x4c4f69,
+            ],
+            text: 0x4c4f69,
+            bg: 0xeff1f5,
+            wash: 12,
+            accents: &[
+                0xc10d34, 0xa34207, 0x795b00, 0x296e1b, 0x106a6f, 0x1957d2, 0x7b33d9, 0x9a3c7f, 0x4858b7, 0x8b5042,
             ],
         }),
     ),
@@ -235,6 +266,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xffb000,
             bg: 0x1a1000,
+            wash: 12,
             accents: &[
                 0xffcc00, 0xffe8a3, 0xff9900, 0xcc5500, 0xfff3d0, 0xb87333, 0xff7700, 0xe0c080, 0xffe066, 0xffffff,
             ],
@@ -249,6 +281,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0x33ff66,
             bg: 0x0a0f0a,
+            wash: 12,
             accents: &[
                 0x33ff66, 0x99ffaa, 0xccffcc, 0xccff66, 0x66ff99, 0x2ecc71, 0x00cc44, 0xa0d8a0, 0xffffff, 0x7fbf8f,
             ],
@@ -263,6 +296,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0xb8b0ff,
             bg: 0x40318d,
+            wash: 12,
             accents: &[
                 0xedf171, 0xa9ff9f, 0x75cec8, 0xb2b2b2, 0xffffff, 0xd08ad3, 0xe8958c, 0xb8b0ff, 0xcfffc9, 0xf8fbb0,
             ],
@@ -277,6 +311,7 @@ pub const THEMES: [(&str, Option<Palette>); 18] = [
             ],
             text: 0x0f380f,
             bg: 0x9bbc0f,
+            wash: 12,
             // Seven, not ten: the DMG screen is four shades of green, and ten colours that far
             // apart would have to leave it for navy and purple. Seven still divide the 210 and
             // keep the Via names apart, as the terminal's own seven do. Only the mark (slot 12)
