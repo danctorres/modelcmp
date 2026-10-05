@@ -1423,41 +1423,53 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
 /// The id most of a row's offers go by, without its vendor. A clear winner only: a row of
 /// several ids, one offer each, has no main id; nor is one without a digit a model's.
 fn main_id(m: &Model) -> Option<String> {
+    most_sold(m, str::to_string).filter(|main| main.bytes().any(|b| b.is_ascii_digit()))
+}
+
+/// The id most of a row's offers go by, each without its vendor and as `id` writes it.
+fn most_sold(m: &Model, id: impl Fn(&str) -> String) -> Option<String> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for o in &m.offers {
-        *counts.entry(slug(&o.id)).or_default() += 1;
+        *counts.entry(id(&slug(&o.id))).or_default() += 1;
     }
-    winner(counts).filter(|main| main.bytes().any(|b| b.is_ascii_digit()))
+    winner(counts)
 }
 
 /// The id most of a row's offers go by, as its words: `grok-4.1-fast` and `grok-4-1-fast` are
 /// one. A clear winner only, as with `main_id`, though one without a digit counts: it says
 /// what is sold, and names no model.
 fn sold_as(m: &Model) -> Option<String> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for o in &m.offers {
-        *counts.entry(words(&slug(&o.id)).join("-")).or_default() += 1;
-    }
-    winner(counts)
+    most_sold(m, |id| words(id).join("-"))
 }
 
 /// Whether a row sold as `id` is another release than the `versions` a source scored: a
 /// "-latest", which moves on, or against each of them a number where the version has another
 /// as long ("ministral-8b-2512" is not `ministral-8b-2410`, though "mistral-medium-3-5" may be
 /// `mistral-medium-2604`). More words on one side alone say nothing: "claude-opus-4-5" is
-/// `claude-opus-4-5-20251101`. Nor is one sold as non-reasoning a model scored with reasoning
+/// `claude-opus-4-5-20251101`; nor do two numbers one side writes as one, a date being "01-25"
+/// or "0125". Nor is one sold as non-reasoning a model scored with reasoning
 /// too, whose scores are its best setting's, or one sold as reasoning a model scored without.
 fn other_release(id: &str, versions: Option<&BTreeSet<String>>) -> bool {
     let id = words(id);
     if id.last().is_some_and(|w| w == "latest") {
         return true;
     }
-    let nums = |w: &[String]| -> HashSet<String> {
-        w.iter().filter(|w| w.bytes().all(|b| b.is_ascii_digit())).cloned().collect()
+    let num = |w: &String| w.bytes().all(|b| b.is_ascii_digit());
+    let nums = |w: &[String]| -> HashSet<String> { w.iter().filter(|w| num(w)).cloned().collect() };
+    // The numbers of `a` that `b` lacks, but for those `b` writes as one or `a` as two.
+    let left = |a: &[String], b: &[String]| -> Vec<String> {
+        let pairs = |w: &[String]| -> Vec<Vec<String>> {
+            w.windows(2).filter(|p| num(&p[0]) && num(&p[1])).map(<[String]>::to_vec).collect()
+        };
+        let (has, joins, splits) = (nums(b), pairs(b), pairs(a));
+        let one = |n: &String| joins.iter().any(|p| p.concat() == *n);
+        let two = |n: &String| splits.iter().any(|p| p.contains(n) && has.contains(&p.concat()));
+        nums(a).into_iter().filter(|n| !has.contains(n) && !one(n) && !two(n)).collect()
     };
     let other = |v: &String| {
-        let (mine, its) = (nums(&id), nums(&words(&slug(v))));
-        mine.difference(&its).any(|a| its.difference(&mine).any(|b| a.len() == b.len()))
+        let v = words(&slug(v));
+        let (mine, its) = (left(&id, &v), left(&v, &id));
+        mine.iter().any(|a| its.iter().any(|b| a.len() == b.len()))
     };
     let mut settings = versions.into_iter().flatten().map(|v| reasons(&words(&slug(v))));
     let setting = match reasons(&id) {
@@ -1488,10 +1500,11 @@ fn joined<'a>(
     let named = |m: &Model, id: &Option<String>| {
         // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
         let aa = (ep.source == Source::Aa).then(|| aa_words(&m.name, true).join("-"));
-        keys(m).chain(aa).find_map(|k| ep.group(&k)).filter(|g| fits(id, g))
+        keys(m).chain(aa).filter_map(|k| ep.group(&k)).find(|g| fits(id, g))
     };
     let named: Vec<Option<&String>> = models.iter().zip(&main).map(|(m, id)| named(m, id)).collect();
     let owned: HashSet<&String> = named.iter().flatten().copied().collect();
+    let rows: HashSet<&str> = models.iter().map(|m| m.key.as_str()).collect();
     let by_id = |m: &Model, id: &Option<String>| {
         let group = |g: &String| Some(words(&clean_name(&ep.groups.get(g)?.0)));
         let sold = id.as_ref().and_then(|id| {
@@ -1501,10 +1514,13 @@ fn joined<'a>(
         });
         let g = keys(m).find_map(|k| ep.ids.get(&k)).or(sold)?;
         let group = group(g)?;
-        let adds = |s: &str| group.iter().all(|w| words(s).contains(w));
+        let adds = |s: &str| {
+            let said = words(s);
+            group.iter().all(|w| said.contains(w))
+        };
         let free = !owned.contains(g);
         // Nor does it take the name of a row that lost the group to its own offers.
-        let rename = free && !models.iter().any(|m| m.key == *g);
+        let rename = free && !rows.contains(g.as_str());
         (fits(id, g) && (free || adds(&m.name) || id.as_deref().is_some_and(adds))).then_some((g, rename))
     };
     models
@@ -2087,7 +2103,7 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
     let list = v["data"].as_array().or(v.as_array()).ok_or("artificial analysis: no model list")?;
     let fields = crate::fit::aa_fields();
     let mut sc = Scores { source: Source::Aa, ..Default::default() };
-    let mut names: BTreeMap<String, (&str, std::cmp::Reverse<&str>, String)> = BTreeMap::new();
+    let mut names: BTreeMap<String, _> = BTreeMap::new();
     for m in list {
         let (Some(slug), Some(name)) = (m["slug"].as_str(), m["name"].as_str()) else { continue };
         let num = |f: &str| m["evaluations"][f].as_f64().filter(|x| x.is_finite());
@@ -2099,7 +2115,8 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
         // Its name reaches it too, where the slug says more or less: `step-5` is "Step 5
         // Preview" and `claude-35-sonnet` "Claude 3.5 Sonnet". Of several, the newest release.
         // A setting with a slug of its own ("…-reasoning-0925") is the longer one.
-        let named = (m["release_date"].as_str().unwrap_or_default(), std::cmp::Reverse(slug), key.clone());
+        let named =
+            (m["release_date"].as_str().unwrap_or_default(), std::cmp::Reverse((slug.len(), slug)), key.clone());
         let e = names.entry(aa_words(&clean_name(name), true).join("-")).or_insert_with(|| named.clone());
         *e = named.max(e.clone());
         // Benchmarks are 0..1, though one above 1 is a percentage.
@@ -2574,6 +2591,8 @@ mod tests {
         assert!(!other("claude-opus-4-5", &["claude-opus-4-5-20251101"]), "one says more, not otherwise");
         assert!(!other("mistral-medium-3-5", &["mistral-medium-2604"]), "a version is not a date");
         assert!(!other("gpt-4o-2024-11-20", &["gpt-4o-2024-08-06", "gpt-4o-2024-11-20"]), "one of them");
+        assert!(!other("qwen-max-2025-01-25", &["qwen-max-0125"]), "one date, written two ways");
+        assert!(other("gpt-4-1", &["gpt-4-5-2025-04-14"]), "a 1 is not the 14 of a date");
         let both = ["grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning"];
         assert!(other("grok-4-1-fast-non-reasoning", &both), "the scores are the reasoning setting's");
         assert!(!other("grok-4-1-fast-reasoning", &both) && !other("grok-4-1-fast", &both));
@@ -2604,6 +2623,14 @@ mod tests {
             ("Qwen 9 Plus Uncensored", None),
         ];
         assert_eq!(rows, named, "by the id sold, under its own name beside a row named as the group, and no fine-tune");
+
+        // A row named as another release than it sells is the group of a key it absorbed.
+        ep.groups.insert("mistralmedium9".into(), ("Mistral Medium 9".into(), Some(150.0), BTreeMap::new()));
+        ep.versions.insert("mistralmedium9".into(), vs(&["mistral-medium-2609"]));
+        let offers = vec![Offer { id: "mistral-medium-2609".into(), ..Default::default() }];
+        let row = Model { key: "mistralmedium".into(), name: "Mistral Medium".into(), offers, ..Default::default() };
+        let absorbed = HashMap::from([("mistralmedium".to_string(), vec!["mistralmedium9".to_string()])]);
+        assert_eq!(joined(&[row], &absorbed, &ep), [Some((&"mistralmedium9".to_string(), true))]);
     }
 
     #[test]
@@ -3124,6 +3151,8 @@ mod tests {
             {"slug":"step-5","name":"Step 5 Preview","evaluations":{"artificial_analysis_intelligence_index":43}},
             {"slug":"v3-2-reasoning-0925","name":"V3.2 Exp (Reasoning)","evaluations":{"artificial_analysis_intelligence_index":16}},
             {"slug":"v3-2-0925","name":"V3.2 Exp (Non-reasoning)","evaluations":{"artificial_analysis_intelligence_index":13}},
+            {"slug":"y7-reasoning-0925","name":"Y7 Exp (Reasoning)","evaluations":{"artificial_analysis_intelligence_index":16}},
+            {"slug":"y7-v-0925","name":"Y7 Exp (Non-reasoning)","evaluations":{"artificial_analysis_intelligence_index":13}},
             {"slug":"mistral-medium","name":"Mistral Medium","evaluations":{"artificial_analysis_intelligence_index":5}}
         ]}"#;
         let names = [
@@ -3140,6 +3169,7 @@ mod tests {
             "Kimi K2 Thinking",
             "Step 5 Preview",
             "V3.2 Exp",
+            "Y7 Exp",
             "Phi-4",
             "Phi-4-reasoning",
             "Qwen 9 Instruct",
@@ -3180,6 +3210,7 @@ mod tests {
         assert_eq!(index("Qwen 9 Instruct"), Some(8.0), "a row that cannot reason is not its reasoning setting");
         assert_eq!(index("Step 5 Preview"), Some(43.0), "found by the entry's name, where its slug says less");
         assert_eq!(index("V3.2 Exp"), Some(13.0), "of two entries so named, the shorter slug: no setting");
+        assert_eq!(index("Y7 Exp"), Some(13.0), "the shorter, not the first by its letters");
         assert_eq!(index("Mistral Medium"), None, "sold as -latest: whichever release that is by now");
     }
 

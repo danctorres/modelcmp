@@ -306,9 +306,11 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             Some(h).filter(|h| o.via.is_empty() || has(&o.via, h))
         };
         let line = |m: &&Model| match o.cmd {
-            true => command(m, via(m), &o.via, &data.harness)
-                .map(|c| c.join(" "))
-                .ok_or_else(|| Exit::from(format!("no harness has {}: there is no command to start it", m.name))),
+            true => command(m, via(m), &o.via, &data.harness).map(|c| c.join(" ")).ok_or_else(|| {
+                // A favorite stays the pick though `--via` asks for a harness without it.
+                let on = if o.via.is_empty() { "no harness has".into() } else { format!("{} lacks", o.via.join(", ")) };
+                Exit::from(format!("{on} {}: there is no command to start it", m.name))
+            }),
             false => Ok(via(m)
                 .and_then(|h| launch_cmd(m, h, &data.harness)?.pop())
                 .unwrap_or_else(|| model_id(m, &data.harness))),
