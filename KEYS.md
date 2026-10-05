@@ -13,7 +13,8 @@ commands and JSON.
 | `qq` `^c` | quit; the first `q` asks, `^c` does not. From an open list too, unless something is being typed there, and any other key is back on the list |
 | `r` | refresh data now |
 | `UU` | upgrade modelcmp when the frame's bottom left says a newer version is available; the first `U` asks. It closes the TUI, runs `brew upgrade` on a Homebrew install or `cargo install` of the new release on a cargo one, and starts the new version, keeping your selection. A binary installed by hand gets the release's page opened instead |
-| `B` | benchmarks from Epoch AI (the default, no API key needed) or Artificial Analysis (needs an API key); the TUI's first start asks, under the wordmark, and `esc` there picks Epoch AI, while a click beside the question does nothing. Artificial Analysis asks for its API key when none is saved and `ARTIFICIAL_ANALYSIS_API_KEY` is not set, and again if it rejects the key; picking it again while it is the source changes the saved key, which is kept in `aa_key` next to `user.json`, readable by you alone. Each source has its own cache, so switching back needs no download |
+| `B` | benchmarks from Epoch AI (the default, no API key needed) or Artificial Analysis (needs an API key); the TUI's first start asks, under the wordmark, and `esc` there picks Epoch AI, or Artificial Analysis when its key is there, while a click beside the question does nothing. A click on `artificialanalysis.ai`, underlined in the question and in the key prompt, opens the page where a free key is made. Artificial Analysis asks for its API key when none is saved and `ARTIFICIAL_ANALYSIS_API_KEY` is not set, and again if it rejects the key; picking it again while it is the source changes the saved key, which is kept in `aa_key` next to `user.json`, readable by you alone. Each source has its own cache, so switching back needs no download |
+| `H` | your default harness: lists `any harness`, then the harnesses you have a model on, starting on yours. `enter` picks one, `esc` leaves it as it was, and `H harness` is a hint in the table's status bar. `x` starts on it and `Y` copies the id it takes, for a model it has, and `--cmd` and `--id` go by it when `--via` names none, after a favorite's own harness (`v` in `f`'s grid). It hides no model. Saved in `user.json`, as `modelcmp harness claude` sets it |
 
 ## Move
 
@@ -65,9 +66,9 @@ Selected models (`✓`) are your shortlist for now, cleared when the TUI closes.
 | Key | Action |
 |-----|--------|
 | `n` | note for the model; `recommend --json` gives it to agents, who use it to choose between models |
-| `y` `Y` | copy the model name / the model id (`provider/model`, as opencode takes it, or pi or omp when only they have the model) |
+| `y` `Y` | copy the model name / the model id: the one your default harness (`H`) takes when it has the model, else `provider/model`, as opencode takes it, or pi or omp when only they have the model |
 | `o` | open the model on models.dev, epoch.ai, artificialanalysis.ai or openrouter.ai, whichever have a page for it; lists them to pick from, even when only one does |
-| `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`, else `x-terminal-emulator`); lists the harnesses that have it to pick from, even when only one does |
+| `x` | open a harness on the model in a new terminal (Windows Terminal under WSL, else `$TERMINAL`, else `x-terminal-emulator`); lists the harnesses that have it to pick from, even when only one does, starting on your default one (`H`) |
 
 ## Panels
 

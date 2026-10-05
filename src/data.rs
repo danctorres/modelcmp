@@ -114,12 +114,17 @@ impl Source {
         }
     }
 
-    /// What it takes, for the `B` chooser.
+    /// What it takes and gives, for the `B` chooser.
     pub fn about(self) -> &'static str {
         match self {
-            Source::Epoch => "the default, no API key needed",
-            Source::Aa => "needs an API key, free at artificialanalysis.ai",
+            Source::Epoch => "no API key needed, fewer models and no speed metrics",
+            Source::Aa => "more models and speed metrics, needs an API key, free at artificialanalysis.ai",
         }
+    }
+
+    /// The one to use when none was picked: Artificial Analysis once its key is there.
+    pub fn preferred() -> Source {
+        if aa_key().is_some() { Source::Aa } else { Source::Epoch }
     }
 
     /// By `id`; empty is the default.
@@ -163,6 +168,8 @@ pub fn set_source(s: Source) {
 
 /// Artificial Analysis's API key: `AA_KEY_ENV`, else the one saved with `save_aa_key`.
 pub const AA_KEY_ENV: &str = "ARTIFICIAL_ANALYSIS_API_KEY";
+/// Where its key is made, free with an account: what a click on the key prompt's link opens.
+pub const AA_KEY_URL: &str = "https://artificialanalysis.ai/login";
 
 /// Why a refresh failed: the two the TUI answers by asking for a key, and the rest.
 #[derive(Clone, PartialEq, Debug)]
@@ -3212,6 +3219,13 @@ mod tests {
         assert_eq!(index("V3.2 Exp"), Some(13.0), "of two entries so named, the shorter slug: no setting");
         assert_eq!(index("Y7 Exp"), Some(13.0), "the shorter, not the first by its letters");
         assert_eq!(index("Mistral Medium"), None, "sold as -latest: whichever release that is by now");
+    }
+
+    #[test]
+    fn the_source_is_artificial_analysis_once_its_key_is_there() {
+        assert_eq!(Source::preferred(), Source::Epoch);
+        save_aa_key("k").unwrap();
+        assert_eq!(Source::preferred(), Source::Aa);
     }
 
     #[test]

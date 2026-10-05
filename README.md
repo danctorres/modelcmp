@@ -88,7 +88,8 @@ tiers keep your coding favorite. In the TUI, `f` has a box per tier on each task
 
 A favorite can name the harness you run it on: `modelcmp fav coding opus-5.5 --via claude`, or
 `v` on a ticked box of `f`'s grid. `--id` then prints the id that harness takes, `--cmd` the whole command
-(`claude --model claude-opus-5-5`), and `recommend --json` says which harness it is.
+(`claude --model claude-opus-5-5`), and `recommend --json` says which harness it is. `modelcmp harness claude` sets one
+for every model without a harness of its own: `--id` and `--cmd` go by it when it has the model.
 
 A task can be one you name yourself, with the model you give it and what it is about:
 `modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"`, or `+ new task` at the end
@@ -122,7 +123,7 @@ skills can take its body in `AGENTS.md`.
 - [Epoch AI Benchmarking Hub](https://epoch.ai/benchmarks) (CC-BY): ECI and
   per-benchmark scores.
 - [Artificial Analysis](https://artificialanalysis.ai), instead of Epoch AI when picked with
-  `B` or `--source aa`: its Intelligence Index, Terminal-Bench 4.0, SciCode and HLE,
+  `B` or `--source aa`, or when none was picked and its key is there: its Intelligence Index, Terminal-Bench 4.0, SciCode and HLE,
   and each model's speed (output tokens per second, time to first answer token).
   Needs a free API key: the TUI's first start asks which source to use, then for the key
   if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,

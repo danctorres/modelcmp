@@ -31,7 +31,7 @@ column, and in a row of compare.
 
 Where the numbers in the score columns come from. Both sources are downloaded on a refresh.
 
-Epoch AI (the default, <https://epoch.ai/data/benchmark_data.zip>, no key):
+Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
 
 - ECI is Epoch's Capabilities Index as Epoch publishes it. modelcmp does not compute it.
 - A benchmark score is the best one Epoch lists for any version of the model, taken as a share
@@ -54,6 +54,8 @@ Artificial Analysis (`--source aa`, its API with your key):
 - Agentic and Reason are one benchmark's score as published, 0-100. Coding is the mean of
   two, computed by modelcmp. Tok/s and TTFT are its measurements.
 - A model's numbers are those of one of its reasoning settings, chosen as [Columns](#columns) says.
+- It scores more models than Epoch AI does, most of all on Agentic, and its task scores can
+  differ from the AAII, where Epoch's stay close to the ECI.
 
 With either source:
 
@@ -80,7 +82,8 @@ modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to 
 modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
 modelcmp fav coding 3.7-flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
 modelcmp fav coding opus-5.5 --via claude       # and the harness you run it on: list --task coding --id prints the id claude takes
-modelcmp list --task coding --tier mid --cmd    # the command that opens a harness on it: the favorite's harness, else the first that has the model
+modelcmp list --task coding --tier mid --cmd    # the command that opens a harness on it: the favorite's harness, else your default one, else the first that has the model
+modelcmp harness claude                        # your default harness: --cmd and --id go by it when it has the model. Alone shows it, --rm clears it (`H` in the TUI)
 modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"  # a task of your own: its model and what it is about; --rm clears the model
 modelcmp fav debugging --about "bugs and flaky tests"               # rewrite what it is about; "" clears it
 modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --task debugging --tier low returns it
@@ -113,7 +116,7 @@ less than a year, or whose best of a year ago scored nothing, has no such pace, 
 tier's pick. Every favorite of the task that you have and did not exclude sits on the task's list, whatever `--dev`, `--via`, `--min`, `--max` or `--selected` narrow it to, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
-`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model; `--via opencode` keeps the id opencode takes, for a script that always starts opencode. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. With no match it is an error (exit code 1), so a harness is never started on an empty model.
+`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model, else your default harness's (`modelcmp harness`) when it has it. `--via` naming a harness prints the id that one takes instead (`--via claude --id` gives `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts opencode), and is an error when the harness lacks the model. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else your default one, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. `--tier` with `--no-fav` gives the tier's pick without your favorites, for when a favorite is on no harness you can start (`--tier mid --via claude --no-fav --id`). A task of your own has none. With no match it is an error (exit code 1), so a harness is never started on an empty model.
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name
@@ -143,7 +146,7 @@ for, and `task:tier` for a tier's), `price` (with the provider's model `id`, whi
 `compare` add `benchmarks` (every score, as a fraction: 0.545 is 54.5%), `providers` (every provider's price) and `pages` (site to URL, for the sites that have a page for it; `url` is the first of them, null when none has). `recommend` prints each
 frontier entry as `name [key] $price (value)`, the value being the task's table column: the
 same as `tasks`. A favorite that is on the line only as
-the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, and the user's `note` when the model has one.
+the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, `via` (the harnesses that have the model, as in `list --json`), and the user's `note` when the model has one.
 A task of your own follows the built-in ones in `recommend --json` with the same fields and
 `"custom": true`: its `about` is what the user wrote (`your own task` when nothing), its `when`
 says it wins over a built-in task that fits too, its `favorite` and `tier_favorites` are the

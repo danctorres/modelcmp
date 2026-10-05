@@ -540,7 +540,10 @@ fn event_loop(
                         app.refreshing = rx.is_some();
                     }
                     // The app applies its own chooser items before they get here.
-                    Some(Effect::Fav(..) | Effect::Via(..) | Effect::NewTask(_) | Effect::Theme(_)) | None => {}
+                    Some(
+                        Effect::Fav(..) | Effect::Via(..) | Effect::NewTask(_) | Effect::Theme(_) | Effect::Harness(_),
+                    )
+                    | None => {}
                 }
                 if matches!(app.input, Input::None) {
                     // The first start's download is for its question: closed without a pick of
@@ -638,6 +641,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             let col = x.saturating_sub(fav_name_w(items) + 2) / BOX_W;
             return (col < BOXES).then_some(Mouse::Tick(row, col));
         }
+        if let Input::Choose { kind: Kind::Source, items, list, .. } = &app.input {
+            let (label, effect) = &items[*choice_rows(items, &list.query).get(k)?];
+            // Past the box's padding and the entry's own space, as `choice_lines` draws it.
+            let x = usize::from(m.column - inner.x).checked_sub(2);
+            if source_link(label, effect).zip(x).is_some_and(|(l, x)| l.contains(&x)) {
+                return Some(Mouse::Link);
+            }
+        }
         return (k < len).then_some(Mouse::Item(k));
     }
     // A click outside the open panel closes it, as one outside a list does, unless it is on a
@@ -645,6 +656,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let close = (!extend && app.panel.is_some_and(|r| !r.contains(pos))).then_some(Mouse::Close);
     // A hint in the status bar presses its key.
     if m.row == area.bottom() - 1 {
+        if !mark && !extend && key_link(app).is_some_and(|l| l.contains(&m.column)) {
+            return Some(Mouse::Link);
+        }
         return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten().or(close);
     }
     if on_tabs {
@@ -871,7 +885,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
         View::Table => {
-            let mut view = vec!["B benchmarks", "/ filter", "s sort"];
+            let mut view = vec!["B benchmarks", "H harness", "/ filter", "s sort"];
             if app.menu(app.col) {
                 view.push("d dropdown");
             }
@@ -1981,6 +1995,20 @@ fn vmarks(buf: &mut Buffer, x: u16, top: u16, bottom: u16, above: bool, below: b
     }
 }
 
+/// The API key prompt's label: it names the site a key comes from, which is its link.
+fn key_ask(wrong: bool) -> String {
+    let (ask, site) = (if wrong { "key rejected, another" } else { "API key" }, data::Source::Aa.site());
+    format!("{ask} from {site} (or set {}): ", data::AA_KEY_ENV)
+}
+
+/// The status bar columns of the link in the API key prompt, after the pill and a space.
+fn key_link(app: &App) -> Option<std::ops::Range<u16>> {
+    let Input::Key { wrong, .. } = app.input else { return None };
+    let site = data::Source::Aa.site();
+    let start = (mode(app).0.len() + 3 + key_ask(wrong).find(site)?) as u16;
+    Some(start..start + site.len() as u16)
+}
+
 /// A solid label like a bar module; returns the column after it.
 fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) -> u16 {
     buf.set_stringn(x, y, format!(" {text} "), max as usize, fg(Color::Black).bg(color).add_modifier(BOLD)).0
@@ -2078,6 +2106,7 @@ fn mode(app: &App) -> (&'static str, Color) {
                 Kind::Fav => "FAV",
                 Kind::Theme => "THEME",
                 Kind::Source => "SOURCE",
+                Kind::Harness => "HARNESS",
                 Kind::Open => "OPEN",
             };
             (name, Color::Green)
@@ -2124,9 +2153,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         // Hidden from anyone looking at the screen; one `*` per byte keeps `cur` in place.
         Input::Key { text, cur, wrong } => {
             masked = "*".repeat(text.len());
-            let ask =
-                if *wrong { "Artificial Analysis rejected the key; another" } else { "Artificial Analysis API key" };
-            Some((format!("{ask} (or set {}): ", data::AA_KEY_ENV), &masked, *cur))
+            Some((key_ask(*wrong), &masked, *cur))
         }
         Input::Bound { col, min, text, cur } => {
             Some((format!("{} {} ", app.col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
@@ -2165,6 +2192,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         let start = scrolled(width(&label), typed, cur, room);
         let text = format!("{label}{}{unit}", &typed[start..]);
         buf.set_stringn(x, area.y, &text, room, Style::new());
+        // Underlined as a link: a click on it opens the page (`hit`).
+        if let Some(link) = key_link(app) {
+            let w = (link.end.min(hx)).saturating_sub(link.start);
+            buf.set_style(Rect::new(link.start, area.y, w, 1), Style::new().add_modifier(Modifier::UNDERLINED));
+        }
         if fits {
             buf.set_stringn(hx, area.y, hint, width(hint), fg(MUTED));
         }
@@ -2370,6 +2402,14 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     lines
 }
 
+/// The link in a source's entry of the "benchmarks?" list, as bytes of its ASCII label: the site
+/// its API key is had at, which its description ends with.
+fn source_link(label: &str, effect: &Effect) -> Option<Range<usize>> {
+    let site = data::Source::Aa.site();
+    (*effect == Effect::Source(data::Source::Aa) && label.ends_with(site))
+        .then(|| label.len() - site.len()..label.len())
+}
+
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `first`: the first start's question, where esc picks the default and `B` asks again later.
 /// `f`'s grid has lines of its own, `fav_lines`.
@@ -2383,7 +2423,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // What has a colour in the table keeps it here: a harness. A site, a theme and a
             // source have none, so they take the text's and not one their name gives.
             let color = match effect {
-                Effect::Launch(_) | Effect::Via(_, _, Some(_)) => {
+                Effect::Launch(_) | Effect::Via(_, _, Some(_)) | Effect::Harness(Some(_)) => {
                     dev_color(label.split(' ').next().unwrap_or_default())
                 }
                 _ => Color::Reset,
@@ -2392,15 +2432,23 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // the command that opens it.
             let name = match effect {
                 Effect::Source(src) => Some((label.len() - src.about().len(), Style::new().add_modifier(BOLD))),
-                Effect::Launch(_) | Effect::Via(..) => Some((label.find(' ').unwrap_or(label.len()), fg(color))),
+                Effect::Launch(_) | Effect::Via(..) | Effect::Harness(_) => {
+                    Some((label.find(' ').unwrap_or(label.len()), fg(color)))
+                }
                 _ => None,
             };
             if let Some((end, style)) = name {
                 let (name, rest) = label.split_at(end);
-                let line = Line::from(vec![
-                    Span::styled(format!(" {name}"), style),
-                    Span::styled(format!("{rest} "), fg(MUTED)),
-                ]);
+                // Where a key is had is a link: underlined, and a click on it opens the page (`hit`).
+                let line = Line::from(match source_link(label, effect) {
+                    Some(l) => vec![
+                        Span::styled(format!(" {name}"), style),
+                        Span::styled(label[end..l.start].to_string(), fg(MUTED)),
+                        Span::styled(label[l].to_string(), fg(MUTED).add_modifier(Modifier::UNDERLINED)),
+                        Span::styled(" ", fg(MUTED)),
+                    ],
+                    None => vec![Span::styled(format!(" {name}"), style), Span::styled(format!("{rest} "), fg(MUTED))],
+                });
                 return lit(line, |s| found(s, query));
             }
             lit(Line::from(format!(" {label} ")).style(fg(color)), |s| found(s, query))
@@ -2414,7 +2462,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
         Kind::Source if first => " j k move · / search · enter picks · esc default · B changes it later",
-        Kind::Source => " j k move · / search · enter picks · esc close",
+        Kind::Source | Kind::Harness => " j k move · / search · enter picks · esc close",
         Kind::Via => " j k move · / search · enter picks · esc back",
         Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
     };
@@ -3000,6 +3048,13 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), click), Some(Mouse::Item(1)));
+        // And on its link opens where a key is made, the question staying.
+        let site = lines[usize::from(click.row)].find("artificialanalysis.ai").unwrap();
+        let column = lines[usize::from(click.row)][..site].chars().count() as u16;
+        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), MouseEvent { column, ..click }), Some(Mouse::Link));
+        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), MouseEvent { column: column - 1, ..click }), Some(Mouse::Item(1)));
+        assert_eq!(a.mouse(Mouse::Link), Some(Effect::Open(data::AA_KEY_URL.into())));
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Source, .. }));
         // Too small for both: over the table, as `B` asks later.
         let lines = screen(&mut a, 120, 12);
         assert!(row(&lines, "Model").is_some() && row(&lines, TAGLINE).is_none());
@@ -3427,7 +3482,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  B benchmarks  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "h l column  │  B benchmarks  H harness  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -3634,6 +3689,24 @@ mod tests {
         assert_eq!(dragged(&mut press, at(drag, 5), to(2)), None, "a drag off a header selects nothing");
         assert_eq!(dragged(&mut press, at(down, 0), None), None);
         assert_eq!(dragged(&mut press, at(drag, 5), to(2)), None, "nor one off the frame");
+    }
+
+    #[test]
+    fn a_click_on_the_key_prompts_link_opens_where_a_key_is_made() {
+        let mut a = app();
+        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        let area = Rect::new(0, 0, 120, 12);
+        let click = |x| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: 11,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        // " KEY " and a space, then "API key from artificialanalysis.ai".
+        assert_eq!(hit(&a, area, click(19)), Some(Mouse::Link));
+        assert_ne!(hit(&a, area, click(18)), Some(Mouse::Link), "only on the link");
+        assert_eq!(a.mouse(Mouse::Link), Some(Effect::Open(data::AA_KEY_URL.into())));
+        assert!(matches!(a.input, Input::Key { .. }), "the prompt stays for the key");
     }
 
     #[test]

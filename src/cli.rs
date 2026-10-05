@@ -200,7 +200,11 @@ fn table(models: &[&Model], store: &Store, any: bool) {
 fn check<'a>(flag: &str, asked: &[String], known: impl Iterator<Item = &'a str>) -> Result {
     let known: BTreeSet<String> = known.filter(|k| !k.is_empty()).map(str::to_lowercase).collect();
     match asked.iter().find(|a| !known.contains(&a.to_lowercase())) {
-        Some(bad) => Err(format!("no model has {flag} '{bad}'; known: {}", Vec::from_iter(known).join(", ")).into()),
+        Some(bad) => {
+            // "not available" can be asked for, but is no harness to name among yours.
+            let known: Vec<_> = known.into_iter().filter(|k| k != crate::view::OUT_OF_REACH).collect();
+            Err(format!("no model has {flag} '{bad}'; known: {}", known.join(", ")).into())
+        }
         None => Ok(()),
     }
 }
@@ -235,6 +239,8 @@ pub struct ListOpts {
     pub cmd: bool,
     /// Print only `provider/model` per line, for a shell substitution.
     pub id: bool,
+    /// With a tier: its pick on merit, your favorites aside.
+    pub no_fav: bool,
 }
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
@@ -267,6 +273,8 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         // tier's, else the task's.
         let line = custom_line(pool(), store, c);
         models = match &o.tier {
+            // It has no pick on merit: a built-in task that fits has.
+            Some(_) if o.no_fav => vec![],
             Some(tier) => store
                 .tier_favorites(c, tier)
                 .find_map(|k| line.iter().find(|m| m.key == k).copied())
@@ -277,7 +285,11 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     } else if let Some(t) = o.task {
         let (front, off) = task_line(models.iter().copied(), pool(), store, t);
         models = match &o.tier {
-            Some(tier) => tier_pick(&front, &off, store, t.name, tier).map(|e| e.0).into_iter().collect(),
+            Some(tier) => {
+                let none = Store::default();
+                let favs = if o.no_fav { &none } else { store };
+                tier_pick(&front, &off, favs, t.name, tier).map(|e| e.0).into_iter().collect()
+            }
             None => front.into_iter().map(|(m, _)| m).collect(),
         };
     } else if let Some(c) = o.sort.map(|c| &COLS[c]) {
@@ -305,14 +317,24 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
             let h = store.task_via(name?, o.tier.as_deref(), &m.key)?;
             Some(h).filter(|h| o.via.is_empty() || has(&o.via, h))
         };
-        let line = |m: &&Model| match o.cmd {
-            true => command(m, via(m), &o.via, &data.harness).map(|c| c.join(" ")).ok_or_else(|| {
-                // A favorite stays the pick though `--via` asks for a harness without it.
-                let on = if o.via.is_empty() { "no harness has".into() } else { format!("{} lacks", o.via.join(", ")) };
-                Exit::from(format!("{on} {}: there is no command to start it", m.name))
-            }),
-            false => Ok(via(m)
-                .and_then(|h| launch_cmd(m, h, &data.harness)?.pop())
+        // Your default harness, after a favorite's own; not one `--via` leaves out either.
+        let default = Some(store.harness.as_str()).filter(|h| !h.is_empty() && (o.via.is_empty() || has(&o.via, h)));
+        // `--via` naming a harness asks for the id that one takes, so one without the model is
+        // an error for `--id` as for `--cmd`, not another harness's id.
+        let named = o.via.iter().any(|v| vias().any(|h| h != "env" && h.eq_ignore_ascii_case(v)));
+        let line = |m: &&Model| match o.cmd || named {
+            true => command(m, &[via(m), default], &o.via, &data.harness)
+                .and_then(|mut c| if o.cmd { Some(c.join(" ")) } else { c.pop() })
+                .ok_or_else(|| {
+                    // A favorite stays the pick though `--via` asks for a harness without it.
+                    let on =
+                        if o.via.is_empty() { "no harness has".into() } else { format!("{} lacks", o.via.join(", ")) };
+                    Exit::from(format!("{on} {}: there is no command to start it", m.name))
+                }),
+            false => Ok([via(m), default]
+                .into_iter()
+                .flatten()
+                .find_map(|h| launch_cmd(m, h, &data.harness)?.pop())
                 .unwrap_or_else(|| model_id(m, &data.harness))),
         };
         // All or none: a script must not start on the first of two commands.
@@ -332,17 +354,18 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     Ok(())
 }
 
-/// The command that starts a harness on `m`: `first` when it has the model, else the first
-/// that does, in Via's order and among `only` when it names any.
+/// The command that starts a harness on `m`: the first of `first` to have the model (the
+/// favorite's harness, then your default one), else the first that does, in Via's order and
+/// among `only` when it names any.
 fn command(
     m: &Model,
-    first: Option<&str>,
+    first: &[Option<&str>],
     only: &[String],
     listed: &BTreeMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
     let asked = |h: &&str| only.is_empty() || only.iter().any(|x| x.eq_ignore_ascii_case(h));
     let has = |h: &str| launch_cmd(m, h, listed);
-    first.and_then(has).or_else(|| vias().filter(asked).find_map(has))
+    first.iter().flatten().find_map(|h| has(h)).or_else(|| vias().filter(asked).find_map(has))
 }
 
 pub fn show(data: &Data, store: &Store, q: &str, json: bool) -> Result {
@@ -427,6 +450,31 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     }
     store.save()?;
     println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name);
+    Ok(())
+}
+
+/// Show your default harness, or set or clear it: the one `--cmd` and `--id` go by when none is
+/// asked for and it has the model.
+pub fn harness(store: &mut Store, name: Option<&str>, rm: bool) -> Result {
+    let known = || vias().filter(|v| *v != "env");
+    match name.map(str::to_lowercase) {
+        Some(h) if !known().any(|v| v == h) => {
+            let msg = format!("no harness '{h}': there are {}", known().collect::<Vec<_>>().join(", "));
+            return Err(Exit { code: 2, msg });
+        }
+        Some(h) => {
+            store.harness = h;
+            store.save()?;
+            println!("harness: {}", store.harness);
+        }
+        None if rm => {
+            store.harness.clear();
+            store.save()?;
+            println!("no default harness");
+        }
+        None if store.harness.is_empty() => println!("no default harness, modelcmp harness <name> sets one"),
+        None => println!("{}", store.harness),
+    }
     Ok(())
 }
 
@@ -571,9 +619,10 @@ fn favorites<'a>(data: &Data, store: &'a Store, task: &str, on: impl Fn(&str) ->
     (slots(&fav), slots(&via))
 }
 
-/// A model on a task's line in `recommend --json`; a `score` the task does not have is NaN, so null.
+/// A model on a task's line in `recommend --json`, with the harnesses that have it (`via`); a
+/// `score` the task does not have is NaN, so null.
 fn entry(m: &Model, store: &Store, score: f64, recommended: bool) -> serde_json::Value {
-    let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (score * 10.0).round() / 10.0, "recommended": recommended});
+    let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "via": m.via, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (score * 10.0).round() / 10.0, "recommended": recommended});
     if let Some(n) = store.note(&m.key) {
         e["note"] = n.into();
     }
@@ -687,6 +736,7 @@ mod tests {
             json: false,
             id: true,
             cmd: false,
+            no_fav: false,
         };
         assert!(list(&data, &store, &o).is_ok());
     }
@@ -713,10 +763,44 @@ mod tests {
             json: false,
             id: true,
             cmd: false,
+            no_fav: false,
         };
         assert!(list(&data, &store, &o).is_err(), "openai has no model for coding");
         store.set_favorite("coding", "mini", None);
         assert!(list(&data, &store, &o).is_ok());
+    }
+
+    /// `--id --via pi` is the id pi takes: a favorite pi lacks is an error, not opencode's id.
+    #[test]
+    fn the_id_is_the_one_the_harness_asked_for_takes() {
+        let mut data =
+            Data { models: vec![model("mini", 60.0, 1.0), model("gpt55", 90.0, 10.0)], ..Default::default() };
+        for (m, h) in data.models.iter_mut().zip(["opencode", "pi"]) {
+            (m.available, m.via, m.offers[0].via) = (true, vec![h.into()], vec![h.into()]);
+        }
+        let mut store = Store::default();
+        store.set_favorite("coding", "mini", None);
+        let mut o = ListOpts {
+            task: fit::task("coding"),
+            custom: None,
+            tier: Some("low".into()),
+            sort: None,
+            bounds: vec![],
+            all: false,
+            selected: false,
+            dev: vec![],
+            via: vec!["opencode".into()],
+            limit: 0,
+            json: false,
+            id: true,
+            cmd: false,
+            no_fav: false,
+        };
+        assert!(list(&data, &store, &o).is_ok());
+        o.via = vec!["pi".into()];
+        assert!(list(&data, &store, &o).is_err(), "pi lacks it");
+        o.no_fav = true;
+        assert!(list(&data, &store, &o).is_ok(), "the tier's pick among pi's");
     }
 
     fn keys(v: &Value) -> Vec<&str> {
@@ -788,17 +872,27 @@ mod tests {
     fn the_command_starts_the_harness_asked_for() {
         let mut m = model("gpt55", 90.0, 10.0);
         let none = BTreeMap::new();
-        assert_eq!(command(&m, None, &[], &none), None, "no harness has it");
+        assert_eq!(command(&m, &[], &[], &none), None, "no harness has it");
         m.offers[0].via = vec!["codex".into(), "opencode".into(), "env".into()];
-        let cmd = |first, only: &[&str]| {
+        let cmd = |first: &[Option<&str>], only: &[&str]| {
             let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
             command(&m, first, &only, &none).map(|c| c.join(" "))
         };
-        assert_eq!(cmd(None, &[]).as_deref(), Some("opencode --model p/gpt55"), "the first in Via's order");
-        assert_eq!(cmd(Some("codex"), &[]).as_deref(), Some("codex --model gpt55"), "the favorite's");
-        assert_eq!(cmd(Some("claude"), &[]).as_deref(), Some("opencode --model p/gpt55"), "one without it: the next");
-        assert_eq!(cmd(None, &["Codex"]).as_deref(), Some("codex --model gpt55"), "--via's, in any case");
-        assert_eq!(cmd(None, &["env"]), None, "an API key starts nothing");
+        assert_eq!(cmd(&[], &[]).as_deref(), Some("opencode --model p/gpt55"), "the first in Via's order");
+        assert_eq!(cmd(&[Some("codex")], &[]).as_deref(), Some("codex --model gpt55"), "the favorite's");
+        assert_eq!(
+            cmd(&[Some("claude")], &[]).as_deref(),
+            Some("opencode --model p/gpt55"),
+            "one without it: the next"
+        );
+        assert_eq!(cmd(&[None, Some("codex")], &[]).as_deref(), Some("codex --model gpt55"), "your default one");
+        assert_eq!(
+            cmd(&[Some("opencode"), Some("codex")], &[]).as_deref(),
+            Some("opencode --model p/gpt55"),
+            "after the favorite's"
+        );
+        assert_eq!(cmd(&[], &["Codex"]).as_deref(), Some("codex --model gpt55"), "--via's, in any case");
+        assert_eq!(cmd(&[], &["env"]), None, "an API key starts nothing");
     }
 
     #[test]
@@ -831,7 +925,7 @@ mod tests {
             keys(&t),
             ["about", "benchmarks", "favorite", "frontier", "name", "tier_favorites", "tier_via", "via", "when"]
         );
-        assert_eq!(keys(&t["frontier"][0]), ["context", "key", "name", "price", "recommended", "score"]);
+        assert_eq!(keys(&t["frontier"][0]), ["context", "key", "name", "price", "recommended", "score", "via"]);
         assert_eq!(names(&t), ["mini", "gpt55"]);
         store.set_note("gpt55", "slow");
         assert_eq!(

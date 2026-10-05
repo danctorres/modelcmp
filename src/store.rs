@@ -36,6 +36,10 @@ pub struct Store {
     /// gives the id that one takes. Gone with the favorite.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub via: BTreeMap<String, String>,
+    /// The harness `--cmd` and `--id` go by when none is asked for and it has the model
+    /// (`modelcmp harness`); a favorite's own comes first.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub harness: String,
     /// What each task of your own is about, in your words, by its name: agents choose it by that.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub about: BTreeMap<String, String>,

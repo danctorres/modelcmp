@@ -27,7 +27,7 @@ struct Args {
     /// Percent of input tokens read from the prompt cache in Price: 90 fits an agent session, 0 a one-off prompt (`%` in the TUI)
     #[arg(long, global = true, value_name = "PERCENT", default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
     cache: u8,
-    /// Benchmarks from: epoch (Epoch AI, the default) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY or a key saved with `B`); overrides `B` in the TUI for this run
+    /// Benchmarks from: epoch (Epoch AI) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY or a key saved with `B`); overrides `B` in the TUI for this run. With neither picked: aa when its key is there, else epoch
     #[arg(long, global = true, value_parser = PossibleValuesParser::new(data::Source::ALL.map(|s| s.id())))]
     source: Option<String>,
     #[command(subcommand)]
@@ -72,10 +72,13 @@ enum Cmd {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
-        /// Only the provider/model ids opencode takes, one per line: `opencode -m $(modelcmp list --task coding --tier mid --id)`; a favorite given a harness (`fav --via`) prints the id that one takes, unless --via names another
+        /// Only the provider/model ids opencode takes, one per line: `opencode -m $(modelcmp list --task coding --tier mid --id)`; a favorite given a harness (`fav --via`) prints the id that one takes, else your default harness's (`modelcmp harness`). --via with a harness prints the id that one takes instead (`--via claude --id`), an error when it lacks the model
         #[arg(long, conflicts_with = "json")]
         id: bool,
-        /// Only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`; the harness of a favorite given one (`fav --via`), else the first that has the model, among --via's when given
+        /// The tier's pick without your favorites: the model to use when a favorite is on no harness you can start
+        #[arg(long, requires = "tier")]
+        no_fav: bool,
+        /// Only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`; the harness of a favorite given one (`fav --via`), else your default one (`modelcmp harness`), else the first that has the model, among --via's when given
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
     },
@@ -126,6 +129,14 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
+    /// Your default harness (opencode, pi, omp, claude, codex, gemini, copilot): `list --cmd` and `--id` go by it when it has the model and --via names none, after a favorite's own harness (`fav --via`). Alone, shows it (`H` in the TUI)
+    Harness {
+        #[arg(conflicts_with = "rm")]
+        name: Option<String>,
+        /// Clear it
+        #[arg(long)]
+        rm: bool,
+    },
     /// Your favorite model for a task, or for one tier of it: --tier picks it and recommend marks it ★; alone, shows them (`f` in the TUI)
     Fav {
         /// overall, coding, agentic, reasoning, value or vision; any other name is a task of your own, e.g. debugging, which has only the models you give it
@@ -172,7 +183,9 @@ fn main() {
     let args = Args::parse();
     data::set_cached(f64::from(args.cache) / 100.0);
     let store = Store::load();
-    data::set_source(data::Source::parse(args.source.as_deref().unwrap_or(&store.source)).unwrap_or_default());
+    let picked = args.source.as_deref().unwrap_or(&store.source);
+    let source = if picked.is_empty() { Some(data::Source::preferred()) } else { data::Source::parse(picked) };
+    data::set_source(source.unwrap_or_default());
     let result = match args.cmd {
         None => {
             let ask = args.source.is_none() && store.source.is_empty();
@@ -208,14 +221,17 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         eprintln!("note: {}", view::NO_ACCESS);
     }
     // A command that saves holds the lock from load to save.
-    let _lock = matches!(cmd, Cmd::Select { .. } | Cmd::Exclude { .. } | Cmd::Note { .. } | Cmd::Fav { .. })
-        .then(|| store::lock(&store::path()))
-        .transpose()
-        .map_err(|e| Exit::from(format!("cannot lock {}: {e}", store::path().display())))?;
+    let _lock = matches!(
+        cmd,
+        Cmd::Select { .. } | Cmd::Exclude { .. } | Cmd::Note { .. } | Cmd::Fav { .. } | Cmd::Harness { .. }
+    )
+    .then(|| store::lock(&store::path()))
+    .transpose()
+    .map_err(|e| Exit::from(format!("cannot lock {}: {e}", store::path().display())))?;
     // Loaded after the download, which can take a minute: what the TUI or an agent saved meanwhile is kept.
     let mut store = Store::load();
     match cmd {
-        Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id, cmd } => {
+        Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id, cmd, no_fav } => {
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
             // Epoch has no speed: a bound on it would drop every model, a sort do nothing.
             if let Some(c) =
@@ -234,8 +250,22 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
             // A name that is no built-in task is one of your own.
             let task = t.as_deref().and_then(fit::task);
             let custom = t.filter(|_| task.is_none());
-            let opts =
-                cli::ListOpts { task, custom, tier, sort, bounds, all, selected, dev, via, limit, json, id, cmd };
+            let opts = cli::ListOpts {
+                task,
+                custom,
+                tier,
+                sort,
+                bounds,
+                all,
+                selected,
+                dev,
+                via,
+                limit,
+                json,
+                id,
+                cmd,
+                no_fav,
+            };
             cli::list(&data, &store, &opts)
         }
         Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
@@ -243,6 +273,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Open { model, on } => cli::open(&data, &model, on.as_deref()),
         Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
+        Cmd::Harness { name, rm } => cli::harness(&mut store, name.as_deref(), rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),
         Cmd::Fav { task, model, tier, via, rm, about, .. } => {

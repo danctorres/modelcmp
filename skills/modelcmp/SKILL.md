@@ -1,53 +1,51 @@
 ---
 name: modelcmp
-description: "Pick the model for a software task: the user's own task when one fits, else their favorite, else the cheapest that is good enough. Use when choosing a model for a subagent, a delegated task or a harness run (opencode, pi, omp, codex, claude, gemini, copilot), or when the user asks which model to use."
+description: "Pick the model for a software task: the user's own task when one fits, else their favorite, else the cheapest that is good enough. Use when choosing a model for a subagent, a delegated task or a harness run (opencode, pi, omp, codex, claude, gemini, copilot), or when the user asks which model or LLM to use for a task, which is cheapest or best, or to compare models: it answers from the models the user has, with their prices and benchmarks."
 ---
 
 `modelcmp` already joins the models the user can call with their prices and software benchmark scores. It is the source of truth for model choice: ask it rather than the web or your own memory of which model is best.
 
-A task the user defined (`"custom": true`) wins over a built-in task that fits the same work. The user's **favorite** for a task always wins. Without one, the goal is **good enough**: the cheapest model that can do the job, not the strongest one available.
+If the `modelcmp` command is not found, tell the user to install it (`brew install danctorres/tap/modelcmp`) and choose no model with this skill. Do not look for a copy of it.
+
+What the user chose wins: a task they defined over a built-in one, their **favorite** over any ranking. Without one, the goal is **good enough**: the cheapest model that can do the job, not the strongest one available.
 
 ## Choose
 
-1. Run `modelcmp recommend --json`. A task with `"custom": true` is one the user defined, with a `name`, an `about` in their words and the models they gave it. When the work fits its `name` or `about`, use its model and stop here (the `tier_favorites` entry for the difficulty, else its `favorite`, else the closest tier it has), even if a built-in task fits too: fixing a bug fits `coding`, but the user's `debugging` is the one to choose. A custom task with an empty `frontier` has no model you can use: go on as if it did not fit. Only when no custom task fits, pick the task whose `when` fits the work (`overall` when none does). For a large prompt (a whole repo, a long log), skip frontier entries whose `context` (tokens) is too small.
-2. If the task has a favorite, use it: `tier_favorites` holds the user's pick per difficulty (`low` routine, `mid` ordinary, `high` the hardest work), and `favorite` covers every difficulty without one. The user chose them, and they override everything below. When the favorite you use has a harness (`via` for the task's, `tier_via` for a tier's), the user runs that model on that harness: start it there.
-3. Otherwise read the task's `frontier`: the best model per price level and what each tier picks, cheapest first, each recommended entry costing more and scoring higher. Start at the cheapest entry that fits the difficulty.
-   An entry's `note`, when present, is the user's own experience with that model: let it rule out an entry or decide between close ones.
-4. **Step up** one entry only after the current model fails the task.
+1. **Task.** Run `modelcmp recommend --json`. A task with `"custom": true` is one the user defined: when the work fits its `name` or `about`, choose it, even if a built-in task fits too (fixing a bug fits `coding`, but the user's `debugging` is the one to choose). A custom task with an empty `frontier` has no model you can use: go on as if it did not fit. With no custom task that fits, pick the built-in task whose `when` fits what the work must deliver. When several do, pick the one naming what makes the work hard (a screenshot to read: `vision`, a long unattended run: `agentic`), and `overall` when none does (docs, summaries, anything they do not name).
+2. **Tier.** `low` for routine work (a mechanical edit, a bug with a clear cause, boilerplate), `mid` for ordinary work (a feature, a change across files), `high` for the hardest (a subtle bug, a design, a long run where a mistake is costly).
+3. **Model.** Ask for the one model of that task and tier, with `--via` naming the harness you will start it on (opencode, pi, omp, claude, codex, gemini, copilot):
 
-Done when you hold one model `key` and can say which task and frontier entry it came from.
+   ```sh
+   modelcmp list --task coding --tier mid --via claude --id    # claude-sonnet-5-5
+   modelcmp list --task coding --tier mid --via opencode --id  # anthropic/claude-sonnet-5-5
+   modelcmp list --task coding --tier mid --via claude --cmd   # claude --model claude-sonnet-5-5
+   ```
 
-## One id for a harness
+   It is the user's favorite for the tier, else for the task, else the cheapest good-enough model that harness has. Pass the whole id exactly as printed, prefix included: each harness takes its own form (`opencode -m opencode/ling-3.1-flash-free`, never `-m ling-3.1-flash-free`). `--cmd` opens an interactive session. For a run with a prompt, put the id in that harness's own run command (`opencode run -m <id> "<prompt>"`, `claude -p --model <id> "<prompt>"`). A Claude Code subagent takes a family, not an id: ask with `--via claude` and pass the family named in the id (`claude-sonnet-5-5` is `sonnet`, `claude-opus-5-5` is `opus`).
+   - Free to start any harness? Leave `--via` out of `--cmd`: it prints the harness the user runs that favorite on, else their default harness, else the first that has the model.
+   - Exit 1 with `<harness> lacks <model>`: the user's favorite is not on your harness. Run `--cmd` without `--via` and start the harness it prints: the favorite on a harness that has it. If you cannot start that one either, add `--no-fav` to your first command: the recommended model for the tier on your harness. A custom task has none: go back to step 1 as if it did not fit.
+   - Exit 1 with `no models match`: a custom task without a model for it. Go back to step 1 as if that task did not fit.
+   - Exit 1 with `no model has --via '<harness>'`: the user can call no model on that harness. Tell the user and do not guess a model for it.
+4. **Check** the model (`--json` in place of `--id` prints its `context` and `note`, and the `frontier` entries of step 1 have them too, and `via`, the harnesses that have each model):
+   - For a large prompt (a whole repo, a long log), a `context` (tokens) too small for it rules the model out, favorite or not. Ask again with `--no-fav --min ctx=<thousands of tokens>`: `--min ctx=600` for 600,000.
+   - A `note` is the user's own experience with that model. One that says it is bad at this kind of work rules it out: ask again with `--no-fav`, and if that prints the same model, take the next tier up. At `high`, ask the same of `overall`, and tell the user if that is ruled out too. Any other note changes nothing.
+5. **Step up** one tier only after the model fails the task. When `high` fails, tell the user.
 
-`--tier` applies the same rules; `--id` prints the provider/model string opencode takes, or pi or omp when only they have the model (for claude, codex, gemini and copilot run `modelcmp show <key> --json` and use the `id` of the `providers` entry whose `via` names the harness). A favorite with a harness of its own (`via`, `tier_via` in `recommend --json`) prints the id that harness takes instead, so pass it to that harness; add `--via opencode` when you can only start opencode:
-
-```sh
-opencode -m "$(modelcmp list --task coding --tier mid --id)"
-```
-
-`--cmd` prints the command that opens the harness on the model instead (`claude --model claude-opus-5-5`): the harness the user chose for the favorite, else the first that has the model. It is the harness, `--model` and the id that harness takes, and it opens an interactive session; for a run with a prompt, take the harness and the id from it and add them to that harness's own run command.
-
-```sh
-modelcmp list --task coding --tier mid --cmd
-```
-
-`low` is the cheapest entry within 8 months of progress of the best one, `mid` the cheapest within 3, `high` the best; a month of progress is a twelfth of what the best score on the task rose in the last year. The tier's favorite, else the task's, wins over the tier's pick. A custom task takes `--task` and `--tier` too: the tier's model, else the task's. With neither it exits 1 and prints no id: take the model from `recommend --json` instead.
+Done when you hold one id and can say which task and tier it came from.
 
 ## Reading the numbers
 
-- `price` is $ per 1M tokens. `null` means unknown, not free. `"listed": true` (in `price`, or on a `recommend --json` entry; `~` in the tables) means the user's provider lists no price and it is the list price of other providers: an estimate.
-- `score` is on the scale of the source in use (`source` in `list --json`). With `epoch` it is in Epoch Capabilities Index points, the task's capability for coding, agentic and reasoning. With `aa` it is the Artificial Analysis Intelligence Index for `overall` and `vision`, and a 0-100 benchmark score for the others (the mean of Terminal-Bench 4.0 and SciCode, Terminal-Bench 4.0, HLE). `value` is a 0-100 percentile with either. Scores from different sources do not compare.
-- `"recommended": false` marks a favorite that sits on the frontier only because the user chose it. Still use it.
-- Models the user excluded never appear in `recommend` or `--task`.
+- `price` in `recommend` is one blended $ per 1M tokens (input, cache reads and output mixed), while `show` and `list --json` give input and output apart. `null` means unknown, not free. `"listed": true` means the user's provider lists no price and it is the list price of other providers: an estimate.
+- `score` is on the scale of the benchmark source in use (`source` in `list --json`): Artificial Analysis when the user has its key and picked no other, else Epoch AI. Compare scores only within one task and one source.
 
 ## Look closer
 
-When two entries are close, compare them before choosing:
+To explain a choice, or when the user asks to compare:
 
 ```sh
 modelcmp show <model> --json          # every benchmark and every provider's price
 modelcmp compare <a> <b> --json       # side by side
-modelcmp list --min coding=155 --sort price --json  # everything good enough, cheapest first
+modelcmp list --sort coding --json -n 10  # the best at coding first
 ```
 
 A model name matches by substring. Exit code 3 means it matched several; stderr lists the candidates with their keys, and a key always matches exactly. `modelcmp --help` has every flag.

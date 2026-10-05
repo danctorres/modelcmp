@@ -285,6 +285,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("r", "refresh data now (auto at start after 24h)"),
             ("U", "upgrade modelcmp when a newer version is out; asks first"),
             ("B", "benchmarks from Epoch AI or Artificial Analysis"),
+            ("H", "default harness, for x, Y, --cmd and --id"),
         ],
     ),
     (
@@ -469,6 +470,8 @@ pub enum Kind {
     Theme,
     /// `B`: the benchmark source.
     Source,
+    /// `H`: your default harness.
+    Harness,
 }
 
 /// The cursor and the search of an open list, a dropdown or a choice list.
@@ -723,6 +726,8 @@ pub enum Effect {
     NewTask(String),
     /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
+    /// Your default harness, or none; the `H` chooser's items, applied by `App` itself.
+    Harness(Option<&'static str>),
     /// The `B` chooser's items; out of it, the source was switched and its data must be loaded.
     Source(crate::data::Source),
 }
@@ -772,6 +777,8 @@ pub enum Mouse {
     Close,
     /// Click on a status bar hint: press its key.
     Key(KeyCode),
+    /// Click on the link in the API key prompt: open where a key is made, the prompt staying.
+    Link,
     /// Click on a stop in compare or recommend: move the cursor to it.
     Model(Stop),
     /// Double click on it: do what `enter` does, open the model's details or rank the table by
@@ -1824,6 +1831,24 @@ impl App {
         Some(Effect::Save)
     }
 
+    /// The `H` chooser: the harnesses you have a model on, after "any", as `v` lists them, with the cursor on
+    /// yours. It is the one `x`, `Y`, `--cmd` and `--id` go by for a model it has, after a
+    /// favorite's own.
+    fn ask_harness(&mut self) {
+        let mine = |h: &&str| *h == self.store.harness || self.data.models.iter().any(|m| m.via.iter().any(|v| v == h));
+        let items: Vec<_> = std::iter::once(("any harness".to_string(), Effect::Harness(None)))
+            .chain(
+                crate::data::vias()
+                    .filter(|h| *h != "env")
+                    .filter(mine)
+                    .map(|h| (h.to_string(), Effect::Harness(Some(h)))),
+            )
+            .collect();
+        let has = |e: &Effect| matches!(e, Effect::Harness(Some(h)) if *h == self.store.harness);
+        let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
+        self.input = Input::choose("default harness?", Kind::Harness, items, sel);
+    }
+
     /// `v` in `f`'s grid: the harnesses that have the slot's favorite `key`, to run it on one,
     /// as `x` lists them, after "any", with the cursor on the one it has. Only a ticked entry
     /// has a model to run.
@@ -2227,6 +2252,9 @@ impl App {
                 self.overlay_query.clear();
             }
             return self.on_key(KeyCode::Esc.into());
+        }
+        if m == Mouse::Link {
+            return Some(Effect::Open(crate::data::AA_KEY_URL.into()));
         }
         // A prompt keeps the wheel still, and a click anywhere else leaves it as esc does: an
         // entry or a note being written, a bound, the key, and what `q`, `U`, `D` and `X` ask. A search
@@ -2708,10 +2736,18 @@ impl App {
                 if items.is_empty() {
                     self.refuse(format!("no harness has {}; Via shows where you have access", m.name));
                 } else {
-                    self.input = Input::choose("open in which harness?", Kind::Launch, items, 0);
+                    // On your default harness when it has the model.
+                    let on = |e: &Effect| matches!(e, Effect::Launch(c) if c[0] == self.store.harness);
+                    let sel = items.iter().position(|(_, e)| on(e)).unwrap_or(0);
+                    self.input = Input::choose("open in which harness?", Kind::Launch, items, sel);
                 }
             }
-            KeyCode::Char('Y') if row => return Some(Effect::Copy(model_id(self.current()?, &self.data.harness))),
+            // The id your default harness takes when it has the model, as `--id`.
+            KeyCode::Char('Y') if row => {
+                let m = self.current()?;
+                let own = launch_cmd(m, &self.store.harness, &self.data.harness).and_then(|mut c| c.pop());
+                return Some(Effect::Copy(own.unwrap_or_else(|| model_id(m, &self.data.harness))));
+            }
             KeyCode::Char('y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
             KeyCode::Char(' ') if table && self.selecting() => {
                 return self.flag(Store::is_marked, Store::toggle_marked, ["selected", "deselected"]);
@@ -2743,6 +2779,7 @@ impl App {
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
             }
             KeyCode::Char('B') => self.ask_source(),
+            KeyCode::Char('H') => self.ask_harness(),
             KeyCode::Enter if self.view == View::Recommend && !row => {
                 let Some(t) = self.cur_task() else {
                     // A task of your own has no line to rank: the table, on its cheapest model.
@@ -3014,6 +3051,11 @@ impl App {
                                 self.input = Input::Key { text: String::new(), cur: 0, wrong: false };
                             }
                             Effect::Source(src) => return self.switch(src),
+                            Effect::Harness(h) => {
+                                self.store.harness = h.unwrap_or("").to_string();
+                                self.report(Ok(format!("default harness: {}", h.unwrap_or("any harness"))));
+                                return Some(Effect::Save);
+                            }
                             Effect::Via(key, slot, h) => {
                                 self.store.set_favorite(&slot, &key, h.as_deref());
                                 let on = h.as_deref().unwrap_or("any harness");
@@ -3028,7 +3070,7 @@ impl App {
                     // Closing the first start's choice picks the default.
                     KeyCode::Esc if self.first_start && *kind == Kind::Source => {
                         self.input = Input::None;
-                        return self.switch(Source::default());
+                        return self.switch(Source::preferred());
                     }
                     // Esc leaves the harnesses for f's grid they were opened from, on the same task.
                     KeyCode::Esc if *kind == Kind::Via => {
@@ -3359,6 +3401,34 @@ mod tests {
         assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Help, ""), "esc clears the filter first");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table);
+    }
+
+    #[test]
+    fn h_picks_the_default_harness() {
+        let mut a = app();
+        for m in &mut a.data.models {
+            m.via = vec!["opencode".into(), "codex".into()];
+            m.offers[0].via = m.via.clone();
+        }
+        let at = |a: &App| match &a.input {
+            Input::Choose { kind, items, list, .. } => Some((*kind, items.len(), list.sel)),
+            _ => None,
+        };
+        press(&mut a, "H");
+        assert_eq!(at(&a), Some((Kind::Harness, 3, 0)), "any, opencode and codex: on any, it has none yet");
+        press(&mut a, "jj");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((a.store.harness.as_str(), a.status.as_str()), ("codex", "default harness: codex"));
+        let key = a.current().map(|m| m.key.clone()).unwrap_or_default();
+        assert_eq!(press(&mut a, "Y"), Some(Effect::Copy(key)), "the id codex takes, not opencode's p/id");
+        press(&mut a, "x");
+        assert_eq!(at(&a), Some((Kind::Launch, 2, 1)), "x starts on it");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "H");
+        assert_eq!(at(&a), Some((Kind::Harness, 3, 2)), "on yours");
+        press(&mut a, "gg");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.harness, "", "any harness: none");
     }
 
     #[test]
