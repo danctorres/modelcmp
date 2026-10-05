@@ -12,7 +12,7 @@ Value, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), 
 its Intelligence Index, and each task column is a benchmark score (0-100): Coding the
 mean of Terminal-Bench 4.0 and SciCode, Agentic Terminal-Bench 4.0, Reason HLE; two more columns show speed,
 Tok/s (output tokens per second) and TTFT (seconds to the first answer token, after any thinking), medians
-on the developer's own API, or across providers when it has none. A model's scores there are its best reasoning setting's; a row that names a setting
+on the developer's own API, or across providers when it has none. A model's scores and speed there are those of one reasoning setting, the best index among those scored on the most benchmarks; a row that names a setting
 ("Grok 4.20 Non-Reasoning") has that setting's, or `-` when Artificial Analysis did not measure it, and one that cannot reason has its non-reasoning setting's. With either source a row has no scores when its offers are another release than the one scored, as a `-latest` id is. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
 columns are the model's capability on the task's benchmarks, in ECI points, fitted from its
 ECI and its scores (a model with few scores stays near its ECI):

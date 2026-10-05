@@ -101,7 +101,7 @@ pub const TASKS: &[Task] = &[
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         need: Need::Tools,
         aa: Some("terminalbench_v4_0"),
-        aa_more: &["tau_banking"],
+        aa_more: &[],
         benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0", "DeepResearch Bench", "Terminal Bench"],
     },
     Task {
@@ -110,7 +110,7 @@ pub const TASKS: &[Task] = &[
         when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
         need: Need::None,
         aa: Some("hle"),
-        aa_more: &["gpqa", "lcr"],
+        aa_more: &["lcr"],
         benches: &[
             "GPQA diamond",
             "HLE",

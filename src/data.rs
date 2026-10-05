@@ -31,8 +31,9 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 10: Artificial Analysis's agentic score is Terminal-Bench 4.0, where it was Hard.
 /// 11: prices at the tier an agent's session reaches. 12: a row's scores are of the release
 /// its offers are. 13: Artificial Analysis's coding score is `fit::AA_CODING`, where it was its
-/// Coding Index, and `Model::ttft` is to the first answer token.
-const FORMAT: u32 = 13;
+/// Coding Index, and `Model::ttft` is to the first answer token. 14: its scores are all of one
+/// reasoning setting.
+const FORMAT: u32 = 14;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -1336,28 +1337,17 @@ fn same_release(all: &[AaEntry]) -> impl Iterator<Item = &AaEntry> {
     all.iter().filter(move |e| model.is_some_and(|m| m.release == e.release))
 }
 
-/// The settings of one model as one: the best score of each, the page of the setting-less slug,
-/// else the shortest, and the speed of the setting with the best index, which the scores mostly
-/// are: a thinking model is not as quick as its non-reasoning setting.
+/// The settings of one model as one: the setting with the best index, the first on a tie, all
+/// of it, scores and speed, as the best of each is a model no setting is. Among those scored
+/// on the most benchmarks: "Gemini 3.7 Flash (Medium)" has the higher index and no
+/// Terminal-Bench 4.0, which the index now counts. Its page is that of the setting-less slug,
+/// else the shortest.
 fn aa_fold<'a>(entries: impl IntoIterator<Item = &'a AaEntry>) -> Option<AaEntry> {
-    let mut entries = entries.into_iter();
-    let mut all = entries.next()?.clone();
-    let rank = |e: &AaEntry| (e.speed != (None, None)).then(|| e.index.unwrap_or(f64::NEG_INFINITY));
-    let mut fastest = rank(&all);
-    for e in entries {
-        if let Some(r) = rank(e).filter(|r| fastest.is_none_or(|f| *r > f)) {
-            (fastest, all.speed) = (Some(r), e.speed);
-        }
-        all.index = [all.index, e.index].into_iter().flatten().reduce(f64::max);
-        for (f, x) in &e.scores {
-            let best = all.scores.entry(f.clone()).or_insert(0.0);
-            *best = best.max(*x);
-        }
-        if (e.slug.len(), &e.slug) < (all.slug.len(), &all.slug) {
-            all.slug.clone_from(&e.slug);
-        }
-    }
-    Some(all)
+    let entries: Vec<&AaEntry> = entries.into_iter().collect();
+    let rank = |e: &AaEntry| (e.scores.len(), e.index.unwrap_or(f64::NEG_INFINITY));
+    let best = entries.iter().copied().reduce(|best, e| if rank(e) > rank(best) { e } else { best })?;
+    let page = entries.iter().map(|e| &e.slug).min_by_key(|s| (s.len(), *s))?;
+    Some(AaEntry { slug: page.clone(), ..best.clone() })
 }
 
 /// Lowercase alphanumerics only: "Claude Opus 4.5" == "claude-opus-4-5" == "claude_opus_4.5".
@@ -2088,8 +2078,8 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
 
 // ---------- Artificial Analysis ----------
 
-/// The API's models, the reasoning settings of one model folded into one group with the best
-/// score of each (`aa_words`, `aa_fold`), as Epoch's are, and kept apart in `settings` for the
+/// The API's models, the reasoning settings of one model folded into one group, its best
+/// (`aa_words`, `aa_fold`), as Epoch's are, and kept apart in `settings` for the
 /// rows that name one. Scores are 0..1, as Epoch's; the index stays 0..100.
 fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("artificial analysis: {e}"))?;
@@ -3075,15 +3065,25 @@ mod tests {
             {"slug":"claude-4-5-sonnet-thinking","name":"Claude 4.5 Sonnet (Reasoning)","model_creator":{"name":"Anthropic"},
              "median_output_tokens_per_second":40.0,"median_time_to_first_token_seconds":0.5,
              "median_time_to_first_answer_token":9.0,
-             "evaluations":{"artificial_analysis_intelligence_index":60,"terminalbench_v4_0":0.7,"scicode":null,"hle":0.3}},
+             "evaluations":{"artificial_analysis_intelligence_index":60,"terminalbench_v4_0":0.7,"scicode":0.5,"hle":0.3}},
             {"slug":"unscored","name":"Unscored","evaluations":{}}
         ]}"#;
         let sc = parse_aa(json).unwrap();
         let key = aa_words("Claude Sonnet 4.5", true).join("-");
         let (name, index, scores) = &sc.groups[&key];
         assert_eq!((name.as_str(), *index), ("Claude 4.5 Sonnet", Some(60.0)), "the best setting's index");
-        assert_eq!(scores[crate::fit::AA_CODING], 0.4, "of the setting scored on both: a null is no score");
-        assert_eq!(scores["terminalbench_v4_0"], 0.7);
+        assert_eq!((scores[crate::fit::AA_CODING], scores["terminalbench_v4_0"]), (0.6, 0.7), "all of that setting's");
+        let e = |index, scored: usize| AaEntry {
+            index: Some(index),
+            scores: (0..scored).map(|i| (i.to_string(), 0.5)).collect(),
+            ..Default::default()
+        };
+        let most = aa_fold([&e(40.0, 1), &e(39.0, 3)]).unwrap();
+        assert_eq!(
+            (most.index, most.scores.len()),
+            (Some(39.0), 3),
+            "the setting scored on the most, not another's index"
+        );
         assert_eq!(scores["hle"], 0.3);
         assert_eq!((sc.page[&key].as_str(), sc.org[&key].as_str()), ("claude-4-5-sonnet", "Anthropic"));
         assert_eq!(

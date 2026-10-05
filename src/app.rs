@@ -74,10 +74,10 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
 
 /// The benchmarks the dropdown of the task column `id` lists, after the entry for the task's
 /// score: "all" with Epoch, which fits them into one, the task's own field with Artificial
-/// Analysis.
+/// Analysis, which may have no other about the task: the dropdown then names that one.
 fn benched(id: &str) -> Option<(&'static str, &'static [&'static str])> {
     let (own, more) = crate::fit::task(id)?.sourced();
-    (!more.is_empty()).then_some((own.unwrap_or("all"), more))
+    (own.is_some() || !more.is_empty()).then_some((own.unwrap_or("all"), more))
 }
 
 fn positive(x: f64) -> Option<f64> {
@@ -3491,6 +3491,11 @@ mod tests {
         assert_eq!(menu(&a), [(crate::fit::AA_CODING, 2), ("terminalbench_v4_0", 0), ("scicode", 1)]);
         press(&mut a, "G ");
         assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
+        // A task with no other benchmark still has its dropdown, which names the one.
+        code(&mut a, KeyCode::Esc);
+        a.col = ECI + 2;
+        press(&mut a, "d");
+        assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0"]);
     }
 
     #[test]
