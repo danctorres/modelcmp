@@ -21,14 +21,46 @@ ECI and its scores (a model with few scores stays near its ECI):
 - Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0
 - Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles, LMCA, DTBench
 
-The capability starts at the model's ECI and moves toward what its scores on those benchmarks
-say, using Epoch's difficulty and slope for each benchmark, with guessing counted as 0. One score
-moves it a little, many that agree move it more. A model without an ECI starts from a fit to
-all its scores, and has task scores only when it was run on at least four of these benchmarks.
+[Scores](#scores) says how each of these numbers is obtained.
 
 `modelcmp recommend --json` gives the same lists as `benchmarks`; with Artificial Analysis, the one field the score is. In the TUI, move the column cursor and the
 top border says what the column means. Green and red mark the best and worst value in a
 column, and in a row of compare.
+
+## Scores
+
+Where the numbers in the score columns come from. Both sources are downloaded on a refresh.
+
+Epoch AI (the default, <https://epoch.ai/data/benchmark_data.zip>, no key):
+
+- ECI is Epoch's Capabilities Index as Epoch publishes it. modelcmp does not compute it.
+- A benchmark score is the best one Epoch lists for any version of the model, taken as a share
+  of the way from guessing (Epoch's random baseline) to the benchmark's ceiling.
+- Coding, Agentic and Reason are computed by modelcmp, in ECI points. Each starts at the
+  model's ECI and moves toward what its scores on the task's benchmarks say, using the
+  difficulty and slope Epoch publishes for each benchmark. One score moves it a little, many
+  that agree move it more. A model without an ECI starts from a fit to all its scores, and
+  has task scores only when it was run on at least four of the benchmarks listed above.
+- A task score stays close to the ECI. On 2026-10-05 half of them were within 0.3 points of
+  their model's ECI and nine in ten within 1 point. Epoch fits all its benchmarks with one
+  capability per model, the ECI, and most models were run on a single coding or agentic
+  benchmark. So a task column reorders models of similar ECI and does not set a model far
+  from where its ECI puts it.
+- Only benchmarks Epoch still runs on new models count toward a task.
+
+Artificial Analysis (`--source aa`, its API with your key):
+
+- AAII is its Intelligence Index as it publishes it.
+- Agentic and Reason are one benchmark's score as published, 0-100. Coding is the mean of
+  two, computed by modelcmp. Tok/s and TTFT are its measurements.
+- A model's numbers are those of one of its reasoning settings, chosen as [Columns](#columns) says.
+
+With either source:
+
+- Value is computed by modelcmp: the model's coding percentile divided by its price, ranked
+  0-100 among the models that have both. Free models rank above every priced one.
+- A row has the scores of the model the source lists under its name, else under the id most
+  of the row's offers are sold as, and none when those offers are another release.
 
 ## Commands
 
