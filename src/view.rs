@@ -695,7 +695,7 @@ pub fn detail_rows(
     let benches = if source == crate::data::Source::Aa { "" } else { ", benchmarks at best effort" };
     let mut v = vec![
         format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
-        format!("  developer:  {}", or_dash(&m.developer)),
+        format!("  developer:  {}", or_dash(&m.devs().collect::<Vec<_>>().join(", "))),
         format!("  via:        {}", via(m, any, get)),
         // What you'd pay and to whom, `~` as in the table; the list price when it is not yours.
         // Per 1M tokens, as the providers below say.

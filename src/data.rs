@@ -36,7 +36,7 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Coding Index, and `Model::ttft` is to the first answer token. 14: its scores are all of one
 /// reasoning setting. 15: Epoch's tasks without the benchmarks it no longer runs, and no task
 /// score for a model without an ECI scored on few benchmarks. 16: `Model::hf`.
-const FORMAT: u32 = 16;
+const FORMAT: u32 = 17;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -640,6 +640,10 @@ pub struct Model {
     /// Who trained it: Epoch's organization, else the vendor prefix of an OpenRouter-style id.
     #[serde(default)]
     pub developer: String,
+    /// Where its developer is from, as Epoch says: "China", "USA". Empty when Epoch knows no
+    /// model of the developer's.
+    #[serde(default)]
+    pub country: String,
     pub context: u64,
     pub max_output: u64,
     pub tool_call: bool,
@@ -750,6 +754,11 @@ impl Model {
     /// `Offer::blended` of `priced_offer`; 0 when it is free, none when nobody lists a price.
     pub fn cost(&self) -> Option<f64> {
         self.quoted().map(|q| q.0.blended())
+    }
+
+    /// What the Dev dropdown and `--dev` pick the model by: its developer and that one's country.
+    pub fn devs(&self) -> impl Iterator<Item = &str> {
+        [self.developer.as_str(), self.country.as_str()].into_iter().filter(|s| !s.is_empty())
     }
 
     /// The model's page on models.dev, which lists every provider's price for it.
@@ -2190,6 +2199,8 @@ struct Scores {
     versions: HashMap<String, BTreeSet<String>>,
     /// group -> organization.
     org: HashMap<String, String>,
+    /// Developer (`dev_key`) -> its country, Epoch's only.
+    country: HashMap<String, String>,
     /// Benchmark -> Epoch's fit of it.
     benches: HashMap<String, crate::fit::Bench>,
     /// group -> task -> percentile, and the value it shows.
@@ -2254,20 +2265,33 @@ fn short_org(s: &str) -> String {
     }
 }
 
+/// A developer's name without what `unify_developers` drops: one key for all its spellings.
+fn dev_key(d: &str) -> String {
+    let mut k = norm(d);
+    while let Some(s) = ["ai", "org", "labs", "corp", "research", "inc"]
+        .iter()
+        .find_map(|x| k.strip_suffix(x).filter(|s| !s.is_empty()))
+    {
+        k = s.to_string();
+    }
+    k
+}
+
+/// Epoch's country names, the long ones as they are said.
+fn short_country(c: &str) -> &str {
+    match c {
+        "United States of America" => "USA",
+        "United Kingdom" => "UK",
+        "United Arab Emirates" => "UAE",
+        c => c,
+    }
+}
+
 /// One spelling per developer: names equal once case, punctuation and a trailing "AI", "org",
 /// "Labs", "Corp", "Research" or "Inc" are dropped ("Zai-org" and "Z.ai", "Deepseek-ai" and
 /// "DeepSeek") all take the most used one, capitalised ones winning ties.
 fn unify_developers(models: &mut [Model]) {
-    fn key(d: &str) -> String {
-        let mut k = norm(d);
-        while let Some(s) = ["ai", "org", "labs", "corp", "research", "inc"]
-            .iter()
-            .find_map(|x| k.strip_suffix(x).filter(|s| !s.is_empty()))
-        {
-            k = s.to_string();
-        }
-        k
-    }
+    use dev_key as key;
     let mut counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
     for m in models.iter().filter(|m| !m.developer.is_empty()) {
         *counts.entry(key(&m.developer)).or_default().entry(m.developer.clone()).or_default() += 1;
@@ -2425,6 +2449,13 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         version_group.insert(version.to_string(), group.to_string());
         if let Some(o) = r.get("organization").filter(|o| !o.is_empty()) {
             ep.org.entry(norm(group)).or_insert_with(|| o.clone());
+            // A model of several countries is of several organizations, and does not say which is whose.
+            if let Some(c) = r.get("country").filter(|c| !c.is_empty() && !c.contains(',')) {
+                // An organization with no name left is no developer: a model with none takes no country.
+                for key in o.split(',').map(|org| dev_key(&short_org(org))).filter(|k| !k.is_empty()) {
+                    ep.country.entry(key).or_insert_with(|| short_country(c).into());
+                }
+            }
         }
     }
     let group_of = |version: &str| {
@@ -2849,6 +2880,10 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         }
     }
     unify_developers(&mut models);
+    let country = epoch.map_or(&ep.country, |e| &e.country);
+    for m in &mut models {
+        m.country = country.get(&dev_key(&m.developer)).cloned().unwrap_or_default();
+    }
     models.sort_by(|a, b| {
         b.eci
             .unwrap_or(0.0)

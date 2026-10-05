@@ -60,7 +60,7 @@ enum Cmd {
         /// Selected only: your shortlist (`S` in the TUI)
         #[arg(short = 'm', long, alias = "marked")]
         selected: bool,
-        /// Only these developers, e.g. --dev anthropic --dev openai (the Dev dropdown, `d`, in the TUI)
+        /// Only these developers or countries, e.g. --dev anthropic --dev china (the Dev dropdown, `d`, in the TUI)
         #[arg(long)]
         dev: Vec<String>,
         /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli); repeatable (the Via dropdown, `d`, in the TUI)

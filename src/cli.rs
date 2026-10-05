@@ -252,7 +252,7 @@ pub struct ListOpts {
 
 /// The models `o` asks for, and how many before `--limit` cut them.
 fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'a Model>, usize)> {
-    check("--dev", &o.dev, data.models.iter().map(|m| m.developer.as_str()))?;
+    check("--dev", &o.dev, data.models.iter().flat_map(Model::devs))?;
     // Via as the table shows it, so "not available" can be picked too.
     let any = data.any_available();
     check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, any)))?;
@@ -268,7 +268,7 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
     let mut models: Vec<&Model> = visible(data, store, o.all, o.selected)
         .map(|(_, m)| m)
         .filter(|m| {
-            (o.dev.is_empty() || has(&o.dev, &m.developer))
+            (o.dev.is_empty() || m.devs().any(|d| has(&o.dev, d)))
                 // On a task not through ollama or llama.cpp: its copy is no pick on merit (`Model::local`).
                 && (o.via.is_empty()
                     || shown_via(m, any).iter().any(|v| has(&o.via, v) && !(task && crate::data::runs_here(v))))

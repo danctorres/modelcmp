@@ -73,6 +73,7 @@ modelcmp list --task coding --tier mid         # just one: the cheapest within 3
 modelcmp list --task coding --tier mid --id    # only its provider/model, for opencode -m $(...)
 modelcmp list --min coding=155 --sort price    # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
+modelcmp list --dev china                      # every model of a developer from there
 modelcmp show sonnet-5                         # everything about one model
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
 modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, aa, openrouter or hf; without --on, the first to have one

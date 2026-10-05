@@ -933,7 +933,7 @@ pub struct App {
     pub descending: bool,
     /// (column, min, max) filters set with `>` and `<`.
     pub bounds: Vec<(usize, f64, f64)>,
-    /// Developers picked from the Dev dropdown; empty is any.
+    /// Developers and countries picked from the Dev dropdown; empty is any.
     pub dev: Vec<String>,
     /// Harnesses picked from the Via dropdown; empty is any.
     pub via: Vec<String>,
@@ -1551,7 +1551,7 @@ impl App {
                     Some(EXCLUDED) => self.store.is_excluded(&m.key),
                     _ => true,
                 }
-                && (skip == 1 || self.dev.is_empty() || self.dev.contains(&m.developer))
+                && (skip == 1 || self.dev.is_empty() || m.devs().any(|d| self.dev.iter().any(|x| x == d)))
                 && (skip == VIA
                     || self.via.is_empty()
                     || self.via.iter().any(|h| self.shown_via(m).contains(&h.as_str())))
@@ -2254,16 +2254,16 @@ impl App {
             let by_dev = col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
             // Via as the table shows it, so "not available" can be picked too.
-            let labels =
-                ms.iter().flat_map(|&(_, m)| if by_dev { vec![m.developer.as_str()] } else { self.shown_via(m) });
+            let labels = ms.iter().flat_map(|&(_, m)| if by_dev { m.devs().collect() } else { self.shown_via(m) });
             for l in labels.filter(|l| !l.is_empty()) {
                 *counts.entry(l).or_default() += 1;
             }
-            // Developers A-Z whatever their case, so xAI comes before Z.ai; harnesses with the
-            // most models first, where the stable sort keeps ties A-Z.
+            // Countries, then developers, each A-Z whatever their case, so xAI comes before Z.ai;
+            // harnesses with the most models first, where the stable sort keeps ties A-Z.
             let mut names: Vec<(String, usize)> = counts.into_iter().map(|(d, n)| (d.to_string(), n)).collect();
             if by_dev {
-                names.sort_by_key(|(d, _)| d.to_lowercase());
+                let countries: std::collections::HashSet<&str> = ms.iter().map(|(_, m)| m.country.as_str()).collect();
+                names.sort_by_key(|(d, _)| (!countries.contains(d.as_str()), d.to_lowercase()));
             } else {
                 names.sort_by_key(|&(_, n)| Reverse(n));
             }
@@ -3788,6 +3788,23 @@ mod tests {
         a.col = ECI + 2;
         press(&mut a, "d");
         assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0"]);
+    }
+
+    #[test]
+    fn the_dev_dropdown_lists_countries_before_developers() {
+        let mut a = app();
+        for m in a.data.models.iter_mut().filter(|m| m.developer != "meta") {
+            m.country = "USA".into();
+        }
+        a.rebuild();
+        a.col = 0;
+        press(&mut a, "ld");
+        assert_eq!(menu(&a), [("any", 3), ("USA", 3), ("anthropic", 1), ("openai", 2)]);
+        press(&mut a, "j ");
+        assert_eq!(keys(&a).len(), 3, "every model of a developer from there");
+        // With a developer picked too, either one shows a model.
+        press(&mut a, "j ");
+        assert_eq!((a.dev.len(), keys(&a).len()), (2, 3));
     }
 
     #[test]
