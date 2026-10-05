@@ -1323,10 +1323,11 @@ fn progress_text(total: usize, awaited: &[&str]) -> String {
 pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
     load_repos();
     let src = source();
-    let key = match src {
-        Source::Epoch => None,
-        Source::Aa => Some(aa_key().ok_or(Failure::NoKey)?),
-    };
+    // Asked for under Epoch too when it is there: one refresh serves both sources.
+    let key = aa_key();
+    if src == Source::Aa && key.is_none() {
+        return Err(Failure::NoKey);
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, answers) = std::sync::mpsc::channel();
     // The installed ones: one not installed is left out.
@@ -1338,7 +1339,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let res = download(src, key.as_deref(), steps);
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
-    let (mut data, [aa, epoch, openrouter], release) = match res {
+    let (mut data, mut other, [aa, epoch, openrouter], release) = match res {
         Ok(d) => d,
         Err(e) => {
             let _ = harness.join();
@@ -1367,8 +1368,14 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     epoch_listed(&mut data.models, &epoch);
     // ponytail: no repo is kept from the last refresh, as the pages are. Read them from the
     // cache in `cached_pages` if a refresh without OpenRouter should keep its links.
-    let unnamed = (!hf_listed(&mut data.models, &openrouter.unwrap_or_default()))
+    let openrouter = openrouter.unwrap_or_default();
+    let unnamed = (!hf_listed(&mut data.models, &openrouter))
         .then(|| "openrouter.ai did not list its models: links to huggingface.co may be missing".to_string());
+    if let Some((_, Ok(o))) = &mut other {
+        aa_pages(&mut o.models, &aa);
+        epoch_listed(&mut o.models, &epoch);
+        hf_listed(&mut o.models, &openrouter);
+    }
     // Only the update notice hangs on it, so without it the refresh still succeeds.
     data.latest = release
         .ok()
@@ -1405,21 +1412,32 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let uncached = crate::store::write_atomic(&cache_path(src), &json)
         .err()
         .map(|e| format!("could not cache the data in {}: {e}", cache_path(src).display()));
+    // The other source's cache, with the same listings, so that a switch to it needs no refresh.
+    let unswitched = other.and_then(|(s, o)| {
+        let written = o.and_then(|mut o| {
+            (o.latest, o.harness, o.kept) = (data.latest.clone(), data.harness.clone(), data.kept.clone());
+            let json = serde_json::to_vec(&o).map_err(|e| e.to_string())?;
+            Ok(crate::store::write_atomic(&cache_path(s), &json).map_err(|e| e.to_string())?)
+        });
+        written.err().map(|e: Failure| format!("{}'s data was not refreshed ({e})", s.label()))
+    });
     let unlisted = |hs: &[String], kept: &str| {
         (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
     };
     let renamed = data.warning.take();
     let warnings =
         [renamed, unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
-    let warnings = warnings.into_iter().chain(unpaged).chain([unnamed]);
+    let warnings = warnings.into_iter().chain(unpaged).chain([unnamed, unswitched]);
     data.warning = Some(warnings.flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
 
-/// What `download` gives: the merged data, then Artificial Analysis's and Epoch's sitemaps,
-/// OpenRouter's models and modelcmp's newest release, which a refresh can do without.
-type Downloaded = (Data, [Result<Vec<u8>, Failure>; 3], Result<Vec<u8>, Failure>);
+/// What `download` gives: the merged data, the other source's when it was asked for, then
+/// Artificial Analysis's and Epoch's sitemaps, OpenRouter's models and modelcmp's newest
+/// release, which a refresh can do without.
+type Downloaded =
+    (Data, Option<(Source, Result<Data, Failure>)>, [Result<Vec<u8>, Failure>; 3], Result<Vec<u8>, Failure>);
 
 /// How long the downloads a refresh can do without are waited for once it has the others.
 const GRACE: Duration = Duration::from_secs(10);
@@ -1453,9 +1471,9 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     }
     drop(tx);
     let mut got: [Result<Vec<u8>, Failure>; 7] = URLS.map(|url| Err(format!("{url}: no reply").into()));
-    // Once the first three that were asked for are in, the rest get `GRACE` and no more. Epoch's
-    // is among them under Artificial Analysis too, though not needed: its names decide which
-    // key a merged row keeps, and your favorites and notes hang on the key.
+    // Once the first three that were asked for are in, the rest get `GRACE` and no more. The
+    // other source's scores are among them, though not needed: they fill its cache, and Epoch's
+    // names decide which key a merged row keeps, which your favorites and notes hang on.
     let (mut missing, mut end) = (2 + usize::from(key.is_some()), None::<Instant>);
     loop {
         let next = match end {
@@ -1477,29 +1495,32 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     // A download not waited for is awaited no more, before the merge and not after it.
     sites.into_iter().for_each(|site| answered(steps, site));
     let [models, epoch, api, aa, epoch_pages, openrouter, release] = got;
-    let data = match src {
-        Source::Epoch => {
-            let ep = parse_epoch(&epoch?)?;
-            let mut data = merge(&models?, &ep, None)?;
-            epoch_named(&mut data.models, &ep);
-            data
-        }
-        Source::Aa => {
-            // Without it the refresh still succeeds, with fewer epoch.ai links and Artificial
-            // Analysis's names deciding the keys.
-            let ep = epoch.and_then(|z| Ok(parse_epoch(&z)?));
-            let mut data = merge(&models?, &parse_aa(&api?)?, ep.as_ref().ok())?;
-            match &ep {
-                Ok(ep) => epoch_named(&mut data.models, ep),
-                // Said, as a favorite or a note on a key that changed is not found until the next refresh.
-                Err(e) => {
-                    data.warning = Some(format!("epoch.ai's names did not come ({e}): some models go by another key"))
-                }
-            }
-            data
-        }
+    let models = models?;
+    let ep = epoch.and_then(|z| Ok(parse_epoch(&z)?));
+    let by_epoch = || -> Result<Data, Failure> {
+        let ep = ep.as_ref().map_err(Failure::clone)?;
+        let mut data = merge(&models, ep, None)?;
+        epoch_named(&mut data.models, ep);
+        Ok(data)
     };
-    Ok((data, [aa, epoch_pages, openrouter], release))
+    let by_aa = || -> Result<Data, Failure> {
+        // Without Epoch's the refresh still succeeds, with fewer epoch.ai links and Artificial
+        // Analysis's names deciding the keys.
+        let mut data = merge(&models, &parse_aa(api.as_ref().map_err(Failure::clone)?)?, ep.as_ref().ok())?;
+        match &ep {
+            Ok(ep) => epoch_named(&mut data.models, ep),
+            // Said, as a favorite or a note on a key that changed is not found until the next refresh.
+            Err(e) => {
+                data.warning = Some(format!("epoch.ai's names did not come ({e}): some models go by another key"))
+            }
+        }
+        Ok(data)
+    };
+    let (data, other) = match src {
+        Source::Epoch => (by_epoch()?, key.map(|_| (Source::Aa, by_aa()))),
+        Source::Aa => (by_aa()?, Some((Source::Epoch, by_epoch()))),
+    };
+    Ok((data, other, [aa, epoch_pages, openrouter], release))
 }
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.

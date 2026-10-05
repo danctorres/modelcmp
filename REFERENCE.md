@@ -29,7 +29,7 @@ column, and in a row of compare.
 
 ## Scores
 
-Where the numbers in the score columns come from. Both sources are downloaded on a refresh.
+Where the numbers in the score columns come from. Both sources are downloaded on a refresh, Artificial Analysis only with its key, so switching between them needs no second refresh.
 
 Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
 
