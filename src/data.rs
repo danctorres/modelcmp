@@ -339,7 +339,7 @@ pub fn gguf_repo(base: &str, key: &str) -> Result<String, String> {
     let url = format!(
         "https://huggingface.co/api/models?filter=gguf&filter=base_model:quantized:{base}&sort=downloads&direction=-1&limit=20"
     );
-    let list = fetch(&url, None).map_err(|e| e.to_string())?;
+    let list = fetch_within(&url, None, HF_WAIT).map_err(|e| e.to_string())?;
     gguf_named(&list, key).ok_or_else(|| format!("Hugging Face has no GGUF copy of {base}"))
 }
 
@@ -352,6 +352,73 @@ fn gguf_named(list: &[u8], key: &str) -> Option<String> {
     let keys = HashSet::from([key]);
     let named = |id: &String| local_tags(&[format!("{LLAMA}/{id}")], &keys).contains_key(key);
     serde_json::from_slice::<Vec<Repo>>(list).ok()?.into_iter().map(|r| r.id).find(named)
+}
+
+/// How long Hugging Face has to say which repo to download, and its size: it answers in a
+/// fraction of a second, and `x` and `get` wait on it.
+const HF_WAIT: Duration = Duration::from_secs(10);
+
+/// The bytes the GGUF `repo` takes to download, as Hugging Face lists its files.
+pub fn gguf_size(repo: &str) -> Result<u64, String> {
+    let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true");
+    let tree = fetch_within(&url, None, HF_WAIT).map_err(|e| e.to_string())?;
+    gguf_bytes(&tree).ok_or_else(|| format!("{repo} lists no .gguf file"))
+}
+
+/// The size of the files ollama and llama.cpp take from a repo named with no quantization, out
+/// of Hugging Face's `[{"path": "x-Q4_K_M.gguf", "size": 1}]`: the first Q4_K_M one, with every
+/// part of it when it is split (`x-Q4_K_M-00001-of-00002.gguf`), else the first `.gguf`.
+// ponytail: the vision projector (`mmproj`) llama.cpp fetches with it is not counted, and which
+// file is first is a guess at theirs: ask the runner's own resolver if the size has to be exact.
+fn gguf_bytes(tree: &[u8]) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct File {
+        path: String,
+        #[serde(default)]
+        size: u64,
+    }
+    let files: Vec<File> = serde_json::from_slice(tree).ok()?;
+    let lower = |f: &File| f.path.to_ascii_lowercase();
+    let weights = || files.iter().filter(|f| lower(f).ends_with(".gguf") && !lower(f).contains("mmproj"));
+    // What a split file's parts share: its path up to `-00001-of-00002.gguf`.
+    let whole = |f: &File| {
+        let p = lower(f);
+        let mut ends = p.trim_end_matches(".gguf").rsplitn(4, '-');
+        let num = |s: Option<&str>| s.is_some_and(|s| s.len() == 5 && s.bytes().all(|b| b.is_ascii_digit()));
+        let split = num(ends.next()) && ends.next() == Some("of") && num(ends.next());
+        ends.next().filter(|_| split).map(str::to_string)
+    };
+    let first = weights().find(|f| lower(f).contains("q4_k_m")).or_else(|| weights().next())?;
+    Some(match whole(first) {
+        Some(stem) => weights().filter(|f| whole(f).as_ref() == Some(&stem)).map(|f| f.size).sum(),
+        None => first.size,
+    })
+}
+
+/// A download's size as said to you: `4.7 GB`, or `640 MB` under one.
+pub fn gb(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b < 1e9 { format!("{:.0} MB", b / 1e6) } else { format!("{:.1} GB", b / 1e9) }
+}
+
+/// Where the sizes of downloads are kept from one run to the next, next to the data.
+fn sizes_path() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join("sizes.json")
+}
+
+/// The size in bytes of each model's download, by key, as Hugging Face said it in a run
+/// before, so it is asked once for a model.
+// ponytail: kept for good, so a repo uploaded again at another size reads stale: date the
+// entries and ask again past some age if that ever shows.
+pub fn load_sizes() -> HashMap<String, u64> {
+    std::fs::read(sizes_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Keeps `sizes` for the next run. Not being able to is no error: they are asked again.
+pub fn save_sizes(sizes: &HashMap<String, u64>) {
+    if let Ok(json) = serde_json::to_vec(sizes) {
+        let _ = crate::store::write_atomic(&sizes_path(), &json);
+    }
 }
 
 /// Whether `harness` runs its models on this machine.
@@ -618,6 +685,11 @@ impl Model {
     pub fn local(&self) -> bool {
         let mut yours = self.offers.iter().filter(|o| o.available);
         self.offers.iter().any(|o| o.local) && yours.all(|o| o.local)
+    }
+
+    /// Your machine runs a copy of it, through ollama or llama.cpp, whoever else offers it.
+    pub fn here(&self) -> bool {
+        self.via.iter().any(|h| runs_here(h))
     }
 
     /// The model's page on a benchmark source, when it has one there (`epoch`, `aa`).
@@ -1364,8 +1436,14 @@ fn agent(limit: Duration) -> ureq::Agent {
 
 /// `url`'s body; `key` goes in Artificial Analysis's `x-api-key` header.
 fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, Failure> {
-    let agent = agent(Duration::from_secs(60));
-    let mut req = agent.get(url);
+    fetch_within(url, key, Duration::from_secs(60))
+}
+
+/// `fetch`, given up on after `limit`.
+fn fetch_within(url: &str, key: Option<&str>, limit: Duration) -> Result<Vec<u8>, Failure> {
+    // One for every download, so a second request to a site goes over the first's connection.
+    static AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| agent(Duration::from_secs(60)));
+    let mut req = AGENT.get(url).config().timeout_global(Some(limit)).build();
     if let Some(k) = key {
         req = req.header("x-api-key", k);
     }
@@ -3312,6 +3390,19 @@ mod tests {
         assert_eq!(gguf_named(list, "qwen3627b").as_deref(), Some("unsloth/Qwen3.6-27B-GGUF"), "the first so named");
         assert_eq!(gguf_named(list, "glm53"), None);
         assert_eq!(gguf_named(b"[]", "glm53"), None);
+        let tree = br#"[{"path":"README.md","size":9},{"path":"mmproj-F16.gguf","size":800},
+            {"path":"m-Q8_0.gguf","size":4270000000},{"path":"Q4_K_M/m-Q4_K_M-00001-of-00002.gguf","size":2000000000},
+            {"path":"Q4_K_M/m-Q4_K_M-00002-of-00002.gguf","size":500000000}]"#;
+        assert_eq!(gguf_bytes(tree).map(gb).as_deref(), Some("2.5 GB"), "both parts of the Q4_K_M one");
+        let other =
+            br#"[{"type":"directory","path":"x"},{"path":"mmproj.gguf","size":8},{"path":"m-Q8_0.gguf","size":7}]"#;
+        assert_eq!((gguf_bytes(other), gguf_bytes(b"[]")), (Some(7), None), "else the first, the projector aside");
+        let two = br#"[{"path":"imatrix/m-Q4_K_M.gguf","size":3},{"path":"m-Q4_K_M.gguf","size":5},{"path":"m-ablit-Q4_K_M.gguf","size":9}]"#;
+        assert_eq!(gguf_bytes(two), Some(3), "one file, not every one so quantized");
+        assert_eq!(
+            (gb(40_000_000), gb(999_000_000), gb(1_000_000_000)),
+            ("40 MB".into(), "999 MB".into(), "1.0 GB".into())
+        );
         assert_eq!(gguf_repo("unsloth/GLM-5.3-GGUF", "glm53").as_deref(), Ok("unsloth/GLM-5.3-GGUF"), "one already");
         assert_eq!(get_cmd(LLAMA, "a/b-GGUF"), ["llama-cli", "-hf", "a/b-GGUF"]);
         assert_eq!(get_cmd(OLLAMA, "a/b-GGUF"), ["ollama", "run", "hf.co/a/b-GGUF"]);

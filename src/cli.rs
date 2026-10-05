@@ -548,7 +548,7 @@ pub fn open(data: &Data, q: &str, on: Option<&str>) -> Result {
 /// installed here, installing one first, once you agree, where there is none: the copy it
 /// already has, else the GGUF one Hugging Face has of the model's repo (`data::gguf_repo`).
 pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
-    use crate::data::{LLAMA, OLLAMA, get_cmd, gguf_repo, has, install_cmd};
+    use crate::data::{LLAMA, OLLAMA, gb, get_cmd, gguf_repo, gguf_size, has, install_cmd};
     let m = resolve(data, q)?;
     let local = [LLAMA, OLLAMA];
     let runner = match via {
@@ -570,7 +570,12 @@ pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
         Some(cmd) => cmd.clone(),
         None => {
             let none = || format!("{} has no repo on Hugging Face to download", m.name);
-            get_cmd(runner, &gguf_repo(m.hf_repo().ok_or_else(none)?, &m.key)?)
+            let repo = gguf_repo(m.hf_repo().ok_or_else(none)?, &m.key)?;
+            // Said before anything is installed or downloaded, and the download goes on without it.
+            if let Ok(bytes) = gguf_size(&repo) {
+                eprintln!("{repo} is a download of about {}", gb(bytes));
+            }
+            get_cmd(runner, &repo)
         }
     };
     if !has(runner) {

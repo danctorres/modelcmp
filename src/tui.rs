@@ -390,6 +390,17 @@ fn event_loop(
     mut pre: Option<Refresh>,
 ) -> Result<Option<Vec<Vec<String>>>, String> {
     let mut dirty = true;
+    // The sizes of downloads Hugging Face is asked for (`Effect::Size`), and how many are awaited.
+    let (size_tx, size_rx) = mpsc::channel::<(String, Option<u64>)>();
+    let mut sizing = 0usize;
+    app.sizes = data::load_sizes();
+    let ask_size = |key: String, base: String| {
+        let tx = size_tx.clone();
+        std::thread::spawn(move || {
+            let bytes = data::gguf_repo(&base, &key).and_then(|r| data::gguf_size(&r)).ok();
+            let _ = tx.send((key, bytes));
+        });
+    };
     // The last press on a cell, which a second one makes a double click (`double`), and the
     // screen row of the last press on a table row, which a drag extends from (`dragged`).
     let (mut click, mut press) = (None, None);
@@ -410,6 +421,14 @@ fn event_loop(
             }
             None => {}
         }
+        while let Ok((key, bytes)) = size_rx.try_recv() {
+            sizing -= 1;
+            app.sized(&key, bytes);
+            if bytes.is_some() {
+                data::save_sizes(&app.sizes);
+                dirty = true;
+            }
+        }
         // The count of a refresh under way moves on its own, with no key pressed.
         let progress = rx.as_ref().map_or_else(String::new, |r| data::progress(&r.1));
         if progress != app.progress {
@@ -421,8 +440,17 @@ fn event_loop(
         }
         // Block on input; wake every 200ms while a refresh is in flight, else once a minute to
         // repaint the data age in the frame.
-        let timeout = if rx.is_some() { Duration::from_millis(200) } else { Duration::from_secs(60) };
-        dirty = rx.is_none();
+        // A size awaited is looked for often, as `x`'s list is open for it, and one still to ask
+        // for is asked once the cursor has rested on its model, not for each row it passes.
+        let rest = app.size_wanted();
+        let timeout = match (sizing > 0, rest, rx.is_some()) {
+            (true, ..) => Duration::from_millis(30),
+            (_, true, _) => Duration::from_millis(150),
+            (.., true) => Duration::from_millis(200),
+            _ => Duration::from_secs(60),
+        };
+        dirty = rx.is_none() && sizing == 0 && !rest;
+        let fire = rest && sizing == 0;
         // Handle every queued event before the next draw, so a held key never falls behind.
         let mut wait = timeout;
         while event::poll(wait).map_err(|e| e.to_string())? {
@@ -527,6 +555,11 @@ fn event_loop(
                             }
                         });
                     }
+                    // Off the loop: the list is open and takes the size when it comes.
+                    Some(Effect::Size(key, base)) => {
+                        sizing += 1;
+                        ask_size(key, base);
+                    }
                     Some(Effect::Source(src)) => {
                         if let Err(e) = app.store.save() {
                             app.report(Err(format!("could not save: {e}")));
@@ -557,6 +590,14 @@ fn event_loop(
                 }
             }
             dirty = true;
+        }
+        // No input in that time: the cursor rested on the model.
+        if fire
+            && wait > Duration::ZERO
+            && let Some(Effect::Size(key, base)) = app.size_ask()
+        {
+            sizing += 1;
+            ask_size(key, base);
         }
     }
 }
@@ -893,6 +934,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 || !app.bounds.is_empty()
                 || !app.dev.is_empty()
                 || !app.via.is_empty()
+                || app.local.is_some()
                 || app.task.is_some()
                 || app.only.is_some()
             {
@@ -2065,6 +2107,9 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     }
     if !app.via.is_empty() {
         parts.push(part(format!("Via={}", app.via.join(",")), Color::Yellow));
+    }
+    if let Some(l) = app.local {
+        parts.push(part(if l { "local only" } else { "not local" }.into(), Color::Yellow));
     }
     for &(col, lo, hi) in &app.bounds {
         let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };

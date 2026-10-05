@@ -114,7 +114,7 @@ Then run `modelcmp --refresh`.
 
 To get a model you do not have yet, press `x` on it and pick `download and run`, or run
 `modelcmp get <model>`. It finds the most downloaded GGUF copy of the model's Hugging Face repo and starts
-`llama-cli -hf <repo>` or `ollama run hf.co/<repo>`, which download it. With neither installed it asks
+`llama-cli -hf <repo>` or `ollama run hf.co/<repo>`, which download it. Both say the size of the download first, as `2.5 GB`. With neither installed it asks
 before installing one: llama.cpp with Homebrew, else ollama with its own script on Linux. It does not
 check that the model fits your machine. A model with no repo on Hugging Face has no such option.
 

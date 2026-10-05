@@ -311,9 +311,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
             ("d", "dropdown on a header with ▾; space enter toggle"),
             ("a A", "all models, including ones you have no access to / yours only"),
+            ("L", "local models only: your machine runs them, or in all can, and again the rest"),
             ("tab", "next tab; shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
-            ("c", "clear filters, bounds, task, S, F and E; the selection stays"),
+            ("c", "clear filters, bounds, L, task, S, F and E, and the selection stays"),
         ],
     ),
     (
@@ -717,6 +718,9 @@ pub enum Effect {
     Refresh,
     /// Run this command in a new terminal window.
     Launch(Vec<String>),
+    /// Ask Hugging Face the size of the download of the model `key`, whose repo there is the
+    /// second; `App::sized` takes the answer.
+    Size(String, String),
     /// A row of `f`'s grid: the model and a task, built in or your own, whose boxes favorite the
     /// model for the task or one tier of it; applied by `App` itself.
     Fav(String, String),
@@ -842,21 +846,40 @@ pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String
 /// The ways to get a model no runner on this machine has yet, each as its label and the
 /// `modelcmp get` that does it in a new terminal: one per runner installed here that lacks the
 /// model, else the one that can be installed. None for a model with no repo on Hugging Face.
-fn get_items(m: &Model) -> Vec<(String, Effect)> {
-    use crate::data::{LLAMA, OLLAMA, has, install_cmd};
+/// `size` is the download's, ` (4.7 GB)`, once known.
+fn get_items(m: &Model, size: &str, (have, install): &Tools) -> Vec<(String, Effect)> {
     if m.hf_repo().is_none() {
         return vec![];
     }
     let exe = std::env::current_exe().map_or_else(|_| "modelcmp".into(), |p| p.to_string_lossy().into_owned());
     let item = |h: &str, how: &str| {
         let cmd = [&exe, "get", &m.key, "--via", h, "--pause"].map(String::from).to_vec();
-        (format!("{h} {how}"), Effect::Launch(cmd))
+        (format!("{h} {how}{size}"), Effect::Launch(cmd))
     };
-    let lacking: Vec<_> = [OLLAMA, LLAMA].into_iter().filter(|h| has(h) && !m.via.iter().any(|v| v == h)).collect();
-    let none = ![OLLAMA, LLAMA].into_iter().any(has);
-    let install = [LLAMA, OLLAMA].into_iter().find(|h| none && install_cmd(h).is_some());
-    let got = lacking.into_iter().map(|h| item(h, "download and run"));
+    let lacking = have.iter().filter(|h| !m.via.iter().any(|v| v == *h));
+    let got = lacking.map(|h| item(h, "download and run"));
     got.chain(install.map(|h| item(h, "install, download and run"))).collect()
+}
+
+/// The runners installed here, ollama then llama.cpp, and with neither the one that can be
+/// installed.
+type Tools = (Vec<&'static str>, Option<&'static str>);
+
+/// `Tools` as this machine has them now: a search of `PATH`, slow where it holds Windows's
+/// folders under WSL, so made at start and at a refresh, not for each model.
+fn tools() -> Tools {
+    use crate::data::{LLAMA, OLLAMA, has, install_cmd};
+    let have: Vec<_> = [OLLAMA, LLAMA].into_iter().filter(|h| has(h)).collect();
+    let install = [LLAMA, OLLAMA].into_iter().find(|h| have.is_empty() && install_cmd(h).is_some());
+    (have, install)
+}
+
+/// The key of the model a `modelcmp get` of `get_items` downloads.
+fn got(e: &Effect) -> Option<&str> {
+    match e {
+        Effect::Launch(c) if c.len() > 2 && c[1] == "get" => Some(&c[2]),
+        _ => None,
+    }
 }
 
 /// A task's line as (index into `Data::models`, score), and the models on it only for being
@@ -893,6 +916,15 @@ pub struct App {
     pub dev: Vec<String>,
     /// Harnesses picked from the Via dropdown; empty is any.
     pub via: Vec<String>,
+    /// `L`: only the models your machine runs, or only the ones it does not; none is any.
+    pub local: Option<bool>,
+    /// The size in bytes of each model's download, by key, which `x` says: kept from one run to
+    /// the next by the shell (`data::load_sizes`).
+    pub sizes: std::collections::HashMap<String, u64>,
+    /// The models whose size was asked for since the last refresh: true while Hugging Face's
+    /// answer is awaited, false when none came, or when `x` offers no download of the model.
+    asked: std::collections::HashMap<String, bool>,
+    tools: Tools,
     /// Task whose price frontier the table shows, picked in the recommend overlay.
     pub task: Option<&'static Task>,
     /// Cursor in the recommend overlay: the task, and on its row 0 for its name, else the tier
@@ -992,6 +1024,10 @@ impl App {
             bounds: vec![],
             dev: vec![],
             via: vec![],
+            local: None,
+            sizes: Default::default(),
+            asked: Default::default(),
+            tools: tools(),
             task: None,
             task_cur: 0,
             task_sel: 0,
@@ -1503,6 +1539,7 @@ impl App {
                 && (skip == VIA
                     || self.via.is_empty()
                     || self.via.iter().any(|h| self.shown_via(m).contains(&h.as_str())))
+                && self.local.is_none_or(|l| l == self.local(m))
                 && self
                     .bounds
                     .iter()
@@ -1616,6 +1653,9 @@ impl App {
 
     /// A background refresh finished.
     pub fn refreshed(&mut self, res: Result<Data, Failure>) {
+        // A runner may be installed since, and the sizes that did not come are asked for again.
+        self.tools = tools();
+        self.asked.retain(|_, awaited| *awaited);
         self.refreshing = false;
         self.refresh_failed = res.is_err();
         match res {
@@ -1746,6 +1786,44 @@ impl App {
         in_reach(m, false, self.any_available)
     }
 
+    /// Whether `m` is local, as `L` keeps it: one your machine runs, and with `a` one it can, as
+    /// ollama or llama.cpp can download it from its Hugging Face repo (`x`, `modelcmp get`).
+    fn local(&self, m: &Model) -> bool {
+        m.here() || self.all && m.hf_repo().is_some()
+    }
+
+    /// Whether the size of the download of the model under the cursor is still to ask for.
+    /// Asked ahead of `x`, once the cursor rests on the model, and once until a refresh.
+    pub fn size_wanted(&self) -> bool {
+        let new = |m: &&Model| !self.sizes.contains_key(&m.key) && !self.asked.contains_key(&m.key);
+        self.current().filter(new).is_some_and(|m| m.hf_repo().is_some())
+    }
+
+    /// The question of that size, when `x` offers the model's download.
+    pub fn size_ask(&mut self) -> Option<Effect> {
+        let m = self.current().filter(|_| self.size_wanted())?;
+        let (key, repo) = (m.key.clone(), m.hf_repo()?.to_string());
+        let offered = !get_items(m, "", &self.tools).is_empty();
+        self.asked.insert(key.clone(), offered);
+        offered.then_some(Effect::Size(key, repo))
+    }
+
+    /// Hugging Face's answer on the download of the model `key`: with its `bytes`, `x` says so
+    /// from now on, in its open list too. With none, `x` asks again.
+    pub fn sized(&mut self, key: &str, bytes: Option<u64>) {
+        let Some(bytes) = bytes else {
+            self.asked.insert(key.into(), false);
+            return;
+        };
+        self.asked.remove(key);
+        if let Input::Choose { kind: Kind::Launch, items, .. } = &mut self.input {
+            for (label, _) in items.iter_mut().filter(|i| got(&i.1) == Some(key)) {
+                label.push_str(&format!(" ({})", crate::data::gb(bytes)));
+            }
+        }
+        self.sizes.insert(key.into(), bytes);
+    }
+
     /// Whether you have access to a model, as the data last set had it.
     pub fn any_available(&self) -> bool {
         self.any_available
@@ -1785,7 +1863,11 @@ impl App {
 
     /// Whether a search, a dropdown or a bound narrows the models too.
     pub fn filtered_too(&self) -> bool {
-        !(self.query.trim().is_empty() && self.bounds.is_empty() && self.dev.is_empty() && self.via.is_empty())
+        !(self.query.trim().is_empty()
+            && self.bounds.is_empty()
+            && self.dev.is_empty()
+            && self.via.is_empty()
+            && self.local.is_none())
     }
 
     /// Recommend ranks the models of tab `i`, picked on its `among` line: the table's tab too,
@@ -2622,6 +2704,15 @@ impl App {
                 self.only = (self.only != Some(EXCLUDED)).then_some(EXCLUDED);
                 self.rebuild();
             }
+            // One that is on is always left, as a tab or a refresh may leave it with no model.
+            KeyCode::Char('L') if table && self.local.is_none() && !self.data.models.iter().any(|m| self.local(m)) => {
+                self.refuse("no local models: ollama and llama.cpp run none here, and a shows the ones they can");
+            }
+            // Local only, then not local, then any.
+            KeyCode::Char('L') if table => {
+                self.local = [Some(true), Some(false), None][self.local.map_or(0, |l| 2 - l as usize)];
+                self.rebuild();
+            }
             KeyCode::Char(']' | '[') if table && !self.any_marked() => self.refuse(NO_SELECTED),
             KeyCode::Char(c @ (']' | '[')) if table => {
                 self.jump(if c == ']' { n } else { -n }, "selected", |a, m| a.store.is_marked(&m.key));
@@ -2655,6 +2746,7 @@ impl App {
                 self.bounds.clear();
                 self.dev.clear();
                 self.via.clear();
+                self.local = None;
                 self.drop_benches(true);
                 // The task set the sort; back to the default.
                 if self.task.take().is_some() {
@@ -2755,13 +2847,19 @@ impl App {
             // A list even of one, as `o`'s.
             KeyCode::Char('x') if row => {
                 let m = self.current()?;
+                let size = self.sizes.get(&m.key).map(|b| format!(" ({})", crate::data::gb(*b)));
                 let items: Vec<_> = m
                     .via
                     .iter()
                     .filter_map(|h| launch_cmd(m, h, &self.data.harness))
                     .map(|c| (c.join(" "), Effect::Launch(c)))
-                    .chain(get_items(m))
+                    .chain(get_items(m, size.as_deref().unwrap_or(""), &self.tools))
                     .collect();
+                // Asked already where the cursor rested on the model, and again here when no
+                // answer came.
+                let ask = (size.is_none() && items.iter().any(|i| got(&i.1).is_some()))
+                    .then(|| (m.key.clone(), m.hf_repo().unwrap_or("").to_string()))
+                    .filter(|(key, _)| self.asked.get(key) != Some(&true));
                 if items.is_empty() {
                     self.refuse(format!("no harness has {}; Via shows where you have access", m.name));
                 } else {
@@ -2769,6 +2867,9 @@ impl App {
                     let on = |e: &Effect| matches!(e, Effect::Launch(c) if c[0] == self.store.harness);
                     let sel = items.iter().position(|(_, e)| on(e)).unwrap_or(0);
                     self.input = Input::choose("open in which harness?", Kind::Launch, items, sel);
+                    let (key, repo) = ask?;
+                    self.asked.insert(key.clone(), true);
+                    return Some(Effect::Size(key, repo));
                 }
             }
             // The id your default harness takes when it has the model, as `--id`.
@@ -3681,6 +3782,51 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         assert_eq!(keys(&a), ["llama4"]);
+    }
+
+    #[test]
+    fn l_keeps_the_local_models_then_the_rest() {
+        let mut a = app();
+        press(&mut a, "L");
+        assert!(a.local.is_none() && a.failed, "none runs here: {}", a.status);
+        a.data.models[3].via.push(crate::data::OLLAMA.into());
+        press(&mut a, "L");
+        assert_eq!((a.local, keys(&a)), (Some(true), vec!["mini"]), "the one ollama has, whoever else does");
+        assert!(a.filtered_too(), "recommend says so");
+        press(&mut a, "L");
+        assert_eq!((a.local, keys(&a).len()), (Some(false), 2), "then the others");
+        press(&mut a, "L");
+        assert_eq!((a.local, keys(&a).len()), (None, 3), "then any");
+        press(&mut a, "Lc");
+        assert_eq!((a.local, keys(&a).len()), (None, 3), "c clears it");
+        // One that is on is left even with no local model to show.
+        press(&mut a, "L");
+        a.data.models[3].via.pop();
+        a.rebuild();
+        press(&mut a, "L");
+        assert_eq!((a.local, keys(&a).len()), (Some(false), 3), "L goes on to the rest");
+        a.data.models[3].via.push(crate::data::OLLAMA.into());
+        press(&mut a, "c");
+        // With all, the ones ollama or llama.cpp can download too.
+        a.data.models[2].hf = Some("meta/llama4".into());
+        press(&mut a, "L");
+        assert_eq!(keys(&a), ["mini"], "yours: only the ones here");
+        press(&mut a, "a");
+        assert_eq!((a.local, keys(&a).len()), (Some(true), 2), "all: llama4 has a repo to download");
+        assert!(keys(&a).contains(&"llama4"));
+    }
+
+    #[test]
+    fn x_says_the_size_of_a_download_once_known() {
+        let mut a = app();
+        let get = |k: &str| Effect::Launch(["modelcmp", "get", k, "--via", "ollama"].map(String::from).to_vec());
+        let run = Effect::Launch(vec!["codex".into(), "--model".into(), "mini".into()]);
+        let items = vec![("codex".to_string(), run), ("get".into(), get("mini")), ("other".into(), get("gpt55"))];
+        a.input = Input::choose("open in which harness?", Kind::Launch, items, 0);
+        a.sized("mini", Some(2_500_000_000));
+        let Input::Choose { items, .. } = &a.input else { panic!("the list stays open") };
+        let labels: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
+        assert_eq!(labels, ["codex", "get (2.5 GB)", "other"], "on that model's download alone");
     }
 
     #[test]

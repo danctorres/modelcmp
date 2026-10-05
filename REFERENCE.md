@@ -76,7 +76,7 @@ modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp show sonnet-5                         # everything about one model
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
 modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, aa, openrouter or hf; without --on, the first to have one
-modelcmp get gemma-3-4b-it --via ollama       # download its GGUF copy from Hugging Face and run it here: ollama or llama-cli, the one you have without --via, installed first, if you agree, when you have neither
+modelcmp get gemma-3-4b-it --via ollama       # download its GGUF copy from Hugging Face and run it here: ollama or llama-cli, the one you have without --via, installed first, if you agree, when you have neither, and the size of the download is said first
 modelcmp models-dir ~/models                   # the folder of the .gguf files you downloaded, listed at the next --refresh: alone shows it, --rm clears it
 modelcmp select sonnet-5                       # shortlist it, list --selected shows them: --rm to deselect
 modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosing; without text shows it, --rm deletes it
