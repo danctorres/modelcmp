@@ -30,8 +30,9 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 9: `Model::md` and `Model::openrouter` for `Model::url`, and `Model::epoch` a page name.
 /// 10: Artificial Analysis's agentic score is Terminal-Bench 4.0, where it was Hard.
 /// 11: prices at the tier an agent's session reaches. 12: a row's scores are of the release
-/// its offers are.
-const FORMAT: u32 = 12;
+/// its offers are. 13: Artificial Analysis's coding score is `fit::AA_CODING`, where it was its
+/// Coding Index, and `Model::ttft` is to the first answer token.
+const FORMAT: u32 = 13;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -384,8 +385,9 @@ pub struct Model {
     /// the benchmarks Epoch ran it on.
     #[serde(default)]
     pub epoch: Option<String>,
-    /// Output tokens per second and seconds to the first token, medians across providers:
-    /// Artificial Analysis measures them, Epoch does not.
+    /// Output tokens per second and seconds to the first token of the answer, after any
+    /// thinking: medians on the developer's own API, else across providers. Artificial Analysis
+    /// measures them, Epoch does not.
     #[serde(default)]
     pub tps: Option<f64>,
     #[serde(default)]
@@ -1728,7 +1730,7 @@ struct Scores {
     fit: crate::fit::Fit,
     /// group -> its page on artificialanalysis.ai.
     page: HashMap<String, String>,
-    /// group -> (tokens/s, time to first token) of that page's setting.
+    /// group -> (tokens/s, time to first answer token) of that page's setting.
     speed: HashMap<String, (Option<f64>, Option<f64>)>,
     /// group -> each of its reasoning settings, which Artificial Analysis lists apart.
     settings: HashMap<String, Vec<AaEntry>>,
@@ -1747,7 +1749,7 @@ struct AaEntry {
     index: Option<f64>,
     /// Field -> score, 0..1.
     scores: BTreeMap<String, f64>,
-    /// (tokens/s, time to first token).
+    /// (tokens/s, time to first answer token).
     speed: (Option<f64>, Option<f64>),
 }
 
@@ -2088,7 +2090,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
 
 /// The API's models, the reasoning settings of one model folded into one group with the best
 /// score of each (`aa_words`, `aa_fold`), as Epoch's are, and kept apart in `settings` for the
-/// rows that name one. Scores are 0..1, as Epoch's: indices are /100.
+/// rows that name one. Scores are 0..1, as Epoch's; the index stays 0..100.
 fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("artificial analysis: {e}"))?;
     let list = v["data"].as_array().or(v.as_array()).ok_or("artificial analysis: no model list")?;
@@ -2109,18 +2111,22 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
         let named = (m["release_date"].as_str().unwrap_or_default(), std::cmp::Reverse(slug), key.clone());
         let e = names.entry(aa_words(&clean_name(name), true).join("-")).or_insert_with(|| named.clone());
         *e = named.max(e.clone());
-        // Indices are 0..100 and single benchmarks 0..1, though one above 1 is a percentage.
-        let score = |f: &&str| {
-            Some((f.to_string(), num(f).map(|x| if f.ends_with("_index") || x > 1.0 { x / 100.0 } else { x })?))
-        };
+        // Benchmarks are 0..1, though one above 1 is a percentage.
+        let score = |f: &&str| Some((f.to_string(), num(f).map(|x| if x > 1.0 { x / 100.0 } else { x })?));
+        let mut scores: BTreeMap<String, f64> = fields.iter().filter_map(score).collect();
+        if let (Some(tb), Some(sci)) = (scores.get("terminalbench_v4_0"), scores.get("scicode")) {
+            scores.insert(crate::fit::AA_CODING.into(), (tb + sci) / 2.0);
+        }
         let top = |f: &str| m[f].as_f64().filter(|x| x.is_finite() && *x > 0.0);
         sc.settings.entry(key.clone()).or_default().push(AaEntry {
             slug: slug.to_string(),
             release: m["release_date"].as_str().unwrap_or_default().to_string(),
             setting: aa_setting(slug, name),
             index: num(crate::fit::AA_INDEX),
-            scores: fields.iter().filter_map(score).collect(),
-            speed: (top("median_output_tokens_per_second"), top("median_time_to_first_token_seconds")),
+            scores,
+            // To the answer, not to the first token: that one is of the thinking, for the
+            // models that stream it.
+            speed: (top("median_output_tokens_per_second"), top("median_time_to_first_answer_token")),
         });
         if let Some(o) = m["model_creator"]["name"].as_str() {
             sc.org.entry(key).or_insert_with(|| o.to_string());
@@ -3064,21 +3070,27 @@ mod tests {
     fn aa_folds_reasoning_settings_into_one_model() {
         let json = br#"{"status":200,"data":[
             {"slug":"claude-4-5-sonnet","name":"Claude 4.5 Sonnet (Non-reasoning)","model_creator":{"name":"Anthropic"},
-             "median_output_tokens_per_second":80.5,"median_time_to_first_token_seconds":1.2,
-             "evaluations":{"artificial_analysis_intelligence_index":50,"artificial_analysis_coding_index":40,"hle":0.2}},
+             "median_output_tokens_per_second":80.5,"median_time_to_first_answer_token":1.2,
+             "evaluations":{"artificial_analysis_intelligence_index":50,"terminalbench_v4_0":0.5,"scicode":0.3,"hle":0.2}},
             {"slug":"claude-4-5-sonnet-thinking","name":"Claude 4.5 Sonnet (Reasoning)","model_creator":{"name":"Anthropic"},
-             "median_output_tokens_per_second":40.0,"median_time_to_first_token_seconds":9.0,
-             "evaluations":{"artificial_analysis_intelligence_index":60,"artificial_analysis_coding_index":null,"hle":0.3}},
+             "median_output_tokens_per_second":40.0,"median_time_to_first_token_seconds":0.5,
+             "median_time_to_first_answer_token":9.0,
+             "evaluations":{"artificial_analysis_intelligence_index":60,"terminalbench_v4_0":0.7,"scicode":null,"hle":0.3}},
             {"slug":"unscored","name":"Unscored","evaluations":{}}
         ]}"#;
         let sc = parse_aa(json).unwrap();
         let key = aa_words("Claude Sonnet 4.5", true).join("-");
         let (name, index, scores) = &sc.groups[&key];
         assert_eq!((name.as_str(), *index), ("Claude 4.5 Sonnet", Some(60.0)), "the best setting's index");
-        assert_eq!(scores["artificial_analysis_coding_index"], 0.4, "an index is /100, a null is no score");
+        assert_eq!(scores[crate::fit::AA_CODING], 0.4, "of the setting scored on both: a null is no score");
+        assert_eq!(scores["terminalbench_v4_0"], 0.7);
         assert_eq!(scores["hle"], 0.3);
         assert_eq!((sc.page[&key].as_str(), sc.org[&key].as_str()), ("claude-4-5-sonnet", "Anthropic"));
-        assert_eq!(sc.speed[&key], (Some(40.0), Some(9.0)), "the speed of the setting whose index it shows");
+        assert_eq!(
+            sc.speed[&key],
+            (Some(40.0), Some(9.0)),
+            "the speed of the setting whose index it shows, to its answer"
+        );
         assert_eq!(sc.groups.len(), 1, "a model with no scores is left out");
         assert!(parse_aa(br#"{"data":[]}"#).is_err());
         let w = |s| aa_words(s, true);

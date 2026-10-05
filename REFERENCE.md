@@ -9,10 +9,10 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 One row per model. Columns: Model, Dev, Released (year and month), Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input; a provider that charges more past a context size is priced as at 100k tokens; a price after a `~` is the list price of other providers, yours listing none),
 $in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
 Value, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
-its Intelligence Index, and each task column is one benchmark's score (0-100): Coding the
-Coding Index, Agentic Terminal-Bench 4.0, Reason HLE; two more columns show speed,
-Tok/s (output tokens per second) and TTFT (seconds to the first token), medians across
-providers. A model's scores there are its best reasoning setting's; a row that names a setting
+its Intelligence Index, and each task column is a benchmark score (0-100): Coding the
+mean of Terminal-Bench 4.0 and SciCode, Agentic Terminal-Bench 4.0, Reason HLE; two more columns show speed,
+Tok/s (output tokens per second) and TTFT (seconds to the first answer token, after any thinking), medians
+on the developer's own API, or across providers when it has none. A model's scores there are its best reasoning setting's; a row that names a setting
 ("Grok 4.20 Non-Reasoning") has that setting's, or `-` when Artificial Analysis did not measure it, and one that cannot reason has its non-reasoning setting's. With either source a row has no scores when its offers are another release than the one scored, as a `-latest` id is. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
 columns are the model's capability on the task's benchmarks, in ECI points, fitted from its
 ECI and its scores (a model with few scores stays near its ECI):

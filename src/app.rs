@@ -40,7 +40,7 @@ impl Col {
     fn text(&self) -> (&'static str, &'static str) {
         let about = match (self.id, crate::data::source()) {
             ("eci", s) => return s.index(),
-            ("coding", Source::Aa) => "Artificial Analysis Coding Index",
+            ("coding", Source::Aa) => "mean of Terminal-Bench 4.0 and SciCode (0-100)",
             ("agentic", Source::Aa) => "Terminal-Bench 4.0 score (0-100)",
             ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
             _ => self.about,
@@ -171,13 +171,13 @@ pub const COLS: [Col; 13] = [
     Col {
         aa_only: true,
         show: |v| format!("{v:.0}"),
-        ..col("Tok/s", "tps", "output tokens per second, median across providers", |m| m.tps)
+        ..col("Tok/s", "tps", "output tokens per second (median)", |m| m.tps)
     },
     Col {
         aa_only: true,
         lower_better: true,
         show: |v| format!("{v:.1}s"),
-        ..col("TTFT", "ttft", "seconds to the first token, median across providers", |m| m.ttft)
+        ..col("TTFT", "ttft", "seconds to the first answer token, after any thinking (median)", |m| m.ttft)
     },
 ];
 
@@ -3488,7 +3488,7 @@ mod tests {
         let m = a.data.models.iter_mut().find(|m| m.key == "mini").unwrap();
         m.scores.insert("scicode".into(), 0.3);
         press(&mut a, "d");
-        assert_eq!(menu(&a), [("artificial_analysis_coding_index", 2), ("terminalbench_v4_0", 0), ("scicode", 1)]);
+        assert_eq!(menu(&a), [(crate::fit::AA_CODING, 2), ("terminalbench_v4_0", 0), ("scicode", 1)]);
         press(&mut a, "G ");
         assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
     }

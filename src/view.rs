@@ -665,7 +665,7 @@ pub fn detail_rows(m: &Model, store: &Store, any: bool) -> Vec<(Option<&'static 
     if m.tps.is_some() || m.ttft.is_some() {
         let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
         v.push(format!(
-            "  speed:      {} tokens/s, first token in {} (median across providers)",
+            "  speed:      {} tokens/s, answer starts in {} (median)",
             n(m.tps, |v| format!("{v:.0}")),
             n(m.ttft, |v| format!("{v:.1}s"))
         ));
@@ -815,7 +815,7 @@ pub fn compare_rows(models: &[&Model], any: bool) -> Vec<Row> {
     // Under context, before the scores' rule: the ECI row is the last so far.
     if models.iter().any(|m| m.tps.is_some() || m.ttft.is_some()) {
         let at = rows.len() - 1;
-        rows.insert(at, row("first token", models.iter().map(|m| m.ttft).collect(), |v| format!("{v:.1}s"), false));
+        rows.insert(at, row("answer starts", models.iter().map(|m| m.ttft).collect(), |v| format!("{v:.1}s"), false));
         rows.insert(at, row("tokens/s", models.iter().map(|m| m.tps).collect(), |v| format!("{v:.0}"), true));
     }
     for t in TASKS.iter().filter(|t| t.name != "overall") {

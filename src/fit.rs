@@ -37,7 +37,8 @@ pub struct Task {
     /// When a model high on this task is the right pick.
     pub when: &'static str,
     pub benches: &'static [&'static str],
-    /// The same for Artificial Analysis: one of its API's `evaluations` fields, shown as is.
+    /// The same for Artificial Analysis: one of its API's `evaluations` fields, shown as is,
+    /// or `AA_CODING`.
     pub aa: Option<&'static str>,
     /// Its other fields about the task, still run on new models: the column's dropdown lists
     /// them after `aa`.
@@ -58,6 +59,9 @@ impl Task {
 
 /// Artificial Analysis's overall index, its ECI.
 pub const AA_INDEX: &str = "artificial_analysis_intelligence_index";
+/// The mean of Terminal-Bench 4.0 and SciCode, the coding part of that index: no field of the
+/// API, whose Coding Index is no longer given to new models (2026-09).
+pub const AA_CODING: &str = "terminalbench_scicode_mean";
 
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
 /// not be about code. Math and factual-recall benchmarks stay out.
@@ -78,7 +82,7 @@ pub const TASKS: &[Task] = &[
         about: "writing and fixing code",
         when: "fixing a bug, adding a feature to an existing repo, refactors",
         need: Need::None,
-        aa: Some("artificial_analysis_coding_index"),
+        aa: Some(AA_CODING),
         aa_more: &["terminalbench_v4_0", "scicode"],
         benches: &[
             "DeepSWE",
@@ -471,8 +475,8 @@ mod tests {
 
     #[test]
     fn aa_ranks_by_task() {
-        let a = scores(&[("artificial_analysis_coding_index", 0.6), ("hle", 0.4)]);
-        let b = scores(&[("artificial_analysis_coding_index", 0.4), ("hle", 0.3)]);
+        let a = scores(&[(AA_CODING, 0.6), ("hle", 0.4)]);
+        let b = scores(&[(AA_CODING, 0.4), ("hle", 0.3)]);
         let pools = aa_pools([(Some(60.0), &a), (None, &b)].into_iter());
         let ((pa, shown_a), (pb, shown_b)) = (aa_fit(Some(60.0), &a, &pools), aa_fit(None, &b, &pools));
         assert!(pa["coding"] > pb["coding"]);

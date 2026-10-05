@@ -100,10 +100,10 @@ struct ModelOut<'a> {
     /// Task -> its score on the source's scale: ECI points (epoch) or the task's benchmark
     /// score, 0..100 (aa); overall and vision are `eci`, value a 0..100 percentile
     tasks: BTreeMap<&'static str, f64>,
-    /// Output tokens per second, median across providers; Artificial Analysis only
+    /// Output tokens per second, median; Artificial Analysis only
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens_per_second: Option<f64>,
-    /// Seconds to the first token, median across providers; Artificial Analysis only
+    /// Seconds to the first answer token, after any thinking, median; Artificial Analysis only
     #[serde(skip_serializing_if = "Option::is_none")]
     ttft_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
