@@ -803,7 +803,7 @@ pub enum Stop {
 
 /// `provider/model` as opencode takes it, else pi, else omp, when one has the model (`launch_cmd`):
 /// the offer you'd pay may be one only another harness reaches. With neither, that offer's, or
-/// the bare tag `ollama run` takes.
+/// the bare tag `ollama run` takes, or the repo or file `llama-cli` does.
 pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
     let harness = ["opencode", "pi", "omp"].iter().find_map(|h| launch_cmd(m, h, listed)?.pop());
     let own = |o: &crate::data::Offer| if o.local { o.id.clone() } else { format!("{}/{}", o.provider, o.id) };
@@ -812,11 +812,22 @@ pub fn model_id(m: &Model, listed: &BTreeMap<String, Vec<String>>) -> String {
 
 /// The command that starts `harness` on `m`, if the harness has it: opencode, pi and omp take
 /// `provider/model` as they listed it (`listed`, pi's `openai-codex/...` for models.dev's `openai/...`),
-/// the others (claude, codex, gemini, copilot) the bare model id. ollama runs its tag.
+/// the others (claude, codex, gemini, copilot) the bare model id. ollama runs its tag, llama-cli the
+/// repo it downloaded or the file you did.
 pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
     let o = m.offer_via(harness)?;
-    if o.local && harness == crate::data::OLLAMA {
-        return Some(vec![harness.into(), "run".into(), o.id.clone()]);
+    if o.local && harness == o.provider {
+        let file = o.id.ends_with(".gguf");
+        let how = if harness == crate::data::OLLAMA {
+            "run"
+        } else if file {
+            "-m"
+        } else {
+            "-hf"
+        };
+        let bin = crate::data::llama_cmd().filter(|_| harness == crate::data::LLAMA);
+        let bin = bin.map_or_else(|| vec![harness.into()], |c| c.iter().map(|s| s.to_string()).collect());
+        return Some([bin, vec![how.into(), o.id.clone()]].concat());
     }
     let id = if matches!(harness, "opencode" | "pi" | "omp") {
         let id = format!("{}/{}", o.provider, o.id);

@@ -269,9 +269,9 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
         .map(|(_, m)| m)
         .filter(|m| {
             (o.dev.is_empty() || has(&o.dev, &m.developer))
-                // On a task not through ollama: its copy is no pick on merit (`Model::local`).
+                // On a task not through ollama or llama.cpp: its copy is no pick on merit (`Model::local`).
                 && (o.via.is_empty()
-                    || shown_via(m, any).iter().any(|v| has(&o.via, v) && !(task && *v == crate::data::OLLAMA)))
+                    || shown_via(m, any).iter().any(|v| has(&o.via, v) && !(task && crate::data::runs_here(v))))
                 && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
                 && !(task && store.is_excluded(&m.key))
                 && !o.not.contains(&m.key)
@@ -438,10 +438,10 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
     let via =
         name.and_then(|n| store.task_via(n, o.tier.as_deref(), &m.key)).filter(|h| o.via.is_empty() || has(&o.via, h));
     // Your default harness, after a favorite's own; not one `--via` leaves out either.
-    // Nor ollama for a model another harness runs in full.
+    // Nor ollama or llama.cpp for a model another harness runs in full.
     let default = Some(store.harness.as_str())
         .filter(|h| !h.is_empty() && (o.via.is_empty() || has(&o.via, h)))
-        .filter(|h| *h != crate::data::OLLAMA || m.local());
+        .filter(|h| !crate::data::runs_here(h) || m.local());
     // `--via` naming a harness asks for the id that one takes, so one without the model is
     // an error for `--id` as for `--cmd`, not another harness's id.
     let named = o.via.iter().any(|v| vias().any(|h| h.eq_ignore_ascii_case(v)));

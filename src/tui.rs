@@ -1279,10 +1279,15 @@ const fn fg(c: Color) -> Style {
 /// A developer's or harness's colour, as a placeholder `recolor` resolves to one of the theme's
 /// accents: a Via name's place in `data::vias`, so no two share one, else the name's byte sum mod
 /// 210, which keeps it mod 7, 10 and 14 (`DEVS`, `Palette::accents`). omp, a fork of pi, has
-/// pi's: an eighth colour is more than the terminal's own seven or gameboy's.
+/// pi's, and llama-cli ollama's, your machine's: an eighth colour is more than the terminal's own
+/// seven or gameboy's.
 fn dev_color(dev: &str) -> Color {
-    let dev = if dev == "omp" { "pi" } else { dev };
-    let k = crate::data::vias().filter(|v| *v != "omp").position(|v| v == dev);
+    let dev = match dev {
+        "omp" => "pi",
+        crate::data::LLAMA => crate::data::OLLAMA,
+        d => d,
+    };
+    let k = crate::data::vias().filter(|v| !matches!(*v, "omp" | crate::data::LLAMA)).position(|v| v == dev);
     Color::Indexed(k.unwrap_or_else(|| dev.bytes().map(usize::from).sum::<usize>() % 210) as u8)
 }
 
@@ -3296,7 +3301,7 @@ mod tests {
     #[test]
     fn every_theme_keeps_the_harnesses_apart() {
         let n = crate::data::vias().map(dev_color).collect::<std::collections::HashSet<_>>().len();
-        assert_eq!(n, crate::data::vias().count() - 1, "only omp shares one, pi's");
+        assert_eq!(n, crate::data::vias().count() - 2, "only omp shares one, pi's, and llama-cli ollama's");
         assert!(DEVS.len() >= n, "the terminal's own: {} for {n}", DEVS.len());
         for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
             assert!(p.accents.len() >= n, "{name}: {} accents for {n}", p.accents.len());

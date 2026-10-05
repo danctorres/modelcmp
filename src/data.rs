@@ -257,6 +257,9 @@ enum Probe {
     /// A command that prints a table of the models it runs on this machine under a `NAME ...`
     /// header, the name first (`name_ids`).
     Names(&'static [&'static str]),
+    /// A command that prints a numbered list of the models it has downloaded to this machine
+    /// (`cache_ids`), with the files downloaded by hand to its folder (`gguf_ids`).
+    Cache(&'static [&'static str]),
     /// No such command: being installed means access to every model of this provider.
     Provider(&'static str),
     /// No such command either, but its CLI lists what the account may use to an Agent Client
@@ -276,10 +279,29 @@ const HARNESSES: &[(&str, Probe)] = &[
     ("gemini", Probe::Provider("google")),
     ("copilot", Probe::Copilot),
     (OLLAMA, Probe::Names(&["list"])),
+    (LLAMA, Probe::Cache(&["--cache-list"])),
 ];
 
 /// Ollama, and the provider of the offer made for a model it runs here (`Offer::local`).
 pub const OLLAMA: &str = "ollama";
+/// llama.cpp's CLI, and the provider of the offer made for a model it runs here.
+pub const LLAMA: &str = "llama-cli";
+/// The harnesses that run models on this machine, and what each is called.
+const LOCAL: &[(&str, &str)] = &[(OLLAMA, "Ollama"), (LLAMA, "llama.cpp")];
+
+/// llama.cpp's CLI as this machine has it: `llama-cli`, else the one binary of newer builds, else
+/// its server, which lists and loads the same models.
+pub fn llama_cmd() -> Option<&'static [&'static str]> {
+    if cfg!(test) {
+        return Some(&[LLAMA]);
+    }
+    [&[LLAMA][..], &["llama", "cli"], &["llama-server"]].into_iter().find(|c| installed(c[0]))
+}
+
+/// Whether `harness` runs its models on this machine.
+pub fn runs_here(harness: &str) -> bool {
+    LOCAL.iter().any(|l| l.0 == harness)
+}
 
 /// The key of the model an ollama tag names, `qwen3.5:4b` or `llama3.2:1b-instruct-Q4_K_M-128k`:
 /// without its quantization or a context size after it. A tag that says no size
@@ -288,27 +310,35 @@ pub const OLLAMA: &str = "ollama";
 fn local_key(tag: &str) -> String {
     let digit = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
     let extra = |p: &str| {
-        matches!(p, "qat" | "it")
+        p == "qat"
             || ["q", "fp", "bf", "f"].iter().any(|q| p.strip_prefix(q).is_some_and(digit))
             || (digit(p) && p.ends_with('k'))
     };
     // Whoever it was pulled from, `hf.co/bartowski/Qwen3.5-4B-GGUF:Q4_K_M` or `someone/qwen3.5:4b`.
     let tag = tag.rsplit('/').next().unwrap_or(tag).to_ascii_lowercase();
-    let (name, variant) = tag.split_once(':').unwrap_or((&tag, ""));
+    let (name, variant) = match tag.strip_suffix(".gguf") {
+        // A file downloaded by hand, `gemma-3-4b-it-Q4_K_M.gguf`: its name, then its quantization.
+        Some(file) => file.rsplit_once(['-', '.']).unwrap_or((file, "")),
+        None => tag.split_once(':').unwrap_or((&tag, "")),
+    };
     let name = name.trim_end_matches("-gguf");
     norm(&format!("{name}{}", variant.split('-').filter(|p| !extra(p)).collect::<String>()))
 }
 
-/// Model key -> the ollama tag that runs it, of the `ollama/tag` ids `listed`: the shortest tag
-/// naming a model, so the one ollama pulls by default, whatever was pulled last. One naming no
-/// model in `keys` names its instruct one, which is what ollama's plain tags hold.
+/// Model key -> the tag that runs it, of the `ollama/tag` or `llama-cli/repo:quant` ids `listed`:
+/// the shortest tag naming a model, so the one ollama pulls by default, whatever was pulled last.
+/// One naming no model in `keys` names its instruct one, which is what ollama's plain tags hold.
+/// One that says `it` names the instruction-tuned model, never the base one beside it: under
+/// that name, else as the instruct one, else as the only one there is.
 fn local_tags<'a>(listed: &'a [String], keys: &HashSet<&str>) -> HashMap<String, &'a str> {
     let mut tags: Vec<&str> = listed.iter().filter_map(|i| Some(i.split_once('/')?.1)).collect();
     tags.sort_by_key(|t| (t.len(), *t));
     let mut by_key = HashMap::new();
     for tag in tags {
         let key = local_key(tag);
-        let key = if keys.contains(key.as_str()) { key } else { format!("{key}instruct") };
+        let tuned = key.strip_suffix("it").map(|k| [format!("{k}instruct"), k.to_string()]);
+        let named = std::iter::once(key.clone()).chain(tuned.into_iter().flatten());
+        let key = named.into_iter().find(|k| keys.contains(k.as_str())).unwrap_or_else(|| format!("{key}instruct"));
         by_key.entry(key).or_insert(tag);
     }
     by_key
@@ -359,7 +389,7 @@ pub struct Offer {
     pub unpriced: bool,
     #[serde(skip)]
     pub available: bool,
-    /// Made for a model ollama runs on this machine (`Data::apply_available`), free: models.dev
+    /// Made for a model ollama or llama.cpp runs on this machine (`Data::apply_available`), free: models.dev
     /// lists none.
     #[serde(skip)]
     pub local: bool,
@@ -604,20 +634,23 @@ impl Data {
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness. A model ollama
-    /// runs here gets an offer of its own, free, for the tag that names it (`local_key`).
+    /// or llama.cpp runs here gets an offer of its own from each, free, for the tag that names it
+    /// (`local_key`).
     pub fn apply_available(&mut self) {
         let keys: HashSet<&str> = self.models.iter().map(|m| m.key.as_str()).collect();
-        let local = self.harness.get(OLLAMA).map(|ids| local_tags(ids, &keys)).unwrap_or_default();
+        let local: Vec<_> =
+            LOCAL.iter().filter_map(|(h, name)| Some((*h, *name, local_tags(self.harness.get(*h)?, &keys)))).collect();
         let harness: Vec<(&str, HashSet<String>)> =
             self.harness.iter().map(|(h, ids)| (h.as_str(), ids.iter().map(|i| canonical(h, i)).collect())).collect();
         for m in &mut self.models {
             m.via.clear();
             // Made anew each time, as the cache does not hold it.
             m.offers.retain(|o| !o.local);
-            if let Some(tag) = local.get(&m.key) {
+            for (h, name, tags) in &local {
+                let Some(tag) = tags.get(&m.key) else { continue };
                 // The scores are the full weights', which a quantized copy falls short of.
-                let provider_name = "Ollama (local quant)".into();
-                let (provider, id) = (OLLAMA.into(), tag.to_string());
+                let provider_name = format!("{name} (local quant)");
+                let (provider, id) = (h.to_string(), tag.to_string());
                 m.offers.push(Offer { provider, provider_name, id, local: true, ..Default::default() });
             }
             for o in &mut m.offers {
@@ -740,6 +773,11 @@ fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &S
         Probe::Table(args) => table_ids(&listing(bin, args, stop)?),
         // One that does not answer runs none: no model is kept for a server that is down.
         Probe::Names(args) => Some(listing(bin, args, stop).and_then(|out| name_ids(&out)).unwrap_or_default()),
+        Probe::Cache(args) => {
+            let cmd = [llama_cmd()?, args].concat();
+            let cached = listing(cmd[0], &cmd[1..], stop).and_then(|out| cache_ids(&out)).unwrap_or_default();
+            Some(cached.into_iter().chain(gguf_ids()).collect())
+        }
         Probe::Json(args) => selector_ids(&listing(bin, args, stop)?),
         Probe::Copilot => copilot_ids(stop),
     };
@@ -827,6 +865,27 @@ fn name_ids(out: &str) -> Option<Vec<String>> {
     let mut names = out.lines().filter_map(|l| l.split_whitespace().next()).skip_while(|n| *n != "NAME");
     names.next()?;
     Some(names.map(|n| format!("{OLLAMA}/{n}")).collect())
+}
+
+/// The `llama-cli/repo:quant` ids of the numbered list under `number of models in cache`, as
+/// `llama-cli --cache-list` prints; `None` without that line.
+fn cache_ids(out: &str) -> Option<Vec<String>> {
+    let mut lines = out.lines().skip_while(|l| !l.starts_with("number of models in cache"));
+    lines.next()?;
+    Some(lines.filter_map(|l| l.split_whitespace().nth(1)).map(|n| format!("{LLAMA}/{n}")).collect())
+}
+
+/// The `llama-cli/path` ids of the `.gguf` files in llama.cpp's own models folder
+/// (`LLAMA_ARG_MODELS_DIR`): the ones downloaded by hand, which its cache does not list. Not a
+/// vision projector, which is no model.
+fn gguf_ids() -> Vec<String> {
+    let dir = std::env::var_os("LLAMA_ARG_MODELS_DIR").and_then(|d| std::fs::read_dir(d).ok());
+    let files = dir.into_iter().flatten().flatten().map(|e| e.path());
+    let model = |p: &PathBuf| {
+        p.extension().is_some_and(|e| e == "gguf")
+            && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("mmproj"))
+    };
+    files.filter(model).map(|p| format!("{LLAMA}/{}", p.display())).collect()
 }
 
 /// The `provider/model` ids of `{"models": [{"selector": ...}]}`, as `omp models --json` prints;
@@ -1008,7 +1067,8 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, answers) = std::sync::mpsc::channel();
     // The installed ones: one not installed is left out.
-    let asked: Vec<_> = HARNESSES.iter().filter(|h| installed(h.0)).collect();
+    let asked: Vec<_> =
+        HARNESSES.iter().filter(|h| if h.0 == LLAMA { llama_cmd().is_some() } else { installed(h.0) }).collect();
     let harness = {
         let (asked, stop, steps) = (asked.clone(), Arc::clone(&stop), Arc::clone(steps));
         std::thread::spawn(move || harness_models(&asked, &stop, &steps, &tx))
@@ -3108,12 +3168,47 @@ mod tests {
         for tag in ["hf.co/bartowski/Llama3.2-1B-Instruct-GGUF:Q4_K_M", "someone/llama3.2:1b-instruct-f16"] {
             assert_eq!(local_key(tag), "llama321binstruct", "{tag} whoever it is from");
         }
-        assert_eq!(local_key("gemma3:4b-it-qat"), "gemma34b");
+        assert_eq!(local_key("gemma3:4b-it-qat"), "gemma34bit", "the instruction-tuned one, as it says");
         d.models[0].offers[0].unpriced = true;
         assert_eq!(d.models[0].cost(), None, "your machine's copy is not the price of one with none listed");
         d.harness.remove("opencode");
         d.apply_available();
         assert!(d.models[0].local() && !d.any_available(), "ollama alone leaves every model in reach");
+    }
+
+    #[test]
+    fn llama_cache_marks_the_models_it_names() {
+        let out = "0.00.000.797 I srv  llama_server: initializing ...\nnumber of models in cache: 2\n   1. ggml-org/tinygemma3-GGUF:Q8_0\n   2. unsloth/Qwen3.5-4B-GGUF:Q4_K_M\n";
+        let ids = cache_ids(out).unwrap();
+        assert_eq!(ids, ["llama-cli/ggml-org/tinygemma3-GGUF:Q8_0", "llama-cli/unsloth/Qwen3.5-4B-GGUF:Q4_K_M"]);
+        assert_eq!(cache_ids("error: invalid argument\n"), None, "no count, no ids");
+        let mut d = Data {
+            harness: BTreeMap::from([(LLAMA.into(), ids), (OLLAMA.into(), vec!["ollama/qwen3.5:4b".into()])]),
+            models: vec![Model { key: "qwen354b".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        d.apply_available();
+        let m = &d.models[0];
+        let offers: Vec<_> = m.offers.iter().map(|o| (o.provider.as_str(), o.id.as_str())).collect();
+        assert_eq!(offers, [("ollama", "qwen3.5:4b"), ("llama-cli", "unsloth/Qwen3.5-4B-GGUF:Q4_K_M")]);
+        assert_eq!((&m.via, m.local()), (&vec![OLLAMA.to_string(), LLAMA.into()], true), "an offer from each");
+        let cmd = crate::app::launch_cmd(m, LLAMA, &d.harness).unwrap();
+        assert_eq!(cmd, ["llama-cli", "-hf", "unsloth/Qwen3.5-4B-GGUF:Q4_K_M"]);
+        for file in ["/mnt/c/Downloads/Qwen3.5-4B-Q4_K_M.gguf", "qwen3.5-4b.Q4_K_M.gguf", "qwen3.5-4b.gguf"] {
+            assert_eq!(local_key(file), "qwen354b", "{file} by its name");
+        }
+        let file = "/mnt/c/Downloads/Qwen3.5-4B-Q4_K_M.gguf";
+        d.harness = BTreeMap::from([(LLAMA.into(), vec![format!("{LLAMA}/{file}")])]);
+        d.apply_available();
+        let cmd = crate::app::launch_cmd(&d.models[0], LLAMA, &d.harness).unwrap();
+        assert_eq!(cmd, ["llama-cli", "-m", file], "a file is loaded, not downloaded");
+        // The instruction-tuned model, by whichever name it has: not the base one beside it.
+        let listed = ["gemma3:4b-it-qat", "gemma-3-12b-it-Q4_K_M.gguf", "gemma-4-12b-it-Q4_K_M.gguf", "gemma3:1b"];
+        let listed = listed.map(|t| format!("x/{t}"));
+        let keys = HashSet::from(["gemma34b", "gemma34bit", "gemma312b", "gemma412b", "gemma412binstruct", "gemma31b"]);
+        let mut named: Vec<_> = local_tags(&listed, &keys).into_keys().collect();
+        named.sort();
+        assert_eq!(named, ["gemma312b", "gemma31b", "gemma34bit", "gemma412binstruct"]);
     }
 
     #[test]

@@ -99,6 +99,27 @@ work, as debugging and coding do for a bug, agents pick yours. It takes a model 
 (`modelcmp fav debugging 3.7-flash --tier low`), a cheap one for easy work and a strong one for
 hard.
 
+## Models on your machine
+
+The models ollama and llama.cpp run here show as free, with `ollama` or `llama-cli` in Via. `ollama`, or
+llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`, and the model must be one of these:
+
+| You have | What makes it show |
+|---|---|
+| a model pulled by ollama | `ollama list` shows it, with ollama running. The tag must say the size: `qwen3.5:4b`, not `:latest` |
+| a model llama.cpp downloaded | `llama-cli --cache-list` shows it, as after `llama-cli -hf unsloth/Qwen3.5-4B-GGUF:Q4_K_M` |
+| a `.gguf` file you downloaded | its folder is in `LLAMA_ARG_MODELS_DIR`, llama.cpp's own variable: `export LLAMA_ARG_MODELS_DIR=~/models` in your shell profile. Subfolders are not read |
+
+Then run `modelcmp --refresh`.
+
+A model is matched by its tag, repo or file name, without the quantization, so the name must be the
+one the model has here (`modelcmp list --all` shows them): `gemma-3-4b-it-Q4_K_M.gguf` is Gemma 3 4B IT.
+A name that says `it` is the instruction-tuned model, never the base one beside it.
+A repo that repeats the developer in its name (`bartowski/Qwen_Qwen3.5-4B-GGUF`) matches none.
+
+The scores and the context shown are the full weights', which a quantized copy with its own context
+falls short of, so a model only your machine runs is recommended for a task only as your favorite.
+
 ## For agents
 
 ```sh
@@ -137,9 +158,7 @@ skills can take its body in `AGENTS.md`.
   and `gemini` binaries on `PATH` (each counts as its own provider), and the models GitHub Copilot's
   CLI takes on your plan when `copilot` is on `PATH` (asked of the CLI itself with `copilot --acp`,
   under its own login; each refresh leaves an empty folder in `~/.copilot/session-state/`), and the models
-  `ollama list` shows on your machine, matched by tag (`qwen3.5:4b`, not `:latest`) and free. Their scores and
-  context are the full weights', which a quantized copy with ollama's own context falls short of, so a model
-  only your machine runs is recommended for a task only as your favorite. The Via column says which. Under WSL the harnesses
+  ollama and llama.cpp run on your machine ([Models on your machine](#models-on-your-machine)). The Via column says which. Under WSL the harnesses
   are asked in a new session, as `x` launches them, so a key exported by hand in your shell does not count. A
   harness that fails to list its models
   keeps the ones from the last refresh, and the refresh says so.

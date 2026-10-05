@@ -13,7 +13,7 @@ use store::Store;
 
 /// Pick the right LLM: prices (models.dev) + benchmarks (Epoch AI, or Artificial Analysis), filtered to the
 /// models you can already use: the ones your harnesses list (opencode models, pi --list-models, omp models;
-/// claude, codex and gemini give their own provider's, copilot what its CLI takes on your plan, ollama the ones on your machine).
+/// claude, codex and gemini give their own provider's, copilot what its CLI takes on your plan, ollama and llama-cli the ones on your machine).
 /// The VIA column says which. Run without a command for the interactive TUI.
 #[derive(Parser)]
 #[command(
@@ -63,7 +63,7 @@ enum Cmd {
         /// Only these developers, e.g. --dev anthropic --dev openai (the Dev dropdown, `d`, in the TUI)
         #[arg(long)]
         dev: Vec<String>,
-        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama); repeatable (the Via dropdown, `d`, in the TUI)
+        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli); repeatable (the Via dropdown, `d`, in the TUI)
         #[arg(long)]
         via: Vec<String>,
         /// Max rows, 0 = no limit
@@ -84,7 +84,7 @@ enum Cmd {
     },
     /// For an agent, one call: each task with what it is for, and the model for its low, mid and high tier (your favorite, else the cheapest good enough), with its context and your note
     Pick {
-        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama): prints the ids it takes, and a favorite it lacks after the tier's own pick. Without it, the command that starts the harness you run each model on
+        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes, and a favorite it lacks after the tier's own pick. Without it, the command that starts the harness you run each model on
         #[arg(long)]
         via: Vec<String>,
         /// Only models at or above a value, favorites too: --min ctx=600 for a prompt of 600,000 tokens
@@ -147,7 +147,7 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Your default harness (opencode, pi, omp, claude, codex, gemini, copilot, ollama): `list --cmd` and `--id` go by it when it has the model and --via names none, after a favorite's own harness (`fav --via`). Alone, shows it (`H` in the TUI)
+    /// Your default harness (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): `list --cmd` and `--id` go by it when it has the model and --via names none, after a favorite's own harness (`fav --via`). Alone, shows it (`H` in the TUI)
     Harness {
         #[arg(conflicts_with = "rm")]
         name: Option<String>,
@@ -165,7 +165,7 @@ enum Cmd {
         /// Only for `list --tier` with this tier, e.g. a cheap model for low and a strong one for the task
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
-        /// The harness you run it on (opencode, pi, omp, claude, codex, gemini, copilot, ollama): `list --task --id` prints the id that one takes
+        /// The harness you run it on (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): `list --task --id` prints the id that one takes
         #[arg(long, requires = "model")]
         via: Option<String>,
         /// Clear the task's favorite, or with --tier the tier's; a task of your own is gone with its last model
