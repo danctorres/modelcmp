@@ -100,6 +100,11 @@ enum Cmd {
         #[arg(long, value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
     },
+    /// Run a command as `pick` prints it, for an agent: what it says on stderr (a harness's steps) is left out, and its last 20 lines are said when it fails
+    Quiet {
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
+    },
     /// Everything about one model
     Show {
         model: String,
@@ -272,8 +277,13 @@ fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
 
 fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // These name no model: they neither wait for a download nor fail without one.
-    let bare =
-        matches!(cmd, Cmd::Harness { .. } | Cmd::ModelsDir { .. } | Cmd::Fav { task: Some(_), rename: Some(_), .. });
+    let bare = matches!(
+        cmd,
+        Cmd::Harness { .. }
+            | Cmd::ModelsDir { .. }
+            | Cmd::Quiet { .. }
+            | Cmd::Fav { task: Some(_), rename: Some(_), .. }
+    );
     let data = if bare {
         data::Data::default()
     } else {
@@ -340,6 +350,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
             let opts = cli::ListOpts { via, bounds, custom: task, tier, ..Default::default() };
             cli::pick(&data, &store, &opts, &not)
         }
+        Cmd::Quiet { cmd } => cli::quiet(&cmd),
         Cmd::Show { model, all, json } => cli::show(&data, &store, &model, json, all),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
         Cmd::Open { model, on } => cli::open(&data, &model, on.as_deref()),

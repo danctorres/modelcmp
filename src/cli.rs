@@ -365,7 +365,8 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
 /// For an agent, in one call: every task with what it is for, yours last, and under it the
 /// model of each tier as `--tier` picks it, with its context and your note. With `via` the id
 /// that harness takes, else the command that starts the harness you run the model on. Tiers
-/// with the same model share a line. The models `not` names are left out, as ones a note rules out.
+/// with the same model share a line, and tasks with the same lines share them (`grouped`).
+/// The models `not` names are left out, as ones a note rules out.
 pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result {
     let not = not.iter().map(|q| Ok(resolve(data, q)?.key.clone())).collect::<Result<Vec<_>>>()?;
     // An agent told only what is known goes on to guess a model for its harness.
@@ -385,7 +386,6 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     }
     let (mut said, mut found) = (Vec::new(), false);
     for (name, task, when) in tasks.into_iter().filter(|t| o.custom.as_deref().is_none_or(|c| c == t.0)) {
-        said.push(format!("{name}: {when}"));
         let mut lines: Vec<(String, String)> = Vec::new();
         for (tier, _) in TIERS.iter().filter(|x| o.tier.as_deref().is_none_or(|t| t == x.0)) {
             let o = ListOpts {
@@ -403,11 +403,9 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
                 _ => lines.push(((*tier).into(), line)),
             }
         }
-        for (tiers, line) in lines {
-            // A favorite on another harness is a model too, and its line the one to relay.
-            found |= !line.starts_with(NO_MODEL) || line.contains("★ favorite");
-            said.push(format!("  {tiers}  {line}"));
-        }
+        // A favorite on another harness is a model too, and its line the one to relay.
+        found |= lines.iter().any(|(_, l)| !l.starts_with(NO_MODEL) || l.contains("★ favorite"));
+        said.push((format!("{name}: {when}"), lines.iter().map(|(tiers, l)| format!("  {tiers}  {l}")).collect()));
     }
     // `no model` on every line would send an agent from task to task for nothing.
     if !found {
@@ -416,8 +414,22 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
         let why = if local { ", a model your machine runs is picked only as your favorite (modelcmp fav)" } else { "" };
         return Err(format!("no task has a model for this{why}: choose no model, tell the user").into());
     }
-    println!("{}", said.join("\n"));
+    println!("{}", grouped(said).join("\n"));
     Ok(())
+}
+
+/// The lines of `pick`: each task's head, then its tiers' lines. Tasks with the same lines are
+/// said together, heads first, at the first one's place: with few models most tasks pick the
+/// same ones, and an agent reads them once.
+fn grouped(tasks: Vec<(String, Vec<String>)>) -> Vec<String> {
+    let mut groups: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+    for (head, lines) in tasks {
+        match groups.iter_mut().find(|g| g.1 == lines) {
+            Some(g) => g.0.push(head),
+            None => groups.push((vec![head], lines)),
+        }
+    }
+    groups.into_iter().flat_map(|(heads, lines)| heads.into_iter().chain(lines)).collect()
 }
 
 const NO_MODEL: &str = "no model";
@@ -495,17 +507,37 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
     }
 }
 
-/// What follows the prompt in a command of `pick`: the steps a harness prints on stderr
-/// (opencode's every command with its output) stay out of the agent's context, and a run that
-/// fails prints their last lines, where the error is, and still fails.
-const QUIET: &str = r#"2>"${TMPDIR:-/tmp}/modelcmp.$$" || (tail -20 "${TMPDIR:-/tmp}/modelcmp.$$" >&2 && false)"#;
+/// What a command of `pick` starts with: `quiet` runs the rest.
+const QUIET: &str = "modelcmp quiet";
+
+/// `cmd` run as `pick` prints it: the steps a harness prints on stderr (opencode's every
+/// command with its output) stay out of the agent's context, and a run that fails says their
+/// last lines, where the error is, and fails with its code. With no stdin, which a harness
+/// given a prompt would wait on.
+pub fn quiet(cmd: &[String]) -> Result {
+    use std::process::{Command, Stdio};
+    let run = Command::new(&cmd[0]).args(&cmd[1..]).stdin(Stdio::null()).stdout(Stdio::inherit()).output();
+    let out = run.map_err(|e| format!("{}: {e}", cmd[0]))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let log = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = log.lines().collect();
+    // A harness that fails saying nothing still leaves the agent something to read.
+    let msg = if lines.is_empty() {
+        format!("{}: {}", cmd[0], out.status)
+    } else {
+        lines[lines.len().saturating_sub(20)..].join("\n")
+    };
+    Err(Exit { code: out.status.code().unwrap_or(1), msg })
+}
 
 /// `cmd`, which opens a harness on a model, as the command that runs one prompt there and exits:
 /// what an agent runs, where the other waits on a terminal. With the flags that let the harness
 /// edit files and run commands (tests, builds) where it would ask, as opencode, pi and omp do
 /// unasked: with nobody to ask, it would refuse them.
 /// None for llama.cpp's server, which takes no prompt.
-/// After the prompt, `QUIET`.
+/// Behind `QUIET`.
 fn one_shot(mut cmd: Vec<String>) -> Option<String> {
     let (sub, flags): (&[&str], &[&str]) = match cmd[0].as_str() {
         "llama-server" => return None,
@@ -525,9 +557,8 @@ fn one_shot(mut cmd: Vec<String>) -> Option<String> {
     // A file's path with a space, a quote or a `;` in it is one word to the shell.
     let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
     let quote = |w: String| if w.chars().all(plain) { w } else { format!("'{}'", w.replace('\'', "'\\''")) };
-    let mut words: Vec<String> = cmd.into_iter().map(quote).collect();
+    let mut words: Vec<String> = std::iter::once(QUIET.into()).chain(cmd.into_iter().map(quote)).collect();
     words.push("\"<prompt>\"".into());
-    words.push(QUIET.into());
     Some(words.join(" "))
 }
 
@@ -1105,7 +1136,7 @@ mod tests {
         (o.no_fav, o.prompt) = (false, true);
         let line = |data: &Data, store: &Store, o: &ListOpts| tier_line(data, store, o).ok();
         let elsewhere = format!(
-            "p/gpt55  -  (★ favorite mini is not on pi, start: opencode run --model p/mini \"<prompt>\" {QUIET})"
+            "p/gpt55  -  (★ favorite mini is not on pi, start: {QUIET} opencode run --model p/mini \"<prompt>\")"
         );
         assert_eq!(line(&data, &store, &o), Some(elsewhere));
         store.set_note("mini", "slow");
@@ -1116,13 +1147,13 @@ mod tests {
         (o.not, o.via, o.cmd) = (vec![], vec![], true);
         assert_eq!(
             line(&data, &store, &o),
-            Some(format!("opencode run --model p/mini \"<prompt>\" {QUIET}  -  note: slow")),
+            Some(format!("{QUIET} opencode run --model p/mini \"<prompt>\"  -  note: slow")),
             "any harness: the command that runs a prompt there"
         );
         // A bound is for the favorite too: a prompt it cannot hold rules it out.
         data.models[1].context = 1_000_000;
         o.bounds = vec![(COLS.iter().position(|c| c.id == "ctx").unwrap(), 600.0, f64::INFINITY)];
-        assert_eq!(line(&data, &store, &o), Some(format!("pi --model p/gpt55 -p \"<prompt>\" {QUIET}  1M")));
+        assert_eq!(line(&data, &store, &o), Some(format!("{QUIET} pi --model p/gpt55 -p \"<prompt>\"  1M")));
         // The tier's favorite ruled out: the task's is next, before the pick on merit.
         data.models.push(model("big", 10.0, 50.0));
         let big = data.models.last_mut().unwrap();
@@ -1130,7 +1161,7 @@ mod tests {
             (true, 2_000_000, vec!["pi".into()], vec!["pi".into()]);
         store.set_favorite("coding:low", "mini", None);
         store.set_favorite("coding", "big", None);
-        assert_eq!(line(&data, &store, &o), Some(format!("pi --model p/big -p \"<prompt>\" {QUIET}  2M")));
+        assert_eq!(line(&data, &store, &o), Some(format!("{QUIET} pi --model p/big -p \"<prompt>\"  2M")));
         let run = |cmd: &[&str]| one_shot(cmd.iter().map(|s| s.to_string()).collect());
         let runs = [
             (&["codex", "--model", "gpt55"][..], "codex exec --sandbox workspace-write --model gpt55"),
@@ -1146,9 +1177,27 @@ mod tests {
             (&["llama-cli", "-m", "/it's/a;b.gguf"], "llama-cli -m '/it'\\''s/a;b.gguf' -st -p"),
         ];
         for (cmd, said) in runs {
-            assert_eq!(run(cmd), Some(format!("{said} \"<prompt>\" {QUIET}")));
+            assert_eq!(run(cmd), Some(format!("{QUIET} {said} \"<prompt>\"")));
         }
         assert_eq!(run(&["llama-server", "-hf", "a/b"]), None, "a server runs no prompt");
+    }
+
+    #[test]
+    fn pick_says_the_lines_tasks_share_once() {
+        let task = |name: &str, lines: &[&str]| (name.to_string(), lines.iter().map(|l| l.to_string()).collect());
+        let said =
+            grouped(vec![task("a", &["low x", "high y"]), task("b", &["low z"]), task("c", &["low x", "high y"])]);
+        assert_eq!(said, ["a", "c", "low x", "high y", "b", "low z"]);
+    }
+
+    #[test]
+    fn quiet_says_the_end_of_a_failed_run_alone() {
+        let sh = |script: &str| quiet(&["sh".into(), "-c".into(), script.into()]);
+        assert!(sh("echo steps >&2").is_ok());
+        let log = (1..=30).map(|n| format!("echo {n} >&2")).collect::<Vec<_>>().join("; ");
+        let e = sh(&format!("{log}; exit 3")).unwrap_err();
+        assert_eq!((e.code, e.msg.lines().count(), e.msg.lines().last()), (3, 20, Some("30")));
+        assert!(quiet(&["no-such-harness".into()]).is_err());
     }
 
     fn keys(v: &Value) -> Vec<&str> {

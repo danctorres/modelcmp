@@ -286,18 +286,21 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
 `pick` is `list --task --tier` for every task and tier at once, your own tasks last.
 
 - Under each task and what it is for, it prints a line per tier with the model, its context
-  and your note. Tiers with the same model share a line (`low/mid`).
+  and your note. Tiers with the same model share a line (`low/mid`), and tasks with the same
+  lines are listed together above them, so an agent reads each line once.
 - Each line has the command that runs one prompt on the model and exits, on the harness
-  `--cmd` goes by (`opencode run --model opencode/ling-3.1-flash-free "<prompt>"`, `pi --model
-  ... -p "<prompt>"`), so an agent in one harness reaches a model only another has.
-- The command sends what the harness prints on stderr (its steps) to a file, and prints the
-  last 20 lines of it when the run fails, so the agent reads the answer alone, or the error.
+  `--cmd` goes by (`modelcmp quiet opencode run --model opencode/ling-3.1-flash-free
+  "<prompt>"`, `modelcmp quiet pi --model ... -p "<prompt>"`), so an agent in one harness
+  reaches a model only another has.
+- `modelcmp quiet <command>` runs the command with what it prints on stderr (the harness's
+  steps) left out, and says the last 20 lines of it when the run fails, with the command's
+  exit code, so the agent reads the answer alone, or the error.
 - The command has the flags that let claude, codex, gemini or copilot edit files and run
   commands (tests, builds) without asking, as opencode, pi and omp do.
 - With `--via` the model is named by the id that harness takes. A favorite the harness lacks
   follows the tier's own pick, with the command that starts it where it runs: `(★ favorite
-  Ling 3.1 Flash is not on claude, start: opencode run --model opencode/ling-3.1-flash-free
-  "<prompt>")`.
+  Ling 3.1 Flash is not on claude, start: modelcmp quiet opencode run --model
+  opencode/ling-3.1-flash-free "<prompt>")`.
 - `--min` and `--not` leave a favorite out too. A tier's favorite they leave out gives way to
   the task's, and a task of your own whose model is out says `no model`.
 - When no task has a model (`--via ollama`, whose copies are picked only as favorites, or a
