@@ -1549,22 +1549,26 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
 pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
-        cached => match refresh(&Steps::default(), None::<fn(Data)>) {
-            Ok(mut d) => {
-                let w = d.warning.take();
-                Ok((d, w))
-            }
-            Err(e) => match cached {
-                Some(d) => {
-                    let w = format!("refresh failed ({e}); using data {} old", crate::view::age(d.age()));
-                    Ok((d, Some(w)))
+        cached => {
+            // A refresh can take half a minute, which with nothing said looks like a hang.
+            eprintln!("downloading model data, cached for 24h...");
+            match refresh(&Steps::default(), None::<fn(Data)>) {
+                Ok(mut d) => {
+                    let w = d.warning.take();
+                    Ok((d, w))
                 }
-                None => Err(match e {
-                    Failure::Other(e) => Failure::Other(format!("could not download model data: {e}")),
-                    key => key,
-                }),
-            },
-        },
+                Err(e) => match cached {
+                    Some(d) => {
+                        let w = format!("refresh failed ({e}); using data {} old", crate::view::age(d.age()));
+                        Ok((d, Some(w)))
+                    }
+                    None => Err(match e {
+                        Failure::Other(e) => Failure::Other(format!("could not download model data: {e}")),
+                        key => key,
+                    }),
+                },
+            }
+        }
     }
 }
 
