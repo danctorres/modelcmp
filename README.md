@@ -19,16 +19,25 @@
 
 Frontier models cost ten times or more what smaller ones do, and many software tasks do not
 need them. modelcmp puts prices and software-engineering benchmarks side by side and, for each
-kind of task (coding, agentic runs, reasoning, ...), names the best model at each price.
+kind of task (coding, agentic runs, reasoning, ...), recommends the best model at each price.
 
-- **You** get a TUI to compare models, keep a shortlist and set the model you want for each task.
-- **Your agent** gets your model for the task from `modelcmp pick` if you set one. Otherwise it
+- **You** get a TUI to compare models by price and benchmarks, filter and sort them, and see
+  which one it recommends for each task. You can shortlist models while you decide, set your
+  favorite for a task, exclude the ones you cannot use and write notes on them. From there you
+  can also start a harness on a model, or download a local one and run it.
+- **Your agent** gets a CLI that gives it your model for the task if you set one. Otherwise it
   gets a model for each of three tiers, cheapest to best, and decides whether the subtask needs
   the top one or a cheaper one will do.
 
 ![modelcmp TUI](https://github.com/user-attachments/assets/6ffde581-f8f1-4b06-b35d-a79c3ecb6277)
 
-By default it shows only the models you can already use, plus in the TUI the ones you selected; `a` in the TUI or `--all` adds the rest.
+It works with:
+
+- **Harnesses:** opencode, pi, omp, Claude Code, Codex, Gemini CLI, GitHub Copilot CLI
+- **Local runners:** ollama, llama.cpp
+
+By default it lists only the models you can already use through them. To see every model,
+press `a` in the TUI or pass `--all` on the command line.
 
 ## Install
 
@@ -38,146 +47,79 @@ brew install danctorres/tap/modelcmp
 cargo install --git https://github.com/danctorres/modelcmp
 ```
 
-Linux and macOS; binaries are on the [releases](https://github.com/danctorres/modelcmp/releases)
-page. `cargo install` needs Rust 1.89 or later.
+Linux and macOS, with binaries on the
+[releases](https://github.com/danctorres/modelcmp/releases) page. To build from source, with
+Rust 1.89 or later:
 
-When a newer version is out the TUI says so, and `U` there upgrades to it.
+```sh
+git clone https://github.com/danctorres/modelcmp
+cd modelcmp
+cargo install --path .   # or cargo build --release, for target/release/modelcmp
+```
+
+When a newer version is out the TUI says so, and `UU` there upgrades to it.
 
 ## Usage
 
 ```sh
-modelcmp                                    # the TUI
-modelcmp recommend                          # best model per price for each task
-modelcmp list --task coding                 # the models worth paying for, cheapest first
-modelcmp list --min coding=155 --sort price # good enough, cheapest first
-modelcmp compare sonnet-5 gpt-5             # side by side, with a verdict
-modelcmp show sonnet-5                      # everything about one model
-modelcmp fav coding sonnet-5                # your model for coding: recommend and agents use it
+modelcmp                                   # the TUI
+modelcmp recommend                         # best model per price for each task
+modelcmp list --task coding                # the models worth paying for, cheapest first
+modelcmp compare sonnet-5 gpt-5            # side by side, with a verdict
+modelcmp show sonnet-5                     # everything about one model
+modelcmp open sonnet-5 --on openrouter     # its page there, or on models.dev, Hugging Face, ...
+modelcmp fav coding sonnet-5               # your model for coding
+modelcmp get gemma-3-4b-it                 # download a model and run it on your machine
 ```
 
-```
-$ modelcmp recommend
-best per price: the top model at each price level, cheapest first, as name [key] $/1M tokens (score on the task), plus ★ your favorite, marked not recommended when it is not one
+In the TUI, `R` recommends, `space` selects models, `C` compares them, `f` sets your favorite
+for a task and `/` filters. `enter` shows everything about a model, `o` opens its page on
+a site like OpenRouter, `x` starts a harness on it and `t` changes the theme. `?` lists the
+keys and `qq` quits.
 
-...
-coding  writing and fixing code  (modelcmp list --task coding)
-  use for:         fixing a bug, adding a feature to an existing repo, refactors
-  best per price:  Gemini 3.7 Flash [gemini37flash] $1.0 (158) · Claude Sonnet 5.5 [claudesonnet55] $2.8 (165) · Claude Opus 5.5 [claudeopus55] $5.4 (167)
+Each task has three tiers, `low`, `mid` and `high`, from routine work to the hardest. `low` and
+`mid` get the cheapest model that scores enough, `high` the best. A favorite you set beats that
+pick.
 
-...
-```
-
-Picks run cheapest first. Each shows the name, key, $ per 1M tokens and the task score (in
-ECI points with Epoch AI) in parentheses.
-
-In the TUI, `R` recommends, `space` selects models, `C` compares them and `/` filters. `esc`
-goes back, `q` quits and `?` lists the keys. [KEYS.md](KEYS.md) covers keys and mouse,
-[REFERENCE.md](REFERENCE.md) the columns, commands and JSON fields, and `modelcmp --help` the
-flags.
-
-## Your model for each task
-
-Press `f` on a model in the TUI and tick its tasks with `space`, or run
-`modelcmp fav <task> <model>`. `modelcmp fav` lists your choices and `modelcmp fav <task> --rm`
-clears one. Your choice beats the computed pick: `recommend` marks it `★` and agents use it
-first.
-
-A favorite can also cover one tier of a task, so easy work goes to a cheaper model than hard
-work: `modelcmp fav coding 3.7-flash --tier low` makes `--tier low` return Gemini 3.7 Flash while the other
-tiers keep your coding favorite. In the TUI, `f` has a box per tier on each task's row.
-
-A favorite can name the harness you run it on: `modelcmp fav coding opus-5.5 --via claude`, or
-`v` on a ticked box of `f`'s grid. `--id` then prints the id that harness takes, `--cmd` the whole command
-(`claude --model claude-opus-5-5`), and `recommend --json` says which harness it is. `modelcmp harness claude` sets one
-for every model without a harness of its own: `--id` and `--cmd` go by it when it has the model.
-
-A task can be one you name yourself, with the model you give it and what it is about:
-`modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"`, or `+ new task` at the end
-of `f`'s grid. No benchmark ranks it, so `recommend` shows it with that model alone and
-`modelcmp list --task debugging --id` returns it. When your task and a built-in one both fit the
-work, as debugging and coding do for a bug, agents pick yours. It takes a model per tier too
-(`modelcmp fav debugging 3.7-flash --tier low`), a cheap one for easy work and a strong one for
-hard.
-
-## Models on your machine
-
-The models ollama and llama.cpp run here show as free, with `ollama` or `llama-cli` in Via. `ollama`, or
-llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`, and the model must be one of these:
-
-| You have | What makes it show |
-|---|---|
-| a model pulled by ollama | `ollama list` shows it, with ollama running. The tag must say the size: `qwen3.5:4b`, not `:latest` |
-| a model llama.cpp downloaded | `llama-cli --cache-list` shows it, as after `llama-cli -hf unsloth/Qwen3.5-4B-GGUF:Q4_K_M` |
-| a `.gguf` file you downloaded | `modelcmp models-dir ~/models` names its folder, or `LLAMA_ARG_MODELS_DIR`, llama.cpp's own variable, does when it is set. Subfolders are not read |
-
-Then run `modelcmp --refresh`.
-
-To get a model you do not have yet, press `x` on it and pick `download and run`, or run
-`modelcmp get <model>`. It finds the most downloaded GGUF copy of the model's Hugging Face repo and starts
-`llama-cli -hf <repo>` or `ollama run hf.co/<repo>`, which download it. Both say the size of the download first, as `2.5 GB`. With neither installed it asks
-before installing one: llama.cpp with Homebrew, else ollama with its own script on Linux. It does not
-check that the model fits your machine. A model with no repo on Hugging Face has no such option.
-
-A model is matched by its tag, repo or file name, without the quantization, so the name must be the
-one the model has here (`modelcmp list --all` shows them): `gemma-3-4b-it-Q4_K_M.gguf` is Gemma 3 4B IT.
-A name that says `it` is the instruction-tuned model, never the base one beside it.
-A repo that repeats the developer in its name (`bartowski/Qwen_Qwen3.5-4B-GGUF`) matches none.
-
-The scores and the context shown are the full weights', which a quantized copy with its own context
-falls short of, so a model only your machine runs is recommended for a task only as your favorite.
+To get a local model, press `a` in the TUI to list every model, then `x` on one and pick its
+`download and run` entry, or run `modelcmp get <model>`. Models on your machine show as free.
 
 ## For agents
 
 ```sh
 npx skills add danctorres/modelcmp -g                        # teach your agent to ask modelcmp
+modelcmp pick --via opencode                                 # what the skill runs: every task and tier
 opencode -m $(modelcmp list --task coding --tier mid --id)   # or ask it yourself
-modelcmp pick --via opencode                                 # what the skill runs: one call, every task and tier
 ```
 
-`pick` prints each task with what it is for, and the model for its `low`, `mid` and `high` tier:
-your favorite, else the cheapest that is good enough, as the id the `--via` harness takes, with
-its context and your note.
-
-`recommend --json` gives your model for a task as its `favorite`, and per tier as
-`tier_favorites`, with their harnesses as `via` and `tier_via` when you chose one; `--tier`
-returns the tier's, else the task's. Your own tasks are there too,
-marked `"custom": true`, and win over a built-in task that fits the same work. Both
-give each model's `note` (written with `n` or `modelcmp note`), which the skill uses to rule
-out a model.
-
-The [skill](skills/modelcmp/SKILL.md) works in Claude Code, opencode, Codex and any other agent
-the [skills CLI](https://skills.sh) supports; `npx skills update` updates it. An agent without
+The [skill](skills/modelcmp/SKILL.md) makes your agent run `modelcmp pick` before it names a
+model for a subtask. It works in Claude Code, opencode, Codex and any other agent the
+[skills CLI](https://skills.sh) supports, and `npx skills update` updates it. An agent without
 skills can take its body in `AGENTS.md`.
+
+For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list --id` or
+`--cmd` prints only the model's id or the command that starts it.
 
 ## Data
 
-- [models.dev](https://models.dev): prices, context windows, capabilities.
-- [Epoch AI Benchmarking Hub](https://epoch.ai/benchmarks) (CC-BY): ECI and
-  per-benchmark scores.
-- [Artificial Analysis](https://artificialanalysis.ai), instead of Epoch AI when picked with
-  `B` or `--source aa`, or when none was picked and its key is there: its Intelligence Index, Terminal-Bench 4.0, SciCode and HLE,
-  and each model's speed (output tokens per second, time to first answer token).
-  Needs a free API key: the TUI's first start asks which source to use, then for the key
-  if you pick it (`B` changes it later), or set `ARTIFICIAL_ANALYSIS_API_KEY`. With Epoch AI,
-  only its sitemap is read, to link models that have a page there (`o`), as Epoch AI's is.
-- [OpenRouter](https://openrouter.ai): only its list of models is read, for the Hugging Face repo it names for each, to link it (`o`).
-- What you have: the models `opencode models`, `pi --list-models` and `omp models` list, the `claude`, `codex`
-  and `gemini` binaries on `PATH` (each counts as its own provider), and the models GitHub Copilot's
-  CLI takes on your plan when `copilot` is on `PATH` (asked of the CLI itself with `copilot --acp`,
-  under its own login; each refresh leaves an empty folder in `~/.copilot/session-state/`), and the models
-  ollama and llama.cpp run on your machine ([Models on your machine](#models-on-your-machine)). The Via column says which. Under WSL the harnesses
-  are asked in a new session, as `x` launches them, so a key exported by hand in your shell does not count. A
-  harness that fails to list its models
-  keeps the ones from the last refresh, and the refresh says so.
+- [models.dev](https://models.dev): prices, context windows and what each model can do
+  (tools, reasoning, vision).
+- [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks, with no key.
+- [Artificial Analysis](https://artificialanalysis.ai): benchmarks and speed, with a free API
+  key.
 
-Downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/` on Linux
-(`~/Library/Caches/modelcmp/` on macOS). Your selection, exclusions, notes and per-task
-favorites live in `~/.config/modelcmp/user.json` (`~/Library/Application Support/modelcmp/`
-on macOS); the `?` help shows the path. Each refresh also asks GitHub for the latest release,
-to say when a new version is out.
+The TUI asks which benchmark source to use on its first start, and `B` changes it later.
+Data is cached for 24 hours.
 
-Benchmarks are proxies: a score says how a model did on that test, not how it will do in
-your harness.
+Benchmarks are proxies: a score says how a model did on that test, not how it will do in your
+harness.
+
+## More
+
+- [KEYS.md](KEYS.md): every key and mouse action in the TUI.
+- [REFERENCE.md](REFERENCE.md): the columns, how each score is obtained, every command,
+  favorites and tasks of your own, local models, and the JSON for scripts.
+- `modelcmp --help`: every flag.
 
 ## Contributing
 

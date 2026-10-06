@@ -29,7 +29,7 @@ column, and in a row of compare.
 
 ## Scores
 
-Where the numbers in the score columns come from. Both sources are downloaded on a refresh, Artificial Analysis only with its key, so switching between them needs no second refresh.
+Where the numbers in the score columns come from. Both sources are downloaded on a refresh, Artificial Analysis only with its key, so switching between them needs no second refresh. Each source's sitemap is read too, with or without a key, to link the models that have a page there (`o`), and OpenRouter's list of models for the Hugging Face repo it names for each.
 
 Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
 
@@ -122,7 +122,7 @@ less than a year, or whose best of a year ago scored nothing, has no such pace, 
 tier's pick. Every favorite of the task that you have and did not exclude sits on the task's list, whatever `--dev`, `--via`, `--min`, `--max` or `--selected` narrow it to, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
 the task, which then shows as `-`. `--all`
 includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
-`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay, or the tag `ollama run` takes, or the repo (`-hf`) or file (`-m`) `llama-cli` takes, for a model only your machine runs; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model, else your default harness's (`modelcmp harness`) when it has it. `--via` naming a harness prints the id that one takes instead (`--via claude --id` gives `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts opencode), and is an error when the harness lacks the model. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else your default one, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. `--tier` with `--no-fav` gives the tier's pick without your favorites, for when a favorite is on no harness you can start (`--tier mid --via claude --no-fav --id`). A task of your own has none. With no match it is an error (exit code 1), so a harness is never started on an empty model. With `--tier`, `--id` and `--cmd` also say the model's context and your note on stderr (`Claude Opus 5.5: context 1000000, note: slow`), which an agent checks and a `$(...)` does not read.
+`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay, or the tag `ollama run` takes, or the repo (`-hf`) or file (`-m`) `llama-cli` takes, for a model only your machine runs; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model, else your default harness's (`modelcmp harness`) when it has it. `--via` naming a harness prints the id that one takes instead (`--via claude --id` gives `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts opencode), and is an error when the harness lacks the model. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else your default one, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. `--tier` with `--no-fav` gives the tier's pick without your favorites, for when a favorite is on no harness you can start (`--tier mid --via claude --no-fav --id`). A task of your own has none. With `--tier`, `--id` or `--cmd`, no match is an error (exit code 1), so a harness is never started on an empty model. Without them `list` says `no models match` and exits with 0. With `--tier`, `--id` and `--cmd` also say the model's context and your note on stderr (`Claude Opus 5.5: context 1000000, note: slow`), which an agent checks and a `$(...)` does not read.
 
 `pick` is `list --task --tier` for every task and tier at once, your own tasks last: under each
 task and what it is for, a line per tier with the model, its context and your note, and tiers with
@@ -137,7 +137,60 @@ that chose it already.
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name
 is ambiguous: it exits with code 3 and lists the candidates. An unknown `--dev` or `--via` is an error rather
-than an empty list.
+than an empty list (exit code 1), and an unknown task or harness, or a `models-dir` that is not a
+folder, exits with code 2.
+
+## What you have
+
+A refresh asks each harness on your `PATH` which models it has, and the Via column names them:
+
+- `opencode models`, `pi --list-models` and `omp models` list theirs.
+- The `claude`, `codex` and `gemini` binaries each count as their own provider.
+- `copilot` gives the models GitHub Copilot's CLI takes on your plan, asked of the CLI itself
+  with `copilot --acp`, under its own login. Each refresh leaves an empty folder in
+  `~/.copilot/session-state/`.
+- ollama and llama.cpp give the models on your machine, as below.
+
+Under WSL the harnesses are asked in a new session, as `x` launches them, so a key exported by
+hand in your shell does not count. A harness that fails to list its models keeps the ones from
+the last refresh, and the refresh says so.
+
+## Models on your machine
+
+The models ollama and llama.cpp run here show as free, with `ollama` or `llama-cli` in Via. `ollama`, or
+llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`, and the model must be one of these:
+
+| You have | What makes it show |
+|---|---|
+| a model pulled by ollama | `ollama list` shows it, with ollama running. The tag must say the size: `qwen3.5:4b`, not `:latest` |
+| a model llama.cpp downloaded | `llama-cli --cache-list` shows it, as after `llama-cli -hf unsloth/Qwen3.5-4B-GGUF:Q4_K_M` |
+| a `.gguf` file you downloaded | `modelcmp models-dir ~/models` names its folder, or `LLAMA_ARG_MODELS_DIR`, llama.cpp's own variable, does when it is set. Subfolders are not read |
+
+Then run `modelcmp --refresh`, which opens the TUI, or `modelcmp list --refresh` in a script.
+
+The scores and the context shown are the full weights', which a quantized copy with its own context
+falls short of, so a model only your machine runs is recommended for a task only as your favorite.
+
+A model is matched by its tag, repo or file name, without the quantization, so the name must be the
+one the model has here (`modelcmp list --all` shows them): `gemma-3-4b-it-Q4_K_M.gguf` is Gemma 3 4B IT.
+A name that says `it` is the instruction-tuned model, never the base one beside it.
+A repo that repeats the developer in its name (`bartowski/Qwen_Qwen3.5-4B-GGUF`) matches none.
+
+`modelcmp get <model>` finds the most downloaded GGUF copy of the model's Hugging Face repo and
+starts `llama-cli -hf <repo>` or `ollama run hf.co/<repo>`, which download it. Both say the size
+of the download first, as `2.5 GB`. With neither installed it asks before installing one:
+llama.cpp with Homebrew, else ollama with its own script on Linux. A model with no repo on
+Hugging Face has no such option, and it does not check that the model fits your machine. In
+the TUI, `x` on a model and `download and run` does the same.
+
+## Files
+
+The data is downloaded on first run and cached for 24 hours under `~/.cache/modelcmp/` on Linux
+(`~/Library/Caches/modelcmp/` on macOS). Your favorites, exclusions, notes and settings live in
+`~/.config/modelcmp/user.json` (`~/Library/Application Support/modelcmp/` on macOS), and the `?`
+help shows the path. Your selection is kept there too, until the TUI closes. Each refresh also
+asks GitHub for the latest release, to say when a new version is out, and `UU` in the TUI
+upgrades to it.
 
 ## Data age
 
