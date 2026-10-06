@@ -29,7 +29,7 @@ column, and in a row of compare.
 
 ## Scores
 
-Where the numbers in the score columns come from. Both sources are downloaded on a refresh, Artificial Analysis only with its key, so switching between them needs no second refresh. Each source's sitemap is read too, with or without a key, to link the models that have a page there (`o`), and OpenRouter's list of models for the Hugging Face repo it names for each.
+Where the numbers in the score columns come from. Both sources are downloaded on a refresh, Artificial Analysis only with its key, so switching between them needs no second refresh. Each source's sitemap is read too, with or without a key, to link the models that have a page there (`o`), and OpenRouter's list of models for the Hugging Face repo it names for each. An open model it names none for is linked to the repo Hugging Face has under an id a provider gives it, which Hugging Face is asked for after the early data, 400 ids a refresh, an id with no repo again a month later.
 
 Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
 

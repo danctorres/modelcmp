@@ -659,7 +659,7 @@ pub struct Model {
     #[serde(default)]
     pub openrouter: Option<String>,
     /// Its repo on Hugging Face, `moonshotai/Kimi-K2-Instruct`, when OpenRouter names one for
-    /// it (`hf_listed`).
+    /// it (`hf_listed`), else the one Hugging Face has under an id of its own (`hf_found`).
     #[serde(default)]
     pub hf: Option<String>,
     pub offers: Vec<Offer>,
@@ -1396,6 +1396,15 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         first.apply_available();
         early(first);
     }
+    // After the early data, which does not wait for it, and while the harnesses answer.
+    step(steps, "huggingface.co");
+    let (mut found, mut asks): (Asked, _) = (kept("hf.json"), HF_ASKS);
+    hf_found(&mut data.models, &mut found, &mut asks, hf_spelled);
+    if let Some((_, Ok(o))) = &mut other {
+        hf_found(&mut o.models, &mut found, &mut asks, hf_spelled);
+    }
+    keep("hf.json", &found);
+    answered(steps, "huggingface.co");
     // Until the last harness has answered. One that never does, its thread dead, is silent.
     listed.extend(answers.iter());
     let _ = harness.join();
@@ -1558,16 +1567,21 @@ fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, Failure> {
 
 /// `fetch`, given up on after `limit`.
 fn fetch_within(url: &str, key: Option<&str>, limit: Duration) -> Result<Vec<u8>, Failure> {
+    request(url, key, limit).map_err(|e| match e {
+        ureq::Error::StatusCode(401 | 403) if key.is_some() => Failure::BadKey,
+        e => format!("{url}: {e}").into(),
+    })
+}
+
+/// `fetch_within`, with the site's own error for one that reads its status.
+fn request(url: &str, key: Option<&str>, limit: Duration) -> Result<Vec<u8>, ureq::Error> {
     // One for every download, so a second request to a site goes over the first's connection.
     static AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| agent(Duration::from_secs(60)));
     let mut req = AGENT.get(url).config().timeout_global(Some(limit)).build();
     if let Some(k) = key {
         req = req.header("x-api-key", k);
     }
-    req.call().and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec()).map_err(|e| match e {
-        ureq::Error::StatusCode(401 | 403) if key.is_some() => Failure::BadKey,
-        e => format!("{url}: {e}").into(),
-    })
+    req.call().and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec())
 }
 
 /// The sitemaps of model pages that Epoch's `index` names: one, and more once Epoch splits it.
@@ -1604,7 +1618,8 @@ fn is_repo(id: &str) -> bool {
 
 /// Gives each model OpenRouter lists the Hugging Face repo its `list` names for it, when it
 /// names one that has a page (`HF_GONE`): `{"data": [{"id": ..., "hugging_face_id": ...}]}`.
-/// False when it is not that.
+/// A model it does not list gets the repo named as the model is, `Qwen/Qwen3.8-Flash-Next` for
+/// `qwen38flashnext`. False when it is not that.
 fn hf_listed(models: &mut [Model], list: &[u8]) -> bool {
     #[derive(Deserialize)]
     struct Rows {
@@ -1621,10 +1636,133 @@ fn hf_listed(models: &mut [Model], list: &[u8]) -> bool {
         .into_iter()
         .filter_map(|r| Some((r.id, r.hugging_face_id.filter(|id| is_repo(id) && !HF_GONE.contains(&id.as_str()))?)));
     let named: HashMap<String, String> = named.collect();
+    // A model OpenRouter lists under another name ("Qwen 3.8 Flash") has its repo's too.
+    let by_name: HashMap<String, &String> =
+        named.values().filter_map(|repo| Some((norm(repo.split_once('/')?.1), repo))).collect();
     for m in models {
-        m.hf = m.openrouter.as_ref().and_then(|id| named.get(id)).cloned();
+        let listed = m.openrouter.as_ref().and_then(|id| named.get(id));
+        m.hf = listed.or_else(|| by_name.get(&m.key).copied()).cloned();
     }
     true
+}
+
+/// The most repos Hugging Face is asked for in a refresh: it answers 500 requests in five
+/// minutes, and `x` asks it too. The rest are asked for by the next refresh.
+const HF_ASKS: usize = 400;
+
+/// How long Hugging Face's "no such repo" is gone by before it is asked again, in seconds.
+const HF_NONE_FOR: u64 = 30 * 24 * 3600;
+
+/// What Hugging Face said of each id it was asked for, in lower case: the repo as it spells
+/// it, or none, and when it said so, in seconds. Kept in `hf.json`, so an id with a repo is
+/// asked for once, and one with none again after `HF_NONE_FOR`.
+// ponytail: a repo found is kept for good, so one deleted since stays linked: ask again past
+// some age if dead links show.
+type Asked = HashMap<String, (Option<String>, u64)>;
+
+/// The repo Hugging Face has under `id`, as it spells it, `Qwen/QwQ-32B` for `qwen/qwq-32b`:
+/// Some(None) when it has none, None when it did not say.
+fn hf_spelled(id: &str) -> Option<Option<String>> {
+    #[derive(Deserialize)]
+    struct Repo {
+        id: String,
+    }
+    match request(&format!("https://huggingface.co/api/models/{id}"), None, HF_WAIT) {
+        // A page in place of its answer, a proxy's, says nothing of the repo.
+        Ok(repo) => Some(Some(serde_json::from_slice::<Repo>(&repo).ok()?.id)),
+        // Its answers for a repo it does not have, or keeps private.
+        Err(ureq::Error::StatusCode(401 | 404)) => Some(None),
+        Err(_) => None,
+    }
+}
+
+/// What a provider or models.dev calls a model, without the provider's tag: `glm-5.2` of
+/// `z-ai/glm-5.2:thinking`, and the id whole. A size is no tag: `deepseek-r1:8b` is another
+/// model than `deepseek-r1`.
+fn id_name(id: &str) -> (&str, &str) {
+    let sized = |tag: &str| tag.starts_with(|c: char| c.is_ascii_digit());
+    let id = id.split_once(':').filter(|(_, tag)| !sized(tag)).map_or(id, |(id, _)| id);
+    (id, id.rsplit_once('/').map_or(id, |(_, name)| name))
+}
+
+/// The ids Hugging Face may have the open model `m` under, in lower case: the ones its
+/// providers and models.dev give it, then their names under `org`, where its developer keeps
+/// its repos (`Qwen/qwen3.5-2b` of Alibaba's `qwen3.5-2b`).
+fn hf_guesses(m: &Model, org: Option<&str>) -> Vec<String> {
+    let ids = || m.md.iter().chain(m.offers.iter().map(|o| &o.id)).map(|id| id_name(id));
+    let said = ids().map(|(id, _)| id.to_ascii_lowercase());
+    let under = ids().filter_map(|(_, name)| Some(format!("{}/{name}", org?).to_ascii_lowercase()));
+    let plain = |id: &str| is_repo(id) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b));
+    let mut seen = HashSet::new();
+    said.chain(under).filter(|id| plain(id) && seen.insert(id.clone())).collect()
+}
+
+/// Gives the open models left without a repo (`hf_listed`) the one Hugging Face has under an
+/// id of theirs (`hf_guesses`), the one named as they are first, then their developer's own,
+/// else the one another model has that is named as they are or as a provider names them
+/// (`zai-org/GLM-5.2` for `zhipuai/glm-5.2`).
+/// `ask` is `hf_spelled`, asked for at most `asks` ids not in `found`, which it adds to.
+// ponytail: a repo under another name than any provider's (`CohereLabs/c4ai-command-r-08-2024`)
+// stays unlinked. Search Hugging Face by the developer's org if those are missed.
+fn hf_found(
+    models: &mut [Model],
+    found: &mut Asked,
+    asks: &mut usize,
+    ask: impl Fn(&str) -> Option<Option<String>> + Sync,
+) {
+    let org_of = |repo: &str| repo.split_once('/').map(|(org, _)| org.to_string());
+    let mut repos: HashMap<(&str, String), usize> = HashMap::new();
+    for m in models.iter().filter(|m| !m.developer.is_empty()) {
+        // Not `hf_repo`: a copy pulled here is whoever's quantized it.
+        if let Some(org) = m.hf.as_deref().and_then(org_of) {
+            *repos.entry((&m.developer, org)).or_default() += 1;
+        }
+    }
+    // Developer -> where most of its repos are.
+    let mut repos: Vec<_> = repos.into_iter().map(|((dev, org), n)| (n, org, dev.to_string())).collect();
+    repos.sort();
+    let orgs: HashMap<String, String> = repos.into_iter().map(|(_, org, dev)| (dev, org)).collect();
+
+    let open = |m: &Model| m.open_weights && m.hf_repo().is_none();
+    let guesses = |(i, m): (usize, &Model)| (i, hf_guesses(m, orgs.get(&m.developer).map(String::as_str)));
+    let guessed: Vec<(usize, Vec<String>)> = models.iter().enumerate().filter(|(_, m)| open(m)).map(guesses).collect();
+    let at = now();
+    let unasked =
+        |id: &&str| found.get(*id).is_none_or(|(repo, was)| repo.is_none() && at.saturating_sub(*was) >= HF_NONE_FOR);
+    let new: BTreeSet<&str> = guessed.iter().flat_map(|(_, ids)| ids).map(String::as_str).filter(unasked).collect();
+    let new: Vec<&str> = new.into_iter().take(*asks).collect();
+    *asks -= new.len();
+    // Hugging Face not answering one, down or asked too much, is not asked for the rest.
+    let (ask, down) = (&ask, &AtomicBool::new(false));
+    let said: Vec<(String, Option<String>)> = std::thread::scope(|s| {
+        let some = |ids: &[&str]| {
+            let one = |id: &&str| {
+                let said = ask(id);
+                down.fetch_or(said.is_none(), Relaxed);
+                Some((id.to_string(), said?))
+            };
+            ids.iter().take_while(|_| !down.load(Relaxed)).map_while(one).collect::<Vec<_>>()
+        };
+        let asking: Vec<_> = new.chunks(new.len().div_ceil(8).max(1)).map(|ids| s.spawn(move || some(ids))).collect();
+        asking.into_iter().flat_map(|t| t.join().unwrap_or_default()).collect()
+    });
+    found.extend(said.into_iter().map(|(id, repo)| (id, (repo, at))));
+
+    for (i, ids) in &guessed {
+        let has = || ids.iter().filter_map(|id| found.get(id)?.0.as_ref());
+        // One provider calls a distill by the name of the model it is distilled from.
+        let named = |repo: &str| norm(id_name(repo).1) == models[*i].key;
+        let own = |repo: &str| org_of(repo).as_ref() == orgs.get(&models[*i].developer);
+        models[*i].hf = has().min_by_key(|repo| (!named(repo), !own(repo))).cloned();
+    }
+    let mut by_name: HashMap<String, String> = HashMap::new();
+    for repo in models.iter().filter_map(Model::hf_repo) {
+        by_name.entry(norm(id_name(repo).1)).or_insert_with(|| repo.to_string());
+    }
+    for m in models.iter_mut().filter(|m| open(m)) {
+        let names = m.md.iter().chain(m.offers.iter().map(|o| &o.id)).map(|id| norm(id_name(id).1));
+        m.hf = std::iter::once(m.key.clone()).chain(names).find_map(|name| by_name.get(&name)).cloned();
+    }
 }
 
 /// "Claude Opus 4.5" -> ["claude", "opus", "4", "5"]: its lowercase alphanumeric runs, a "+"
@@ -3249,7 +3387,7 @@ mod tests {
         let mut ms = [
             Model { openrouter: Some("moonshotai/kimi-k2".into()), ..Default::default() },
             Model { openrouter: Some("openai/gpt-5.5".into()), hf: Some("stale/repo".into()), ..Default::default() },
-            Model::default(),
+            Model { key: "kimik2instruct".into(), ..Default::default() },
             Model { openrouter: Some("a/b".into()), ..Default::default() },
             Model { openrouter: Some("a/c".into()), ..Default::default() },
             Model { openrouter: Some("a/d".into()), ..Default::default() },
@@ -3261,8 +3399,61 @@ mod tests {
         assert!(hf_listed(&mut ms, list) && !hf_listed(&mut [], b"<html>"), "only a list of models is one");
         assert_eq!(
             ms.each_ref().map(|m| m.hf.as_deref()),
-            [Some("moonshotai/Kimi-K2-Instruct"), None, None, None, None, None]
+            [Some("moonshotai/Kimi-K2-Instruct"), None, Some("moonshotai/Kimi-K2-Instruct"), None, None, None],
+            "the third by the repo's name, OpenRouter not listing it"
         );
+        // Hugging Face is asked for the ids of the open models still without one, once each.
+        let open = |dev: &str, key: &str, ids: &[&str]| Model {
+            key: key.into(),
+            developer: dev.into(),
+            open_weights: true,
+            offers: ids.iter().map(|id| Offer { id: id.to_string(), ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        let mut found =
+            Asked::from([("stale/qwq-32b".to_string(), (None, 0)), ("fresh/qwq-32b".to_string(), (None, now()))]);
+        let (asked, up) = (Mutex::new(Vec::new()), AtomicBool::new(true));
+        let ask = |id: &str| {
+            asked.lock().unwrap().push(id.to_string());
+            let has = ["Qwen/QwQ-32B", "cortecs/QwQ-32B", "zai-org/GLM-5.2"];
+            up.load(Relaxed).then(|| has.into_iter().find(|r| r.eq_ignore_ascii_case(id)).map(String::from))
+        };
+        let mut asked_for = [
+            Model { hf: Some("Qwen/Qwen3-32B".into()), developer: "Alibaba".into(), ..Default::default() },
+            open("Alibaba", "qwq32b", &["cortecs/qwq-32b", "qwq-32b:free", "~odd", "stale/qwq-32b", "fresh/qwq-32b"]),
+            open("Z.ai", "glm52", &["zai-org/GLM-5.2"]),
+            open("Z.ai", "glm52fast", &["z-ai/glm-5.2:fast"]),
+            open("Alibaba", "qwenmax", &["qwen/max", "qwen3:8b"]),
+            Model {
+                key: "closed".into(),
+                offers: vec![Offer { id: "zai-org/glm-5.2".into(), ..Default::default() }],
+                ..Default::default()
+            },
+        ];
+        let mut asks = 9;
+        hf_found(&mut asked_for, &mut found, &mut asks, ask);
+        assert_eq!(
+            asked_for.each_ref().map(|m| m.hf.as_deref()),
+            [
+                Some("Qwen/Qwen3-32B"),
+                Some("Qwen/QwQ-32B"),
+                Some("zai-org/GLM-5.2"),
+                Some("zai-org/GLM-5.2"),
+                None,
+                None
+            ],
+            "its developer's repo over a provider's copy, and the fourth by the name its provider gives it"
+        );
+        let mut ids = std::mem::take(&mut *asked.lock().unwrap());
+        ids.sort();
+        let all = ["cortecs/qwq-32b", "qwen/max", "qwen/qwq-32b", "stale/qwq-32b", "z-ai/glm-5.2", "zai-org/glm-5.2"];
+        assert_eq!((ids, asks), (all.map(String::from).to_vec(), 3), "the ids shaped as a repo, not the fresh none");
+        // Hugging Face down says nothing of an id, which the next refresh asks for again.
+        found.remove("qwen/max");
+        up.store(false, Relaxed);
+        hf_found(&mut asked_for, &mut found, &mut 9, ask);
+        assert_eq!(*asked.lock().unwrap(), ["qwen/max"], "the others are asked for once");
+        assert!(!found.contains_key("qwen/max") && found["z-ai/glm-5.2"].0.is_none());
         let named = ("huggingface.co", "https://huggingface.co/moonshotai/Kimi-K2-Instruct".to_string());
         assert_eq!(ms[0].links().last(), Some(&named), "the repo OpenRouter names, where no offer names one");
         let paid = |p: &str, price: f64| Offer {
