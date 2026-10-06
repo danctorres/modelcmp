@@ -311,10 +311,9 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
             ("d", "dropdown on a header with ▾; space enter toggle"),
             ("a A", "all models, including ones you have no access to / yours only"),
-            ("L", "cycle: local models only (ollama, llama.cpp), not local, every model"),
             ("tab", "next tab; shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
-            ("c", "clear filters, bounds, L, task, S, F and E, and the selection stays"),
+            ("c", "clear filters, bounds, task, S, F and E, and the selection stays"),
         ],
     ),
     (
@@ -359,6 +358,13 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
 ];
+
+/// The Via dropdown's entries that are no harness, after the harnesses: the models your machine
+/// runs through ollama or llama.cpp, the others, and the ones `x` can download.
+const LOCAL: &str = "local";
+const NOT_LOCAL: &str = "not local";
+const DOWNLOAD: &str = "↓ download";
+const VIA_KINDS: [&str; 3] = [LOCAL, NOT_LOCAL, DOWNLOAD];
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: yours, all, the selected, favorite and excluded only, then the panels,
@@ -937,10 +943,8 @@ pub struct App {
     pub bounds: Vec<(usize, f64, f64)>,
     /// Developers and countries picked from the Dev dropdown; empty is any.
     pub dev: Vec<String>,
-    /// Harnesses picked from the Via dropdown; empty is any.
+    /// Harnesses picked from the Via dropdown, and of `VIA_KINDS`; empty is any.
     pub via: Vec<String>,
-    /// `L`: only the models your machine runs, or only the ones it does not; none is any.
-    pub local: Option<bool>,
     /// What is known of each model's download, by key (`Download`).
     downloads: std::collections::HashMap<String, Download>,
     tools: Tools,
@@ -1043,7 +1047,6 @@ impl App {
             bounds: vec![],
             dev: vec![],
             via: vec![],
-            local: None,
             downloads: Default::default(),
             tools: tools(),
             task: None,
@@ -1556,8 +1559,7 @@ impl App {
                 && (skip == 1 || self.dev.is_empty() || m.devs().any(|d| self.dev.iter().any(|x| x == d)))
                 && (skip == VIA
                     || self.via.is_empty()
-                    || self.via.iter().any(|h| self.shown_via(m).contains(&h.as_str())))
-                && self.local.is_none_or(|l| l == self.local(m))
+                    || self.via.iter().any(|h| self.via_labels(m).contains(&h.as_str())))
                 && self
                     .bounds
                     .iter()
@@ -1810,8 +1812,8 @@ impl App {
         in_reach(m, false, self.any_available)
     }
 
-    /// Whether `m` is local, as `L` keeps it: one your machine runs, and with `a` one it can, as
-    /// ollama or llama.cpp can download it from its Hugging Face repo (`x`, `modelcmp get`).
+    /// Whether `m` is local: one your machine runs, and with `a` one it can, as ollama or
+    /// llama.cpp can download it from its Hugging Face repo (`x`, `modelcmp get`).
     fn local(&self, m: &Model) -> bool {
         m.here() || self.all && m.hf_repo().is_some()
     }
@@ -1847,8 +1849,9 @@ impl App {
     /// on. Its open list says it too, on the entry, which stays where it is under the cursor.
     pub fn sized(&mut self, key: &str, answer: Download) {
         self.downloads.insert(key.into(), answer);
-        // Via sorts by it.
-        if self.sort_col == VIA && matches!(answer, Download::Size(_)) {
+        // Via sorts by it, and a model with no copy leaves the ones picked by `DOWNLOAD`.
+        let picked = answer == Download::Gone && self.via.iter().any(|v| v == DOWNLOAD);
+        if picked || self.sort_col == VIA && matches!(answer, Download::Size(_)) {
             self.rebuild();
         }
         let said = match answer {
@@ -1906,6 +1909,15 @@ impl App {
         self.any_available
     }
 
+    /// What the Via dropdown picks `m` by: `shown_via`, then whether your machine runs it
+    /// through ollama or llama.cpp, and `DOWNLOAD` for one `x` can download (`download`).
+    fn via_labels<'a>(&self, m: &'a Model) -> Vec<&'a str> {
+        let mut v = self.shown_via(m);
+        v.push(if m.here() { LOCAL } else { NOT_LOCAL });
+        v.extend(self.download(m).map(|_| DOWNLOAD));
+        v
+    }
+
     /// Via as the table shows it: the harnesses, or `OUT_OF_REACH` for one you have no access to.
     fn shown_via<'a>(&self, m: &'a Model) -> Vec<&'a str> {
         shown_via(m, self.any_available)
@@ -1940,11 +1952,7 @@ impl App {
 
     /// Whether a search, a dropdown or a bound narrows the models too.
     pub fn filtered_too(&self) -> bool {
-        !(self.query.trim().is_empty()
-            && self.bounds.is_empty()
-            && self.dev.is_empty()
-            && self.via.is_empty()
-            && self.local.is_none())
+        !(self.query.trim().is_empty() && self.bounds.is_empty() && self.dev.is_empty() && self.via.is_empty())
     }
 
     /// Recommend ranks the models of tab `i`, picked on its `among` line: the table's tab too,
@@ -2255,10 +2263,14 @@ impl App {
         } else if col == 1 || col == VIA {
             let by_dev = col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            // Via as the table shows it, so "not available" can be picked too.
-            let labels = ms.iter().flat_map(|&(_, m)| if by_dev { m.devs().collect() } else { self.shown_via(m) });
+            // Via as the table shows it, so "not available" can be picked too, then `LOCAL` and the like.
+            let labels = ms.iter().flat_map(|&(_, m)| if by_dev { m.devs().collect() } else { self.via_labels(m) });
             for l in labels.filter(|l| !l.is_empty()) {
                 *counts.entry(l).or_default() += 1;
+            }
+            // With no local model the rest are every model, as "any" is.
+            if !counts.contains_key(LOCAL) {
+                counts.remove(NOT_LOCAL);
             }
             // Countries, then developers, each A-Z whatever their case, so xAI comes before Z.ai;
             // harnesses with the most models first, where the stable sort keeps ties A-Z.
@@ -2267,7 +2279,7 @@ impl App {
                 let countries: std::collections::HashSet<&str> = ms.iter().map(|(_, m)| m.country.as_str()).collect();
                 names.sort_by_key(|(d, _)| (!countries.contains(d.as_str()), d.to_lowercase()));
             } else {
-                names.sort_by_key(|&(_, n)| Reverse(n));
+                names.sort_by_key(|(h, n)| (VIA_KINDS.iter().position(|k| k == h), Reverse(*n)));
             }
             let current = if col == 1 { &self.dev } else { &self.via };
             let picked = current.first().and_then(|d| names.iter().position(|(x, _)| x == d));
@@ -2781,15 +2793,6 @@ impl App {
                 self.only = (self.only != Some(EXCLUDED)).then_some(EXCLUDED);
                 self.rebuild();
             }
-            // One that is on is always left, as a tab or a refresh may leave it with no model.
-            KeyCode::Char('L') if table && self.local.is_none() && !self.data.models.iter().any(|m| self.local(m)) => {
-                self.refuse("no local models: ollama and llama.cpp run none here, and a shows the ones they can");
-            }
-            // Local only, then not local, then any.
-            KeyCode::Char('L') if table => {
-                self.local = [Some(true), Some(false), None][self.local.map_or(0, |l| 2 - l as usize)];
-                self.rebuild();
-            }
             KeyCode::Char(']' | '[') if table && !self.any_marked() => self.refuse(NO_SELECTED),
             KeyCode::Char(c @ (']' | '[')) if table => {
                 self.jump(if c == ']' { n } else { -n }, "selected", |a, m| a.store.is_marked(&m.key));
@@ -2823,7 +2826,6 @@ impl App {
                 self.bounds.clear();
                 self.dev.clear();
                 self.via.clear();
-                self.local = None;
                 self.drop_benches(true);
                 // The task set the sort; back to the default.
                 if self.task.take().is_some() {
@@ -3887,35 +3889,36 @@ mod tests {
     }
 
     #[test]
-    fn l_keeps_the_local_models_then_the_rest() {
+    fn via_dropdown_picks_the_local_models_or_the_rest() {
         let mut a = app();
-        press(&mut a, "L");
-        assert!(a.local.is_none() && a.failed, "none runs here: {}", a.status);
+        a.col = VIA;
         a.data.models[3].via.push(crate::data::OLLAMA.into());
-        press(&mut a, "L");
-        assert_eq!((a.local, keys(&a)), (Some(true), vec!["mini"]), "the one ollama has, whoever else does");
-        assert!(a.filtered_too(), "recommend says so");
-        press(&mut a, "L");
-        assert_eq!((a.local, keys(&a).len()), (Some(false), 2), "then the others");
-        press(&mut a, "L");
-        assert_eq!((a.local, keys(&a).len()), (None, 3), "then any");
-        press(&mut a, "Lc");
-        assert_eq!((a.local, keys(&a).len()), (None, 3), "c clears it");
-        // One that is on is left even with no local model to show.
-        press(&mut a, "L");
-        a.data.models[3].via.pop();
-        a.rebuild();
-        press(&mut a, "L");
-        assert_eq!((a.local, keys(&a).len()), (Some(false), 3), "L goes on to the rest");
-        a.data.models[3].via.push(crate::data::OLLAMA.into());
-        press(&mut a, "c");
-        // With all, the ones ollama or llama.cpp can download too.
         a.data.models[2].hf = Some("meta/llama4".into());
-        press(&mut a, "L");
-        assert_eq!(keys(&a), ["mini"], "yours: only the ones here");
+        a.tools = (vec![crate::data::OLLAMA], None);
+        let pick = |a: &mut App, entry: &str| {
+            press(a, "d");
+            press(a, &format!("/{entry}"));
+            code(a, KeyCode::Enter);
+            code(a, KeyCode::Esc);
+            code(a, KeyCode::Esc);
+        };
+        press(&mut a, "d");
+        assert_eq!(menu(&a)[menu(&a).len() - 2..], [("local", 1), ("not local", 2)], "after the harnesses");
+        code(&mut a, KeyCode::Esc);
+        pick(&mut a, "local");
+        assert_eq!((a.via.as_slice(), keys(&a)), (&["local".to_string()][..], vec!["mini"]), "whoever else has it");
+        assert!(a.filtered_too(), "recommend says so");
+        press(&mut a, "c");
+        pick(&mut a, "not local");
+        assert_eq!((keys(&a).len(), a.via.len()), (2, 1), "the others");
+        press(&mut a, "c");
+        assert_eq!((keys(&a).len(), a.via.len()), (3, 0), "c clears it");
+        // With all, the ones ollama or llama.cpp can download have an entry of their own.
         press(&mut a, "a");
-        assert_eq!((a.local, keys(&a).len()), (Some(true), 2), "all: llama4 has a repo to download");
-        assert!(keys(&a).contains(&"llama4"));
+        pick(&mut a, "download");
+        assert_eq!(keys(&a), ["llama4"], "it has a repo to download");
+        a.sized("llama4", Download::Gone);
+        assert!(keys(&a).is_empty(), "Hugging Face has no GGUF copy of it after all");
     }
 
     #[test]
