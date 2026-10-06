@@ -123,7 +123,9 @@ enum Cmd {
         #[arg(long)]
         on: Option<String>,
     },
-    /// Download a copy of the model to your machine and run it there: the GGUF one Hugging Face has of it, by `llama-cli -hf` or `ollama run`, after installing one of them, once you agree, when you have neither (`x` in the TUI)
+    /// Download a copy of the model to your machine and run it there (`x` in the TUI)
+    ///
+    /// The GGUF one Hugging Face has of it, by `llama-cli -hf` or `ollama run`, after installing one of them, once you agree, when you have neither
     Get {
         model: String,
         /// The one that runs it (ollama or llama-cli), the one you have when left out
@@ -157,7 +159,9 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Your default harness (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): `list --cmd` and `--id` go by it when it has the model and --via names none, after a favorite's own harness (`fav --via`). Alone, shows it (`H` in the TUI)
+    /// Your default harness, alone shows it (`H` in the TUI)
+    ///
+    /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli: `list --cmd` and `--id` go by it when it has the model and --via names none, after a favorite's own harness (`fav --via`)
     Harness {
         #[arg(conflicts_with = "rm")]
         name: Option<String>,
@@ -165,7 +169,9 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// The folder of the `.gguf` files you downloaded: llama.cpp runs the models in it and a refresh lists them, when `LLAMA_ARG_MODELS_DIR` is not set. Alone, shows it
+    /// The folder of the `.gguf` files you downloaded, alone shows it
+    ///
+    /// llama.cpp runs the models in it and a refresh lists them, when `LLAMA_ARG_MODELS_DIR` is not set
     ModelsDir {
         #[arg(conflicts_with = "rm")]
         dir: Option<String>,

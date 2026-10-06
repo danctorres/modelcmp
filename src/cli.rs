@@ -202,6 +202,9 @@ fn table(models: &[&Model], store: &Store, any: bool) {
 
 /// Every name in `asked` must be one of `known`, any case, or the filter would silently match nothing.
 fn check<'a>(flag: &str, asked: &[String], known: impl Iterator<Item = &'a str>) -> Result {
+    if asked.is_empty() {
+        return Ok(());
+    }
     let known: BTreeSet<String> = known.filter(|k| !k.is_empty()).map(str::to_lowercase).collect();
     match asked.iter().find(|a| !known.contains(&a.to_lowercase())) {
         Some(bad) => {
@@ -364,6 +367,10 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     // An agent told only what is known goes on to guess a model for its harness.
     check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, data.any_available())))
         .map_err(|e| Exit { msg: format!("{}: choose no model for it, tell the user", e.msg), ..e })?;
+    // Every line would be a model with no way to run it.
+    if !data.any_available() {
+        return Err(format!("{}: choose no model, tell the user", crate::view::NO_ACCESS).into());
+    }
     let own = store.custom_tasks();
     let own = own.iter().map(|&c| (c, None, format!("the user's own task, {}", store.about(c).unwrap_or(CUSTOM_WHEN))));
     let tasks: Vec<_> = TASKS.iter().map(|t| (t.name, Some(t), t.when.to_string())).chain(own).collect();
@@ -402,24 +409,27 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
 /// else the tier's pick on merit, followed by the favorite's command on the harness that has it.
 fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
     let allowed = |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi));
-    // With no harness asked for, one no harness has is called by its id.
-    let call = |o: &ListOpts, m: &Model| {
-        launch(data, store, o, m).or_else(|e| match o.via.is_empty() {
-            true => launch(data, store, &ListOpts { cmd: false, ..o.clone() }, m),
-            false => Err(e),
-        })
-    };
     let said = |m: &Model, id: String| {
         let ctx = COLS.iter().find(|c| c.id == "ctx").and_then(|c| Some((c.show)((c.get)(m)?)));
         let note = store.note(&m.key).map(|n| format!("  note: {n}")).unwrap_or_default();
         format!("{id}  {}{note}", ctx.unwrap_or("-".into()))
     };
-    let fav = matched(data, store, o)?.0.first().copied().filter(allowed);
-    if let Some((m, Ok(id))) = fav.map(|m| (m, call(o, m))) {
-        return Ok(said(m, id));
+    // One the bounds allow, with what calls it: an id alone is no command to run.
+    let line = |o: &ListOpts| {
+        let m = matched(data, store, o)?.0.first().copied();
+        Ok::<_, Exit>((m, m.filter(allowed).and_then(|m| Some(said(m, launch(data, store, o, m).ok()?)))))
+    };
+    let (first, said_first) = line(o)?;
+    if let Some(l) = said_first {
+        return Ok(l);
     }
-    let merit = matched(data, store, &ListOpts { no_fav: true, ..o.clone() })?.0.first().copied();
-    let merit = merit.and_then(|m| Some(said(m, call(o, m).ok()?))).unwrap_or("no model".into());
+    // The tier's favorite ruled out: the task's, then the pick on merit.
+    let rest = ListOpts { not: o.not.iter().cloned().chain(first.map(|m| m.key.clone())).collect(), ..o.clone() };
+    let merit = match line(&rest)?.1 {
+        Some(l) => l,
+        None => line(&ListOpts { no_fav: true, ..rest })?.1.unwrap_or("no model".into()),
+    };
+    let fav = first.filter(allowed);
     let anywhere = ListOpts { via: vec![], cmd: true, ..o.clone() };
     let elsewhere = fav.and_then(|m| {
         Some(format!(
@@ -488,8 +498,10 @@ fn one_shot(mut cmd: Vec<String>) -> Option<String> {
     };
     cmd.splice(1..1, sub.iter().map(|s| s.to_string()));
     cmd.extend(flags.iter().map(|s| s.to_string()));
-    // A file's path with a space in it is one word to the shell.
-    let mut words: Vec<String> = cmd.into_iter().map(|w| if w.contains(' ') { format!("'{w}'") } else { w }).collect();
+    // A file's path with a space, a quote or a `;` in it is one word to the shell.
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
+    let quote = |w: String| if w.chars().all(plain) { w } else { format!("'{}'", w.replace('\'', "'\\''")) };
+    let mut words: Vec<String> = cmd.into_iter().map(quote).collect();
     words.push("\"<prompt>\"".into());
     Some(words.join(" "))
 }
@@ -1074,6 +1086,14 @@ mod tests {
         data.models[1].context = 1_000_000;
         o.bounds = vec![(COLS.iter().position(|c| c.id == "ctx").unwrap(), 600.0, f64::INFINITY)];
         assert_eq!(line(&data, &store, &o).as_deref(), Some("pi --model p/gpt55 -p \"<prompt>\"  1M"));
+        // The tier's favorite ruled out: the task's is next, before the pick on merit.
+        data.models.push(model("big", 10.0, 50.0));
+        let big = data.models.last_mut().unwrap();
+        (big.available, big.context, big.via, big.offers[0].via) =
+            (true, 2_000_000, vec!["pi".into()], vec!["pi".into()]);
+        store.set_favorite("coding:low", "mini", None);
+        store.set_favorite("coding", "big", None);
+        assert_eq!(line(&data, &store, &o).as_deref(), Some("pi --model p/big -p \"<prompt>\"  2M"));
         let run = |cmd: &[&str]| one_shot(cmd.iter().map(|s| s.to_string()).collect());
         let runs = [
             (&["codex", "--model", "gpt55"][..], "codex exec --sandbox workspace-write --model gpt55"),
@@ -1083,6 +1103,7 @@ mod tests {
             (&["ollama", "run", "qwen"], "ollama run qwen"),
             (&["llama-cli", "-hf", "a/b"], "llama-cli -hf a/b -st -p"),
             (&["llama-cli", "-m", "/my models/a.gguf"], "llama-cli -m '/my models/a.gguf' -st -p"),
+            (&["llama-cli", "-m", "/it's/a;b.gguf"], "llama-cli -m '/it'\\''s/a;b.gguf' -st -p"),
         ];
         for (cmd, said) in runs {
             assert_eq!(run(cmd), Some(format!("{said} \"<prompt>\"")));
