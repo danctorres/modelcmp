@@ -29,7 +29,7 @@ kind of task (coding, agentic runs, reasoning, ...), recommends the best model a
   gets a model for each of three tiers, cheapest to best, and decides whether the subtask needs
   the top one or a cheaper one will do.
 
-![modelcmp TUI](https://github.com/user-attachments/assets/6ffde581-f8f1-4b06-b35d-a79c3ecb6277)
+![Filtering to the Opus models, sorting them by price and opening one](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
 
 It works with:
 
@@ -77,6 +77,8 @@ for a task and `/` filters. `enter` shows everything about a model, `o` opens it
 a site like OpenRouter, `x` starts a harness on it and `t` changes the theme. `?` lists the
 keys and `qq` quits.
 
+![The model recommended for each task and tier](https://github.com/user-attachments/assets/bb30bc6d-8b18-4315-a7e2-2d51c9d16c2f)
+
 Each task has three tiers, `low`, `mid` and `high`, from routine work to the hardest. `low` and
 `mid` get the cheapest model that scores enough, `high` the best. A favorite you set beats that
 pick.
@@ -96,6 +98,8 @@ The [skill](skills/modelcmp/SKILL.md) makes your agent run `modelcmp pick` befor
 model for a subtask. It works in Claude Code, opencode, Codex and any other agent the
 [skills CLI](https://skills.sh) supports, and `npx skills update` updates it. An agent without
 skills can take its body in `AGENTS.md`.
+
+![An agent asking modelcmp which model opencode should run for a rename](https://github.com/user-attachments/assets/9d4645f8-121f-4eb9-8ec5-eb01e1e94c09)
 
 For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list --id` or
 `--cmd` prints only the model's id or the command that starts it.
