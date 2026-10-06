@@ -258,14 +258,32 @@ fn main() {
     }
 }
 
+/// Epoch has no speed: a bound on it would drop every model, a sort do nothing.
+fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
+    match cols.find(|&c| app::hidden(c + app::TEXT)) {
+        Some(c) => {
+            Err(Exit::from(format!("{} needs --source aa: only Artificial Analysis measures it", app::COLS[c].id)))
+        }
+        None => Ok(()),
+    }
+}
+
 fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
-    let (data, warn) = data::load(force).map_err(|e| e.to_string())?;
-    if let Some(w) = warn {
-        eprintln!("warning: {w}");
-    }
-    if !data.any_available() {
-        eprintln!("note: {}", view::NO_ACCESS);
-    }
+    // These name no model: they neither wait for a download nor fail without one.
+    let bare =
+        matches!(cmd, Cmd::Harness { .. } | Cmd::ModelsDir { .. } | Cmd::Fav { task: Some(_), rename: Some(_), .. });
+    let data = if bare {
+        data::Data::default()
+    } else {
+        let (data, warn) = data::load(force).map_err(|e| e.to_string())?;
+        if let Some(w) = warn {
+            eprintln!("warning: {w}");
+        }
+        if !data.any_available() {
+            eprintln!("note: {}", view::NO_ACCESS);
+        }
+        data
+    };
     // A command that saves holds the lock from load to save.
     let _lock = matches!(
         cmd,
@@ -284,15 +302,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     match cmd {
         Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id, cmd, no_fav } => {
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
-            // Epoch has no speed: a bound on it would drop every model, a sort do nothing.
-            if let Some(c) =
-                sort.into_iter().chain(min.iter().chain(&max).map(|b| b.0)).find(|&c| app::hidden(c + app::TEXT))
-            {
-                return Err(Exit::from(format!(
-                    "{} needs --source aa: only Artificial Analysis measures it",
-                    app::COLS[c].id
-                )));
-            }
+            shown(sort.into_iter().chain(min.iter().chain(&max).map(|b| b.0)))?;
             let bounds = min
                 .into_iter()
                 .map(|(c, v)| (c, v, f64::INFINITY))
@@ -322,6 +332,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
             cli::list(&data, &store, &opts)
         }
         Cmd::Pick { via, min, not, task, tier } => {
+            shown(min.iter().map(|b| b.0))?;
             let bounds = min.into_iter().map(|(c, v)| (c, v, f64::INFINITY)).collect();
             // The task asked for, built in or yours, goes by its name.
             let opts = cli::ListOpts { via, bounds, custom: task, tier, ..Default::default() };

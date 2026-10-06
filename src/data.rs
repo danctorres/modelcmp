@@ -935,10 +935,18 @@ impl Data {
         }
         // By key, or by a provider's id for it, bare or as `list --id` prints it:
         // "granite-4.0-h-micro" or "openrouter/ibm-granite/granite-4.0-h-micro" is "Granite 4.0 Micro".
+        // Or as pi and omp name the provider, which is the id `pick` prints for them.
+        let pi = norm(&canonical("pi", query));
         let by_id = |m: &&Model| {
-            m.offers.iter().any(|o| norm(&slug(&o.id)) == q || norm(&format!("{}/{}", o.provider, o.id)) == q)
+            m.offers.iter().any(|o| {
+                let full = norm(&format!("{}/{}", o.provider, o.id));
+                norm(&slug(&o.id)) == q || full == q || full == pi
+            })
         };
-        if let Some(m) = self.models.iter().find(|m| m.key == q).or_else(|| self.models.iter().find(by_id)) {
+        // Or by the name shown, which says more than the key when it is Epoch's: "Kimi K2 (Sep 2025)".
+        let by_name = |m: &&Model| norm(&m.name) == q;
+        let all = || self.models.iter();
+        if let Some(m) = all().find(|m| m.key == q).or_else(|| all().find(by_id)).or_else(|| all().find(by_name)) {
             return Ok(m);
         }
         let hits = |mine: bool| -> Vec<&Model> {
@@ -2944,6 +2952,13 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     let mut models: Vec<Model> = by_key.into_values().collect();
     let plain = plain(&models);
     let groups = joined(&models, &absorbed, ep);
+    // One row takes a group's name, the others that reach it keep their own: the row most
+    // providers sell, then the first by key, whatever order this refresh has them in.
+    let mut named: HashMap<&String, (std::cmp::Reverse<usize>, String)> = HashMap::new();
+    for (m, g) in models.iter().zip(&groups).filter_map(|(m, g)| Some((m, g.filter(|g| g.1)?.0))) {
+        let row = (std::cmp::Reverse(m.offers.len()), m.key.clone());
+        named.entry(g).and_modify(|n| *n = row.clone().min(n.clone())).or_insert(row);
+    }
     for (m, group) in models.iter_mut().zip(groups) {
         // The family in the name is surest; else what most offers' ids say.
         m.developer = match developer_from_name(&m.name) {
@@ -3028,7 +3043,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
                 continue;
             }
             // Epoch's names are the cleaner; Artificial Analysis's put the version first.
-            if ep.source == Source::Epoch && group.is_some_and(|g| g.1) {
+            if ep.source == Source::Epoch && group.is_some_and(|g| g.1 && named[g.0].1 == m.key) {
                 m.name = gname.clone();
             }
             if let Some(o) = ep.org.get(k) {
@@ -3281,6 +3296,18 @@ mod tests {
             ("Qwen 9 Plus Uncensored", None),
         ];
         assert_eq!(rows, named, "by the id sold, under its own name beside a row named as the group, and no fine-tune");
+
+        // Two rows reach a group no row has by name: the one more providers sell takes its name.
+        ep.groups.insert("kimi9sep2025".into(), ("Kimi 9 (Sep 2025)".into(), Some(150.0), BTreeMap::new()));
+        ep.ids.insert("kimi90905".into(), "kimi9sep2025".into());
+        ep.ids.insert("kimi9instruct0905".into(), "kimi9sep2025".into());
+        let json = br#"{"p": {"models": {"kimi-9-0905": {"name": "Kimi 9 0905"},
+                                         "kimi-9-instruct-0905": {"name": "Kimi-9-Instruct-0905"}}},
+                        "q": {"models": {"kimi-9-0905": {"name": "Kimi 9 0905"}}}}"#;
+        let d = merge(json, &ep, None).unwrap();
+        let mut rows: Vec<_> = d.models.iter().map(|m| (m.name.as_str(), m.eci)).collect();
+        rows.sort_by_key(|r| r.0);
+        assert_eq!(rows, [("Kimi 9 (Sep 2025)", Some(150.0)), ("Kimi-9-Instruct-0905", Some(150.0))]);
 
         // A row named as another release than it sells is the group of a key it absorbed.
         ep.groups.insert("mistralmedium9".into(), ("Mistral Medium 9".into(), Some(150.0), BTreeMap::new()));
@@ -3640,6 +3667,14 @@ mod tests {
         );
         assert!(d.find("nope").unwrap_err().is_empty());
         assert!(d.find("--").unwrap_err().is_empty(), "nothing to match by is no match, not every model");
+        let gpt = Model {
+            name: "GPT-5.5 (Apr 2026)".into(),
+            offers: vec![Offer { provider: "openai".into(), id: "gpt-5.5".into(), ..Default::default() }],
+            ..mk("gpt55")
+        };
+        let d = Data { fetched: 0, models: vec![gpt], ..Default::default() };
+        assert_eq!(d.find("GPT-5.5 (Apr 2026)").unwrap().key, "gpt55", "by the name shown, longer than the key");
+        assert_eq!(d.find("openai-codex/gpt-5.5").unwrap().key, "gpt55", "as pi names the provider, and pick prints");
         let mine = |k: &str| Model { available: true, ..mk(k) };
         let d = Data {
             models: vec![

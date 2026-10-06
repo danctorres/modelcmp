@@ -835,7 +835,8 @@ pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String
         } else {
             "-hf"
         };
-        let bin = crate::data::llama_cmd().filter(|_| harness == crate::data::LLAMA);
+        // Asked only for llama.cpp: it is a search of `PATH` (`tools`).
+        let bin = (harness == crate::data::LLAMA).then(crate::data::llama_cmd).flatten();
         let bin = bin.map_or_else(|| vec![harness.into()], |c| c.iter().map(|s| s.to_string()).collect());
         return Some([bin, vec![how.into(), o.id.clone()]].concat());
     }
@@ -873,11 +874,11 @@ fn getters<'a>(m: &'a Model, (have, install): &'a Tools) -> impl Iterator<Item =
 
 /// The runners installed here, ollama then llama.cpp, and with neither the one that can be
 /// installed.
-type Tools = (Vec<&'static str>, Option<&'static str>);
+pub type Tools = (Vec<&'static str>, Option<&'static str>);
 
 /// `Tools` as this machine has them now: a search of `PATH`, slow where it holds Windows's
-/// folders under WSL, so made at start and at a refresh, not for each model.
-fn tools() -> Tools {
+/// folders under WSL, so made at start and by a refresh's thread, not for each model.
+pub fn tools() -> Tools {
     use crate::data::{LLAMA, OLLAMA, has, install_cmd};
     let have: Vec<_> = [OLLAMA, LLAMA].into_iter().filter(|h| has(h)).collect();
     let install = [LLAMA, OLLAMA].into_iter().find(|h| have.is_empty() && install_cmd(h).is_some());
@@ -1303,8 +1304,11 @@ impl App {
     /// score for a tier to be near the best on (`fit::add_lag`), unless your favorites give its
     /// tiers models of their own.
     pub fn one_pick(&self, i: usize) -> bool {
+        if TASKS.get(i).is_none_or(|t| t.name != "value") {
+            return false;
+        }
         let picks = self.tier_picks(i).map(|p| p.map(|e| &e.0.key));
-        TASKS.get(i).is_some_and(|t| t.name == "value") && picks.iter().all(|p| *p == picks[0])
+        picks.iter().all(|p| *p == picks[0])
     }
 
     /// What each tier of recommend's task `i` picks, as `--tier` does, with its score: your
@@ -1385,7 +1389,8 @@ impl App {
                 return (0..self.rows.len()).filter(|&k| self.is_selected(k)).map(key).collect();
             }
             if cur.as_ref().is_some_and(|k| self.store.marked.contains(k)) {
-                return self.store.marked.clone();
+                // Not a kept mark of a model the data no longer has: it is none (`any_marked`).
+                return self.marked_models().iter().map(|m| m.key.clone()).collect();
             }
         }
         cur.map(|k| vec![k]).unwrap_or_default()
@@ -1676,9 +1681,9 @@ impl App {
     }
 
     /// A background refresh finished.
-    pub fn refreshed(&mut self, res: Result<Data, Failure>) {
+    pub fn refreshed(&mut self, res: Result<Data, Failure>, tools: Tools) {
         // A runner may be installed since, and the sizes that did not come are asked for again.
-        self.tools = tools();
+        self.tools = tools;
         self.downloads.retain(|_, d| *d != Download::NoAnswer);
         self.refreshing = false;
         self.refresh_failed = res.is_err();
@@ -2057,13 +2062,15 @@ impl App {
             return self.refuse(format!("{slot} is not ticked: a harness is for its favorite"));
         }
         let Some(m) = self.data.models.iter().find(|m| m.key == key) else { return };
-        let cmds: Vec<_> = crate::data::vias().filter_map(|h| launch_cmd(m, h, &self.data.harness)).collect();
+        // With its harness: llama.cpp's command starts with the binary this machine has, which is not its name.
+        let cmds: Vec<_> =
+            crate::data::vias().filter_map(|h| Some((h, launch_cmd(m, h, &self.data.harness)?))).collect();
         if cmds.is_empty() {
             return self.refuse(format!("no harness has {}; Via shows where you have access", m.name));
         }
         let via = |h: Option<String>| Effect::Via(key.to_string(), slot.to_string(), h);
         let items: Vec<_> = std::iter::once(("any harness".to_string(), via(None)))
-            .chain(cmds.into_iter().map(|c| (c.join(" "), via(Some(c[0].clone())))))
+            .chain(cmds.into_iter().map(|(h, c)| (c.join(" "), via(Some(h.to_string())))))
             .collect();
         let has = |e: &Effect| matches!(e, Effect::Via(_, _, h) if h.as_deref() == self.store.via(slot));
         let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
@@ -2900,7 +2907,8 @@ impl App {
                     self.refuse(format!("a task has one favorite: f takes one model, {n} are {what}"));
                 }
             }
-            KeyCode::Char('v') if table => {
+            // Not on an empty table: a range of no rows would have `C` keep none of the selected.
+            KeyCode::Char('v') if table && (self.selecting() || !self.rows.is_empty()) => {
                 if self.selecting() {
                     self.deselect();
                 } else {
@@ -3689,7 +3697,7 @@ mod tests {
     #[test]
     fn a_rejected_key_is_asked_for_again() {
         let mut a = app();
-        a.refreshed(Err(Failure::BadKey));
+        a.refreshed(Err(Failure::BadKey), tools());
         assert!(matches!(a.input, Input::Key { wrong: true, .. }));
         // A new key while the old one's refresh is under way starts another.
         crate::data::set_source(Source::Aa);
@@ -3699,15 +3707,26 @@ mod tests {
         assert_eq!(crate::data::aa_key().as_deref(), Some("new"));
         crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = Some("env".into()));
         let mut e = app();
-        e.refreshed(Err(Failure::BadKey));
+        e.refreshed(Err(Failure::BadKey), tools());
         assert!(e.input == Input::None && e.status.contains(crate::data::AA_KEY_ENV), "fixed where it is set");
         let mut b = app();
-        b.refreshed(Err("offline".into()));
+        b.refreshed(Err("offline".into()), tools());
         assert_eq!(b.input, Input::None, "any other failure is only reported");
         let mut c = app();
         c.input = Input::Note { key: "gpt55".into(), text: "half".into(), cur: 4 };
-        c.refreshed(Err(Failure::NoKey));
+        c.refreshed(Err(Failure::NoKey), tools());
         assert!(matches!(c.input, Input::Note { .. }), "a note being typed is kept");
+    }
+
+    #[test]
+    fn the_selected_outlive_an_empty_table_and_a_model_gone() {
+        let mut a = app();
+        a.store.marked = vec!["gpt55".into(), "mini".into(), "gone".into()];
+        a.rebuild();
+        assert_eq!(a.targets(), ["gpt55", "mini"], "a kept mark of a model the data lost is no target");
+        a.rows.clear();
+        press(&mut a, "vC");
+        assert_eq!(a.store.marked.len(), 3, "a range of no rows does not replace the selected");
     }
 
     fn press(app: &mut App, keys: &str) -> Option<Effect> {
@@ -3943,7 +3962,7 @@ mod tests {
         assert!(a.size_wanted());
         a.sized(&key, Download::NoAnswer);
         assert!(!a.size_wanted(), "not while the cursor stays");
-        a.refreshed(Err("offline".to_string().into()));
+        a.refreshed(Err("offline".to_string().into()), tools());
         assert!(a.size_wanted() && a.sizes().len() == 1, "a refresh asks again, the sizes staying");
         assert_eq!(a.downloads["llama4"], Download::Gone, "and the lack of a copy");
         // The local rows on screen are asked with it, each once.
@@ -4560,7 +4579,7 @@ mod tests {
         a.key(KeyCode::Enter.into());
         a.store.toggle_marked("llama4");
         let data = std::mem::take(&mut a.data);
-        a.refreshed(Ok(data));
+        a.refreshed(Ok(data), tools());
         assert!(!shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
         assert_eq!(a.current().unwrap().key, "llama4");
         a.key(KeyCode::Esc.into());
@@ -4988,11 +5007,11 @@ mod tests {
         let mut a = app();
         press(&mut a, "vj");
         let same = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
-        a.refreshed(Ok(same));
+        a.refreshed(Ok(same), tools());
         assert_eq!((a.visual_range(), a.selected()), (Some(0..=1), 1), "the range follows its models");
         a.mouse(Mouse::Pick(2));
         let same = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
-        a.refreshed(Ok(same));
+        a.refreshed(Ok(same), tools());
         assert_eq!(a.picked, [0, 1, 2], "so do picked rows");
     }
 
@@ -5392,7 +5411,7 @@ mod tests {
         press(&mut a, " j C$");
         assert_eq!((&a.view, a.compare_sel), (&View::Compare, 1));
         let one = Data { models: a.data.models.drain(..1).collect(), ..Data::default() };
-        a.refreshed(Ok(one));
+        a.refreshed(Ok(one), tools());
         assert_eq!((a.compare_sel, a.rows.len(), a.selected()), (0, 1, 0), "clamped to the models left");
         assert_eq!(a.current().map(|m| m.key.as_str()), Some("gpt55"));
     }
@@ -5403,32 +5422,32 @@ mod tests {
         assert_eq!(press(&mut a, "r"), Some(Effect::Refresh));
         assert!(a.refreshing && a.status.is_empty(), "only the ⟳ indicator says so");
         assert_eq!(press(&mut a, "r"), None);
-        a.refreshed(Err("offline".into()));
+        a.refreshed(Err("offline".into()), tools());
         assert!(a.failed && a.refresh_failed, "a failure is shown as one");
         assert_eq!(a.status, "refresh failed: offline");
         assert_eq!(press(&mut a, "r"), Some(Effect::Refresh));
         assert!(!a.failed && a.status.is_empty() && a.refresh_failed, "the frame keeps saying it failed");
-        a.refreshed(Ok(Data::default()));
+        a.refreshed(Ok(Data::default()), tools());
         assert!(!a.refresh_failed, "until one succeeds");
         assert_eq!(a.status, "data refreshed");
         // Nor after a refusal a key has since cleared.
         press(&mut a, "u");
         press(&mut a, "j");
         a.status = "benchmarks from Epoch AI · B to change".into();
-        a.refreshed(Ok(Data::default()));
+        a.refreshed(Ok(Data::default()), tools());
         assert!(a.status.ends_with("B to change"), "what a switch said outlasts its download");
         a.report(Err("user.json is not valid".into()));
-        a.refreshed(Ok(Data::default()));
+        a.refreshed(Ok(Data::default()), tools());
         assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");
-        a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }));
+        a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }), tools());
         assert_eq!(a.status, "user.json is not valid; pi did not list its models", "nor by a warning");
         // Why a key did nothing is red too, and no error: the refresh's outcome replaces it.
         press(&mut a, "u");
         assert!(a.failed && a.status.starts_with("no selected models"));
-        a.refreshed(Ok(Data::default()));
+        a.refreshed(Ok(Data::default()), tools());
         assert_eq!((a.failed, a.status.as_str()), (false, "data refreshed"));
         press(&mut a, "u");
-        a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }));
+        a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }), tools());
         assert_eq!(a.status, "pi did not list its models", "as its warning does");
         // A message set under an open list is no error, whatever stood before it.
         a.first_start = true;
@@ -5731,7 +5750,7 @@ mod tests {
         let key = a.current().unwrap().key.clone();
         let mut models = a.data.models.clone();
         models.reverse();
-        a.refreshed(Ok(Data { fetched: 0, models, ..Default::default() }));
+        a.refreshed(Ok(Data { fetched: 0, models, ..Default::default() }), tools());
         assert_eq!(a.current().unwrap().key, key);
         assert_eq!(a.targets(), [key.as_str()]);
     }

@@ -400,7 +400,8 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
             }
         }
         for (tiers, line) in lines {
-            found |= !line.starts_with(NO_MODEL);
+            // A favorite on another harness is a model too, and its line the one to relay.
+            found |= !line.starts_with(NO_MODEL) || line.contains("★ favorite");
             said.push(format!("  {tiers}  {line}"));
         }
     }
@@ -496,7 +497,6 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
 /// unasked: with nobody to ask, it would refuse them.
 /// None for llama.cpp's server, which takes no prompt.
 fn one_shot(mut cmd: Vec<String>) -> Option<String> {
-    let llama = crate::data::llama_cmd().is_some_and(|c| c[0] == cmd[0]);
     let (sub, flags): (&[&str], &[&str]) = match cmd[0].as_str() {
         "llama-server" => return None,
         "opencode" => (&["run"], &[]),
@@ -505,7 +505,8 @@ fn one_shot(mut cmd: Vec<String>) -> Option<String> {
         "gemini" => (&[], &["--approval-mode", "yolo", "-p"]),
         "copilot" => (&[], &["--allow-all-tools", "-p"]),
         crate::data::OLLAMA => (&[], &[]),
-        _ if llama => (&[], &["-st", "-p"]),
+        // By name, as `launch_cmd` put it there: no search of `PATH` for each line of `pick`.
+        crate::data::LLAMA | "llama" => (&[], &["-st", "-p"]),
         // pi, omp
         _ => (&[], &["-p"]),
     };
@@ -620,7 +621,7 @@ pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
     let runner = match via {
         Some(v) => *local
             .iter()
-            .find(|h| **h == v)
+            .find(|h| h.eq_ignore_ascii_case(v))
             .ok_or_else(|| format!("{v} runs no model on this machine: --via takes {OLLAMA} or {LLAMA}"))?,
         // The one that has the model, else one installed, else one that can be.
         None => {
@@ -843,7 +844,9 @@ pub fn fav(
                 let has: Vec<&str> = m.via.iter().map(String::as_str).collect();
                 let has =
                     if has.is_empty() { "no harness has it".into() } else { format!("it is on {}", has.join(", ")) };
-                return Err(format!("{h} does not have {}: {has}", m.name).into());
+                // An unknown harness is a usage error, as it is for `harness`.
+                let code = if vias().any(|v| v == h) { 1 } else { 2 };
+                return Err(Exit { code, msg: format!("{h} does not have {}: {has}", m.name) });
             }
             // Said, as a mistyped task makes one of your own too.
             let name = t.split(':').next().unwrap_or(t);

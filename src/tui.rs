@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 /// its outcome.
 enum Refreshed {
     Early(Data),
-    Done(Result<Data, data::Failure>),
+    Done(Result<Data, data::Failure>, crate::app::Tools),
 }
 
 /// A refresh under way: where its result comes, and its steps for the frame's count.
@@ -376,7 +376,8 @@ fn spawn_refresh() -> Refresh {
     std::thread::spawn(move || {
         let early = tx.clone();
         let res = data::refresh(&counted, Some(move |d| drop(early.send(Refreshed::Early(d)))));
-        let _ = tx.send(Refreshed::Done(res));
+        // Its search of `PATH` here, not in the event loop.
+        let _ = tx.send(Refreshed::Done(res, crate::app::tools()));
     });
     (rx, steps)
 }
@@ -416,27 +417,34 @@ fn event_loop(
         let done = rx.as_ref().and_then(|r| match r.0.try_recv() {
             Ok(sent) => Some(sent),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Refreshed::Done(Err("refresh thread died".into()))),
+            Err(TryRecvError::Disconnected) => {
+                Some(Refreshed::Done(Err("refresh thread died".into()), crate::app::tools()))
+            }
         });
         dirty |= done.is_some();
         match done {
             // The refresh goes on, and its news comes with the rest.
             Some(Refreshed::Early(d)) => app.set_data(d),
-            Some(Refreshed::Done(res)) => {
+            Some(Refreshed::Done(res, tools)) => {
                 rx = None;
-                app.refreshed(res);
+                app.refreshed(res, tools);
             }
             None => {}
         }
+        // One write for the answers that came together, not one each.
+        let mut sized = false;
         while let Ok((key, answer)) = size_rx.try_recv() {
             sizing -= 1;
             app.sized(&key, answer);
             dirty |= answer != Download::NoAnswer;
             match answer {
-                Download::Size(_) => data::save_sizes(&app.sizes()),
+                Download::Size(_) => sized = true,
                 Download::Gone => data::save_gone(&mut gone, &key),
                 _ => {}
             }
+        }
+        if sized {
+            data::save_sizes(&app.sizes());
         }
         // The count of a refresh under way moves on its own, with no key pressed.
         let progress = rx.as_ref().map_or_else(String::new, |r| data::progress(&r.1));
