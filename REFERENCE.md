@@ -93,7 +93,8 @@ modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --
 modelcmp list --task debugging --tier mid --id # that tier's provider/model, else the task's
 modelcmp fav debugging --rename triage         # another name for a task of your own; its models stay
 modelcmp recommend                             # best model per price for each task, what it measures, when to use it
-modelcmp pick --via opencode                   # for an agent, one call: each task, what it is for, and the id opencode takes for its low, mid and high tier
+modelcmp pick                                  # for an agent, one call: each task, what it is for, and the command that runs a prompt on the model of its low, mid and high tier
+modelcmp pick --via opencode                   # the same among opencode's models, each by the id opencode takes
 modelcmp pick --via claude --min ctx=600       # only models that hold a 600,000-token prompt, favorites too
 modelcmp pick --not opus-5.5                   # without a model, as one your note rules out for the work
 modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
@@ -128,11 +129,15 @@ includes models you have no access to. `--refresh` on any command re-downloads f
 task and what it is for, a line per tier with the model, its context and your note, and tiers with
 the same model share a line (`low/mid`). With `--via` the model is named by the id that harness
 takes, and a favorite the harness lacks follows the tier's own pick, with the command that starts
-it where it runs: `(★ favorite Ling 3.1 Flash is not on claude, start: opencode --model
-opencode/ling-3.1-flash-free)`. Without `--via` each line has the command `--cmd` prints, or the
-id when no harness has the model. `--min` and `--not` leave a favorite out too, and a task of your
-own whose model is out says `no model`. `--task` and `--tier` print only that task or tier, for an agent
-that chose it already.
+it where it runs: `(★ favorite Ling 3.1 Flash is not on claude, start: opencode run --model
+opencode/ling-3.1-flash-free "<prompt>")`. Without `--via` each line has the command that runs one
+prompt on the model and exits, on the harness `--cmd` goes by (`opencode run --model
+opencode/ling-3.1-flash-free "<prompt>"`, `pi --model ... -p "<prompt>"`), so an agent in one
+harness reaches a model only another has, or the id when no harness has the model. The command
+has the flag that lets claude, codex, gemini or copilot edit files without asking, as opencode, pi
+and omp do, and no wider permission. `--min` and
+`--not` leave a favorite out too, and a task of your own whose model is out says `no model`.
+`--task` and `--tier` print only that task or tier, for an agent that chose it already.
 
 Model names match by substring, among the models you have first; the shortest match wins
 only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name

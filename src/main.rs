@@ -84,7 +84,7 @@ enum Cmd {
     },
     /// For an agent, one call: each task with what it is for, and the model for its low, mid and high tier (your favorite, else the cheapest good enough), with its context and your note
     Pick {
-        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes, and a favorite it lacks after the tier's own pick. Without it, the command that starts the harness you run each model on
+        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes, and a favorite it lacks after the tier's own pick. Without it, the command that runs a prompt on each model, on the harness you have it on
         #[arg(long)]
         via: Vec<String>,
         /// Only models at or above a value, favorites too: --min ctx=600 for a prompt of 600,000 tokens
@@ -307,6 +307,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
                 id,
                 cmd,
                 no_fav,
+                prompt: false,
                 not: vec![],
             };
             cli::list(&data, &store, &opts)

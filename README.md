@@ -90,7 +90,7 @@ To get a local model, press `a` in the TUI to list every model, then `x` on one 
 
 ```sh
 npx skills add danctorres/modelcmp -g                        # teach your agent to ask modelcmp
-modelcmp pick --via opencode                                 # what the skill runs: every task and tier
+modelcmp pick                                                # what the skill runs: every task and tier, with the command to run
 opencode -m $(modelcmp list --task coding --tier mid --id)   # or ask it yourself
 ```
 

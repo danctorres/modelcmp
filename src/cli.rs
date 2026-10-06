@@ -244,6 +244,8 @@ pub struct ListOpts {
     pub cmd: bool,
     /// Print only `provider/model` per line, for a shell substitution.
     pub id: bool,
+    /// With `cmd`: the command that runs one prompt on the model and exits, as `pick` prints it.
+    pub prompt: bool,
     /// With a tier: its pick on merit, your favorites aside.
     pub no_fav: bool,
     /// Keys of models to leave out, favorites too: `pick --not`.
@@ -380,6 +382,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
                 tier: Some((*tier).into()),
                 not: not.clone(),
                 cmd: o.via.is_empty(),
+                prompt: true,
                 ..o.clone()
             };
             let line = tier_line(data, store, &o)?;
@@ -447,7 +450,11 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
     let named = o.via.iter().any(|v| vias().any(|h| h.eq_ignore_ascii_case(v)));
     match o.cmd || named {
         true => command(m, &[via, default], &o.via, &data.harness)
-            .and_then(|mut c| if o.cmd { Some(c.join(" ")) } else { c.pop() })
+            .and_then(|mut c| match (o.cmd, o.prompt) {
+                (true, true) => one_shot(c),
+                (true, false) => Some(c.join(" ")),
+                _ => c.pop(),
+            })
             .ok_or_else(|| {
                 // A favorite stays the pick though `--via` asks for a harness without it.
                 let on = if o.via.is_empty() { "no harness has".into() } else { format!("{} lacks", o.via.join(", ")) };
@@ -459,6 +466,32 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
             .find_map(|h| launch_cmd(m, h, &data.harness)?.pop())
             .unwrap_or_else(|| model_id(m, &data.harness))),
     }
+}
+
+/// `cmd`, which opens a harness on a model, as the command that runs one prompt there and exits:
+/// what an agent runs, where the other waits on a terminal. With the flag that lets the harness
+/// edit files where it would ask, as opencode, pi and omp do unasked, and no more than that.
+/// None for llama.cpp's server, which takes no prompt.
+fn one_shot(mut cmd: Vec<String>) -> Option<String> {
+    let llama = crate::data::llama_cmd().is_some_and(|c| c[0] == cmd[0]);
+    let (sub, flags): (&[&str], &[&str]) = match cmd[0].as_str() {
+        "llama-server" => return None,
+        "opencode" => (&["run"], &[]),
+        "codex" => (&["exec", "--sandbox", "workspace-write"], &[]),
+        "claude" => (&[], &["--permission-mode", "acceptEdits", "-p"]),
+        "gemini" => (&[], &["--approval-mode", "auto_edit", "-p"]),
+        "copilot" => (&[], &["--allow-tool=write", "-p"]),
+        crate::data::OLLAMA => (&[], &[]),
+        _ if llama => (&[], &["-st", "-p"]),
+        // pi, omp
+        _ => (&[], &["-p"]),
+    };
+    cmd.splice(1..1, sub.iter().map(|s| s.to_string()));
+    cmd.extend(flags.iter().map(|s| s.to_string()));
+    // A file's path with a space in it is one word to the shell.
+    let mut words: Vec<String> = cmd.into_iter().map(|w| if w.contains(' ') { format!("'{w}'") } else { w }).collect();
+    words.push("\"<prompt>\"".into());
+    Some(words.join(" "))
 }
 
 /// The command that starts a harness on `m`: the first of `first` to have the model (the
@@ -949,6 +982,7 @@ mod tests {
             limit: 0,
             json: false,
             id: true,
+            prompt: false,
             cmd: false,
             no_fav: false,
             not: vec![],
@@ -977,6 +1011,7 @@ mod tests {
             limit: 0,
             json: false,
             id: true,
+            prompt: false,
             cmd: false,
             no_fav: false,
             not: vec![],
@@ -1009,6 +1044,7 @@ mod tests {
             limit: 0,
             json: false,
             id: true,
+            prompt: false,
             cmd: false,
             no_fav: false,
             not: vec![],
@@ -1019,9 +1055,9 @@ mod tests {
         o.no_fav = true;
         assert!(list(&data, &store, &o).is_ok(), "the tier's pick among pi's");
         // `pick` gives both: pi's own, then the favorite where it runs.
-        o.no_fav = false;
+        (o.no_fav, o.prompt) = (false, true);
         let line = |data: &Data, store: &Store, o: &ListOpts| tier_line(data, store, o).ok();
-        let elsewhere = "p/gpt55  -  (★ favorite mini is not on pi, start: opencode --model p/mini)";
+        let elsewhere = "p/gpt55  -  (★ favorite mini is not on pi, start: opencode run --model p/mini \"<prompt>\")";
         assert_eq!(line(&data, &store, &o).as_deref(), Some(elsewhere));
         store.set_note("mini", "slow");
         o.via = vec!["opencode".into()];
@@ -1031,13 +1067,27 @@ mod tests {
         (o.not, o.via, o.cmd) = (vec![], vec![], true);
         assert_eq!(
             line(&data, &store, &o).as_deref(),
-            Some("opencode --model p/mini  -  note: slow"),
-            "any harness: the command"
+            Some("opencode run --model p/mini \"<prompt>\"  -  note: slow"),
+            "any harness: the command that runs a prompt there"
         );
         // A bound is for the favorite too: a prompt it cannot hold rules it out.
         data.models[1].context = 1_000_000;
         o.bounds = vec![(COLS.iter().position(|c| c.id == "ctx").unwrap(), 600.0, f64::INFINITY)];
-        assert_eq!(line(&data, &store, &o).as_deref(), Some("pi --model p/gpt55  1M"));
+        assert_eq!(line(&data, &store, &o).as_deref(), Some("pi --model p/gpt55 -p \"<prompt>\"  1M"));
+        let run = |cmd: &[&str]| one_shot(cmd.iter().map(|s| s.to_string()).collect());
+        let runs = [
+            (&["codex", "--model", "gpt55"][..], "codex exec --sandbox workspace-write --model gpt55"),
+            (&["claude", "--model", "opus"], "claude --model opus --permission-mode acceptEdits -p"),
+            (&["gemini", "--model", "flash"], "gemini --model flash --approval-mode auto_edit -p"),
+            (&["copilot", "--model", "gpt55"], "copilot --model gpt55 --allow-tool=write -p"),
+            (&["ollama", "run", "qwen"], "ollama run qwen"),
+            (&["llama-cli", "-hf", "a/b"], "llama-cli -hf a/b -st -p"),
+            (&["llama-cli", "-m", "/my models/a.gguf"], "llama-cli -m '/my models/a.gguf' -st -p"),
+        ];
+        for (cmd, said) in runs {
+            assert_eq!(run(cmd), Some(format!("{said} \"<prompt>\"")));
+        }
+        assert_eq!(run(&["llama-server", "-hf", "a/b"]), None, "a server runs no prompt");
     }
 
     fn keys(v: &Value) -> Vec<&str> {
