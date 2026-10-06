@@ -133,7 +133,9 @@ it where it runs: `(★ favorite Ling 3.1 Flash is not on claude, start: opencod
 opencode/ling-3.1-flash-free "<prompt>")`. Without `--via` each line has the command that runs one
 prompt on the model and exits, on the harness `--cmd` goes by (`opencode run --model
 opencode/ling-3.1-flash-free "<prompt>"`, `pi --model ... -p "<prompt>"`), so an agent in one
-harness reaches a model only another has. The command has the flags that let claude, codex,
+harness reaches a model only another has. Each ends by sending what the harness prints on stderr
+(its steps) to a file, and printing the last 20 lines of it when the run fails, so the agent reads
+the answer alone, or the error. The command has the flags that let claude, codex,
 gemini or copilot edit files and run commands (tests, builds) without asking, as opencode, pi and
 omp do. `--min` and `--not` leave a favorite out too, a tier's favorite they leave out gives way to
 the task's, and a task of your own whose model is out says `no model`. When no task has a model

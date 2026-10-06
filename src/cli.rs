@@ -491,11 +491,17 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
     }
 }
 
+/// What follows the prompt in a command of `pick`: the steps a harness prints on stderr
+/// (opencode's every command with its output) stay out of the agent's context, and a run that
+/// fails prints their last lines, where the error is, and still fails.
+const QUIET: &str = r#"2>"${TMPDIR:-/tmp}/modelcmp.$$" || (tail -20 "${TMPDIR:-/tmp}/modelcmp.$$" >&2 && false)"#;
+
 /// `cmd`, which opens a harness on a model, as the command that runs one prompt there and exits:
 /// what an agent runs, where the other waits on a terminal. With the flags that let the harness
 /// edit files and run commands (tests, builds) where it would ask, as opencode, pi and omp do
 /// unasked: with nobody to ask, it would refuse them.
 /// None for llama.cpp's server, which takes no prompt.
+/// After the prompt, `QUIET`.
 fn one_shot(mut cmd: Vec<String>) -> Option<String> {
     let (sub, flags): (&[&str], &[&str]) = match cmd[0].as_str() {
         "llama-server" => return None,
@@ -517,6 +523,7 @@ fn one_shot(mut cmd: Vec<String>) -> Option<String> {
     let quote = |w: String| if w.chars().all(plain) { w } else { format!("'{}'", w.replace('\'', "'\\''")) };
     let mut words: Vec<String> = cmd.into_iter().map(quote).collect();
     words.push("\"<prompt>\"".into());
+    words.push(QUIET.into());
     Some(words.join(" "))
 }
 
@@ -1093,8 +1100,10 @@ mod tests {
         // `pick` gives both: pi's own, then the favorite where it runs.
         (o.no_fav, o.prompt) = (false, true);
         let line = |data: &Data, store: &Store, o: &ListOpts| tier_line(data, store, o).ok();
-        let elsewhere = "p/gpt55  -  (★ favorite mini is not on pi, start: opencode run --model p/mini \"<prompt>\")";
-        assert_eq!(line(&data, &store, &o).as_deref(), Some(elsewhere));
+        let elsewhere = format!(
+            "p/gpt55  -  (★ favorite mini is not on pi, start: opencode run --model p/mini \"<prompt>\" {QUIET})"
+        );
+        assert_eq!(line(&data, &store, &o), Some(elsewhere));
         store.set_note("mini", "slow");
         o.via = vec!["opencode".into()];
         assert_eq!(line(&data, &store, &o).as_deref(), Some("p/mini  -  note: slow"));
@@ -1102,14 +1111,14 @@ mod tests {
         assert_eq!(line(&data, &store, &o).as_deref(), Some("no model"), "ruled out, and opencode has no other");
         (o.not, o.via, o.cmd) = (vec![], vec![], true);
         assert_eq!(
-            line(&data, &store, &o).as_deref(),
-            Some("opencode run --model p/mini \"<prompt>\"  -  note: slow"),
+            line(&data, &store, &o),
+            Some(format!("opencode run --model p/mini \"<prompt>\" {QUIET}  -  note: slow")),
             "any harness: the command that runs a prompt there"
         );
         // A bound is for the favorite too: a prompt it cannot hold rules it out.
         data.models[1].context = 1_000_000;
         o.bounds = vec![(COLS.iter().position(|c| c.id == "ctx").unwrap(), 600.0, f64::INFINITY)];
-        assert_eq!(line(&data, &store, &o).as_deref(), Some("pi --model p/gpt55 -p \"<prompt>\"  1M"));
+        assert_eq!(line(&data, &store, &o), Some(format!("pi --model p/gpt55 -p \"<prompt>\" {QUIET}  1M")));
         // The tier's favorite ruled out: the task's is next, before the pick on merit.
         data.models.push(model("big", 10.0, 50.0));
         let big = data.models.last_mut().unwrap();
@@ -1117,7 +1126,7 @@ mod tests {
             (true, 2_000_000, vec!["pi".into()], vec!["pi".into()]);
         store.set_favorite("coding:low", "mini", None);
         store.set_favorite("coding", "big", None);
-        assert_eq!(line(&data, &store, &o).as_deref(), Some("pi --model p/big -p \"<prompt>\"  2M"));
+        assert_eq!(line(&data, &store, &o), Some(format!("pi --model p/big -p \"<prompt>\" {QUIET}  2M")));
         let run = |cmd: &[&str]| one_shot(cmd.iter().map(|s| s.to_string()).collect());
         let runs = [
             (&["codex", "--model", "gpt55"][..], "codex exec --sandbox workspace-write --model gpt55"),
@@ -1133,7 +1142,7 @@ mod tests {
             (&["llama-cli", "-m", "/it's/a;b.gguf"], "llama-cli -m '/it'\\''s/a;b.gguf' -st -p"),
         ];
         for (cmd, said) in runs {
-            assert_eq!(run(cmd), Some(format!("{said} \"<prompt>\"")));
+            assert_eq!(run(cmd), Some(format!("{said} \"<prompt>\" {QUIET}")));
         }
         assert_eq!(run(&["llama-server", "-hf", "a/b"]), None, "a server runs no prompt");
     }
