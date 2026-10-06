@@ -106,6 +106,9 @@ struct ModelOut<'a> {
     /// Seconds to the first answer token, after any thinking, median; Artificial Analysis only
     #[serde(skip_serializing_if = "Option::is_none")]
     ttft_seconds: Option<f64>,
+    /// USD one coding task cost on DeepSWE, at the setting its score there is of; Epoch only
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_cost_usd: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
             .collect(),
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
+        task_cost_usd: m.task_cost,
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
     }

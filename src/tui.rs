@@ -3543,7 +3543,7 @@ mod tests {
         let mut a = app();
         let (buf, lines) = render(&mut a, 206, 6);
         let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding ▾ Agentic ▾ \
-                      Reason ▾ Value │ Via ▾ Notes";
+                      Reason ▾ Value $task │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 3, "{}", lines[1]);
@@ -4029,10 +4029,10 @@ mod tests {
             a.key(KeyCode::Char('h').into());
         }
         let (_, lines) = render(&mut a, 56, 4);
-        assert_eq!(words(&lines[0])[4..], ["‹│", "Reason", "▾", "Value"], "scrolls back only as far as needed");
+        assert_eq!(words(&lines[0])[4..], ["‹│", "Value", "$task"], "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 56, 4);
-        assert_eq!(words(&lines[0])[4..], ["‹│", "Reason", "▾", "Value"], "{}", lines[0]);
+        assert_eq!(words(&lines[0])[4..], ["‹│", "Value", "$task"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 48, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");

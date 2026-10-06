@@ -724,6 +724,8 @@ pub fn detail_rows(
             n(m.ttft, |v| format!("{v:.1}s"))
         ));
     }
+    // What a task came to, where the price is per token.
+    v.extend(m.task_cost.map(|c| format!("  task cost:  ${} a coding task on DeepSWE (measured)", money(c))));
     v.extend([
         format!(
             "  features:   tools {} · reasoning {} · vision {} · open weights {}",
@@ -878,6 +880,10 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         let at = rows.len() - 1;
         rows.insert(at, row("answer starts", models.iter().map(|m| m.ttft).collect(), |v| format!("{v:.1}s"), false));
         rows.insert(at, row("tokens/s", models.iter().map(|m| m.tps).collect(), |v| format!("{v:.0}"), true));
+    }
+    if models.iter().any(|m| m.task_cost.is_some()) {
+        let at = rows.len() - 1;
+        rows.insert(at, row("$ / coding task", models.iter().map(|m| m.task_cost).collect(), money, false));
     }
     for t in TASKS.iter().filter(|t| t.name != "overall") {
         let vals: Vec<Option<f64>> = models.iter().map(|m| task_score(m, t.name)).collect();

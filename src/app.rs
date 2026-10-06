@@ -28,8 +28,8 @@ pub struct Col {
     pub show: fn(f64) -> String,
     /// A bound as typed, a maximum when the flag is set; none when it is not a value of the column.
     pub read: fn(&str, bool) -> Option<f64>,
-    /// Only Artificial Analysis measures it: hidden with any other source (`hidden`).
-    pub aa_only: bool,
+    /// The one source that has it, when not both: hidden with the other (`hidden`).
+    pub only: Option<Source>,
     /// It hangs on the price, so a list price shows in it after a `~` (`on_price`).
     pub price: bool,
 }
@@ -67,7 +67,7 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
         get,
         show: |v| score(Some(v)),
         read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()),
-        aa_only: false,
+        only: None,
         price: false,
     }
 }
@@ -122,8 +122,9 @@ fn month(v: f64) -> String {
 }
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
-/// index, the task scores and Value, then speed when Artificial Analysis measures it.
-pub const COLS: [Col; 13] = [
+/// index, the task scores, Value and what a task cost when Epoch lists it, then speed when
+/// Artificial Analysis measures it.
+pub const COLS: [Col; 14] = [
     Col {
         ranked: false,
         show: month,
@@ -171,12 +172,18 @@ pub const COLS: [Col; 13] = [
     col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
     Col { price: true, ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied()) },
     Col {
-        aa_only: true,
+        only: Some(Source::Epoch),
+        lower_better: true,
+        show: money,
+        ..col("$task", "cost", "USD one coding task cost on DeepSWE, as measured", |m| m.task_cost)
+    },
+    Col {
+        only: Some(Source::Aa),
         show: |v| format!("{v:.0}"),
         ..col("Tok/s", "tps", "output tokens per second (median)", |m| m.tps)
     },
     Col {
-        aa_only: true,
+        only: Some(Source::Aa),
         lower_better: true,
         show: |v| format!("{v:.1}s"),
         ..col("TTFT", "ttft", "seconds to the first answer token, after any thinking (median)", |m| m.ttft)
@@ -204,7 +211,7 @@ const DEFAULT_SORT: (usize, bool) = (ECI, true);
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 6;
 /// Column index of Tok/s.
-pub const SPEED: usize = TEXT + 11;
+pub const SPEED: usize = TEXT + 12;
 /// First column of each group: names and release, price and context, benchmarks, speed, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, SPEED, VIA];
 /// Column index of where you have access.
@@ -213,9 +220,9 @@ pub const VIA: usize = TEXT + COLS.len();
 pub const NOTES: usize = VIA + 1;
 pub const NCOLS: usize = NOTES + 1;
 
-/// Whether the column at cursor index `col` is left out: one the source in use does not measure.
+/// Whether the column at cursor index `col` is left out: one the source in use does not have.
 pub fn hidden(col: usize) -> bool {
-    numeric(col).is_some_and(|c| c.aa_only && crate::data::source() != Source::Aa)
+    numeric(col).is_some_and(|c| c.only.is_some_and(|s| s != crate::data::source()))
 }
 
 /// Cursor index `col` moved `n` shown columns right, or left when negative, wrapping.
@@ -4318,8 +4325,10 @@ mod tests {
         press(&mut a, &format!("{shown}l"));
         assert_eq!(a.col, ECI, "counted column moves wrap around, over the shown ones");
         crate::data::set_source(Source::Aa);
-        press(&mut a, &format!("{NCOLS}l"));
-        assert_eq!(a.col, ECI, "Artificial Analysis shows them all");
+        let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
+        assert!(shown < NCOLS, "Artificial Analysis has no cost of a task");
+        press(&mut a, &format!("{shown}l"));
+        assert_eq!(a.col, ECI, "with its speed columns in their place");
     }
 
     #[test]

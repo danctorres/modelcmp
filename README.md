@@ -37,8 +37,8 @@ installed, shows which one has each model, and starts it on the model you pick.
 
 It works with:
 
-- **Harnesses:** `opencode`, `pi`, `omp`, `Claude Code`, `Codex`, `Gemini CLI`,
-  `GitHub Copilot CLI`
+- **Harnesses:** `opencode`, `pi`, `omp`, `Claude Code`, `GitHub Copilot CLI`
+- **Harnesses not tested yet:** `Codex`, `Gemini CLI`
 - **Local runners:** `ollama`, `llama.cpp`
 
 By default it lists only the models you can already use through them. To see every model,
@@ -113,7 +113,8 @@ For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list 
 
 - [models.dev](https://models.dev): prices, context windows and what each model can do
   (tools, reasoning, vision).
-- [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks, and it needs no API key.
+- [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks and what a coding task cost, and it
+  needs no API key.
 - [Artificial Analysis](https://artificialanalysis.ai): benchmarks and speed, and it needs a
   free API key.
 

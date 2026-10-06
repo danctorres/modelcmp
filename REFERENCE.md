@@ -6,30 +6,90 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 
 ## Columns
 
-One row per model. Columns: Model, Dev, Released (year and month), Price ($/1M tokens, blended 3:1 input:output with 90% of the input read from the prompt cache, as in an agent session, `%` or `--cache` to change it; providers without a cache price pay full input; a provider that charges more past a context size is priced as at 100k tokens; a price after a `~` is the list price of other providers, yours listing none),
-$in, $cache (cached input, $in when a provider has no discount), $out, Ctx, ECI (Epoch Capabilities Index), Coding, Agentic, Reason,
-Value, Via, Notes. With Artificial Analysis as the source (`B`, `--source aa`), ECI is AAII,
-its Intelligence Index, and each task column is a benchmark score (0-100): Coding the
-mean of Terminal-Bench 4.0 and SciCode, Agentic Terminal-Bench 4.0, Reason HLE; two more columns show speed,
-Tok/s (output tokens per second) and TTFT (seconds to the first answer token, after any thinking), medians
-on the developer's own API, or across providers when it has none. A model's scores and speed there are those of one reasoning setting, the best index among those scored on the most benchmarks; a row that names a setting
-("Grok 4.20 Non-Reasoning") has that setting's, or `-` when Artificial Analysis did not measure it, and one that cannot reason has its non-reasoning setting's. With either source a row has no scores when its offers are another release than the one scored, as a `-latest` id is. Epoch does not measure speed, so they are hidden with it. With Epoch AI, the default, task
-columns are the model's capability on the task's benchmarks, in ECI points, fitted from its
-ECI and its scores (a model with few scores stays near its ECI):
+One row per model. In the TUI, move the column cursor and the top border says what the column
+means. Green and red mark the best and worst value in a column, and in a row of compare.
+
+| Column | What it is |
+|---|---|
+| Model, Dev | the model and its developer |
+| Released | year and month |
+| Price | $ per 1M tokens, blended as [below](#price) |
+| $in | $ per 1M input tokens |
+| $cache | $ per 1M cached input tokens, `$in` when a provider has no discount |
+| $out | $ per 1M output tokens |
+| Ctx | context window, in tokens |
+| ECI | Epoch Capabilities Index. With Artificial Analysis it is AAII, its Intelligence Index |
+| Coding, Agentic, Reason | the [task scores](#task-columns) |
+| Value | coding per dollar, ranked 0-100 |
+| $task | $ one coding task cost, [measured](#task). Epoch AI only |
+| Tok/s | output tokens per second. Artificial Analysis only |
+| TTFT | seconds to the first answer token, after any thinking. Artificial Analysis only |
+| Via | the harnesses that have the model |
+| Notes | your note on it |
+
+### Price
+
+- It blends input and output 3:1, with 90% of the input read from the prompt cache, as in an
+  agent session. `%` in the TUI or `--cache` changes the share.
+- A provider without a cache price pays full input.
+- A provider that charges more past a context size is priced as at 100k tokens.
+- A price after a `~` is the list price of other providers, yours listing none.
+
+### $task
+
+- Price is per token, and models differ in how many tokens and steps the same job takes them.
+  `$task` is what one task of DeepSWE cost the model in dollars, as the benchmark measured it,
+  every model on the same harness.
+- It is the cost of the run the model's DeepSWE score is of, its best reasoning setting. A lower
+  setting costs less and scores less.
+- Few models have it, 26 of them on 2026-10-06, and the rest show `-`. No tier goes by it.
+- `--sort cost` and `--max cost=5` take it.
+
+### Task columns
+
+With Epoch AI, the default, a task column is the model's capability on the task's benchmarks,
+in ECI points, fitted from its ECI and its scores. A model with few scores stays near its ECI.
 
 - Coding: DeepSWE, FrontierCode, FrontierSWE, WeirdML, MirrorCode
 - Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0
 - Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles, LMCA, DTBench
 
-[Scores](#scores) says how each of these numbers is obtained.
+With Artificial Analysis (`B`, `--source aa`), a task column is a benchmark score, 0-100.
 
-`modelcmp recommend --json` gives the same lists as `benchmarks`; with Artificial Analysis, the one field the score is. In the TUI, move the column cursor and the
-top border says what the column means. Green and red mark the best and worst value in a
-column, and in a row of compare.
+- Coding: the mean of Terminal-Bench 4.0 and SciCode
+- Agentic: Terminal-Bench 4.0
+- Reason: HLE
+
+Its scores and speed follow these rules:
+
+- Tok/s and TTFT are medians on the developer's own API, or across providers when it has none.
+- A model's scores and speed are those of one reasoning setting, the best index among those
+  scored on the most benchmarks.
+- A row that names a setting ("Grok 4.20 Non-Reasoning") has that setting's, or `-` when
+  Artificial Analysis did not measure it.
+- A row that cannot reason has its non-reasoning setting's.
+
+With either source a row has no scores when its offers are another release than the one
+scored, as a `-latest` id is.
+
+`modelcmp recommend --json` gives the same lists as `benchmarks`. With Artificial Analysis it
+is the one field the score is.
+
+[Scores](#scores) says how each of these numbers is obtained.
 
 ## Scores
 
-Where the numbers in the score columns come from. Both sources are downloaded on a refresh, Artificial Analysis only with its key, so switching between them needs no second refresh. Each source's sitemap is read too, with or without a key, to link the models that have a page there (`o`), and OpenRouter's list of models for the Hugging Face repo it names for each. An open model it names none for is linked to the repo Hugging Face has under an id a provider gives it, which Hugging Face is asked for after the early data, 400 ids a refresh, an id with no repo again a month later.
+Where the numbers in the score columns come from.
+
+What a refresh downloads:
+
+- Both sources, Artificial Analysis only with its key, so switching between them needs no
+  second refresh.
+- Each source's sitemap, with or without a key, to link the models that have a page there (`o`).
+- OpenRouter's list of models, for the Hugging Face repo it names for each.
+- For an open model OpenRouter names no repo for, the repo Hugging Face has under an id a
+  provider gives it. Hugging Face is asked after the early data, 400 ids a refresh, and an id
+  with no repo again a month later.
 
 Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
 
@@ -47,15 +107,19 @@ Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data
   benchmark. So a task column reorders models of similar ECI and does not set a model far
   from where its ECI puts it.
 - Only benchmarks Epoch still runs on new models count toward a task.
+- `$task` is the mean cost of a task that Epoch lists for the model's best DeepSWE run, as
+  published. modelcmp does not compute it.
 
 Artificial Analysis (`--source aa`, its API with your key):
 
 - AAII is its Intelligence Index as it publishes it.
 - Agentic and Reason are one benchmark's score as published, 0-100. Coding is the mean of
   two, computed by modelcmp. Tok/s and TTFT are its measurements.
-- A model's numbers are those of one of its reasoning settings, chosen as [Columns](#columns) says.
+- A model's numbers are those of one of its reasoning settings, chosen as
+  [Task columns](#task-columns) says.
 - It scores more models than Epoch AI does, most of all on Agentic, and its task scores can
   differ from the AAII, where Epoch's stay close to the ECI.
+- Its API lists no cost of a task, so `$task` is hidden with it.
 
 With either source:
 
@@ -67,87 +131,190 @@ With either source:
 ## Commands
 
 ```sh
+# list
 modelcmp list                                  # models you have access to
-modelcmp list --task coding                    # best model per price level, cheapest first, down to 8 months behind your best
-modelcmp list --task coding --tier mid         # just one: the cheapest within 3 months of your best
+modelcmp list --task coding                    # best model per price level, cheapest first
+modelcmp list --task coding --tier mid         # just one, the tier's pick
 modelcmp list --task coding --tier mid --id    # only its provider/model, for opencode -m $(...)
+modelcmp list --task coding --tier mid --cmd   # the command that opens a harness on it
 modelcmp list --min coding=155 --sort price    # good enough, cheapest first
+modelcmp list --sort cost --max cost=5         # by what a coding task cost, $5 at most
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp list --dev china                      # every model of a developer from there
-modelcmp show sonnet-5                         # everything about one model, --all adds the price at providers you have no harness for
+
+# one model
+modelcmp show sonnet-5                         # everything about it, --all adds the price at providers you have no harness for
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
-modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, aa, openrouter or hf; without --on, the first to have one
-modelcmp get gemma-3-4b-it --via ollama       # download its GGUF copy from Hugging Face and run it here: ollama or llama-cli, the one you have without --via, installed first, if you agree, when you have neither, and the size of the download is said first
-modelcmp models-dir ~/models                   # the folder of the .gguf files you downloaded, listed at the next --refresh: alone shows it, --rm clears it
-modelcmp select sonnet-5                       # shortlist it, list --selected shows them: --rm to deselect
-modelcmp note sonnet-5 "fast enough for refactors" # agents weigh it when choosing; without text shows it, --rm deletes it
-modelcmp exclude llama-4-maverick              # have it, can't use it; --rm to include again
-modelcmp fav coding sonnet-5                   # your favorite for a task: --tier picks it; alone lists them, --rm clears
-modelcmp fav coding 3.7-flash --tier low           # your favorite for one tier: list --tier low picks it over the task's
-modelcmp fav coding opus-5.5 --via claude       # and the harness you run it on: list --task coding --id prints the id claude takes
-modelcmp list --task coding --tier mid --cmd    # the command that opens a harness on it: the favorite's harness, else your default one, else the first that has the model
-modelcmp harness claude                        # your default harness: --cmd and --id go by it when it has the model. Alone shows it, --rm clears it (`H` in the TUI)
-modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"  # a task of your own: its model and what it is about; --rm clears the model
-modelcmp fav debugging --about "bugs and flaky tests"               # rewrite what it is about; "" clears it
-modelcmp fav debugging 3.7-flash --tier low    # its model for one tier: list --task debugging --tier low returns it
-modelcmp list --task debugging --tier mid --id # that tier's provider/model, else the task's
-modelcmp fav debugging --rename triage         # another name for a task of your own; its models stay
-modelcmp recommend                             # best model per price for each task, what it measures, when to use it
-modelcmp pick                                  # for an agent, one call: each task, what it is for, and the command that runs a prompt on the model of its low, mid and high tier
-modelcmp pick --via opencode                   # the same among opencode's models, each by the id opencode takes
-modelcmp pick --via claude --min ctx=600       # only models that hold a 600,000-token prompt, favorites too
-modelcmp pick --not opus-5.5                   # without a model, as one your note rules out for the work
-modelcmp recommend --cache 0                   # priced as one-off prompts: no input read from the prompt cache
+modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, aa, openrouter or hf
+modelcmp get gemma-3-4b-it --via ollama        # download its GGUF copy and run it here
+modelcmp models-dir ~/models                   # the folder of the .gguf files you downloaded
+
+# your choices
+modelcmp select sonnet-5                       # shortlist it, list --selected shows them
+modelcmp note sonnet-5 "fast enough for refactors"
+modelcmp exclude llama-4-maverick              # have it, can't use it
+modelcmp harness claude                        # your default harness (`H` in the TUI)
+modelcmp fav coding sonnet-5                   # your favorite for a task
+modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier
+modelcmp fav coding opus-5.5 --via claude      # and the harness you run it on
+
+# tasks of your own
+modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"
+modelcmp fav debugging --about "bugs and flaky tests"   # rewrite what it is about, "" clears it
+modelcmp fav debugging 3.7-flash --tier low    # its model for one tier
+modelcmp fav debugging --rename triage         # another name, its models stay
+
+# recommendations
+modelcmp recommend                             # best model per price for each task, what it measures and when to use it
+modelcmp recommend --cache 0                   # priced as one-off prompts
+modelcmp pick                                  # for an agent: every task and tier, with the command to run
+modelcmp pick --via opencode                   # the same among opencode's models, by the id opencode takes
+modelcmp pick --via claude --min ctx=600       # only models that hold a 600,000-token prompt
+modelcmp pick --not opus-5.5                   # without a model, as one your note rules out
 ```
 
-Tasks: `overall`, `coding`, `value`, `agentic`, `reasoning`, `vision`. For a large prompt, bound the context instead: `--min ctx=200`.
-Any other name given to `fav` is a task of your own (`debugging`, `"Tool Dispatch"` is stored as
-`tool-dispatch`). No benchmark ranks it: it has the models you give it, one for the task and one
-per tier if you like. `--task` lists them, cheapest first, and with `--tier` returns that tier's,
-else the task's, leaving out one you excluded or lost access to. `recommend` lists it after the
-built-in tasks, with what you wrote it is about and each model's tier, `(low)`. It is the task to
-pick for work that fits it, even when a built-in task fits too: for a bug, your `debugging` over
-`coding`. It is gone when its last model is cleared, and `--rename` gives it another name, one no
-task has yet.
-Columns for `--sort`, `--min` and `--max`: `price`, `in`, `cache`, `out`, `ctx` (thousands of
-tokens, and a value of 10000 or more is read as tokens), `release` (a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June), `eci`, `coding`, `agentic`, `reasoning`, `value`, and with Artificial Analysis `tps` and `ttft`. `--task` and
-`recommend` leave excluded models out; plain `list` shows them marked `✗`, and your selection `✓`. `--tier` picks one
-model from the task's list: `low` the cheapest within 8 months of progress of your best model on the task,
-`mid` the cheapest within 3, `high` your best. The list keeps the best model of
-each price level (free, up to $0.5, $2, $5, $15, and above), and what a tier picks even when its level
-has a better one. `high` is the best to the whole point: of two models a fraction of a point apart, the cheaper.
-A month of progress is a twelfth of what the best
-score on the task rose in the last year, among the models listed here that the source scored; a task scored for
-less than a year, or whose best of a year ago scored nothing, has no such pace, and every tier picks the best.
-`value` lists the models within 8 months of your best on coding. A model you `fav` for the tier, else for the task, beats the
-tier's pick. Every favorite of the task that you have and did not exclude sits on the task's list, whatever `--dev`, `--via`, `--min`, `--max` or `--selected` narrow it to, marked `★` in `recommend`, whether or not it is on the frontier or has a score for
-the task, which then shows as `-`. `--all`
-includes models you have no access to. `--refresh` on any command re-downloads first, `--cache PERCENT` (default 90) sets how much input Price reads from the prompt cache, and `--source epoch|aa` which benchmarks to use for this run (default: the one picked with `B`).
-`list` prints every match unless `-n` limits it, and then says how many it left out. `--id` prints the id opencode takes, or pi or omp when only they have the model, else the id at the provider you'd pay, or the tag `ollama run` takes, or the repo (`-hf`) or file (`-m`) `llama-cli` takes, for a model only your machine runs; with `--task`, a favorite given a harness (`fav --via`) prints the id that harness takes, while it has the model, else your default harness's (`modelcmp harness`) when it has it. `--via` naming a harness prints the id that one takes instead (`--via claude --id` gives `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts opencode), and is an error when the harness lacks the model. `--cmd` prints the command that starts the harness on the model instead (`claude --model claude-opus-5-5`): the favorite's harness, else your default one, else the first that has the model in Via's order, among `--via`'s when given; a model no harness has is an error. `--tier` with `--no-fav` gives the tier's pick without your favorites, for when a favorite is on no harness you can start (`--tier mid --via claude --no-fav --id`). A task of your own has none. With `--tier`, `--id` or `--cmd`, no match is an error (exit code 1), so a harness is never started on an empty model. Without them `list` says `no models match` and exits with 0. With `--tier`, `--id` and `--cmd` also say the model's context and your note on stderr (`Claude Opus 5.5: context 1000000, note: slow`), which an agent checks and a `$(...)` does not read.
+`--rm` undoes `select`, `note`, `exclude`, `harness`, `models-dir` and `fav`. Alone, `harness`,
+`models-dir` and `fav` show what is set, and `note <model>` without text shows the note. Agents
+weigh a note when choosing.
 
-`pick` is `list --task --tier` for every task and tier at once, your own tasks last: under each
-task and what it is for, a line per tier with the model, its context and your note, and tiers with
-the same model share a line (`low/mid`). With `--via` the model is named by the id that harness
-takes, and a favorite the harness lacks follows the tier's own pick, with the command that starts
-it where it runs: `(★ favorite Ling 3.1 Flash is not on claude, start: opencode run --model
-opencode/ling-3.1-flash-free "<prompt>")`. Without `--via` each line has the command that runs one
-prompt on the model and exits, on the harness `--cmd` goes by (`opencode run --model
-opencode/ling-3.1-flash-free "<prompt>"`, `pi --model ... -p "<prompt>"`), so an agent in one
-harness reaches a model only another has. Each ends by sending what the harness prints on stderr
-(its steps) to a file, and printing the last 20 lines of it when the run fails, so the agent reads
-the answer alone, or the error. The command has the flags that let claude, codex,
-gemini or copilot edit files and run commands (tests, builds) without asking, as opencode, pi and
-omp do. `--min` and `--not` leave a favorite out too, a tier's favorite they leave out gives way to
-the task's, and a task of your own whose model is out says `no model`. When no task has a model
-(`--via ollama`, whose copies are picked only as favorites, or a `--min` nothing meets), `pick`
-fails and says to choose none.
-`--task` and `--tier` print only that task or tier, for an agent that chose it already.
+- `open` without `--on` opens the first site to have a page for the model.
+- `get` downloads the copy from Hugging Face and runs it with ollama or `llama-cli`, the one you have without `--via`. With
+  neither it installs one first, if you agree. It says the size of the download first.
+- `models-dir` is read at the next `--refresh`.
 
-Model names match by substring, among the models you have first; the shortest match wins
-only when every other contains it (`opus-4.5` over its `-thinking` variant), else the name
-is ambiguous: it exits with code 3 and lists the candidates. An unknown `--dev` or `--via` is an error rather
-than an empty list (exit code 1), and an unknown task or harness, or a `models-dir` that is not a
-folder, exits with code 2.
+### Common flags
+
+| Flag | What it does |
+|---|---|
+| `--refresh` | re-downloads the data first |
+| `--cache PERCENT` | how much of the input Price reads from the prompt cache, 90 by default |
+| `--source epoch\|aa` | the benchmarks for this run. The default is the one picked with `B` |
+| `--all` | includes the models you have no access to |
+| `--json` | on `list`, `show`, `compare` and `recommend`, as [JSON](#json) says |
+
+### Tasks
+
+The built-in tasks are `overall`, `coding`, `value`, `agentic`, `reasoning` and `vision`. For a
+large prompt, bound the context instead: `--min ctx=200`.
+
+Any other name given to `fav` is a task of your own (`debugging`, and `"Tool Dispatch"` is
+stored as `tool-dispatch`).
+
+- No benchmark ranks it. It has the models you give it, one for the task and one per tier if
+  you like.
+- `--task` lists them, cheapest first. With `--tier` it returns that tier's, else the task's,
+  leaving out one you excluded or lost access to.
+- `recommend` lists it after the built-in tasks, with what you wrote it is about and each
+  model's tier, `(low)`.
+- It is the task to pick for work that fits it, even when a built-in task fits too: for a bug,
+  your `debugging` over `coding`.
+- It is gone when its last model is cleared.
+- `--rename` gives it another name, one no task has yet.
+
+### Sorting and bounds
+
+`--sort`, `--min` and `--max` take these columns:
+
+| Column | Notes |
+|---|---|
+| `price`, `in`, `cache`, `out` | $ per 1M tokens |
+| `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
+| `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
+| `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores |
+| `cost` | `$task`, with Epoch AI |
+| `tps`, `ttft` | with Artificial Analysis |
+
+`list` prints every match unless `-n` limits it, and then says how many it left out. It shows
+excluded models marked `✗` and your selection `✓`. `--task` and `recommend` leave excluded
+models out.
+
+### Tiers
+
+`--task` keeps the best model of each price level (free, up to $0.5, $2, $5, $15, and above),
+and what a tier picks even when its level has a better one. It goes down to 8 months behind
+your best. `--tier` picks one model from that list:
+
+| Tier | Its pick |
+|---|---|
+| `low` | the cheapest within 8 months of progress of your best model on the task |
+| `mid` | the cheapest within 3 months |
+| `high` | your best. It is the best to the whole point: of two models a fraction of a point apart, the cheaper |
+
+- A month of progress is a twelfth of what the best score on the task rose in the last year,
+  among the models listed here that the source scored.
+- A task scored for less than a year, or whose best of a year ago scored nothing, has no such
+  pace, and every tier picks the best.
+- `value` lists the models within 8 months of your best on coding.
+
+### Favorites
+
+- A model you `fav` for the tier, else for the task, beats the tier's pick.
+- Every favorite of the task that you have and did not exclude sits on the task's list,
+  whatever `--dev`, `--via`, `--min`, `--max` or `--selected` narrow it to.
+- `recommend` marks it `★`, whether or not it is on the frontier or has a score for the task,
+  which then shows as `-`.
+- `--tier` with `--no-fav` gives the tier's pick without your favorites, for when a favorite is
+  on no harness you can start (`--tier mid --via claude --no-fav --id`). A task of your own
+  has none.
+
+### `--id` and `--cmd`
+
+`--id` prints only the model's id, the first of these that applies:
+
+1. With `--via` naming a harness, the id that harness takes (`--via claude --id` gives
+   `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts
+   opencode). It is an error when the harness lacks the model.
+2. With `--task`, the id the favorite's harness takes (`fav --via`), while it has the model.
+3. With `--task`, the id your default harness takes (`modelcmp harness`), when it has the model.
+4. The id opencode takes, or pi or omp when only they have the model.
+5. The id at the provider you'd pay.
+6. For a model only your machine runs, the tag `ollama run` takes, or the repo (`-hf`) or file
+   (`-m`) `llama-cli` takes.
+
+`--cmd` prints the command that starts the harness on the model instead (`claude --model
+claude-opus-5-5`). The harness is the favorite's, else your default one, else the first that
+has the model in Via's order, among `--via`'s when given. A model no harness has is an error.
+
+- With `--tier`, `--id` or `--cmd`, no match is an error (exit code 1), so a harness is never
+  started on an empty model. Without them `list` says `no models match` and exits with 0.
+- With `--tier`, `--id` and `--cmd` also say the model's context and your note on stderr
+  (`Claude Opus 5.5: context 1000000, note: slow`), which an agent checks and a `$(...)` does
+  not read.
+
+### `pick`
+
+`pick` is `list --task --tier` for every task and tier at once, your own tasks last.
+
+- Under each task and what it is for, it prints a line per tier with the model, its context
+  and your note. Tiers with the same model share a line (`low/mid`).
+- Each line has the command that runs one prompt on the model and exits, on the harness
+  `--cmd` goes by (`opencode run --model opencode/ling-3.1-flash-free "<prompt>"`, `pi --model
+  ... -p "<prompt>"`), so an agent in one harness reaches a model only another has.
+- The command sends what the harness prints on stderr (its steps) to a file, and prints the
+  last 20 lines of it when the run fails, so the agent reads the answer alone, or the error.
+- The command has the flags that let claude, codex, gemini or copilot edit files and run
+  commands (tests, builds) without asking, as opencode, pi and omp do.
+- With `--via` the model is named by the id that harness takes. A favorite the harness lacks
+  follows the tier's own pick, with the command that starts it where it runs: `(★ favorite
+  Ling 3.1 Flash is not on claude, start: opencode run --model opencode/ling-3.1-flash-free
+  "<prompt>")`.
+- `--min` and `--not` leave a favorite out too. A tier's favorite they leave out gives way to
+  the task's, and a task of your own whose model is out says `no model`.
+- When no task has a model (`--via ollama`, whose copies are picked only as favorites, or a
+  `--min` nothing meets), `pick` fails and says to choose none.
+- `--task` and `--tier` print only that task or tier, for an agent that chose it already.
+
+### Naming a model
+
+Model names match by substring, among the models you have first. The shortest match wins only
+when every other contains it (`opus-4.5` over its `-thinking` variant), else the name is
+ambiguous.
+
+| Exit code | When |
+|---|---|
+| 1 | an unknown `--dev` or `--via`, rather than an empty list |
+| 2 | an unknown task or harness, or a `models-dir` that is not a folder |
+| 3 | an ambiguous model name, and it lists the candidates |
 
 ## What you have
 
@@ -205,7 +372,7 @@ upgrades to it.
 
 The TUI's bottom border always shows the refresh state: `⟳ refreshing 7/9, waiting for opencode` (the downloads
 and harnesses that answered, and the last one or two still awaited), `refresh failed` in red
-with the age of the data still shown, or the data age alone, red once it is past 24h; then
+with the age of the data still shown, or the data age alone, red once it is past 24h. Then
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
 ## JSON
@@ -214,18 +381,60 @@ the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
 ```sh
 opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just provider/model
-modelcmp recommend --json                      # choose the task by its "when"; each has its frontier, the user's "favorite" and "tier_favorites", and their harnesses as "via" and "tier_via"
+modelcmp recommend --json                      # choose the task by its "when"
 modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite for the tier or task when set, else the tier's
 ```
 
-Each JSON model carries `key`, `selected` (on your shortlist), `excluded`, `favorite_for` (the tasks it is the user's favorite
-for, and `task:tier` for a tier's), `price` (with the provider's model `id`, which opencode takes after `provider/`, and `cache_read_per_mtok`, null when input is never discounted; `input_per_mtok` and `output_per_mtok` are null when no provider lists a price, which the tables show as `-`, not `free`; `listed` is true when yours lists none and they are the list prices of other providers, `~` in the tables), `context`,
-`eci` (the overall index of `source`, `epoch` or `aa`), per-task `tasks` (each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile), and with `aa` `tokens_per_second` and `ttft_seconds`. `show` and
-`compare` add `benchmarks` (every score, as a fraction: 0.545 is 54.5%), `providers` (every provider's price) and `pages` (site to URL, for the sites that have a page for it; `url` is the first of them, null when none has). `recommend` prints each
-frontier entry as `name [key] $price (value)`, the value being the task's table column: the
-same as `tasks`. A favorite that is on the line only as
-the favorite is marked `not recommended`, and its `recommend --json` entry has `"recommended": false`. An entry carries its `context` in tokens, `via` (the harnesses that have the model, as in `list --json`), and the user's `note` when the model has one.
-A task of your own follows the built-in ones in `recommend --json` with the same fields and
-`"custom": true`: its `about` is what the user wrote (`your own task` when nothing), its `when`
-says it wins over a built-in task that fits too, its `favorite` and `tier_favorites` are the
-models the user gave it, `via` and `tier_via` the harnesses they run on when the user chose one (null and `{}` otherwise, as for a built-in task), and its `frontier` lists them, cheapest first, with a null `score`.
+Each model carries these fields:
+
+| Field | What it is |
+|---|---|
+| `key` | the model's key |
+| `selected` | on your shortlist |
+| `excluded` | you excluded it |
+| `favorite_for` | the tasks it is the user's favorite for, and `task:tier` for a tier's |
+| `price` | the offer you'd pay, as below |
+| `context` | in tokens |
+| `eci` | the overall index of `source` |
+| `source` | `epoch` or `aa` |
+| `tasks` | each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile |
+| `task_cost_usd` | `$task`, with `epoch`, when the model has one |
+| `tokens_per_second`, `ttft_seconds` | with `aa` |
+
+`price` has:
+
+| Field | What it is |
+|---|---|
+| `id` | the provider's model id, which opencode takes after `provider/` |
+| `input_per_mtok`, `output_per_mtok` | null when no provider lists a price, which the tables show as `-`, not `free` |
+| `cache_read_per_mtok` | null when input is never discounted |
+| `listed` | true when yours lists none and they are the list prices of other providers, `~` in the tables |
+
+`show` and `compare` add:
+
+| Field | What it is |
+|---|---|
+| `benchmarks` | every score, as a fraction: 0.545 is 54.5% |
+| `providers` | every provider's price |
+| `pages` | site to URL, for the sites that have a page for it |
+| `url` | the first of `pages`, null when none has |
+
+`recommend --json` has a list of tasks, each with its `when`, its `frontier`, the user's
+`favorite` and `tier_favorites`, and their harnesses as `via` and `tier_via`.
+
+- A frontier entry carries its `context` in tokens, `via` (the harnesses that have the model,
+  as in `list --json`), and the user's `note` when the model has one.
+- A favorite that is on the line only as the favorite has `"recommended": false`, and the text
+  output marks it `not recommended`.
+- The text output prints each frontier entry as `name [key] $price (value)`, the value being
+  the task's table column, the same as `tasks`.
+
+A task of your own follows the built-in ones with the same fields and `"custom": true`:
+
+| Field | What it is |
+|---|---|
+| `about` | what the user wrote, `your own task` when nothing |
+| `when` | says it wins over a built-in task that fits too |
+| `favorite`, `tier_favorites` | the models the user gave it |
+| `via`, `tier_via` | the harnesses they run on when the user chose one, null and `{}` otherwise, as for a built-in task |
+| `frontier` | those models, cheapest first, with a null `score` |

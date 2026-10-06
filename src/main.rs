@@ -258,11 +258,13 @@ fn main() {
     }
 }
 
-/// Epoch has no speed: a bound on it would drop every model, a sort do nothing.
+/// Epoch has no speed, Artificial Analysis no cost of a task: a bound on one would drop every
+/// model, a sort do nothing.
 fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
     match cols.find(|&c| app::hidden(c + app::TEXT)) {
         Some(c) => {
-            Err(Exit::from(format!("{} needs --source aa: only Artificial Analysis measures it", app::COLS[c].id)))
+            let (col, src) = (&app::COLS[c], app::COLS[c].only.unwrap_or_default());
+            Err(Exit::from(format!("{} needs --source {}: only {} has it", col.id, src.id(), src.label())))
         }
         None => Ok(()),
     }
