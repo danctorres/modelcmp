@@ -379,8 +379,9 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
         let names = tasks.iter().map(|t| t.0).collect::<Vec<_>>().join(", ");
         return Err(Exit { code: 2, msg: format!("no task '{c}': there are {names}") });
     }
+    let (mut said, mut found) = (Vec::new(), false);
     for (name, task, when) in tasks.into_iter().filter(|t| o.custom.as_deref().is_none_or(|c| c == t.0)) {
-        println!("{name}: {when}");
+        said.push(format!("{name}: {when}"));
         let mut lines: Vec<(String, String)> = Vec::new();
         for (tier, _) in TIERS.iter().filter(|x| o.tier.as_deref().is_none_or(|t| t == x.0)) {
             let o = ListOpts {
@@ -399,11 +400,22 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
             }
         }
         for (tiers, line) in lines {
-            println!("  {tiers}  {line}");
+            found |= !line.starts_with(NO_MODEL);
+            said.push(format!("  {tiers}  {line}"));
         }
     }
+    // `no model` on every line would send an agent from task to task for nothing.
+    if !found {
+        // A copy your machine runs is no pick on merit (`Model::local`).
+        let local = !o.via.is_empty() && o.via.iter().all(|v| crate::data::runs_here(&v.to_lowercase()));
+        let why = if local { ", a model your machine runs is picked only as your favorite (modelcmp fav)" } else { "" };
+        return Err(format!("no task has a model for this{why}: choose no model, tell the user").into());
+    }
+    println!("{}", said.join("\n"));
     Ok(())
 }
+
+const NO_MODEL: &str = "no model";
 
 /// A tier's line in `pick`: your favorite when `o`'s harness has it and its bounds allow it,
 /// else the tier's pick on merit, followed by the favorite's command on the harness that has it.
@@ -427,7 +439,7 @@ fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
     let rest = ListOpts { not: o.not.iter().cloned().chain(first.map(|m| m.key.clone())).collect(), ..o.clone() };
     let merit = match line(&rest)?.1 {
         Some(l) => l,
-        None => line(&ListOpts { no_fav: true, ..rest })?.1.unwrap_or("no model".into()),
+        None => line(&ListOpts { no_fav: true, ..rest })?.1.unwrap_or(NO_MODEL.into()),
     };
     let fav = first.filter(allowed);
     let anywhere = ListOpts { via: vec![], cmd: true, ..o.clone() };
@@ -479,8 +491,9 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
 }
 
 /// `cmd`, which opens a harness on a model, as the command that runs one prompt there and exits:
-/// what an agent runs, where the other waits on a terminal. With the flag that lets the harness
-/// edit files where it would ask, as opencode, pi and omp do unasked, and no more than that.
+/// what an agent runs, where the other waits on a terminal. With the flags that let the harness
+/// edit files and run commands (tests, builds) where it would ask, as opencode, pi and omp do
+/// unasked: with nobody to ask, it would refuse them.
 /// None for llama.cpp's server, which takes no prompt.
 fn one_shot(mut cmd: Vec<String>) -> Option<String> {
     let llama = crate::data::llama_cmd().is_some_and(|c| c[0] == cmd[0]);
@@ -488,9 +501,9 @@ fn one_shot(mut cmd: Vec<String>) -> Option<String> {
         "llama-server" => return None,
         "opencode" => (&["run"], &[]),
         "codex" => (&["exec", "--sandbox", "workspace-write"], &[]),
-        "claude" => (&[], &["--permission-mode", "acceptEdits", "-p"]),
-        "gemini" => (&[], &["--approval-mode", "auto_edit", "-p"]),
-        "copilot" => (&[], &["--allow-tool=write", "-p"]),
+        "claude" => (&[], &["--permission-mode", "acceptEdits", "--allowedTools", "Bash", "-p"]),
+        "gemini" => (&[], &["--approval-mode", "yolo", "-p"]),
+        "copilot" => (&[], &["--allow-all-tools", "-p"]),
         crate::data::OLLAMA => (&[], &[]),
         _ if llama => (&[], &["-st", "-p"]),
         // pi, omp
@@ -520,12 +533,20 @@ fn command(
     first.iter().flatten().find_map(|h| has(h)).or_else(|| vias().filter(asked).find_map(has))
 }
 
-pub fn show(data: &Data, store: &Store, q: &str, json: bool) -> Result {
+pub fn show(data: &Data, store: &Store, q: &str, json: bool, all: bool) -> Result {
     let m = resolve(data, q)?;
     if json {
         return print_json(&out(m, store, true));
     }
-    for line in detail_lines(m, store, data.any_available()) {
+    let mut lines = detail_lines(m, store, data.any_available());
+    // The providers end the lines, yours first: the others are prices you do not pay.
+    let others = m.offers.iter().filter(|o| !o.available).count();
+    let cut = !all && others > 0 && others < m.offers.len();
+    if cut {
+        lines.truncate(lines.len() - others);
+        lines.push(format!("    {others} more you have no harness for, --all lists them"));
+    }
+    for line in lines {
         println!("{line}");
     }
     Ok(())
@@ -1097,9 +1118,12 @@ mod tests {
         let run = |cmd: &[&str]| one_shot(cmd.iter().map(|s| s.to_string()).collect());
         let runs = [
             (&["codex", "--model", "gpt55"][..], "codex exec --sandbox workspace-write --model gpt55"),
-            (&["claude", "--model", "opus"], "claude --model opus --permission-mode acceptEdits -p"),
-            (&["gemini", "--model", "flash"], "gemini --model flash --approval-mode auto_edit -p"),
-            (&["copilot", "--model", "gpt55"], "copilot --model gpt55 --allow-tool=write -p"),
+            (
+                &["claude", "--model", "opus"],
+                "claude --model opus --permission-mode acceptEdits --allowedTools Bash -p",
+            ),
+            (&["gemini", "--model", "flash"], "gemini --model flash --approval-mode yolo -p"),
+            (&["copilot", "--model", "gpt55"], "copilot --model gpt55 --allow-all-tools -p"),
             (&["ollama", "run", "qwen"], "ollama run qwen"),
             (&["llama-cli", "-hf", "a/b"], "llama-cli -hf a/b -st -p"),
             (&["llama-cli", "-m", "/my models/a.gguf"], "llama-cli -m '/my models/a.gguf' -st -p"),

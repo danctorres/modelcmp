@@ -74,7 +74,7 @@ modelcmp list --task coding --tier mid --id    # only its provider/model, for op
 modelcmp list --min coding=155 --sort price    # good enough, cheapest first
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp list --dev china                      # every model of a developer from there
-modelcmp show sonnet-5                         # everything about one model
+modelcmp show sonnet-5                         # everything about one model, --all adds the price at providers you have no harness for
 modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
 modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, aa, openrouter or hf; without --on, the first to have one
 modelcmp get gemma-3-4b-it --via ollama       # download its GGUF copy from Hugging Face and run it here: ollama or llama-cli, the one you have without --via, installed first, if you agree, when you have neither, and the size of the download is said first
@@ -133,10 +133,12 @@ it where it runs: `(★ favorite Ling 3.1 Flash is not on claude, start: opencod
 opencode/ling-3.1-flash-free "<prompt>")`. Without `--via` each line has the command that runs one
 prompt on the model and exits, on the harness `--cmd` goes by (`opencode run --model
 opencode/ling-3.1-flash-free "<prompt>"`, `pi --model ... -p "<prompt>"`), so an agent in one
-harness reaches a model only another has, or the id when no harness has the model. The command
-has the flag that lets claude, codex, gemini or copilot edit files without asking, as opencode, pi
-and omp do, and no wider permission. `--min` and
-`--not` leave a favorite out too, and a task of your own whose model is out says `no model`.
+harness reaches a model only another has. The command has the flags that let claude, codex,
+gemini or copilot edit files and run commands (tests, builds) without asking, as opencode, pi and
+omp do. `--min` and `--not` leave a favorite out too, a tier's favorite they leave out gives way to
+the task's, and a task of your own whose model is out says `no model`. When no task has a model
+(`--via ollama`, whose copies are picked only as favorites, or a `--min` nothing meets), `pick`
+fails and says to choose none.
 `--task` and `--tier` print only that task or tier, for an agent that chose it already.
 
 Model names match by substring, among the models you have first; the shortest match wins

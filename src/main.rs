@@ -103,6 +103,9 @@ enum Cmd {
     /// Everything about one model
     Show {
         model: String,
+        /// The price at every provider, not only the ones you have a harness for
+        #[arg(short, long)]
+        all: bool,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -324,7 +327,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
             let opts = cli::ListOpts { via, bounds, custom: task, tier, ..Default::default() };
             cli::pick(&data, &store, &opts, &not)
         }
-        Cmd::Show { model, json } => cli::show(&data, &store, &model, json),
+        Cmd::Show { model, all, json } => cli::show(&data, &store, &model, json, all),
         Cmd::Compare { models, json } => cli::compare(&data, &store, &models, json),
         Cmd::Open { model, on } => cli::open(&data, &model, on.as_deref()),
         Cmd::Get { model, via, pause } => cli::get(&data, &model, via.as_deref(), pause).inspect_err(|e| {
