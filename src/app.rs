@@ -848,7 +848,9 @@ pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String
 /// model, else the one that can be installed. None for a model with no repo on Hugging Face.
 /// `size` is the download's, ` (4.7 GB)`, once known.
 fn get_items(m: &Model, size: &str, tools: &Tools) -> Vec<(String, Effect)> {
+    // Linux says `… (deleted)` of a binary replaced under a running TUI: the new one is at the path.
     let exe = std::env::current_exe().map_or_else(|_| "modelcmp".into(), |p| p.to_string_lossy().into_owned());
+    let exe = exe.trim_end_matches(" (deleted)").to_string();
     let item = |(h, how): (&str, &str)| {
         let cmd = [&exe, "get", &m.key, "--via", h, "--pause"].map(String::from).to_vec();
         (format!("{h} {how}{size}"), Effect::Launch(cmd))
