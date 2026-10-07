@@ -327,7 +327,7 @@ A refresh asks each harness on your `PATH` which models it has, and the Via colu
 - The `claude`, `codex` and `gemini` binaries each count as their own provider.
 - `copilot` gives the models GitHub Copilot's CLI takes on your plan, asked of the CLI itself
   with `copilot --acp`, under its own login. Each refresh leaves an empty folder in
-  `~/.copilot/session-state/`.
+  `~/.copilot/session-state/`. The VS Code extension alone is not enough, install the CLI.
 - ollama and llama.cpp give the models on your machine, as below.
 
 Under WSL the harnesses are asked in a new session, as `x` launches them, so a key exported by
