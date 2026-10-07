@@ -308,6 +308,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("] [", "next / previous selected model, or ticked entry"),
             ("} {", "next / previous available model"),
             ("v", "highlight a range; space e C act on all of it"),
+            ("V", "highlight the selected models, Ve excludes them all"),
         ],
     ),
     (
@@ -1385,22 +1386,14 @@ impl App {
         self.picked.clear();
     }
 
-    /// Keys of the models a command acts on: in the table the selection, else every marked
-    /// model when the current one is marked (as a file manager acts on the selection only from
-    /// inside it, so stale marks never widen an action on an unmarked row), else the current one.
+    /// Keys of the models a command acts on: in the table the highlighted rows, else the current
+    /// one alone, marked or not (`V` highlights the marked ones, to act on them all).
     fn targets(&self) -> Vec<String> {
-        let cur = self.current().map(|m| m.key.clone());
-        if self.view == View::Table {
-            if self.selecting() {
-                let key = |k: usize| self.data.models[self.rows[k]].key.clone();
-                return (0..self.rows.len()).filter(|&k| self.is_selected(k)).map(key).collect();
-            }
-            if cur.as_ref().is_some_and(|k| self.store.marked.contains(k)) {
-                // Not a kept mark of a model the data no longer has: it is none (`any_marked`).
-                return self.marked_models().iter().map(|m| m.key.clone()).collect();
-            }
+        if self.view == View::Table && self.selecting() {
+            let key = |k: usize| self.data.models[self.rows[k]].key.clone();
+            return (0..self.rows.len()).filter(|&k| self.is_selected(k)).map(key).collect();
         }
-        cur.map(|k| vec![k]).unwrap_or_default()
+        self.current().map(|m| vec![m.key.clone()]).unwrap_or_default()
     }
 
     /// Sets a flag on every target, or clears it when all of them have it. Ends a visual range
@@ -2602,12 +2595,12 @@ impl App {
             Mouse::Star(n) if n < self.rows.len() => {
                 self.deselect();
                 self.select(n);
-                // Only the clicked row, even on a selected one, where `f` refuses several.
+                // Only the clicked row, even in a highlight, where `f` refuses several.
                 let key = self.current()?.key.clone();
                 self.ask_fav(&key);
                 return None;
             }
-            // Only the clicked row, even on a mark, where `e` takes every mark.
+            // Only the clicked row, even in a highlight, where `e` takes all of it.
             Mouse::Exclude(n) if n < self.rows.len() => {
                 self.deselect();
                 self.select(n);
@@ -2910,8 +2903,19 @@ impl App {
                 if let [key] = &keys[..] {
                     self.ask_fav(key);
                 } else if let n @ 2.. = keys.len() {
-                    let what = if self.selecting() { "highlighted" } else { "selected" };
-                    self.refuse(format!("a task has one favorite: f takes one model, {n} are {what}"));
+                    self.refuse(format!("a task has one favorite: f takes one model, {n} are highlighted"));
+                }
+            }
+            KeyCode::Char('V') if table && !self.any_marked() => self.refuse(NO_SELECTED),
+            // The marked rows shown, for `e` or `space` to act on them all.
+            KeyCode::Char('V') if table => {
+                self.visual = None;
+                self.picked = (0..self.rows.len())
+                    .filter(|&k| self.store.is_marked(&self.data.models[self.rows[k]].key))
+                    .collect();
+                // A search or a dropdown hides them all.
+                if self.picked.is_empty() {
+                    self.refuse("no selected model is shown");
                 }
             }
             // Not on an empty table: a range of no rows would have `C` keep none of the selected.
@@ -3730,8 +3734,12 @@ mod tests {
         let mut a = app();
         a.store.marked = vec!["gpt55".into(), "mini".into(), "gone".into()];
         a.rebuild();
+        press(&mut a, "V");
         assert_eq!(a.targets(), ["gpt55", "mini"], "a kept mark of a model the data lost is no target");
+        press(&mut a, "V");
         a.rows.clear();
+        press(&mut a, "V");
+        assert!(a.failed && !a.selecting() && a.status == "no selected model is shown");
         press(&mut a, "vC");
         assert_eq!(a.store.marked.len(), 3, "a range of no rows does not replace the selected");
     }
@@ -5285,9 +5293,11 @@ mod tests {
         press(&mut a, "Ge");
         assert!(a.store.is_excluded("opus5") && !a.store.is_excluded("gpt55"), "e on an unmarked row acts on it alone");
         press(&mut a, "Gegge");
+        assert!(a.store.is_excluded("gpt55") && !a.store.is_excluded("mini"), "e on a mark acts on it alone too");
+        press(&mut a, "Ve");
         assert!(
             a.store.is_excluded("gpt55") && a.store.is_excluded("mini") && !a.store.is_excluded("opus5"),
-            "e on a mark: all marks"
+            "Ve: all marks"
         );
         press(&mut a, "ggvjj ");
         assert_eq!(a.store.marked, ["gpt55", "mini", "opus5"], "space on a partly marked range marks the rest");
@@ -5320,11 +5330,27 @@ mod tests {
         assert_eq!((a.store.favorite("coding"), a.store.favorite("coding:mid")), (Some("opus5"), Some("opus5")));
         a.mouse(Mouse::Tick(1, 2));
         code(&mut a, KeyCode::Esc);
-        // A task has one favorite: with several selected or highlighted, f says so and asks nothing.
+        // On a selected row f is for that row alone, the others selected or not.
         a.mouse(Mouse::Box(1));
         a.mouse(Mouse::Box(2));
-        assert_eq!((press(&mut a, "f"), a.choosing_favs()), (None, false));
-        assert_eq!(a.status, "a task has one favorite: f takes one model, 2 are selected");
+        press(&mut a, "f");
+        assert!(
+            matches!(&a.input, Input::Choose { items, .. } if matches!(&items[0].1, Effect::Fav(k, ..) if k == "opus5")),
+            "{:?}",
+            a.input
+        );
+        code(&mut a, KeyCode::Esc);
+        // A task has one favorite: with several highlighted, f says so and asks nothing.
+        assert_eq!((press(&mut a, "Vf"), a.choosing_favs()), (None, false));
+        assert_eq!(a.status, "a task has one favorite: f takes one model, 2 are highlighted");
+        // e on a selected row excludes that row alone, and Ve every selected one.
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "e");
+        assert!(a.store.excluded.iter().eq(["opus5"]));
+        press(&mut a, "eVe");
+        assert_eq!((a.store.excluded.len(), a.status.as_str(), a.selecting()), (2, "excluded 2 models", false));
+        press(&mut a, "Ve");
+        assert!(a.store.excluded.is_empty());
         press(&mut a, "ggvjf");
         assert!(!a.choosing_favs() && a.status.ends_with("2 are highlighted"), "{}", a.status);
         a.mouse(Mouse::Star(2));
@@ -5355,7 +5381,7 @@ mod tests {
         press(&mut a, "gg ");
         a.mouse(Mouse::Box(1));
         a.mouse(Mouse::Exclude(1));
-        assert!(a.store.is_excluded(&k) && !a.store.is_excluded(&key(&a, 0)), "on a mark, not every mark as e does");
+        assert!(a.store.is_excluded(&k) && !a.store.is_excluded(&key(&a, 0)), "on a mark, that row alone");
         // Under E a click that drops the row leaves the cursor where it was, as e does.
         for n in 0..3 {
             if !a.store.is_excluded(&key(&a, n)) {

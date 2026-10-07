@@ -961,6 +961,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             }
             if app.any_marked() {
                 view.push("u deselect");
+                view.push("V highlight");
             }
             if app.only == Some(FAV) {
                 view.push("D unfavorite all");
@@ -3409,8 +3410,8 @@ mod tests {
         let (opus, flash) = (row("opus"), row("flash"));
         assert!(lines[flash as usize].contains('✓') && lines[opus as usize].contains('☐'), "checkboxes: {lines:?}");
         a.rebuild();
-        let deselect = |a: &App| hints(a, 200).contains(&"u deselect");
-        assert!(deselect(&a) && !deselect(&app()), "u is a hint while a model is selected");
+        let deselect = |a: &App| ["u deselect", "V highlight"].iter().all(|h| hints(a, 200).contains(h));
+        assert!(deselect(&a) && !deselect(&app()), "u and V are hints while a model is selected");
         let filled = |y: u16| (0..120).all(|x| buf[(x, y)].bg == MARK && buf[(x, y)].fg == Color::Black);
         assert!(filled(flash), "the row is filled through the border, black on the mark colour");
         assert!((0..120).all(|x| buf[(x, opus)].bg != MARK), "and only that row");
