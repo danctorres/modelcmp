@@ -31,14 +31,18 @@ installed, shows which one has each model, and starts it on the model you pick.
   `DeepSeek V4 Pro` in `pi`), or a local one (e.g. `Qwen3.8 Flash Next` in `llama.cpp`), and
   hand it a subtask.
 
-![Filtering to the Opus models, sorting them by price and opening one](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
+![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
+
+<p align="center"><i>Filter to the Opus models, sort by price and open a model's details.</i></p>
 
 ![Listing the best models for coding, comparing two and printing the command that starts one](https://github.com/user-attachments/assets/31cfd9f0-b286-4fac-ac17-f61caca59631)
 
+<p align="center"><i>List the best models for coding, compare two, print the command that starts one.</i></p>
+
 It works with:
 
-- **Harnesses:** `opencode`, `pi`, `omp`, `Claude Code`, `GitHub Copilot CLI`
-- **Harnesses not tested yet:** `Codex`, `Gemini CLI`
+- **Harnesses:** `opencode`, `pi`, `omp`, `Claude Code`, `GitHub Copilot CLI`, `Codex`
+- **Harnesses not tested yet:** `Gemini CLI`
 - **Local runners:** `ollama`, `llama.cpp`
 
 By default it lists only the models you can already use through them. To see every model,
@@ -84,6 +88,8 @@ keys and `qq` quits.
 
 ![The model recommended for each task and tier](https://github.com/user-attachments/assets/bb30bc6d-8b18-4315-a7e2-2d51c9d16c2f)
 
+<p align="center"><i>The model recommended for each task and tier.</i></p>
+
 Each task has three tiers, `low`, `mid` and `high`, from routine work to the hardest. `low` and
 `mid` get the cheapest model that scores enough, and `high` gets the best one. A favorite you set
 beats that pick.
@@ -104,7 +110,9 @@ model for a subtask. It works in `Claude Code`, `opencode`, `Codex` and any othe
 [skills CLI](https://skills.sh) supports, and `npx skills update` updates it. For an agent
 without skills, paste the skill's text into `AGENTS.md`.
 
-![An agent asking modelcmp which model should do a rename](https://github.com/user-attachments/assets/eedc93b0-fcf5-47ae-8be1-4bf4837b4576)
+![An agent using the modelcmp skill to pick the harness and model for a rename task](https://github.com/user-attachments/assets/eedc93b0-fcf5-47ae-8be1-4bf4837b4576)
+
+<p align="center"><i>An agent uses the modelcmp skill to pick the harness and model for a rename task.</i></p>
 
 For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list --id` or
 `--cmd` prints only the model's id or the command that starts it.
