@@ -109,6 +109,9 @@ struct ModelOut<'a> {
     /// USD one coding task cost on DeepSWE, at the setting its score there is of; Epoch only
     #[serde(skip_serializing_if = "Option::is_none")]
     task_cost_usd: Option<f64>,
+    /// Output tokens that task took, of the same run; Epoch only
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_output_tokens: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +161,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
         task_cost_usd: m.task_cost,
+        task_output_tokens: m.task_tokens.map(f64::round),
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
     }

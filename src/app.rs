@@ -122,9 +122,9 @@ fn month(v: f64) -> String {
 }
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
-/// index, the task scores, Value and what a task cost when Epoch lists it, then speed when
+/// index, the task scores, Value and what a task cost and took when Epoch lists it, then speed when
 /// Artificial Analysis measures it.
-pub const COLS: [Col; 14] = [
+pub const COLS: [Col; 15] = [
     Col {
         ranked: false,
         show: month,
@@ -178,6 +178,13 @@ pub const COLS: [Col; 14] = [
         ..col("$task", "cost", "USD one coding task cost on DeepSWE, as measured", |m| m.task_cost)
     },
     Col {
+        only: Some(Source::Epoch),
+        lower_better: true,
+        // In tokens, not thousands as Ctx: a task may take fewer than Ctx's 10,000 that tell them apart.
+        show: |v| ctx(v as u64),
+        ..col("Tok/task", "tokens", "output tokens one coding task took on DeepSWE, as measured", |m| m.task_tokens)
+    },
+    Col {
         only: Some(Source::Aa),
         show: |v| format!("{v:.0}"),
         ..col("Tok/s", "tps", "output tokens per second (median)", |m| m.tps)
@@ -211,7 +218,7 @@ const DEFAULT_SORT: (usize, bool) = (ECI, true);
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 6;
 /// Column index of Tok/s.
-pub const SPEED: usize = TEXT + 12;
+pub const SPEED: usize = TEXT + 13;
 /// First column of each group: names and release, price and context, benchmarks, speed, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, SPEED, VIA];
 /// Column index of where you have access.

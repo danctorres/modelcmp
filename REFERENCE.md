@@ -22,6 +22,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | coding per dollar, ranked 0-100 |
 | $task | $ one coding task cost, [measured](#task). Epoch AI only |
+| Tok/task | output tokens one coding task took, [measured](#task). Epoch AI only |
 | Tok/s | output tokens per second. Artificial Analysis only |
 | TTFT | seconds to the first answer token, after any thinking. Artificial Analysis only |
 | Via | the harnesses that have the model |
@@ -44,6 +45,14 @@ means. Green and red mark the best and worst value in a column, and in a row of 
   setting costs less and scores less.
 - Few models have it, 26 of them on 2026-10-06, and the rest show `-`. No tier goes by it.
 - `--sort cost` and `--max cost=5` take it.
+- `Tok/task` is the output tokens that same run took per task, for an allowance counted in
+  tokens and not in dollars. Epoch lists no input tokens, which an agent spends far more of, so
+  it compares models and does not total what a task takes. `--sort tokens` and
+  `--max tokens=50000` take it.
+- For a model that shows `-`, [Artificial Analysis](https://artificialanalysis.ai) charts the
+  input and output tokens its own benchmarks took on the model's page, which
+  `modelcmp open MODEL --on aa` opens. Its API does not list them and its terms forbid scraping
+  the site, so modelcmp cannot show them.
 
 ### Task columns
 
@@ -107,8 +116,8 @@ Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data
   benchmark. So a task column reorders models of similar ECI and does not set a model far
   from where its ECI puts it.
 - Only benchmarks Epoch still runs on new models count toward a task.
-- `$task` is the mean cost of a task that Epoch lists for the model's best DeepSWE run, as
-  published. modelcmp does not compute it.
+- `$task` and `Tok/task` are the mean cost and the mean output tokens of a task that Epoch
+  lists for the model's best DeepSWE run, as published. modelcmp does not compute them.
 
 Artificial Analysis (`--source aa`, its API with your key):
 
@@ -119,7 +128,7 @@ Artificial Analysis (`--source aa`, its API with your key):
   [Task columns](#task-columns) says.
 - It scores more models than Epoch AI does, most of all on Agentic, and its task scores can
   differ from the AAII, where Epoch's stay close to the ECI.
-- Its API lists no cost of a task, so `$task` is hidden with it.
+- Its API lists no cost of a task, so `$task` and `Tok/task` are hidden with it.
 
 With either source:
 
@@ -222,6 +231,7 @@ stored as `tool-dispatch`).
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
 | `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores |
 | `cost` | `$task`, with Epoch AI |
+| `tokens` | `Tok/task`, with Epoch AI, in tokens |
 | `tps`, `ttft` | with Artificial Analysis |
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
@@ -404,6 +414,7 @@ Each model carries these fields:
 | `source` | `epoch` or `aa` |
 | `tasks` | each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile |
 | `task_cost_usd` | `$task`, with `epoch`, when the model has one |
+| `task_output_tokens` | `Tok/task`, in tokens, with `epoch`, when the model has one |
 | `tokens_per_second`, `ttft_seconds` | with `aa` |
 
 `price` has:

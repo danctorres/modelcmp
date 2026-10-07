@@ -36,8 +36,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Coding Index, and `Model::ttft` is to the first answer token. 14: its scores are all of one
 /// reasoning setting. 15: Epoch's tasks without the benchmarks it no longer runs, and no task
 /// score for a model without an ECI scored on few benchmarks. 16: `Model::hf`.
-/// 18: `Model::task_cost`.
-const FORMAT: u32 = 18;
+/// 18: `Model::task_cost`. 19: `Model::task_tokens`.
+const FORMAT: u32 = 19;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -701,6 +701,9 @@ pub struct Model {
     /// lists it, Artificial Analysis's API does not.
     #[serde(default)]
     pub task_cost: Option<f64>,
+    /// Output tokens that task took it, of the same run. Epoch lists no input tokens.
+    #[serde(default)]
+    pub task_tokens: Option<f64>,
     #[serde(skip)]
     pub available: bool,
     /// Every `Offer::via` of the model, once each.
@@ -2381,9 +2384,9 @@ struct Scores {
     org: HashMap<String, String>,
     /// Developer (`dev_key`) -> its country, Epoch's only.
     country: HashMap<String, String>,
-    /// group -> its best score on `COST_BENCH` and what a task cost there, when the run says,
-    /// Epoch's only.
-    cost: HashMap<String, (f64, Option<f64>)>,
+    /// group -> its best score on `COST_BENCH`, and what a task cost there and the output tokens
+    /// it took, when the run says, Epoch's only.
+    cost: HashMap<String, (f64, Option<f64>, Option<f64>)>,
     /// Benchmark -> Epoch's fit of it.
     benches: HashMap<String, crate::fit::Bench>,
     /// group -> task -> percentile, and the value it shows.
@@ -2612,10 +2615,10 @@ fn epoch_named(models: &mut [Model], ep: &Scores) {
     }
 }
 
-/// The benchmark whose runs say what a task cost, and the column that says it: every model is
-/// run there on one harness, so the costs compare.
+/// The benchmark whose runs say what a task cost, and the columns that say it, in USD and in
+/// output tokens: every model is run there on one harness, so the costs compare.
 // ponytail: one benchmark, some 30 models; mean a second one in if Epoch lists a cost as wide.
-const COST_BENCH: (&str, &str) = ("DeepSWE", "Mean cost (USD)");
+const COST_BENCH: (&str, &str, &str) = ("DeepSWE", "Mean cost (USD)", "Mean output tokens");
 
 fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("epoch zip: {e}"))?;
@@ -2689,11 +2692,11 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             *best = best.max(s * scale);
             // The cost of the run the score is of, never a lower run's, and the cheaper of two that tie.
             if bench == COST_BENCH.0 {
-                let usd = r.get(COST_BENCH.1).and_then(|c| c.parse::<f64>().ok());
-                let usd = usd.filter(|c| c.is_finite() && *c > 0.0);
-                let kept = ep.cost.entry(norm(&e.0)).or_insert((s, usd));
+                let num = |c| r.get(c).and_then(|c| c.parse::<f64>().ok()).filter(|c| c.is_finite() && *c > 0.0);
+                let (usd, tokens) = (num(COST_BENCH.1), num(COST_BENCH.2));
+                let kept = ep.cost.entry(norm(&e.0)).or_insert((s, usd, tokens));
                 if s > kept.0 || s == kept.0 && usd.is_some_and(|u| kept.1.is_none_or(|k| u < k)) {
-                    *kept = (s, usd);
+                    *kept = (s, usd, tokens);
                 }
             }
         }
@@ -3081,7 +3084,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             }
             (m.eci, m.scores) = (eci, scores);
             (m.fit, m.shown) = fit;
-            m.task_cost = ep.cost.get(k).and_then(|c| c.1);
+            (m.task_cost, m.task_tokens) = ep.cost.get(k).map_or((None, None), |c| (c.1, c.2));
         }
     }
     unify_developers(&mut models);
@@ -4258,8 +4261,8 @@ mod tests {
             );
             file(
                 "swe.csv",
-                b"Model version,score,Mean cost (USD)\nfoo-2-09,0.5,4\nfoo-2-09_max,0.5,9\nfoo-2-09_low,0.2,1\n\
-                  bar-3-09,0.5,\nbar-3-09_low,0.3,2\n",
+                b"Model version,score,Mean cost (USD),Mean output tokens\nfoo-2-09,0.5,4,4000\n\
+                  foo-2-09_max,0.5,9,9000\nfoo-2-09_low,0.2,1,1000\nbar-3-09,0.5,,\nbar-3-09_low,0.3,2,2000\n",
             );
             file(
                 "epoch_capabilities_index/eci_scores.csv",
@@ -4277,6 +4280,7 @@ mod tests {
         assert!(!ep.ids.contains_key("flash9chat"), "an id of another kind of model is not its group's");
         assert!(ep.ids.contains_key("flash9") && !ep.ids.contains_key("googleflash9"), "without its provider");
         assert_eq!(ep.cost["foo2sep2025"].1, Some(4.0), "the cost of its best run, the cheaper of two that tie");
+        assert_eq!(ep.cost["foo2sep2025"].2, Some(4000.0), "and that run's output tokens");
         assert_eq!(ep.cost["bar3sep2025"].1, None, "its best run lists no cost: not a lower run's");
     }
 
