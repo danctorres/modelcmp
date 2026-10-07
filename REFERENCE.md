@@ -353,6 +353,7 @@ falls short of, so a model only your machine runs is recommended for a task only
 A model is matched by its tag, repo or file name, without the quantization, so the name must be the
 one the model has here (`modelcmp list --all` shows them): `gemma-3-4b-it-Q4_K_M.gguf` is Gemma 3 4B IT.
 A name that says `it` is the instruction-tuned model, never the base one beside it.
+A tag of ollama's own library (`llama3.2:1b`) is the instruct model, as that is what ollama holds under it.
 A repo that repeats the developer in its name (`bartowski/Qwen_Qwen3.5-4B-GGUF`) matches none.
 
 `modelcmp get <model>` finds the most downloaded GGUF copy of the model's Hugging Face repo and
@@ -360,7 +361,8 @@ starts `llama-cli -hf <repo>` or `ollama run hf.co/<repo>`, which download it. B
 of the download first, as `2.5 GB`. With neither installed it asks before installing one:
 llama.cpp with Homebrew, else ollama with its own script on Linux. A model with no repo on
 Hugging Face has no such option, and it does not check that the model fits your machine. In
-the TUI, `x` on a model and `download and run` does the same.
+the TUI, `x` on a model and `download and run` does the same, with each runner you have, and
+`install, download and run` with each one you lack that it can install, for a model no runner here has.
 
 ## Files
 

@@ -860,7 +860,7 @@ pub fn launch_cmd(m: &Model, harness: &str, listed: &BTreeMap<String, Vec<String
 
 /// The ways to get a model no runner on this machine has yet, each as its label and the
 /// `modelcmp get` that does it in a new terminal: one per runner installed here that lacks the
-/// model, else the one that can be installed. None for a model with no repo on Hugging Face.
+/// model, then one per runner that can be installed, when no runner here has the model. None for a model with no repo on Hugging Face.
 /// `size` is the download's, ` (4.7 GB)`, once known.
 fn get_items(m: &Model, size: &str, tools: &Tools) -> Vec<(String, Effect)> {
     // Linux says `… (deleted)` of a binary replaced under a running TUI: the new one is at the path.
@@ -877,19 +877,21 @@ fn get_items(m: &Model, size: &str, tools: &Tools) -> Vec<(String, Effect)> {
 fn getters<'a>(m: &'a Model, (have, install): &'a Tools) -> impl Iterator<Item = (&'static str, &'static str)> + 'a {
     let lacking = have.iter().filter(|h| !m.via.iter().any(|v| v == *h));
     let got = lacking.map(|h| (*h, "download and run"));
-    got.chain(install.map(|h| (h, "install, download and run"))).filter(|_| m.hf_repo().is_some())
+    // Not for one a runner here has: nothing is installed for a model that already runs.
+    let new = install.iter().filter(|_| !m.here()).map(|h| (*h, "install, download and run"));
+    got.chain(new).filter(|_| m.hf_repo().is_some())
 }
 
-/// The runners installed here, ollama then llama.cpp, and with neither the one that can be
+/// The runners installed here, ollama then llama.cpp, and the ones that are not and can be
 /// installed.
-pub type Tools = (Vec<&'static str>, Option<&'static str>);
+pub type Tools = (Vec<&'static str>, Vec<&'static str>);
 
 /// `Tools` as this machine has them now: a search of `PATH`, slow where it holds Windows's
 /// folders under WSL, so made at start and by a refresh's thread, not for each model.
 pub fn tools() -> Tools {
     use crate::data::{LLAMA, OLLAMA, has, install_cmd};
     let have: Vec<_> = [OLLAMA, LLAMA].into_iter().filter(|h| has(h)).collect();
-    let install = [LLAMA, OLLAMA].into_iter().find(|h| have.is_empty() && install_cmd(h).is_some());
+    let install = [LLAMA, OLLAMA].into_iter().filter(|h| !have.contains(h) && install_cmd(h).is_some()).collect();
     (have, install)
 }
 
@@ -3928,7 +3930,7 @@ mod tests {
         a.col = VIA;
         a.data.models[3].via.push(crate::data::OLLAMA.into());
         a.data.models[2].hf = Some("meta/llama4".into());
-        a.tools = (vec![crate::data::OLLAMA], None);
+        a.tools = (vec![crate::data::OLLAMA], vec![]);
         let pick = |a: &mut App, entry: &str| {
             press(a, "d");
             press(a, &format!("/{entry}"));
@@ -3984,17 +3986,23 @@ mod tests {
         let other = a.rows.iter().map(|&i| a.data.models[i].key.clone()).find(|k| *k != key && k != "mini").unwrap();
         a.data.models.iter_mut().for_each(|m| m.via.push(crate::data::OLLAMA.into()));
         // Of one ollama has too, with no download to offer: its details say the size.
-        a.tools = (vec![crate::data::OLLAMA], None);
+        a.tools = (vec![crate::data::OLLAMA], vec![]);
         let asked: Vec<String> = a.size_ask().into_iter().map(|q| q.0).collect();
-        a.tools = (vec![crate::data::LLAMA], None);
+        a.tools = (vec![crate::data::LLAMA], vec![]);
         assert!(asked.contains(&key) && asked.contains(&other), "{asked:?}");
         assert_eq!(asked.iter().filter(|k| **k == key).count(), 1, "the cursor's row is asked once");
         assert!(!asked.contains(&"mini".to_string()) && !a.size_wanted(), "not the ones known");
         // Via marks the ones `x` can download, with the size once known.
         let marks = ["mini", "llama4", &key].map(|k| a.download(a.data.models.iter().find(|m| m.key == k).unwrap()));
         assert_eq!(marks, [Some("↓ 2.5 GB".into()), None, Some("↓".into())], "none where there is no copy");
-        a.tools = (vec![crate::data::OLLAMA], None);
+        a.tools = (vec![crate::data::OLLAMA], vec![]);
         assert_eq!(a.download(a.current().unwrap()), None, "nor where ollama has it and is all there is");
+        a.tools.1 = vec![crate::data::LLAMA];
+        assert_eq!(a.download(a.current().unwrap()), None, "nor to install another runner for it");
+        let mut none = a.current().unwrap().clone();
+        none.via.clear();
+        let how: Vec<_> = getters(&none, &a.tools).collect();
+        assert_eq!(how, [("ollama", "download and run"), ("llama-cli", "install, download and run")]);
         assert_eq!(press(&mut a, "r"), Some(Effect::Refresh));
         assert!(!a.downloads.contains_key("llama4") && a.sizes().len() == 1, "r asks again of a lack of a copy");
     }
@@ -5403,7 +5411,7 @@ mod tests {
         assert_eq!(keys(&a), ["opus5", "gpt55", "mini", "llama4"], "not available after codex");
         // The ones that read alike by the size of their download, one with none last either way.
         a.data.models.iter_mut().for_each(|m| m.hf = Some(format!("o/{}", m.key)));
-        a.tools = (vec![crate::data::OLLAMA], None);
+        a.tools = (vec![crate::data::OLLAMA], vec![]);
         a.sized("mini", Download::Size(1));
         assert_eq!(keys(&a), ["opus5", "mini", "gpt55", "llama4"], "a size coming in sorts again");
         a.sized("gpt55", Download::Size(2));

@@ -529,7 +529,8 @@ fn local_key(tag: &str) -> String {
 
 /// Model key -> the tag that runs it, of the `ollama/tag` or `llama-cli/repo:quant` ids `listed`:
 /// the shortest tag naming a model, so the one ollama pulls by default, whatever was pulled last.
-/// One naming no model in `keys` names its instruct one, which is what ollama's plain tags hold.
+/// One naming no model in `keys` names its instruct one, which is what ollama's plain tags hold:
+/// a tag of ollama's own library names that one first, even with the base one in `keys`.
 /// One that says `it` names the instruction-tuned model, never the base one beside it: under
 /// that name, else as the instruct one, else as the only one there is. A tag pulled from a repo
 /// of `repos`, model key -> repo, names that model too, whatever the repo is called.
@@ -538,13 +539,16 @@ fn local_tags<'a>(
     keys: &HashSet<&str>,
     repos: &HashMap<String, String>,
 ) -> HashMap<String, &'a str> {
-    let mut tags: Vec<&str> = listed.iter().filter_map(|i| Some(i.split_once('/')?.1)).collect();
-    tags.sort_by_key(|t| (t.len(), *t));
+    let mut tags: Vec<(&str, &str)> = listed.iter().filter_map(|i| i.split_once('/')).collect();
+    tags.sort_by_key(|(_, t)| (t.len(), *t));
     let mut by_key = HashMap::new();
-    for tag in tags {
+    for (harness, tag) in tags {
         let key = local_key(tag);
+        // A tag of ollama's own library, `llama3.2:1b`: the instruct model, not the base one beside it.
+        let plain = harness == OLLAMA && !tag.contains('/');
+        let chat = plain.then(|| [format!("{key}instruct"), format!("{key}it")]);
         let tuned = key.strip_suffix("it").map(|k| [format!("{k}instruct"), k.to_string()]);
-        let named = std::iter::once(key.clone()).chain(tuned.into_iter().flatten());
+        let named = chat.into_iter().flatten().chain([key.clone()]).chain(tuned.into_iter().flatten());
         let key = named.into_iter().find(|k| keys.contains(k.as_str())).unwrap_or_else(|| format!("{key}instruct"));
         by_key.entry(key).or_insert(tag);
         let from = tag_repo(tag);
@@ -3908,6 +3912,13 @@ mod tests {
         let mut named: Vec<_> = local_tags(&listed, &keys, &HashMap::new()).into_keys().collect();
         named.sort();
         assert_eq!(named, ["gemma312b", "gemma31b", "gemma34bit", "gemma412binstruct"]);
+        // ollama's plain tag is the instruct model where the base one is listed too, a repo's is as named.
+        let keys = HashSet::from(["llama321b", "llama321binstruct"]);
+        let named = |id: &str| local_tags(&[id.to_string()], &keys, &HashMap::new()).into_keys().collect::<Vec<_>>();
+        assert_eq!(named("ollama/llama3.2:1b"), ["llama321binstruct"]);
+        assert_eq!(named("ollama/hf.co/callgg/llama-3.2-1b-gguf:latest"), ["llama321b"]);
+        assert_eq!(named("ollama/someone/llama3.2:1b"), ["llama321b"], "nor is another's upload");
+        assert_eq!(named("llama-cli/callgg/llama-3.2-1b-gguf:Q4_K_M"), ["llama321b"]);
     }
 
     #[test]
