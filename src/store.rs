@@ -22,7 +22,7 @@ pub struct Store {
     /// Pins from older files, read once and loaded as marks.
     #[serde(alias = "favorites", skip_serializing)]
     pinned: BTreeSet<String>,
-    /// Marks (space in the TUI); closing the TUI clears them.
+    /// Marks (space in the TUI), kept until deselected.
     pub marked: Vec<String>,
     /// Models you have but cannot use; recommendations skip them.
     pub excluded: BTreeSet<String>,

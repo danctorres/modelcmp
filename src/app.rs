@@ -327,7 +327,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Selected ✓, favorite ★, excluded ✗",
         &[
-            ("✓", "selected: your shortlist for now; cleared when modelcmp closes"),
+            ("✓", "selected: your shortlist, kept until you deselect it"),
             ("★", "favorite: your pick for a task; always in its recommendation"),
             ("✗", "excluded: you have it but cannot use it; recommendations skip it"),
             ("space", "select the model; C compares the selected"),

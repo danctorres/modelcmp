@@ -143,7 +143,7 @@ enum Cmd {
         #[arg(long, hide = true)]
         pause: bool,
     },
-    /// Select a model, to shortlist it until the TUI closes: `list --selected` shows them (space in the TUI)
+    /// Select a model, to shortlist it until you deselect it: `list --selected` shows them (space in the TUI)
     #[command(alias = "mark")]
     Select {
         model: String,

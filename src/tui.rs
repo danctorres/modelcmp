@@ -105,22 +105,8 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     let Some(cmds) = res? else { return Ok(()) };
-    // On the terminal's own screen, where the upgrade's output shows. One that fails has still
-    // closed the TUI.
-    upgrade(&cmds).inspect_err(|_| {
-        let _lock = crate::store::lock(&crate::store::path());
-        let _ = close(&mut app.store);
-    })
-}
-
-/// The selection is the shortlist of one session: closing the TUI clears it.
-fn close(store: &mut Store) -> Result<(), String> {
-    store.reload_if_changed();
-    if store.marked.is_empty() {
-        return Ok(());
-    }
-    store.marked.clear();
-    store.save().map_err(|e| format!("could not save: {e}"))
+    // On the terminal's own screen, where the upgrade's output shows.
+    upgrade(&cmds)
 }
 
 const REPO: &str = "https://github.com/danctorres/modelcmp";
@@ -530,8 +516,7 @@ fn event_loop(
             };
             {
                 match effect {
-                    Some(Effect::Quit) => return close(&mut app.store).map(|()| None),
-                    // The selection stays: the new modelcmp starts where this one stops.
+                    Some(Effect::Quit) => return Ok(None),
                     Some(Effect::Upgrade) => {
                         // Unresolved when it cannot be, as replaced under a running TUI it cannot:
                         // its path still says what installed it.

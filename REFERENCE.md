@@ -367,9 +367,9 @@ the TUI, `x` on a model and `download and run` does the same, with each runner y
 ## Files
 
 The data is downloaded on first run, which a command says on stderr as it can take half a minute, and cached for 24 hours under `~/.cache/modelcmp/` on Linux
-(`~/Library/Caches/modelcmp/` on macOS). Your favorites, exclusions, notes and settings live in
+(`~/Library/Caches/modelcmp/` on macOS). Your selection, favorites, exclusions, notes and settings live in
 `~/.config/modelcmp/user.json` (`~/Library/Application Support/modelcmp/` on macOS), and the `?`
-help shows the path. Your selection is kept there too, until the TUI closes. Each refresh also
+help shows the path. Each refresh also
 asks GitHub for the latest release, to say when a new version is out, and `UU` in the TUI
 upgrades to it.
 
