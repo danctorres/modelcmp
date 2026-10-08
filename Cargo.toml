@@ -35,3 +35,7 @@ cloned_instead_of_copied = "warn"
 inefficient_to_string = "warn"
 manual_let_else = "warn"
 uninlined_format_args = "warn"
+
+# Unoptimized, `cargo run` took 0.3s to read the cache on every switch of benchmark source.
+[profile.dev]
+opt-level = 1
