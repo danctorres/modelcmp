@@ -278,8 +278,8 @@ fn main() {
 fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
     match cols.find(|&c| app::hidden(c + app::TEXT)) {
         Some(c) => {
-            let (col, src) = (&app::COLS[c], app::COLS[c].from());
-            Err(Exit::from(format!("{} needs --source {}: only {} has it", col.id, src.id(), src.label())))
+            let (id, src) = (app::COLS[app::by_role(c)].id, app::COLS[c].from());
+            Err(Exit::from(format!("{id} needs --source {}: only {} has it", src.id(), src.label())))
         }
         None => Ok(()),
     }
@@ -325,13 +325,13 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     let mut store = Store::load();
     match cmd {
         Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id, cmd, no_fav } => {
-            let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
-            shown(sort.into_iter().chain(min.iter().chain(&max).map(|b| b.0)))?;
-            let bounds = min
+            let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s)).map(app::by_role);
+            let bounds: Vec<_> = min
                 .into_iter()
-                .map(|(c, v)| (c, v, f64::INFINITY))
-                .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
+                .map(|(c, v)| (app::by_role(c), v, f64::INFINITY))
+                .chain(max.into_iter().map(|(c, v)| (app::by_role(c), f64::NEG_INFINITY, v)))
                 .collect();
+            shown(sort.into_iter().chain(bounds.iter().map(|b| b.0)))?;
             // A name that is no built-in task is one of your own.
             let task = t.as_deref().and_then(fit::task);
             let custom = t.filter(|_| task.is_none());
@@ -356,8 +356,8 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
             cli::list(&data, &store, &opts)
         }
         Cmd::Pick { via, min, not, task, tier } => {
-            shown(min.iter().map(|b| b.0))?;
-            let bounds = min.into_iter().map(|(c, v)| (c, v, f64::INFINITY)).collect();
+            let bounds: Vec<_> = min.into_iter().map(|(c, v)| (app::by_role(c), v, f64::INFINITY)).collect();
+            shown(bounds.iter().map(|b| b.0))?;
             // The task asked for, built in or yours, goes by its name.
             let opts = cli::ListOpts { via, bounds, custom: task, tier, ..Default::default() };
             cli::pick(&data, &store, &opts, &not)

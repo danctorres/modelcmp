@@ -745,6 +745,11 @@ pub struct Model {
 }
 
 impl Model {
+    /// The overall index `of` gives it: the one in use has it in `eci`, the other in `other_index`.
+    pub fn index(&self, of: Source) -> Option<f64> {
+        if of == source() { self.eci } else { self.other_index }
+    }
+
     /// The offer you'd actually use: cheapest available paid one, else a free one of yours,
     /// else one of yours with no listed price, else the `list` one. It may be `unpriced`,
     /// still naming the id to use; `priced_offer` is the one with prices to show.

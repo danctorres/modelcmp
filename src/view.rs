@@ -747,12 +747,15 @@ pub fn detail_rows(
             Some(store.favorite_for(&m.key).join(", ")).filter(|s| !s.is_empty()).unwrap_or("-".into())
         ),
         String::new(),
-        // The other source's after it, with its data there too.
+        // Both indexes in the table's order, the other source's with its data there too.
         format!(
-            "  {} {}{}",
-            source.index().0,
-            score(m.eci),
-            m.other_index.map_or(String::new(), |v| format!(" · {} {v:.0}", source.other().index().0))
+            "  {}",
+            crate::data::Source::ALL
+                .iter()
+                .filter(|s| **s == source || m.other_index.is_some())
+                .map(|s| format!("{} {}", s.index().0, score(m.index(*s))))
+                .collect::<Vec<_>>()
+                .join(" · ")
         ),
         format!("  task fit ({}, value a percentile{benches}):", source.scale()),
     ]);
@@ -910,11 +913,13 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         let tokens = models.iter().map(|m| m.task_tokens).collect();
         rows.insert(at, row("output tokens / task", tokens, |v| ctx(v as u64), false));
     }
-    // The other source's index under this one's, with its data there too.
+    // The other source's index beside this one's, with its data there too: ECI then AAII, as
+    // the table's columns.
     if models.iter().any(|m| m.other_index.is_some()) {
+        let source = crate::data::source();
         let other = models.iter().map(|m| m.other_index).collect();
-        let name = crate::data::source().other().index().0;
-        rows.push(Row { section: "scores", ..row(name, other, |v| format!("{v:.1}"), true) });
+        let at = rows.len() - usize::from(source == crate::data::Source::Aa);
+        rows.insert(at, Row { section: "scores", ..row(source.other().index().0, other, |v| format!("{v:.1}"), true) });
     }
     for t in TASKS.iter().filter(|t| t.name != "overall") {
         let vals: Vec<Option<f64>> = models.iter().map(|m| task_score(m, t.name)).collect();

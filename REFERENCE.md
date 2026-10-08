@@ -18,12 +18,12 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | $cache | $ per 1M cached input tokens, `$in` when a provider has no discount |
 | $out | $ per 1M output tokens |
 | Ctx | context window, in tokens |
-| ECI | Epoch Capabilities Index. With Artificial Analysis it is AAII, its Intelligence Index |
+| ECI | Epoch Capabilities Index. From Epoch AI |
+| AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | coding per dollar, ranked 0-100 |
 | $task | $ one coding task cost, [measured](#task). From Epoch AI |
 | Tok/task | output tokens one coding task took, [measured](#task). From Epoch AI |
-| AAII | the other source's index: AAII beside Epoch AI's scores, ECI beside Artificial Analysis's |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
 | Via | the harnesses that have the model |
@@ -31,7 +31,8 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 
 One table shows the columns of both sources. The ones of the source not in use show when both
 are cached, which takes an Artificial Analysis key, and were fetched within a day of each other.
-The task scores, Value and the recommendations stay with the source picked with `B`. In the TUI,
+ECI and AAII keep their places, and the table starts sorted by the one of the source picked with
+`B`. The task scores, Value and the recommendations stay with that source. In the TUI,
 `|` picks the columns to show.
 
 ### Price

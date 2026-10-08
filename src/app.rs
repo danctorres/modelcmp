@@ -36,12 +36,12 @@ pub struct Col {
 }
 
 impl Col {
-    /// Its name and meaning; the index column's are the benchmark source's, and so are the
-    /// task columns' meanings, each a single benchmark with Artificial Analysis.
+    /// Its name and meaning; an index column's are its source's, and the task columns' meanings
+    /// the benchmark source's, each a single benchmark with Artificial Analysis.
     fn text(&self) -> (&'static str, &'static str) {
         let about = match (self.id, crate::data::source()) {
-            ("eci", s) => return s.index(),
-            (OTHER, s) => return s.other().index(),
+            ("eci", _) => return Source::Epoch.index(),
+            (OTHER, _) => return Source::Aa.index(),
             ("coding", Source::Aa) => "mean of Terminal-Bench 4.0 and SciCode (0-100)",
             ("agentic", Source::Aa) => "Terminal-Bench 4.0 score (0-100)",
             ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
@@ -58,11 +58,9 @@ impl Col {
         self.text().1
     }
 
-    /// The source its values are from: the one that alone has it, the other one for its index,
-    /// else the one in use.
+    /// The source its values are from: the one that alone has it, else the one in use.
     pub fn from(&self) -> Source {
-        let source = crate::data::source();
-        if self.id == OTHER { source.other() } else { self.only.unwrap_or(source) }
+        self.only.unwrap_or_else(crate::data::source)
     }
 }
 
@@ -130,7 +128,8 @@ fn month(v: f64) -> String {
     }
 }
 
-/// The id of the other source's index: AAII beside Epoch AI's scores, ECI beside Artificial Analysis's.
+/// The id of the AAII column. On the command line it is the other source's index, as `eci` is
+/// the one of the source in use, whichever columns those are (`by_role`).
 const OTHER: &str = "other";
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
@@ -178,8 +177,9 @@ pub const COLS: [Col; 16] = [
         read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()).map(|v| if v >= 10_000.0 { v / 1000.0 } else { v }),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    // Named by the source in use: `Col::text`.
-    col("", "eci", "", |m| m.eci),
+    // The two indexes, each in its place whichever source is in use, and named in `Col::text`.
+    Col { only: Some(Source::Epoch), ..col("", "eci", "", |m| m.index(Source::Epoch)) },
+    Col { only: Some(Source::Aa), ..col("", OTHER, "", |m| m.index(Source::Aa)) },
     col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
     col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
     col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
@@ -197,8 +197,6 @@ pub const COLS: [Col; 16] = [
         show: |v| ctx(v as u64),
         ..col("Tok/task", "tokens", "output tokens one coding task took on DeepSWE, as measured", |m| m.task_tokens)
     },
-    // Named by the other source: `Col::text`.
-    col("", OTHER, "", |m| m.other_index),
     Col {
         only: Some(Source::Aa),
         show: |v| format!("{v:.0}"),
@@ -229,13 +227,27 @@ pub const TEXT: usize = 2;
 pub const PRICE: usize = TEXT + 1;
 /// The sort the table starts with, and that `c` and leaving a task go back to: the source's
 /// index (ECI or AAII), best first. The cursor starts on that column too.
-const DEFAULT_SORT: (usize, bool) = (ECI, true);
-/// Column index of ECI.
+fn default_sort() -> (usize, bool) {
+    (index_col(), true)
+}
+/// Column index of ECI, and of AAII beside it.
 pub const ECI: usize = TEXT + 6;
-/// Column index of Tok/s.
-pub const SPEED: usize = TEXT + 14;
-/// First column of each group: names and release, price and context, benchmarks, speed, your own.
-pub const GROUPS: [usize; 5] = [0, PRICE, ECI, SPEED, VIA];
+const AAII: usize = ECI + 1;
+
+/// Column index of the index of the source in use.
+pub fn index_col() -> usize {
+    if crate::data::source() == Source::Aa { AAII } else { ECI }
+}
+
+/// `COLS[c]` as the command line names it: there `eci` is the index of the source in use and
+/// `other` the other one's.
+pub fn by_role(c: usize) -> usize {
+    if crate::data::source() == Source::Aa && [ECI, AAII].contains(&(c + TEXT)) { ECI + AAII - 2 * TEXT - c } else { c }
+}
+/// Column index of $task, the first of what a run measured: a task's cost and tokens, then speed.
+const MEASURED: usize = TEXT + 12;
+/// First column of each group: names and release, price and context, scores, measured, your own.
+pub const GROUPS: [usize; 5] = [0, PRICE, ECI, MEASURED, VIA];
 /// Column index of where you have access.
 pub const VIA: usize = TEXT + COLS.len();
 /// Column index of your note, the last one.
@@ -325,7 +337,7 @@ pub fn has_menu(col: usize) -> bool {
 
 /// Coding, Agentic and Reason: the columns `col_benches` has benchmarks for, with either
 /// source. Asked of every header on every frame, so not looked up.
-const TASK_COLS: std::ops::RangeInclusive<usize> = ECI + 1..=ECI + 3;
+const TASK_COLS: std::ops::RangeInclusive<usize> = AAII + 1..=AAII + 3;
 
 /// The benchmarks the dropdown of the task column at cursor index `col` lists.
 fn col_benches(col: usize) -> Option<(&'static str, &'static [&'static str])> {
@@ -1121,9 +1133,9 @@ impl App {
             all: false,
             any_available: false,
             detail: String::new(),
-            col: DEFAULT_SORT.0,
-            sort_col: DEFAULT_SORT.0,
-            descending: DEFAULT_SORT.1,
+            col: default_sort().0,
+            sort_col: default_sort().0,
+            descending: default_sort().1,
             bounds: vec![],
             dev: vec![],
             via: vec![],
@@ -1863,10 +1875,10 @@ impl App {
     /// Off a column that is left out: the cursor, the sort and any bound on it.
     fn off_hidden(&mut self) {
         if hidden(self.col) {
-            self.col = Some(DEFAULT_SORT.0).filter(|&c| !hidden(c)).unwrap_or(0);
+            self.col = Some(default_sort().0).filter(|&c| !hidden(c)).unwrap_or(0);
         }
         if hidden(self.sort_col) {
-            (self.sort_col, self.descending) = DEFAULT_SORT;
+            (self.sort_col, self.descending) = default_sort();
         }
         self.bounds.retain(|b| !hidden(b.0));
     }
@@ -1888,9 +1900,16 @@ impl App {
         self.first_start = false;
         // A pick is one of the other source's benchmarks.
         self.drop_benches(false);
-        // And a bound on the index or a task is on the other source's scale: 155 is no AAII.
-        self.bounds.retain(|b| !(ECI..=ECI + 3).contains(&b.0));
+        // And a bound on a task is on the other source's scale: 155 ECI points are no score.
+        self.bounds.retain(|b| !TASK_COLS.contains(&b.0));
+        let was = index_col();
         crate::data::set_source(src);
+        // The cursor and the sort follow the index to this source's column.
+        for c in [&mut self.col, &mut self.sort_col] {
+            if *c == was {
+                *c = index_col();
+            }
+        }
         self.store.source = src.id().to_string();
         self.report(Ok(format!("benchmarks from {} · B to change", src.label())));
         Some(Effect::Source(src))
@@ -2971,7 +2990,7 @@ impl App {
                 self.drop_benches(true);
                 // The task set the sort; back to the default.
                 if self.task.take().is_some() {
-                    (self.sort_col, self.descending) = DEFAULT_SORT;
+                    (self.sort_col, self.descending) = default_sort();
                 }
                 self.only = None;
                 self.rebuild();
@@ -3003,7 +3022,7 @@ impl App {
                     self.rebuild();
                 } else if self.task.take().is_some() {
                     // Back to recommend, where enter picked the task.
-                    (self.sort_col, self.descending) = DEFAULT_SORT;
+                    (self.sort_col, self.descending) = default_sort();
                     self.rebuild();
                     self.view = View::Recommend;
                 }
@@ -3164,7 +3183,7 @@ impl App {
                     let key = first.as_ref().map(|(k, _)| k.clone());
                     // A built-in task picked before would keep the table to its line, as esc undoes.
                     if self.task.take().is_some() {
-                        (self.sort_col, self.descending) = DEFAULT_SORT;
+                        (self.sort_col, self.descending) = default_sort();
                         self.rebuild();
                     }
                     let row = key.and_then(|k| self.rows.iter().position(|&i| self.data.models[i].key == k));
@@ -3529,6 +3548,18 @@ mod tests {
     use crate::data::Offer;
     use crate::fit;
     use crate::view::frontier;
+
+    /// ECI and AAII keep their columns whichever source is in use: the cursor and the sort move.
+    #[test]
+    fn the_indexes_keep_their_columns() {
+        let mut a = app();
+        assert_eq!((a.col, a.sort_col, by_role(ECI - TEXT) + TEXT), (ECI, ECI, ECI));
+        a.switch(Source::Aa);
+        assert_eq!([ECI, AAII].map(base_col_name), ["ECI", "AAII"]);
+        assert_eq!((a.col, a.sort_col), (AAII, AAII), "they follow the index of the source");
+        assert!(hidden(ECI) && !hidden(AAII), "Epoch's index shows with its data alone");
+        assert_eq!([ECI, AAII].map(|c| by_role(c - TEXT) + TEXT), [AAII, ECI], "`eci` on the command line is AAII");
+    }
 
     /// `|` ticks the columns the table shows, saved, and the other source's show with its data.
     #[test]
@@ -3968,7 +3999,7 @@ mod tests {
             let m = a.data.models.iter_mut().find(|m| m.key == key).unwrap();
             m.scores.insert("DeepSWE".into(), s);
         }
-        a.col = ECI + 1;
+        a.col = ECI + 2;
         press(&mut a, "d");
         assert_eq!(menu(&a)[..2], [("all", 2), ("DeepSWE", 2)], "each with the models it scored");
         // The entry already shown changes nothing: a bound typed for the column stays.
@@ -3994,8 +4025,8 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.task.is_some(), a.col_name(ECI + 1)), (true, "Coding"));
-        a.col = ECI + 1;
+        assert_eq!((a.task.is_some(), a.col_name(ECI + 2)), (true, "Coding"));
+        a.col = ECI + 2;
         press(&mut a, "d");
         assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "Coding"));
         assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()));
@@ -4005,10 +4036,10 @@ mod tests {
         press(&mut a, "dj ");
         code(&mut a, KeyCode::Esc);
         a.bounds.push((a.col, 60.0, f64::MAX));
-        // So does one on the index, which is on the other source's scale. A price stays a price.
+        // One on an index stays, as ECI keeps its column and its scale. A price stays a price.
         a.bounds.extend([(ECI, 155.0, f64::MAX), (PRICE, 0.0, f64::MAX)]);
         a.switch(Source::Aa);
-        assert_eq!((a.col_name(a.col), a.bounds.iter().map(|b| b.0).collect::<Vec<_>>()), ("Coding", vec![PRICE]));
+        assert_eq!((a.col_name(a.col), a.bounds.iter().map(|b| b.0).collect::<Vec<_>>()), ("Coding", vec![ECI, PRICE]));
         a.bounds.clear();
         assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()), "with either source");
         // Artificial Analysis lists the task's own benchmark, then its others about the task.
@@ -4020,7 +4051,7 @@ mod tests {
         assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
         // A task with no other benchmark still has its dropdown, which names the one.
         code(&mut a, KeyCode::Esc);
-        a.col = ECI + 2;
+        a.col = ECI + 3;
         press(&mut a, "d");
         assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0"]);
     }
@@ -4538,8 +4569,9 @@ mod tests {
         crate::data::set_source(Source::Aa);
         let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
         assert!(shown < NCOLS, "Artificial Analysis has no cost of a task");
+        a.off_hidden();
         press(&mut a, &format!("{shown}l"));
-        assert_eq!(a.col, ECI, "with its speed columns in their place");
+        assert_eq!(a.col, AAII, "with its speed columns in their place, from its own index");
     }
 
     #[test]
@@ -4547,15 +4579,15 @@ mod tests {
         let mut a = app();
         a.col = 0;
         let mut cols = vec![];
-        for _ in 0..4 {
+        for _ in 0..5 {
             press(&mut a, "w");
             cols.push(a.col);
         }
         press(&mut a, "w");
-        assert_eq!((cols, a.col), (vec![PRICE, ECI, VIA, NOTES], 0), "w wraps from the last column");
+        assert_eq!((cols, a.col), (vec![PRICE, ECI, MEASURED, VIA, NOTES], 0), "w wraps from the last column");
         press(&mut a, "b");
         assert_eq!(a.col, VIA, "b wraps from the first");
-        a.col = ECI + 1;
+        a.col = ECI + 2;
         press(&mut a, "b");
         assert_eq!(a.col, ECI, "b to the start of the group first");
         press(&mut a, "b");
@@ -4655,7 +4687,7 @@ mod tests {
         press(&mut a, "c");
         assert!(a.task.is_none());
         assert_eq!(a.rows.len(), 3);
-        assert_eq!((a.sort_col, a.descending), DEFAULT_SORT, "c restores the default sort");
+        assert_eq!((a.sort_col, a.descending), default_sort(), "c restores the default sort");
     }
 
     #[test]
@@ -5486,7 +5518,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert!(a.task.is_none(), "esc drops the task");
         assert_eq!((&a.view, a.task_cur), (&View::Recommend, 1), "and goes back to recommend");
-        assert_eq!((a.sort_col, a.descending), DEFAULT_SORT, "and the sort it started with");
+        assert_eq!((a.sort_col, a.descending), default_sort(), "and the sort it started with");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "CC");
         assert_eq!(a.view, View::Table, "C closes compare, as ? and R close theirs");

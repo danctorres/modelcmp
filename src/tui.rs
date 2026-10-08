@@ -3553,10 +3553,10 @@ mod tests {
         let mut a = app();
         let (buf, lines) = render(&mut a, 206, 6);
         let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Coding ▾ Agentic ▾ \
-                      Reason ▾ Value $task Tok/task │ Via ▾ Notes";
+                      Reason ▾ Value │ $task Tok/task │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
-        assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 3, "{}", lines[1]);
+        assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);
         let sep = cell(&lines[0], "│");
         assert_eq!((cell(&lines[1], "┼"), cell(&lines[3], "│")), (sep, sep), "the group lines run straight down");
         assert_eq!(buf[(sep, 3)].fg, MUTED, "and are muted");
@@ -3600,7 +3600,7 @@ mod tests {
             "the blended price takes its level's colour"
         );
         // A task shows its own scores, so its columns offer no dropdown while one is picked.
-        a.col = ECI + 1;
+        a.col = ECI + 2;
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 6 && lines[5].contains("d dropdown"), "{lines:?}");
         a.task = fit::task("agentic");
@@ -3859,7 +3859,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
         assert_eq!(hit(&a, area, click(col("Price"), 1)), Some(Mouse::Header(PRICE)));
         assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(PRICE)), "the ▾ after Price");
-        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(9)));
+        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(10)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 2)), None, "the status bar");
         let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.find("opencode")?))).unwrap();
@@ -3867,7 +3867,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(x + 7, y)), Some(Mouse::Harness(k - 2, 0)), "a harness in Via");
         assert_eq!(hit(&a, area, click(x + 8, y)), Some(Mouse::Row(k - 2)), "past its name: the row");
         assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
-        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 9)), "a benchmark score");
+        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 10)), "a benchmark score");
         assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Cell(1, PRICE)), "a price");
         assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Cell(1, NOTES)), "the note to write");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
