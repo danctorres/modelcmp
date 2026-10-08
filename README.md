@@ -46,14 +46,14 @@ It works with:
 - **Local runners:** `ollama`, `llama.cpp`
 
 By default it lists only the models you can already use through them. To see every model,
-press `a` in the TUI or pass `--all` on the command line.
+press `a` in the TUI or pass `--all` to `modelcmp list`.
 
 ## Install
 
 ```sh
 brew install danctorres/tap/modelcmp
 # or
-cargo install --git https://github.com/danctorres/modelcmp
+cargo install --locked --git https://github.com/danctorres/modelcmp
 ```
 
 It runs on Linux and macOS, and the
@@ -63,7 +63,7 @@ build from source, with Rust 1.89 or later:
 ```sh
 git clone https://github.com/danctorres/modelcmp
 cd modelcmp
-cargo install --path .   # or cargo build --release, for target/release/modelcmp
+cargo install --locked --path .   # or cargo build --release, for target/release/modelcmp
 ```
 
 The TUI says when a newer version is out, and `UU` upgrades to it.
@@ -102,7 +102,7 @@ To get a local model, press `a` in the TUI to list every model, then `x` on one 
 ```sh
 npx skills add danctorres/modelcmp -g                        # install the skill for your agent
 modelcmp pick                                                # what the skill runs: every task and tier, with the command to run
-opencode -m $(modelcmp list --task coding --tier mid --id)   # or start a harness on a pick yourself
+opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)   # or start a harness on a pick yourself
 ```
 
 The [skill](skills/modelcmp/SKILL.md) makes your agent run `modelcmp pick` before it names a

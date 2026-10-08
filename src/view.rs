@@ -8,6 +8,8 @@ use std::ops::Range;
 pub fn money(x: f64) -> String {
     match x {
         0.0 => "free".into(),
+        // Under a cent is not free: a cache read at 0.0036.
+        x if x < 0.01 => format!("{x:.3}"),
         x if x < 1.0 => format!("{x:.2}"),
         x if x < 10.0 => format!("{x:.1}"),
         x => format!("{x:.0}"),
@@ -357,7 +359,8 @@ pub fn ctx(n: u64) -> String {
     match n {
         0 => "-".into(),
         n if n >= 1_000_000 => format!("{}M", (n as f64 / 1e6 * 10.0).round() / 10.0),
-        n => format!("{}k", n / 1000),
+        n if n >= 1000 => format!("{}k", n / 1000),
+        n => n.to_string(),
     }
 }
 
@@ -840,11 +843,15 @@ pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
 pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
         let mut it = vals.iter().flatten();
+        // As shown, like the verdict: 60.6 and 61.4 both read 61, and neither is the better.
         let ext = it.next().and_then(|&first| {
             let (lo, hi) = it.fold((first, first), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-            (lo != hi).then_some(if higher { (hi, lo) } else { (lo, hi) })
+            (fmt(lo) != fmt(hi)).then_some(if higher { (hi, lo) } else { (lo, hi) })
         });
-        let cells = vals.iter().map(|v| v.map_or("-".into(), &fmt)).collect();
+        let cells: Vec<String> = vals.iter().map(|v| v.map_or("-".into(), &fmt)).collect();
+        // A value that reads as the best or the worst is coloured as it.
+        let snap = |v: f64| ext.and_then(|(b, w)| [b, w].into_iter().find(|&e| fmt(e) == fmt(v))).unwrap_or(v);
+        let vals = vals.into_iter().map(|v| v.map(snap)).collect();
         Row { label: label.into(), cells, vals, ext, ..Default::default() }
     }
     // A list price, yours having none, after a `~` as in the table, and as there neither the
@@ -870,7 +877,13 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         // No cache discount: cached input costs full price.
         price("$ cached in / 1M", |o| o.cache_read.unwrap_or(o.input)),
         price("$ out / 1M", |o| o.output),
-        row("context", models.iter().map(|m| Some(m.context as f64)).collect(), |c| ctx(c as u64), true),
+        // Unknown is no context to rank.
+        row(
+            "context",
+            models.iter().map(|m| (m.context > 0).then_some(m.context as f64)).collect(),
+            |c| ctx(c as u64),
+            true,
+        ),
         Row {
             section: "scores",
             ..row(crate::data::source().index().0, models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true)
@@ -1078,9 +1091,11 @@ mod tests {
             "an edge belongs to the level below"
         );
         assert_eq!(money(0.153), "0.15");
+        assert_eq!(money(0.0036), "0.004", "under a cent is not free");
         assert_eq!(money(2.5), "2.5");
         assert_eq!(money(15.0), "15");
         assert_eq!(ctx(0), "-");
+        assert_eq!(ctx(448), "448");
         assert_eq!(ctx(128_000), "128k");
         assert_eq!(ctx(1_048_576), "1M");
         assert_eq!(truncate("abcdef", 4), "abc…");
@@ -1106,6 +1121,11 @@ mod tests {
         assert_eq!((find("context").section, find("ECI").section), ("", "scores"));
         let same = compare_rows(&[&a, &a], false, &|_| None);
         assert_eq!(same.iter().find(|r| r.label == "context").unwrap().ext, None, "equal values are not marked");
+        let ms = [100_000, 200_400, 200_000, 0].map(|c| mk("m", c, None));
+        let rows = compare_rows(&ms.each_ref(), false, &|_| None);
+        let context = rows.iter().find(|r| r.label == "context").unwrap();
+        let best = Some(200_400.0);
+        assert_eq!(context.vals, [Some(100_000.0), best, best, None], "200k twice, and unknown is not the worst");
         // A list price is neither the best nor the worst, as in the table.
         let at = |p: f64| Offer { input: p, output: p, available: true, ..Default::default() };
         let yours = |p: f64| Model { offers: vec![at(p)], ..Default::default() };

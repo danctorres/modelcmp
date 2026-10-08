@@ -102,7 +102,8 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     let res = if ask || new { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
         .and_then(|()| event_loop(&mut app, &mut terminal, rx, pre));
-    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    // The cursor too: the terminal shows it only when dropped, after an upgrade a ^C may end.
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, Show);
     ratatui::restore();
     let Some(cmds) = res? else { return Ok(()) };
     // On the terminal's own screen, where the upgrade's output shows.
@@ -120,7 +121,7 @@ fn upgrade_cmds(exe: &std::path::Path, new: &str) -> Option<Vec<Vec<String>>> {
         // `upgrade` alone goes by a list of formulae up to a day old.
         &[&["brew", "update"], &["brew", "upgrade", "danctorres/tap/modelcmp"]]
     } else if exe.contains("/.cargo/bin/") {
-        &[&["cargo", "install", "--git", REPO, "--tag", &tag]]
+        &[&["cargo", "install", "--locked", "--git", REPO, "--tag", &tag]]
     } else {
         return None;
     };
@@ -1836,7 +1837,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         // A marked model's name is bold, as the ✓, and takes no colour: the fill says the row is
         // marked, and under the cursor the ✓ and the bold do. Out of reach, its Via says so.
         let name = if marked { text.add_modifier(BOLD) } else { text };
-        buf.set_stringn(name_x, y, &m.name, nw, name);
+        // A cut name says so: "Claude Sonnet 5…" is not "Claude Sonnet 5.5" misread as "5.".
+        buf.set_stringn(name_x, y, truncate(&m.name, nw.max(1)), nw, name);
         buf.set_stringn(dev_x, y, &m.developer, dw, soft(dev_color(&m.developer)));
         for &(i, x, w) in &cols {
             let Some(v) = app.vals[r][i] else {
@@ -2074,7 +2076,7 @@ fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) ->
 
 /// The status bar's left side, joined with " · ": the model count, then what filters it.
 fn parts(app: &App) -> Vec<Line<'static>> {
-    let scope = match (app.all, app.data.any_available()) {
+    let scope = match (app.all, app.any_available()) {
         (false, true) => "available",
         (false, false) => "all (no access found)",
         (true, _) => "all",
@@ -3073,7 +3075,7 @@ mod tests {
         let brew = Some("brew upgrade danctorres/tap/modelcmp".to_string());
         assert_eq!(cmd("/opt/homebrew/Cellar/modelcmp/0.1.0/bin/modelcmp"), brew);
         assert_eq!(cmd("/home/linuxbrew/.linuxbrew/Cellar/modelcmp/0.1.0/bin/modelcmp"), brew);
-        let cargo = format!("cargo install --git {REPO} --tag v0.2.0");
+        let cargo = format!("cargo install --locked --git {REPO} --tag v0.2.0");
         assert_eq!(cmd("/home/you/.cargo/bin/modelcmp"), Some(cargo));
         assert_eq!(cmd("/usr/local/bin/modelcmp"), None, "put there by hand: nothing to run");
         assert_eq!(cmd(""), None, "the path is not known");

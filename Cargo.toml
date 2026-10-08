@@ -11,11 +11,11 @@ libc = "0.2.189"
 csv = "1.4.0"
 dirs = "7.0.0"
 open = "5.4.4"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "underline-color", "layout-cache"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 ureq = "3.4.2"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [profile.release]
 lto = true

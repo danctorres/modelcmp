@@ -36,8 +36,9 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Coding Index, and `Model::ttft` is to the first answer token. 14: its scores are all of one
 /// reasoning setting. 15: Epoch's tasks without the benchmarks it no longer runs, and no task
 /// score for a model without an ECI scored on few benchmarks. 16: `Model::hf`.
-/// 18: `Model::task_cost`. 19: `Model::task_tokens`.
-const FORMAT: u32 = 19;
+/// 18: `Model::task_cost`. 19: `Model::task_tokens`. 20: context and max output are the
+/// ones most offers give, where they were the most any gave.
+const FORMAT: u32 = 20;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -891,7 +892,8 @@ impl Data {
     }
 
     pub fn stale(&self) -> bool {
-        self.age() > MAX_AGE || self.format != FORMAT || self.benches != source().benches()
+        // Dated ahead of the clock, it would never grow old.
+        self.age() > MAX_AGE || self.fetched > now() || self.format != FORMAT || self.benches != source().benches()
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness. A model ollama
@@ -958,11 +960,17 @@ impl Data {
         // Or by the name shown, which says more than the key when it is Epoch's: "Kimi K2 (Sep 2025)".
         let by_name = |m: &&Model| norm(&m.name) == q;
         let all = || self.models.iter();
-        if let Some(m) = all().find(|m| m.key == q).or_else(|| all().find(by_id)).or_else(|| all().find(by_name)) {
+        // Two models can go by one bare id at different providers: yours first.
+        let id = || all().filter(by_id).min_by_key(|m| !m.available);
+        if let Some(m) = all().find(|m| m.key == q).or_else(id).or_else(|| all().find(by_name)) {
             return Ok(m);
         }
+        // A version is whole: "sonnet-5" is no part of "claude-sonnet-5.5".
+        let digit = |c: char| c.is_ascii_digit();
+        let part =
+            |k: &str| k.match_indices(&q).any(|(i, _)| !(q.ends_with(digit) && k[i + q.len()..].starts_with(digit)));
         let hits = |mine: bool| -> Vec<&Model> {
-            self.models.iter().filter(|m| (!mine || m.available) && m.key.contains(&q)).collect()
+            self.models.iter().filter(|m| (!mine || m.available) && part(&m.key)).collect()
         };
         let mut hits = Some(hits(true)).filter(|h| !h.is_empty()).unwrap_or_else(|| hits(false));
         hits.sort_by_key(|m| m.key.len());
@@ -1000,7 +1008,15 @@ pub fn load_cache() -> Option<Data> {
 }
 
 fn installed(bin: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+    // One that cannot run is not installed: a harness found by its file alone has every model of its provider.
+    let runs = |f: std::path::PathBuf| {
+        #[cfg(unix)]
+        return std::fs::metadata(f)
+            .is_ok_and(|m| m.is_file() && std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0);
+        #[cfg(not(unix))]
+        f.is_file()
+    };
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| runs(d.join(bin))))
 }
 
 /// The shell line that runs `cmd` in the shell's place, each argument quoted whatever it holds.
@@ -1557,6 +1573,12 @@ pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
         cached => {
+            // One refresh at a time: agents that find the cache stale together wait for the
+            // first and read what it wrote.
+            let _held = crate::store::lock(&cache_path(source()));
+            if !force && let Some(d) = load_cache().filter(|d| !d.stale()) {
+                return Ok((d, None));
+            }
             // A refresh can take half a minute, which with nothing said looks like a hang.
             eprintln!("downloading model data, cached for 24h...");
             match refresh(&Steps::default(), None::<fn(Data)>) {
@@ -2200,8 +2222,6 @@ fn merge_by(
         if to != k {
             let m = by_key.remove(&k).unwrap();
             let t = by_key.get_mut(&to).unwrap();
-            t.context = t.context.max(m.context);
-            t.max_output = t.max_output.max(m.max_output);
             t.tool_call |= m.tool_call;
             t.reasoning |= m.reasoning;
             t.open_weights |= m.open_weights;
@@ -2872,6 +2892,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     // own listing (Kilo's "stealth" previews, Azure's later launch), so the first or earliest
     // is not it.
     let mut dates: HashMap<String, Vec<(&str, &str)>> = HashMap::new();
+    // Context and max output per model, (provider, context, output) of each offer.
+    let mut limits: HashMap<String, Vec<(&String, u64, u64)>> = HashMap::new();
     // models.dev's page per model, one vote per offer that names one: a reseller's alias and a
     // router's many models are outvoted.
     let mut page_votes: HashMap<String, HashMap<&str, usize>> = HashMap::new();
@@ -2925,8 +2947,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         if !hint.is_empty() {
             *dev_votes.entry(key.clone()).or_default().entry(hint).or_default() += 1;
         }
-        m.context = m.context.max(md.limit.context);
-        m.max_output = m.max_output.max(md.limit.output);
+        limits.entry(key.clone()).or_default().push((pid, md.limit.context, md.limit.output));
         m.tool_call |= md.tool_call;
         m.reasoning |= md.reasoning;
         m.open_weights |= md.open_weights;
@@ -2973,6 +2994,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         }
         let moved = dates.remove(&from).unwrap_or_default();
         dates.entry(to.clone()).or_default().extend(moved);
+        let moved = limits.remove(&from).unwrap_or_default();
+        limits.entry(to.clone()).or_default().extend(moved);
         for (page, n) in page_votes.remove(&from).unwrap_or_default() {
             *page_votes.entry(to.clone()).or_default().entry(page).or_default() += n;
         }
@@ -3006,6 +3029,17 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         let own = dates.iter().filter(|(p, _)| is_lab(p, &m.developer)).map(|(_, d)| *d).min();
         let most = || dates.iter().map(|(_, d)| *d).max_by_key(|d| (votes(d), std::cmp::Reverse(*d)));
         m.release = own.or_else(most).unwrap_or_default().to_string();
+        // Its developer's own limits too, else the ones most offers give and the smaller on a
+        // tie: one reseller's claim of more is not what the provider you call takes.
+        let limits = limits.remove(&m.key).unwrap_or_default();
+        let usual = |get: fn(&(&String, u64, u64)) -> u64| {
+            let of = |own: bool| {
+                let all = || limits.iter().filter(|l| !own || is_lab(l.0, &m.developer)).map(get).filter(|&n| n > 0);
+                all().max_by_key(|&n| (all().filter(|&x| x == n).count(), std::cmp::Reverse(n)))
+            };
+            of(true).or_else(|| of(false)).unwrap_or_default()
+        };
+        (m.context, m.max_output) = (usual(|l| l.1), usual(|l| l.2));
         m.md = page_votes.remove(&m.key).and_then(winner).map(String::from);
         // The model's OpenRouter page. Else that of an id its offers go by, when OpenRouter has
         // it: Helicone's "llama-4-maverick" is OpenRouter's, under whatever name Helicone gives
@@ -3388,6 +3422,22 @@ mod tests {
     }
 
     #[test]
+    fn the_context_is_the_one_most_offers_give() {
+        let json = br#"{
+            "a": {"models": {"x-1": {"limit": {"context": 400000, "output": 128000}}, "y-1": {"limit": {"context": 200000}}}},
+            "b": {"models": {"x-1": {"limit": {"context": 400000, "output": 128000}}, "y-1": {"limit": {"context": 1000000}}}},
+            "big": {"models": {"x-1": {"limit": {"context": 1047576, "output": 1047576}}, "gpt-9": {"limit": {"context": 1000000}}}},
+            "c": {"models": {"gpt-9": {"limit": {"context": 1000000}}}},
+            "openai": {"models": {"gpt-9": {"limit": {"context": 400000}}}}
+        }"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        let of = |k: &str| d.models.iter().find(|m| m.key == k).map(|m| (m.context, m.max_output)).unwrap();
+        assert_eq!(of("x1"), (400_000, 128_000), "not the most one reseller claims");
+        assert_eq!(of("y1"), (200_000, 0), "the smaller on a tie, none when no offer has one");
+        assert_eq!(of("gpt9").0, 400_000, "its developer's own, whatever the resellers say");
+    }
+
+    #[test]
     fn folds_vendor_prefix() {
         let keys: HashSet<String> =
             ["gpt41", "openaigpt41", "prozaiorgglm5", "zaiorgglm5", "glm5x", "o3", "openaio3", "spacebunny"]
@@ -3700,6 +3750,11 @@ mod tests {
             "as list --id prints"
         );
         assert!(d.find("nope").unwrap_err().is_empty());
+        let d5 = Data { models: vec![mk("claudesonnet55"), mk("claudesonnet5")], ..Default::default() };
+        assert_eq!(d5.find("sonnet-5").unwrap().key, "claudesonnet5");
+        let d5 = Data { models: vec![mk("claudesonnet55")], ..Default::default() };
+        assert!(d5.find("sonnet-5").is_err(), "a version is whole: 5 is not 5.5");
+        assert_eq!(d5.find("sonnet").unwrap().key, "claudesonnet55");
         assert!(d.find("--").unwrap_err().is_empty(), "nothing to match by is no match, not every model");
         let gpt = Model {
             name: "GPT-5.5 (Apr 2026)".into(),

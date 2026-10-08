@@ -295,11 +295,11 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "General",
         &[
-            ("?", "this help; / keeps the lines that match"),
+            ("?", "this help, / keeps the lines that match"),
             ("esc", "back: overlay, highlight, filter, S, F, E, task"),
-            ("q", "quit; asks first"),
+            ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
-            ("U", "upgrade modelcmp when a newer version is out; asks first"),
+            ("U", "upgrade modelcmp when a newer version is out, asks first"),
             ("B", "benchmarks from Epoch AI or Artificial Analysis"),
             ("H", "default harness, for x, Y, --cmd and --id"),
         ],
@@ -307,26 +307,26 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Move",
         &[
-            ("j k ↓ ↑", "move; a count repeats, as in 3j"),
-            ("h l ← →", "pick a column; in compare a model, in recommend a tier or the task"),
-            ("0 _ $ w b", "first / last column; next / previous group"),
+            ("j k ↓ ↑", "move, and a count repeats, as in 3j"),
+            ("h l ← →", "pick a column. In compare a model, in recommend a tier or the task"),
+            ("0 _ $ w b", "first / last column, next / previous group"),
             ("gg G 3gg", "top / bottom / row 3"),
             ("( ) ^u ^d", "half a page up / down"),
             ("] [", "next / previous selected model, or ticked entry"),
             ("} {", "next / previous available model"),
-            ("v", "highlight a range; space e C act on all of it"),
+            ("v", "highlight a range, space e C act on all of it"),
             ("V", "highlight the selected models, Ve excludes them all"),
         ],
     ),
     (
         "Filter and sort",
         &[
-            ("s", "sort by the column; again reverses"),
+            ("s", "sort by the column, again reverses"),
             ("/", "filter models, compare rows, this help or a list"),
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
-            ("d", "dropdown on a header with ▾; space enter toggle"),
+            ("d", "dropdown on a header with ▾, space enter toggle"),
             ("a A", "all models, including ones you have no access to / yours only"),
-            ("tab", "next tab; shift+tab back"),
+            ("tab", "next tab, shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
             ("c", "clear filters, bounds, task, S, F and E, and the selection stays"),
         ],
@@ -335,15 +335,15 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Selected ✓, favorite ★, excluded ✗",
         &[
             ("✓", "selected: your shortlist, kept until you deselect it"),
-            ("★", "favorite: your pick for a task; always in its recommendation"),
-            ("✗", "excluded: you have it but cannot use it; recommendations skip it"),
-            ("space", "select the model; C compares the selected"),
+            ("★", "favorite: your pick for a task, always in its recommendation"),
+            ("✗", "excluded: you have it but cannot use it, and recommendations skip it"),
+            ("space", "select the model, C compares the selected"),
             ("f", "favorite the model for a task, a tier of one, or a task you name"),
             ("f: r a", "rename a task you named, write what it is about"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
-            ("D", "unfavorite every model; asks first"),
-            ("X", "unexclude every model; asks first"),
+            ("D", "unfavorite every model, asks first"),
+            ("X", "unexclude every model, asks first"),
             ("S F E", "selected / favorite / excluded only"),
         ],
     ),
@@ -1596,6 +1596,7 @@ impl App {
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
         let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
         let anchor = self.visual.and_then(key_of);
+        let range: Vec<String> = self.visual_range().into_iter().flatten().filter_map(key_of).collect();
         let picked: Vec<String> = self.picked.iter().filter_map(|&k| key_of(k)).collect();
         let keep = key_of(self.selected());
         let matching = |app: &Self| -> Vec<usize> { app.filtered(usize::MAX).map(|(i, _)| i).collect() };
@@ -1676,6 +1677,21 @@ impl App {
         let sel = keep.and_then(|k| pos(&k)).unwrap_or(0);
         self.visual = anchor.and_then(|k| pos(&k));
         self.picked = picked.iter().filter_map(|k| pos(k)).collect();
+        // A sort or a refresh can part the range's models: then they are picked one by one, as a
+        // range between its two ends would take in models that were never highlighted.
+        let at: Vec<usize> = range.iter().filter_map(|k| pos(k)).collect();
+        let run = self.visual.is_some_and(|a| {
+            let span = a.min(sel)..=a.max(sel);
+            at.len() == span.clone().count() && at.iter().all(|p| span.contains(p))
+        });
+        if !run {
+            self.visual = None;
+            for k in at {
+                if !self.picked.contains(&k) {
+                    self.picked.push(k);
+                }
+            }
+        }
         self.select(sel);
     }
 
@@ -1761,6 +1777,8 @@ impl App {
         self.first_start = false;
         // A pick is one of the other source's benchmarks.
         self.drop_benches(false);
+        // And a bound on the index or a task is on the other source's scale: 155 is no AAII.
+        self.bounds.retain(|b| !(ECI..=ECI + 3).contains(&b.0));
         crate::data::set_source(src);
         self.store.source = src.id().to_string();
         self.report(Ok(format!("benchmarks from {} · B to change", src.label())));
@@ -2786,6 +2804,7 @@ impl App {
             KeyCode::Char(c @ ('>' | '<')) if table && numeric(self.col).is_some() => {
                 self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
             }
+            KeyCode::Char('>' | '<') if table => self.refuse("> and < bound a column of numbers"),
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the columns marked ▾"),
             // The next tab with something to show, past the last back to the first.
@@ -3002,6 +3021,10 @@ impl App {
                 return Some(Effect::Save);
             }
             KeyCode::Char('C') if self.view == View::Compare => self.view = View::Table,
+            // One row is nothing to compare, and would replace the selection, which is saved.
+            KeyCode::Char('C') if table && self.selecting() && self.targets().len() < 2 => {
+                self.refuse("compare takes 2 models, 1 is highlighted")
+            }
             KeyCode::Char('C') => {
                 // A selection is what gets compared.
                 let save = table && self.selecting();
@@ -3082,6 +3105,10 @@ impl App {
                 self.scroll = 0;
             }
             // A new search starts empty; esc brings the previous one back.
+            // Said, as every key that has nothing to act on here says why.
+            KeyCode::Char('/') if !(table || self.overlay_search()) => {
+                self.refuse("/ filters the table, compare and the lists")
+            }
             KeyCode::Char('/') if table || self.overlay_search() => {
                 self.input = Input::Search { cur: 0, was: std::mem::take(self.search_target()) };
                 if table {
@@ -3820,8 +3847,11 @@ mod tests {
         press(&mut a, "dj ");
         code(&mut a, KeyCode::Esc);
         a.bounds.push((a.col, 60.0, f64::MAX));
+        // So does one on the index, which is on the other source's scale. A price stays a price.
+        a.bounds.extend([(ECI, 155.0, f64::MAX), (PRICE, 0.0, f64::MAX)]);
         a.switch(Source::Aa);
-        assert_eq!((a.col_name(a.col), a.bounds.len()), ("Coding", 0));
+        assert_eq!((a.col_name(a.col), a.bounds.iter().map(|b| b.0).collect::<Vec<_>>()), ("Coding", vec![PRICE]));
+        a.bounds.clear();
         assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()), "with either source");
         // Artificial Analysis lists the task's own benchmark, then its others about the task.
         let m = a.data.models.iter_mut().find(|m| m.key == "mini").unwrap();
@@ -5035,6 +5065,24 @@ mod tests {
     }
 
     #[test]
+    fn a_sort_keeps_the_range_on_its_models() {
+        let mut a = app();
+        press(&mut a, "vj");
+        let mut before = a.targets();
+        before.sort();
+        // Every column both ways: whichever parts the two, they stay the two.
+        for col in TEXT..NCOLS {
+            a.col = col;
+            for _ in 0..2 {
+                press(&mut a, "s");
+                let mut now = a.targets();
+                now.sort();
+                assert_eq!(now, before, "sorted by {}", a.col_name(col));
+            }
+        }
+    }
+
+    #[test]
     fn a_refresh_keeps_the_selection() {
         let mut a = app();
         press(&mut a, "vj");
@@ -5045,6 +5093,14 @@ mod tests {
         let same = Data { models: std::mem::take(&mut a.data.models), ..Data::default() };
         a.refreshed(Ok(same), tools());
         assert_eq!(a.picked, [0, 1, 2], "so do picked rows");
+    }
+
+    #[test]
+    fn compare_on_one_highlighted_row_keeps_the_selection() {
+        let mut a = app();
+        press(&mut a, " G ");
+        assert_eq!(press(&mut a, "vC"), None);
+        assert_eq!((&a.view, a.store.marked.len(), a.refused), (&View::Table, 2, true));
     }
 
     #[test]

@@ -144,7 +144,7 @@ With either source:
 modelcmp list                                  # models you have access to
 modelcmp list --task coding                    # best model per price level, cheapest first
 modelcmp list --task coding --tier mid         # just one, the tier's pick
-modelcmp list --task coding --tier mid --id    # only its provider/model, for opencode -m $(...)
+modelcmp list --task coding --tier mid --via opencode --id    # only its provider/model, for opencode -m $(...)
 modelcmp list --task coding --tier mid --cmd   # the command that opens a harness on it
 modelcmp list --min coding=155 --sort price    # good enough, cheapest first
 modelcmp list --sort cost --max cost=5         # by what a coding task cost, $5 at most
@@ -198,7 +198,7 @@ weigh a note when choosing.
 | `--refresh` | re-downloads the data first |
 | `--cache PERCENT` | how much of the input Price reads from the prompt cache, 90 by default |
 | `--source epoch\|aa` | the benchmarks for this run. The default is the one picked with `B` |
-| `--all` | includes the models you have no access to |
+| `--all` | on `list`, includes the models you have no access to. On `show`, adds the price at providers you have no harness for |
 | `--json` | on `list`, `show`, `compare` and `recommend`, as [JSON](#json) says |
 
 ### Tasks
@@ -395,7 +395,7 @@ the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 `list`, `show`, `compare` and `recommend` take `--json`. It is indented at a terminal and one line in a pipe.
 
 ```sh
-opencode -m $(modelcmp list --task coding --tier mid --id)   # --id prints just provider/model
+opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)   # --id prints just provider/model
 modelcmp recommend --json                      # choose the task by its "when"
 modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite for the tier or task when set, else the tier's
 ```
@@ -405,11 +405,18 @@ Each model carries these fields:
 | Field | What it is |
 |---|---|
 | `key` | the model's key |
+| `name`, `developer` | as the table shows them |
+| `available` | a harness of yours has it |
+| `via` | the harnesses that have it |
 | `selected` | on your shortlist |
 | `excluded` | you excluded it |
+| `note` | your note on it, null when it has none |
 | `favorite_for` | the tasks it is the user's favorite for, and `task:tier` for a tier's |
 | `price` | the offer you'd pay, as below |
-| `context` | in tokens |
+| `context`, `max_output` | in tokens |
+| `tool_call`, `reasoning`, `vision`, `open_weights` | what it can do, true or false |
+| `release`, `knowledge` | its release date and knowledge cutoff, empty when unknown |
+| `url` | its page, the first of `pages` below, null when no site has one |
 | `eci` | the overall index of `source` |
 | `source` | `epoch` or `aa` |
 | `tasks` | each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile |
@@ -421,7 +428,9 @@ Each model carries these fields:
 
 | Field | What it is |
 |---|---|
+| `provider` | the provider the price is from |
 | `id` | the provider's model id, which opencode takes after `provider/` |
+| `available`, `via` | whether a harness of yours has this offer, and which |
 | `input_per_mtok`, `output_per_mtok` | null when no provider lists a price, which the tables show as `-`, not `free` |
 | `cache_read_per_mtok` | null when input is never discounted |
 | `listed` | true when yours lists none and they are the list prices of other providers, `~` in the tables |
@@ -433,7 +442,6 @@ Each model carries these fields:
 | `benchmarks` | every score, as a fraction: 0.545 is 54.5% |
 | `providers` | every provider's price |
 | `pages` | site to URL, for the sites that have a page for it |
-| `url` | the first of `pages`, null when none has |
 
 `recommend --json` has a list of tasks, each with its `when`, its `frontier`, the user's
 `favorite` and `tier_favorites`, and their harnesses as `via` and `tier_via`.

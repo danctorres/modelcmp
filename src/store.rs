@@ -56,6 +56,9 @@ pub struct Store {
     /// The version the TUI last opened as: a different one plays the intro again.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub seen: String,
+    /// What a newer modelcmp wrote and this one does not know, kept for it.
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// The `favorite` key of a task, or of one `--tier` of it: `coding`, `coding:low`.
@@ -139,7 +142,14 @@ fn write_mode(p: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
     #[cfg(not(unix))]
     let _ = mode;
-    std::io::Write::write_all(&mut opts.open(&tmp)?, bytes)?;
+    let mut f = opts.open(&tmp)?;
+    std::io::Write::write_all(&mut f, bytes)?;
+    // On disk before it takes the name: a power cut must not leave an empty file under it.
+    f.sync_all()?;
+    // A file you made private stays so.
+    if let Ok(m) = std::fs::metadata(p) {
+        let _ = std::fs::set_permissions(&tmp, m.permissions());
+    }
     std::fs::rename(tmp, p)
 }
 
@@ -228,7 +238,10 @@ impl Store {
             let msg = format!("{} could not be read ({e}), so it is not overwritten", self.path.display());
             return Err(std::io::Error::other(msg));
         }
-        write_atomic(&self.path, serde_json::to_string_pretty(self)?.as_bytes())?;
+        // Through a link to the file it names: a dotfiles repo's copy, not a file in its place.
+        let to = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+        write_atomic(&to, serde_json::to_string_pretty(self)?.as_bytes())
+            .map_err(|e| std::io::Error::new(e.kind(), format!("cannot save {}: {e}", to.display())))?;
         self.mtime = mtime(&self.path);
         Ok(())
     }
@@ -506,6 +519,28 @@ mod tests {
         assert_eq!(both.marked, ["a", "b", "c"]);
         both.save().unwrap();
         assert!(!std::fs::read_to_string(&p).unwrap().contains("pinned"));
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    /// A save keeps what it did not write: a newer version's field, a link to the file, its mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_keeps_the_link_the_mode_and_unknown_fields() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = tmp("link");
+        let real = p.with_file_name("dotfiles.json");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&real, r#"{"marked": ["a"], "newer": {"x": 1}}"#).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _ = std::fs::remove_file(&p);
+        std::os::unix::fs::symlink(&real, &p).unwrap();
+        let mut s = Store::load_from(p.clone());
+        s.toggle_marked("b");
+        s.save().unwrap();
+        assert!(std::fs::symlink_metadata(&p).unwrap().is_symlink());
+        let saved = std::fs::read_to_string(&real).unwrap();
+        assert!(saved.contains("\"b\"") && saved.contains("newer"), "{saved}");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 

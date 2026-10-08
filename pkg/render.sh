@@ -3,7 +3,8 @@
 # Replaces @VERSION@ (without the "v") and @SHA256_<target>@ in TEMPLATE.
 set -eu
 version=${1#v}
-script="s/@VERSION@/$version/g"
+# The template's own two lines say what it is, which the rendered formula is not.
+script="1,2d;s/@VERSION@/$version/g"
 while read -r sum file; do
   target=${file#modelcmp-}
   target=${target%-"$1".tar.gz}

@@ -330,6 +330,8 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
     Ok((models, total))
 }
 
+const NO_HARNESS: &str = "no harness models found";
+
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     let (models, total) = matched(data, store, o)?;
     let any = data.any_available();
@@ -338,6 +340,10 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     // `--cmd`, whose substitution would start the harness on no model at all, or nothing.
     if models.is_empty() && (o.tier.is_some() || o.id || o.cmd) {
         return Err("no models match".to_string().into());
+    }
+    // Nor one out of every model there is, shown for want of yours: an id no harness here takes.
+    if !any && !o.all && (o.tier.is_some() || o.id || o.cmd) {
+        return Err(format!("{NO_HARNESS}, and --all lists every model").into());
     }
     if o.json {
         return print_json(&models.iter().map(|m| out(m, store, false)).collect::<Vec<_>>());
@@ -378,7 +384,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
         .map_err(|e| Exit { msg: format!("{}: choose no model for it, tell the user", e.msg), ..e })?;
     // Every line would be a model with no way to run it.
     if !data.any_available() {
-        return Err(format!("{}: choose no model, tell the user", crate::view::NO_ACCESS).into());
+        return Err(format!("{NO_HARNESS}: choose no model, tell the user").into());
     }
     let own = store.custom_tasks();
     let own = own.iter().map(|&c| (c, None, format!("the user's own task, {}", store.about(c).unwrap_or(CUSTOM_WHEN))));
@@ -495,7 +501,7 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
         true => command(m, &[via, default], &o.via, &data.harness)
             .and_then(|mut c| match (o.cmd, o.prompt) {
                 (true, true) => one_shot(c),
-                (true, false) => Some(c.join(" ")),
+                (true, false) => Some(c.into_iter().map(quote).collect::<Vec<_>>().join(" ")),
                 _ => c.pop(),
             })
             .ok_or_else(|| {
@@ -558,12 +564,16 @@ fn one_shot(mut cmd: Vec<String>) -> Option<String> {
     };
     cmd.splice(1..1, sub.iter().map(|s| s.to_string()));
     cmd.extend(flags.iter().map(|s| s.to_string()));
-    // A file's path with a space, a quote or a `;` in it is one word to the shell.
-    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
-    let quote = |w: String| if w.chars().all(plain) { w } else { format!("'{}'", w.replace('\'', "'\\''")) };
     let mut words: Vec<String> = std::iter::once(QUIET.into()).chain(cmd.into_iter().map(quote)).collect();
     words.push("\"<prompt>\"".into());
     Some(words.join(" "))
+}
+
+/// A file's path with a space, a quote or a `;` in it is one word to the shell.
+fn quote(w: String) -> String {
+    // `~` too: it opens no word of an id ("openrouter/~anthropic/..."), where alone the shell expands it.
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-~".contains(c);
+    if w.chars().all(plain) && !w.starts_with('~') { w } else { format!("'{}'", w.replace('\'', "'\\''")) }
 }
 
 /// The command that starts a harness on `m`: the first of `first` to have the model (the
@@ -901,6 +911,10 @@ pub fn fav(
             store.save()?;
             let via = via.map_or(String::new(), |h| format!(" via {h}"));
             println!("★ {t}{}: {}{via}", if new { " (new task)" } else { "" }, m.name);
+            // Kept for when a harness has it, and said: `pick` and `recommend` pass it over.
+            if !crate::view::in_reach(m, false, data.any_available()) {
+                eprintln!("note: no harness here has {}, so no pick uses it until one does", m.name);
+            }
         }
     }
     Ok(())
@@ -1086,7 +1100,7 @@ mod tests {
             tier: Some("low".into()),
             sort: None,
             bounds: vec![],
-            all: false,
+            all: true,
             selected: false,
             dev: vec!["openai".into()],
             via: vec![],
@@ -1101,6 +1115,16 @@ mod tests {
         assert!(list(&data, &store, &o).is_err(), "openai has no model for coding");
         store.set_favorite("coding", "mini", None);
         assert!(list(&data, &store, &o).is_ok());
+    }
+
+    /// With no harness listing a model every model shows, and a tier's pick out of them is an
+    /// id nothing here takes: `opencode -m $(...)` must fail, as `pick` does.
+    #[test]
+    fn no_harness_is_no_pick() {
+        let data = Data { models: vec![model("mini", 60.0, 1.0)], ..Default::default() };
+        let o = ListOpts { task: fit::task("coding"), tier: Some("low".into()), id: true, ..Default::default() };
+        assert!(list(&data, &Store::default(), &o).is_err());
+        assert!(list(&data, &Store::default(), &ListOpts { all: true, ..o }).is_ok());
     }
 
     /// `--id --via pi` is the id pi takes: a favorite pi lacks is an error, not opencode's id.
