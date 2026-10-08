@@ -1089,6 +1089,14 @@ fn palette(app: &App) -> Option<&'static Palette> {
 const ACCENT: Color = Color::Magenta;
 const KEY: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
+/// A benchmark source's colour: the headers of the columns with its values, and its name on the
+/// frame's bottom border, so ECI or AAII says which one the task columns are of.
+const fn source_color(s: data::Source) -> Color {
+    match s {
+        data::Source::Epoch => Color::Cyan,
+        data::Source::Aa => Color::Yellow,
+    }
+}
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
 /// A marked row's fill and its ✓, the ✓ of a ticked entry in a list and the count in the
@@ -1389,7 +1397,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             _ => (age, MUTED),
         };
         // A state still too long would run over the version: the source goes, which `B` shows too.
-        let source = if state.chars().count() > room { String::new() } else { source };
+        let named = state.chars().count() <= room;
         let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, app.col_name(app.sort_col));
         let sort_w = sort.chars().count();
         let frame = Block::bordered()
@@ -1398,7 +1406,18 @@ fn draw(app: &mut App, f: &mut Frame) {
             .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
             .title_bottom(version)
             .title_bottom(
-                Line::from(vec![Span::styled(source, fg(MUTED)), Span::styled(state, fg(color))]).right_aligned(),
+                // The source in its colour, as the headers of its columns are.
+                Line::from_iter(
+                    [
+                        Span::styled(" models.dev + ", fg(MUTED)),
+                        Span::styled(data::source().label(), fg(source_color(data::source()))),
+                        Span::styled(" · ", fg(MUTED)),
+                    ]
+                    .into_iter()
+                    .filter(|_| named)
+                    .chain([Span::styled(state, fg(color))]),
+                )
+                .right_aligned(),
             );
         let inner = frame.inner(body);
         let head = head(app);
@@ -1723,10 +1742,11 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         false => "",
     };
     // The column under the cursor: its header reversed, its cells bold and a thick rule under it,
-    // as VisiData shows its current column; the values keep their colours.
-    let header = |i: usize| match i == app.col {
-        true => fg(ACCENT).add_modifier(BOLD | Modifier::REVERSED),
-        false => fg(ACCENT).add_modifier(BOLD),
+    // as VisiData shows its current column; the values keep their colours. A column with a
+    // benchmark source's values has its header in the source's colour (`source_color`).
+    let header = |i: usize| {
+        let style = fg(crate::app::col_source(i).map_or(ACCENT, source_color)).add_modifier(BOLD);
+        if i == app.col { style.add_modifier(Modifier::REVERSED) } else { style }
     };
     // The marks: the checkbox, then the ☆, then the ✗ box.
     let num_w = (name_x - 7) as usize;
@@ -3375,6 +3395,11 @@ mod tests {
                 far("a task and muted", x, of(MUTED), 60.0);
             }
             p.accents.iter().for_each(|&x| far("a developer and muted", x, of(MUTED), 60.0));
+            // A header says by its colour whose values the column has: a source's, or neither's.
+            let heads = [of(ACCENT), of(source_color(data::Source::Epoch)), of(source_color(data::Source::Aa))];
+            for (i, &x) in heads.iter().enumerate() {
+                heads[i + 1..].iter().for_each(|&y| far("headers", x, y, 60.0));
+            }
             let [mark, cursor] = [MARK, CURSOR].map(|c| hex(fill(c, p)));
             far("the fills", mark, cursor, 14.0);
             // A match is told from the name around it by its yellow, as a gold ★ and a mid price
@@ -3931,7 +3956,28 @@ mod tests {
         let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
         let star = |m: &str| buf[at(lines.iter().position(|l| l.contains(m)).unwrap(), "★")].fg;
         assert_eq!(star("opus"), STAR, "no task picked: a gold ★ that says favorite for some task");
-        assert_eq!(buf[at(0, "Coding")].fg, ACCENT, "headers are one colour, a task's column too");
+        assert_eq!(buf[at(0, "Price")].fg, ACCENT, "the other headers are one colour");
+        // But those of a benchmark source's values, in its colour: ECI or AAII says which one
+        // the task columns are of, and the bottom border names it in that colour.
+        data::set_lent(true);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 10)).unwrap();
+        for src in data::Source::ALL {
+            data::set_source(src);
+            term.draw(|f| draw(&mut a, f)).unwrap();
+            let (wide, rows) = (term.backend().buffer(), text(term.backend().buffer()));
+            // The first cell of `pat`: a header's, or on the bottom border, where models.dev is.
+            let cell = |pat: &str| {
+                let on = if pat == src.label() { "models.dev" } else { "Released" };
+                let y = rows.iter().position(|l| l.contains(on)).unwrap();
+                wide[(rows[y][..rows[y].find(pat).unwrap()].chars().count() as u16, y as u16)].fg
+            };
+            let (epoch, aa, own) =
+                (source_color(data::Source::Epoch), source_color(data::Source::Aa), source_color(src));
+            assert_eq!((cell("ECI"), cell("AAII")), (epoch, aa));
+            assert_eq!((cell("Coding"), cell("Value"), cell(src.label())), (own, own, own));
+        }
+        data::set_source(data::Source::Epoch);
+        data::set_lent(false);
         assert_eq!(buf[at(4, "★")].fg, task_color("agentic"), "and in the status bar");
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         let name_x = at(opus, "opus").0;

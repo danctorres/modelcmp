@@ -281,6 +281,12 @@ pub fn absent(col: usize) -> bool {
     numeric(col).is_some_and(|c| c.from() != crate::data::source() && !crate::data::lent())
 }
 
+/// The benchmark source the column at cursor index `col` has its values from, when it has them
+/// from one: every column from the indexes on, the task scores and Value of the source in use.
+pub fn col_source(col: usize) -> Option<Source> {
+    numeric(col).filter(|_| col >= ECI).map(Col::from)
+}
+
 /// Whether the column at cursor index `col` is left out: `absent`, or turned off in `|`.
 pub fn hidden(col: usize) -> bool {
     absent(col) || off() >> col & 1 == 1
@@ -356,7 +362,30 @@ pub fn base_col_about(col: usize) -> String {
             COLS[PRICE - TEXT].about,
             crate::data::cached() * 100.0
         ),
-        _ => numeric(col).map_or("", Col::about).into(),
+        _ => {
+            let c = numeric(col);
+            // Epoch fits a task's benchmarks into one score, so the column names them.
+            let about = match c.and_then(|c| crate::fit::task(c.id)).map(Task::sourced) {
+                Some((None, b)) if !b.is_empty() => format!("fitted from {}, ECI points", named(b)),
+                _ => c.map_or("", Col::about).into(),
+            };
+            // A task's column is of the source in use, beside both sources' indexes.
+            if TASK_COLS.contains(&col) { of_source(&about) } else { about }
+        }
+    }
+}
+
+/// `about` after the source in use, whose scores it tells of.
+fn of_source(about: &str) -> String {
+    format!("{}, {about}", crate::data::source().label())
+}
+
+/// "A, B and C", or the first two and how many more.
+fn named(b: &[&str]) -> String {
+    match b {
+        [one] => one.to_string(),
+        [most @ .., last] if b.len() <= 3 => format!("{} and {last}", most.join(", ")),
+        _ => format!("{}, {} and {} more", b[0], b[1], b.len() - 2),
     }
 }
 
@@ -1277,7 +1306,7 @@ impl App {
     /// What the column at cursor index `col` means.
     pub fn col_about(&self, col: usize) -> String {
         match self.col_bench(col) {
-            Some(_) => "score on this benchmark alone, 0-100".into(),
+            Some(_) => of_source("score on this benchmark alone, 0-100"),
             None => base_col_about(col),
         }
     }
@@ -4510,6 +4539,25 @@ mod tests {
         assert!(base_col_about(0).contains("Via"));
         assert!(base_col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
+        let of = |id| col_source(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
+        assert_eq!(
+            (of("price"), of("ctx"), of("eci"), of("value"), of("cost")),
+            (None, None, Some(Source::Epoch), Some(Source::Epoch), Some(Source::Epoch))
+        );
+        assert!(COLS[ECI - TEXT..].iter().all(|c| c.only.is_some() || c.price || crate::fit::task(c.id).is_some()));
+        let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
+        assert_eq!(about("coding"), "Epoch AI, fitted from DeepSWE, FrontierCode and 3 more, ECI points");
+        assert_eq!(
+            about("agentic"),
+            "Epoch AI, fitted from APEX-Agents, Remote Labor Index and OSWorld 2.0, ECI points"
+        );
+        assert_eq!(about("value"), "coding per dollar, ranked 0-100", "no benchmarks of its own");
+        crate::data::set_source(Source::Aa);
+        assert_eq!(
+            about("agentic"),
+            "Artificial Analysis, Terminal-Bench 4.0 score (0-100)",
+            "the one benchmark it is"
+        );
     }
 
     #[test]
