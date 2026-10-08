@@ -110,7 +110,7 @@ model for a subtask. It works in `Claude Code`, `opencode`, `Codex` and any othe
 [skills CLI](https://skills.sh) supports, and `npx skills update` updates it. For an agent
 without skills, paste the skill's text into `AGENTS.md`.
 
-![An agent using the modelcmp skill to pick a free model for the unit tests and the best one for a race condition](https://github.com/user-attachments/assets/5d51479a-2d2a-4a44-8233-162d37893e6d)
+![An agent using the modelcmp skill to pick a free model for the unit tests and the best one for a race condition](https://github.com/user-attachments/assets/d2c5349e-0cc6-475c-b978-9897ca203bdf)
 
 <p align="center"><i>An agent uses the modelcmp skill to pick a free model for the unit tests and the best one for a race condition.</i></p>
 
