@@ -110,9 +110,9 @@ model for a subtask. It works in `Claude Code`, `opencode`, `Codex` and any othe
 [skills CLI](https://skills.sh) supports, and `npx skills update` updates it. For an agent
 without skills, paste the skill's text into `AGENTS.md`.
 
-![An agent using the modelcmp skill to pick the harness and model for a rename task](https://github.com/user-attachments/assets/eedc93b0-fcf5-47ae-8be1-4bf4837b4576)
+![An agent using the modelcmp skill to pick a free model for the unit tests and the best one for a race condition](https://github.com/user-attachments/assets/5d51479a-2d2a-4a44-8233-162d37893e6d)
 
-<p align="center"><i>An agent uses the modelcmp skill to pick the harness and model for a rename task.</i></p>
+<p align="center"><i>An agent uses the modelcmp skill to pick a free model for the unit tests and the best one for a race condition.</i></p>
 
 For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list --id` or
 `--cmd` prints only the model's id or the command that starts it.
