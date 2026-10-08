@@ -8,9 +8,9 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, GROUPS, HELP, HELP_TAB, Input, Kind, List, MARKED,
-    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, hidden, menu_rows,
-    on_price, shown,
+    App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse,
+    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, group_starts, hidden,
+    menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -479,6 +479,7 @@ fn event_loop(
                     if matches!(e.kind, MouseEventKind::Down(_)) {
                         lock = Some(crate::store::lock(&crate::store::path()));
                         if app.store.reload_if_changed() {
+                            app.set_cols();
                             app.rebuild_in_place();
                             dirty = true;
                         }
@@ -506,6 +507,7 @@ fn event_loop(
             let _lock = lock.unwrap_or_else(|| {
                 let held = crate::store::lock(&crate::store::path());
                 if app.store.reload_if_changed() {
+                    app.set_cols();
                     app.rebuild_in_place();
                 }
                 held
@@ -581,7 +583,12 @@ fn event_loop(
                     }
                     // The app applies its own chooser items before they get here.
                     Some(
-                        Effect::Fav(..) | Effect::Via(..) | Effect::NewTask(_) | Effect::Theme(_) | Effect::Harness(_),
+                        Effect::Fav(..)
+                        | Effect::Via(..)
+                        | Effect::NewTask(_)
+                        | Effect::Theme(_)
+                        | Effect::Harness(_)
+                        | Effect::Col(_),
                     )
                     | None => {}
                 }
@@ -927,7 +934,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
         View::Table => {
-            let mut view = vec!["B benchmarks", "H harness", "/ filter", "s sort"];
+            let mut view = vec!["B benchmarks", "H harness", "| columns", "/ filter", "s sort"];
             if app.menu(app.col) {
                 view.push("d dropdown");
             }
@@ -1636,8 +1643,9 @@ fn layout(width: u16, app: &App) -> Layout {
     let ws: Vec<u16> = widths.into_iter().chain([via_w, notes_w]).collect();
     // A column starting a group has a `│` in its gap, one cell wider; so does the first shown
     // when scrolled, parting it from Dev. Released, in Dev's group, has neither.
-    let sep = |k: usize| u16::from(GROUPS.contains(&(k + 2)));
-    // A column the source does not measure takes no room at all.
+    let starts = group_starts();
+    let sep = |k: usize| u16::from(starts.contains(&(k + 2)));
+    // A column left out takes no room at all.
     let ws: Vec<u16> = ws.into_iter().enumerate().map(|(k, w)| if hidden(k + 2) { 0 } else { w }).collect();
     let span = |k: usize| if ws[k] == 0 { 0 } else { ws[k] + GAP + sep(k) };
     let fixed: u16 = (0..ws.len()).map(span).sum::<u16>() + dev_w + GAP;
@@ -2167,6 +2175,7 @@ fn mode(app: &App) -> (&'static str, Color) {
                 Kind::Theme => "THEME",
                 Kind::Source => "SOURCE",
                 Kind::Harness => "HARNESS",
+                Kind::Cols => "COLUMNS",
                 Kind::Open => "OPEN",
             };
             (name, Color::Green)
@@ -2236,7 +2245,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             Input::Choose { .. } => (true, true),
             _ => (false, true),
         };
-        let toggles = matches!(app.input, Input::Menu { .. }) || app.choosing_favs();
+        let toggles = matches!(app.input, Input::Menu { .. }) || app.choosing_favs() || app.choosing_cols();
         let hint = match (menu, typing) {
             (true, false) => "j k move  / search  space enter toggle  esc close",
             (true, true) if toggles => "↓ ↑ move  enter toggle  esc clear",
@@ -2492,7 +2501,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             // the command that opens it.
             let name = match effect {
                 Effect::Source(src) => Some((label.len() - src.about().len(), Style::new().add_modifier(BOLD))),
-                Effect::Launch(_) | Effect::Via(..) | Effect::Harness(_) => {
+                Effect::Launch(_) | Effect::Via(..) | Effect::Harness(_) | Effect::Col(_) => {
                     Some((label.find(' ').unwrap_or(label.len()), fg(color)))
                 }
                 _ => None,
@@ -2500,7 +2509,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
             if let Some((end, style)) = name {
                 let (name, rest) = label.split_at(end);
                 // Where a key is had is a link: underlined, and a click on it opens the page (`hit`).
-                let line = Line::from(match source_link(label, effect) {
+                let mut spans = match source_link(label, effect) {
                     Some(l) => vec![
                         Span::styled(format!(" {name}"), style),
                         Span::styled(label[end..l.start].to_string(), fg(MUTED)),
@@ -2508,8 +2517,14 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
                         Span::styled(" ", fg(MUTED)),
                     ],
                     None => vec![Span::styled(format!(" {name}"), style), Span::styled(format!("{rest} "), fg(MUTED))],
-                });
-                return lit(line, |s| found(s, query));
+                };
+                // A column has its checkbox, as an entry of a dropdown: ticked while it shows.
+                if let Effect::Col(c) = effect {
+                    let on = !crate::app::hidden(*c);
+                    let tick = if on { Span::styled(" ✓", fg(MARK).add_modifier(BOLD)) } else { Span::raw(" ☐") };
+                    spans.insert(0, tick);
+                }
+                return lit(Line::from(spans), |s| found(s, query));
             }
             lit(Line::from(format!(" {label} ")).style(fg(color)), |s| found(s, query))
         })
@@ -2518,7 +2533,9 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
         lines.push(no_match(query));
     }
     let hint = match kind {
+        _ if typing && kind == Kind::Cols => " ↓ ↑ move · enter toggle · esc clear",
         _ if typing => " ↓ ↑ move · enter pick · esc clear",
+        Kind::Cols => " j k move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
         Kind::Source if first => " j k move · / search · enter picks · esc default · B changes it later",
@@ -3554,7 +3571,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  B benchmarks  H harness  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "h l column  │  B benchmarks  H harness  | columns  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]

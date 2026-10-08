@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// A numeric column. The text columns (model name, developer) come first and are not listed here.
 pub struct Col {
@@ -40,6 +41,7 @@ impl Col {
     fn text(&self) -> (&'static str, &'static str) {
         let about = match (self.id, crate::data::source()) {
             ("eci", s) => return s.index(),
+            (OTHER, s) => return s.other().index(),
             ("coding", Source::Aa) => "mean of Terminal-Bench 4.0 and SciCode (0-100)",
             ("agentic", Source::Aa) => "Terminal-Bench 4.0 score (0-100)",
             ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
@@ -54,6 +56,13 @@ impl Col {
 
     pub fn about(&self) -> &'static str {
         self.text().1
+    }
+
+    /// The source its values are from: the one that alone has it, the other one for its index,
+    /// else the one in use.
+    pub fn from(&self) -> Source {
+        let source = crate::data::source();
+        if self.id == OTHER { source.other() } else { self.only.unwrap_or(source) }
     }
 }
 
@@ -121,10 +130,14 @@ fn month(v: f64) -> String {
     }
 }
 
+/// The id of the other source's index: AAII beside Epoch AI's scores, ECI beside Artificial Analysis's.
+const OTHER: &str = "other";
+
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
-/// index, the task scores, Value and what a task cost and took when Epoch lists it, then speed when
-/// Artificial Analysis measures it.
-pub const COLS: [Col; 15] = [
+/// index, the task scores, Value and what a task cost and took when Epoch lists it, the other
+/// source's index, then speed when Artificial Analysis measures it. What the source in use does
+/// not measure is the other one's, when its data is there too (`absent`).
+pub const COLS: [Col; 16] = [
     Col {
         ranked: false,
         show: month,
@@ -184,6 +197,8 @@ pub const COLS: [Col; 15] = [
         show: |v| ctx(v as u64),
         ..col("Tok/task", "tokens", "output tokens one coding task took on DeepSWE, as measured", |m| m.task_tokens)
     },
+    // Named by the other source: `Col::text`.
+    col("", OTHER, "", |m| m.other_index),
     Col {
         only: Some(Source::Aa),
         show: |v| format!("{v:.0}"),
@@ -218,7 +233,7 @@ const DEFAULT_SORT: (usize, bool) = (ECI, true);
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 6;
 /// Column index of Tok/s.
-pub const SPEED: usize = TEXT + 13;
+pub const SPEED: usize = TEXT + 14;
 /// First column of each group: names and release, price and context, benchmarks, speed, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, SPEED, VIA];
 /// Column index of where you have access.
@@ -227,9 +242,51 @@ pub const VIA: usize = TEXT + COLS.len();
 pub const NOTES: usize = VIA + 1;
 pub const NCOLS: usize = NOTES + 1;
 
-/// Whether the column at cursor index `col` is left out: one the source in use does not have.
+/// The columns turned off in `|`, a bit per cursor index: one process-wide setting, like
+/// `data::source`.
+#[cfg(not(test))]
+static OFF: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+thread_local!(static OFF: AtomicU32 = const { AtomicU32::new(0) });
+
+fn off() -> u32 {
+    #[cfg(test)]
+    return OFF.with(|o| o.load(Relaxed));
+    #[cfg(not(test))]
+    OFF.load(Relaxed)
+}
+
+fn set_off(mask: u32) {
+    #[cfg(test)]
+    OFF.with(|o| o.store(mask, Relaxed));
+    #[cfg(not(test))]
+    OFF.store(mask, Relaxed);
+}
+
+/// Whether the column at cursor index `col` has nothing to show: one of the other source's,
+/// with none of its data.
+pub fn absent(col: usize) -> bool {
+    numeric(col).is_some_and(|c| c.from() != crate::data::source() && !crate::data::lent())
+}
+
+/// Whether the column at cursor index `col` is left out: `absent`, or turned off in `|`.
 pub fn hidden(col: usize) -> bool {
-    numeric(col).is_some_and(|c| c.only.is_some_and(|s| s != crate::data::source()))
+    absent(col) || off() >> col & 1 == 1
+}
+
+/// The column at cursor index `col` as `Store::hide` names it. Model and Dev always show.
+fn col_id(col: usize) -> &'static str {
+    match col {
+        VIA => "via",
+        NOTES => "notes",
+        _ => numeric(col).map_or("", |c| c.id),
+    }
+}
+
+/// The first shown column of each of `GROUPS`.
+pub fn group_starts() -> Vec<usize> {
+    let end = |i: usize| GROUPS.get(i + 1).copied().unwrap_or(NCOLS);
+    GROUPS.iter().enumerate().filter_map(|(i, &g)| (g..end(i)).find(|&c| !hidden(c))).collect()
 }
 
 /// Cursor index `col` moved `n` shown columns right, or left when negative, wrapping.
@@ -325,6 +382,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "filter models, compare rows, this help or a list"),
             ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
             ("d", "dropdown on a header with ▾, space enter toggle"),
+            ("|", "columns to show, space enter toggle"),
             ("a A", "all models, including ones you have no access to / yours only"),
             ("tab", "next tab, shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
@@ -496,6 +554,8 @@ pub enum Kind {
     Source,
     /// `H`: your default harness.
     Harness,
+    /// `|`: the columns the table shows; space or enter ticks one and the list stays open.
+    Cols,
 }
 
 /// The cursor and the search of an open list, a dropdown or a choice list.
@@ -755,6 +815,8 @@ pub enum Effect {
     Theme(&'static str),
     /// Your default harness, or none; the `H` chooser's items, applied by `App` itself.
     Harness(Option<&'static str>),
+    /// The column at this cursor index; the `|` chooser's items, applied by `App` itself.
+    Col(usize),
     /// The `B` chooser's items; out of it, the source was switched and its data must be loaded.
     Source(crate::data::Source),
 }
@@ -1111,6 +1173,7 @@ impl App {
         app.cache_on = if start > 0.0 { start } else { crate::data::AGENT_CACHED };
         // ponytail: leaked once per App, which the TUI makes once; hints are &'static str.
         app.cache_hint = Box::leak(format!("% {:.0}% cached", app.cache_on * 100.0).into_boxed_str());
+        app.set_cols();
         app.set_data(data);
         app
     }
@@ -1131,6 +1194,9 @@ impl App {
             }
         }
         self.data = data;
+        // The other source's columns come and go with its data.
+        crate::data::set_lent(self.data.lent);
+        self.off_hidden();
         self.fill();
         // A refresh that could not ask for the newest release leaves nothing to upgrade to.
         if self.input == Input::Upgrade && self.data.update().is_none() {
@@ -1246,9 +1312,11 @@ impl App {
                 // A row with a box ticked.
                 let on = |i: usize| match &items[i].1 {
                     Effect::Fav(k, t) => (0..BOXES).any(|c| self.store.favorite(&box_slot(t, c)) == Some(k)),
+                    Effect::Col(c) => !hidden(*c),
                     _ => false,
                 };
-                (choice_rows(items, &list.query).into_iter().map(on).collect(), "task")
+                let what = if self.choosing_favs() { "task" } else { "column" };
+                (choice_rows(items, &list.query).into_iter().map(on).collect(), what)
             }
             Input::Menu { col, items, list } => {
                 // The ticks the dropdown draws: "any" has one while nothing is picked.
@@ -1526,6 +1594,11 @@ impl App {
         matches!(self.input, Input::Choose { kind: Kind::Fav, .. })
     }
 
+    /// Whether the open choice list is `|`'s columns, ticked as `f`'s tasks are.
+    pub fn choosing_cols(&self) -> bool {
+        matches!(self.input, Input::Choose { kind: Kind::Cols, .. })
+    }
+
     /// The theme under the cursor of the open `t` list, which the screen previews.
     pub fn theme_preview(&self) -> Option<&'static str> {
         match &self.input {
@@ -1760,6 +1833,44 @@ impl App {
         self.refused = true;
     }
 
+    /// The `|` chooser: every column right of Dev that has something to show, ticked while shown,
+    /// on the one under the cursor.
+    fn ask_cols(&mut self) {
+        let cols = (TEXT..NCOLS).filter(|&c| !absent(c));
+        let items: Vec<_> =
+            cols.map(|c| (format!("{:<8} {}", base_col_name(c), base_col_about(c)), Effect::Col(c))).collect();
+        let sel = items.iter().position(|(_, e)| *e == Effect::Col(self.col)).unwrap_or(0);
+        self.input = Input::choose("columns?", Kind::Cols, items, sel);
+    }
+
+    /// Show the column at cursor index `col`, or leave it out, from now on.
+    fn toggle_col(&mut self, col: usize) -> Option<Effect> {
+        let id = col_id(col);
+        if !self.store.hide.remove(id) {
+            self.store.hide.insert(id.to_string());
+        }
+        self.set_cols();
+        self.rebuild();
+        Some(Effect::Save)
+    }
+
+    /// Leave out the columns `Store::hide` names, as saved or as another modelcmp changed them.
+    pub fn set_cols(&mut self) {
+        set_off((TEXT..NCOLS).filter(|&c| self.store.hide.contains(col_id(c))).fold(0, |m, c| m | 1 << c));
+        self.off_hidden();
+    }
+
+    /// Off a column that is left out: the cursor, the sort and any bound on it.
+    fn off_hidden(&mut self) {
+        if hidden(self.col) {
+            self.col = Some(DEFAULT_SORT.0).filter(|&c| !hidden(c)).unwrap_or(0);
+        }
+        if hidden(self.sort_col) {
+            (self.sort_col, self.descending) = DEFAULT_SORT;
+        }
+        self.bounds.retain(|b| !hidden(b.0));
+    }
+
     /// The `B` chooser, each source saying what it takes; the TUI opens with it until one is picked.
     pub fn ask_source(&mut self) {
         let items =
@@ -1789,14 +1900,6 @@ impl App {
     /// downloaded, which replaces any refresh under way for the other source. Until then the
     /// table is empty rather than showing the other source's scores under this one's name.
     pub fn switched(&mut self, cached: Option<Data>) -> bool {
-        // Off a column this source does not have: the cursor, the sort and any bound on it.
-        if hidden(self.col) {
-            self.col = DEFAULT_SORT.0;
-        }
-        if hidden(self.sort_col) {
-            (self.sort_col, self.descending) = DEFAULT_SORT;
-        }
-        self.bounds.retain(|b| !hidden(b.0));
         let fetch = cached.as_ref().is_none_or(Data::stale);
         self.set_data(cached.unwrap_or_default());
         (self.refreshing, self.refresh_failed) = (fetch, false);
@@ -2450,7 +2553,9 @@ impl App {
                     list.col = list.col.saturating_add_signed(if back { -n } else { n }).min(BOXES - 1);
                 }
             }
-            KeyCode::Char(c @ (']' | '[')) if self.choosing_favs() || matches!(self.input, Input::Menu { .. }) => {
+            KeyCode::Char(c @ (']' | '['))
+                if self.choosing_favs() || self.choosing_cols() || matches!(self.input, Input::Menu { .. }) =>
+            {
                 self.jump_ticked(if c == ']' { n } else { -n })
             }
             _ if list => return self.input_key(k.code, k.modifiers),
@@ -2654,12 +2759,12 @@ impl App {
                 // An empty cell has nothing to open.
                 self.val(self.rows[n], col)?;
                 let m = self.current()?;
-                // The groups of `GROUPS` and where each comes from: the release, prices and context,
-                // benchmarks, then speed, which only Artificial Analysis measures.
+                // Where each comes from: the release, prices and context from models.dev, the
+                // rest from the source that measures it.
                 let (site, page) = if col < ECI {
                     ("models.dev", m.price_page())
                 } else {
-                    let src = if col < SPEED { crate::data::source() } else { Source::Aa };
+                    let src = numeric(col).map_or_else(crate::data::source, Col::from);
                     (src.site(), m.page(src))
                 };
                 if page.is_none() {
@@ -2777,18 +2882,20 @@ impl App {
                 *sel = step((*sel).min(len.saturating_sub(1)), n, len);
             }
             KeyCode::Char('0' | '_') if table => self.col = 0,
-            KeyCode::Char('$') if table => self.col = NCOLS - 1,
+            KeyCode::Char('$') if table => self.col = step_col(0, -1),
             KeyCode::Char('0' | '_') if across => *self.across_sel() = 0,
             KeyCode::Char('$') if across => *self.across_sel() = self.across_len().saturating_sub(1),
             KeyCode::Char('w') if table => {
+                let (starts, last) = (group_starts(), step_col(0, -1));
                 for _ in 0..n {
-                    let end = if self.col == NCOLS - 1 { 0 } else { NCOLS - 1 };
-                    self.col = GROUPS.into_iter().find(|&g| g > self.col && !hidden(g)).unwrap_or(end);
+                    let end = if self.col == last { 0 } else { last };
+                    self.col = starts.iter().copied().find(|&g| g > self.col).unwrap_or(end);
                 }
             }
             KeyCode::Char('b') if table => {
+                let starts = group_starts();
                 for _ in 0..n {
-                    self.col = GROUPS.into_iter().rev().find(|&g| g < self.col && !hidden(g)).unwrap_or(VIA);
+                    self.col = starts.iter().rev().copied().find(|&g| g < self.col).unwrap_or(starts[starts.len() - 1]);
                 }
             }
             KeyCode::Char('s') if table => {
@@ -3047,6 +3154,7 @@ impl App {
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
             }
             KeyCode::Char('B') => self.ask_source(),
+            KeyCode::Char('|') => self.ask_cols(),
             KeyCode::Char('H') => self.ask_harness(),
             KeyCode::Enter if self.view == View::Recommend && !row => {
                 let Some(t) = self.cur_task() else {
@@ -3261,6 +3369,14 @@ impl App {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     // Not on the first start's choice, which has no table to go back to.
                     KeyCode::Char('q') if list.idle() && !self.first_start => self.ask_quit(),
+                    // Space ticks a column and keeps the list open, as in f's grid, and so does enter.
+                    KeyCode::Char(' ') | KeyCode::Enter
+                        if *kind == Kind::Cols && (code == KeyCode::Enter || !list.typing) =>
+                    {
+                        let Some((_, Effect::Col(c))) = items.get(at?) else { return None };
+                        let c = *c;
+                        return self.toggle_col(c);
+                    }
                     // Space ticks a task in f's grid and keeps it open, as in the Dev and Via
                     // dropdowns, and so does enter. While searching, space is typed.
                     KeyCode::Char(' ') | KeyCode::Enter
@@ -3351,8 +3467,9 @@ impl App {
                             self.fav_at(&key, &slot);
                         }
                     }
-                    // The key that opens the theme list also closes it.
+                    // The key that opens the theme list also closes it, and so the columns'.
                     KeyCode::Char('t') if *kind == Kind::Theme => self.input = Input::None,
+                    KeyCode::Char('|') if *kind == Kind::Cols => self.input = Input::None,
                     // And it is a tab, which tab leaves for the next.
                     KeyCode::Tab | KeyCode::BackTab if *kind == Kind::Theme => {
                         return self.step_tab(code == KeyCode::BackTab);
@@ -3412,6 +3529,47 @@ mod tests {
     use crate::data::Offer;
     use crate::fit;
     use crate::view::frontier;
+
+    /// `|` ticks the columns the table shows, saved, and the other source's show with its data.
+    #[test]
+    fn columns_are_picked_and_the_other_sources_show_with_its_data() {
+        let col = |id: &str| TEXT + COLS.iter().position(|c| c.id == id).unwrap();
+        let (tps, other, price) = (col("tps"), col(OTHER), col("price"));
+        let mut a = app();
+        assert!(hidden(tps) && hidden(other), "Epoch alone has no speed, nor another index");
+        // With Artificial Analysis's data too, its columns show, the index under its name.
+        let mut data = std::mem::take(&mut a.data);
+        data.lent = true;
+        a.set_data(data);
+        assert!(!hidden(tps) && !hidden(other));
+        assert_eq!(base_col_name(other), "AAII");
+        // The list opens on the cursor's column, and a tick leaves it out, the cursor off it.
+        a.col = price;
+        a.bounds = vec![(price, 0.0, 1.0)];
+        press(&mut a, "|");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert!(hidden(price) && a.store.hide.contains("price") && a.choosing_cols(), "and the list stays open");
+        assert_eq!((a.col, a.bounds.len()), (ECI, 0), "nor a bound on it");
+        press(&mut a, "]");
+        assert!(matches!(&a.input, Input::Choose { list, .. } if list.sel == 2), "] to the next ticked one");
+        code(&mut a, KeyCode::Esc);
+        a.col = PRICE - 1;
+        press(&mut a, "l");
+        assert_eq!(a.col, PRICE + 1, "l steps over it");
+        a.col = 0;
+        press(&mut a, "w");
+        assert_eq!(a.col, PRICE + 1, "and its group starts at the next one");
+        // Via and Notes too: `$` is the last column shown.
+        a.store.hide.extend(["via".to_string(), "notes".to_string()]);
+        a.set_cols();
+        press(&mut a, "$");
+        assert_eq!(a.col, col("ttft"));
+        // Ticked again, it is back.
+        a.col = PRICE + 1;
+        press(&mut a, "|k");
+        code(&mut a, KeyCode::Enter);
+        assert!(!hidden(price) && !a.store.hide.contains("price"));
+    }
 
     fn model(key: &str, available: bool, coding: Option<f64>, price: f64) -> Model {
         let mut m = Model {

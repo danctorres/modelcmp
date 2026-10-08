@@ -127,6 +127,7 @@ For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list 
   free API key.
 
 The TUI asks which benchmark source to use on its first start, and `B` changes it later.
+With both, one table shows the columns of each, and `|` picks the ones to show.
 Data is cached for 24 hours.
 
 Benchmarks are proxies: a score says how a model did on that test, not how it will do in your

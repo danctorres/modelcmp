@@ -278,7 +278,7 @@ fn main() {
 fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
     match cols.find(|&c| app::hidden(c + app::TEXT)) {
         Some(c) => {
-            let (col, src) = (&app::COLS[c], app::COLS[c].only.unwrap_or_default());
+            let (col, src) = (&app::COLS[c], app::COLS[c].from());
             Err(Exit::from(format!("{} needs --source {}: only {} has it", col.id, src.id(), src.label())))
         }
         None => Ok(()),
@@ -298,6 +298,8 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         data::Data::default()
     } else {
         let (data, warn) = data::load(force).map_err(|e| e.to_string())?;
+        // The other source's columns sort and bound too, with its data there.
+        data::set_lent(data.lent);
         if let Some(w) = warn {
             eprintln!("warning: {w}");
         }

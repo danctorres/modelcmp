@@ -100,16 +100,19 @@ struct ModelOut<'a> {
     /// Task -> its score on the source's scale: ECI points (epoch) or the task's benchmark
     /// score, 0..100 (aa); overall and vision are `eci`, value a 0..100 percentile
     tasks: BTreeMap<&'static str, f64>,
-    /// Output tokens per second, median; Artificial Analysis only
+    /// The other source's overall index, when its data is cached too: AAII with "epoch", ECI with "aa"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    other_index: Option<f64>,
+    /// Output tokens per second, median, from Artificial Analysis
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens_per_second: Option<f64>,
-    /// Seconds to the first answer token, after any thinking, median; Artificial Analysis only
+    /// Seconds to the first answer token, after any thinking, median, from Artificial Analysis
     #[serde(skip_serializing_if = "Option::is_none")]
     ttft_seconds: Option<f64>,
-    /// USD one coding task cost on DeepSWE, at the setting its score there is of; Epoch only
+    /// USD one coding task cost on DeepSWE, at the setting its score there is of, from Epoch AI
     #[serde(skip_serializing_if = "Option::is_none")]
     task_cost_usd: Option<f64>,
-    /// Output tokens that task took, of the same run; Epoch only
+    /// Output tokens that task took, of the same run, from Epoch AI
     #[serde(skip_serializing_if = "Option::is_none")]
     task_output_tokens: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +161,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
             .iter()
             .filter_map(|t| Some((t.name, (fit::shown(m, t, fit::fit(m, t)?) * 10.0).round() / 10.0)))
             .collect(),
+        other_index: m.other_index,
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
         task_cost_usd: m.task_cost,

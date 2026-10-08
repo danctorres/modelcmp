@@ -21,12 +21,18 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | ECI | Epoch Capabilities Index. With Artificial Analysis it is AAII, its Intelligence Index |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | coding per dollar, ranked 0-100 |
-| $task | $ one coding task cost, [measured](#task). Epoch AI only |
-| Tok/task | output tokens one coding task took, [measured](#task). Epoch AI only |
-| Tok/s | output tokens per second. Artificial Analysis only |
-| TTFT | seconds to the first answer token, after any thinking. Artificial Analysis only |
+| $task | $ one coding task cost, [measured](#task). From Epoch AI |
+| Tok/task | output tokens one coding task took, [measured](#task). From Epoch AI |
+| AAII | the other source's index: AAII beside Epoch AI's scores, ECI beside Artificial Analysis's |
+| Tok/s | output tokens per second. From Artificial Analysis |
+| TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
 | Via | the harnesses that have the model |
 | Notes | your note on it |
+
+One table shows the columns of both sources. The ones of the source not in use show when both
+are cached, which takes an Artificial Analysis key, and were fetched within a day of each other.
+The task scores, Value and the recommendations stay with the source picked with `B`. In the TUI,
+`|` picks the columns to show.
 
 ### Price
 
@@ -230,9 +236,12 @@ stored as `tool-dispatch`).
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
 | `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores |
-| `cost` | `$task`, with Epoch AI |
-| `tokens` | `Tok/task`, with Epoch AI, in tokens |
-| `tps`, `ttft` | with Artificial Analysis |
+| `cost` | `$task`, from Epoch AI |
+| `tokens` | `Tok/task`, from Epoch AI, in tokens |
+| `tps`, `ttft` | from Artificial Analysis |
+| `other` | the other source's index |
+
+A column of the source not in use needs both sources cached, as in the [table](#columns).
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
 excluded models marked `✗` and your selection `✓`. `--task` and `recommend` leave excluded
@@ -420,9 +429,10 @@ Each model carries these fields:
 | `eci` | the overall index of `source` |
 | `source` | `epoch` or `aa` |
 | `tasks` | each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile |
-| `task_cost_usd` | `$task`, with `epoch`, when the model has one |
-| `task_output_tokens` | `Tok/task`, in tokens, with `epoch`, when the model has one |
-| `tokens_per_second`, `ttft_seconds` | with `aa` |
+| `other_index` | the other source's index, AAII with `epoch` and ECI with `aa`, when both are cached |
+| `task_cost_usd` | `$task`, from Epoch AI, when the model has one |
+| `task_output_tokens` | `Tok/task`, in tokens, from Epoch AI, when the model has one |
+| `tokens_per_second`, `ttft_seconds` | from Artificial Analysis, when the model has them |
 
 `price` has:
 

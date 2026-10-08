@@ -139,6 +139,14 @@ impl Source {
         Source::ALL.into_iter().find(|x| x.id() == s)
     }
 
+    /// The one this is not, whose columns show beside its own (`Data::borrow`).
+    pub fn other(self) -> Source {
+        match self {
+            Source::Epoch => Source::Aa,
+            Source::Aa => Source::Epoch,
+        }
+    }
+
     /// The benchmarks its tasks use; a cache made with others is stale.
     fn benches(self) -> Vec<&'static str> {
         match self {
@@ -168,6 +176,27 @@ pub fn set_source(s: Source) {
     SOURCE.with(|x| x.store(i, Relaxed));
     #[cfg(not(test))]
     SOURCE.store(i, Relaxed);
+}
+
+/// Whether the data shown has the other source's columns too (`Data::lent`): one process-wide
+/// setting, like `SOURCE`.
+#[cfg(not(test))]
+static LENT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+thread_local!(static LENT: AtomicBool = const { AtomicBool::new(false) });
+
+pub fn lent() -> bool {
+    #[cfg(test)]
+    return LENT.with(|l| l.load(Relaxed));
+    #[cfg(not(test))]
+    LENT.load(Relaxed)
+}
+
+pub fn set_lent(on: bool) {
+    #[cfg(test)]
+    LENT.with(|l| l.store(on, Relaxed));
+    #[cfg(not(test))]
+    LENT.store(on, Relaxed);
 }
 
 /// Artificial Analysis's API key: `AA_KEY_ENV`, else the one saved with `save_aa_key`.
@@ -705,6 +734,9 @@ pub struct Model {
     /// Output tokens that task took it, of the same run. Epoch lists no input tokens.
     #[serde(default)]
     pub task_tokens: Option<f64>,
+    /// The other source's overall index, with its data at hand too (`Data::borrow`).
+    #[serde(skip)]
+    pub other_index: Option<f64>,
     #[serde(skip)]
     pub available: bool,
     /// Every `Offer::via` of the model, once each.
@@ -872,6 +904,46 @@ pub struct Data {
     /// early data, too soon to say that there is access to no model.
     #[serde(skip)]
     pub listing: bool,
+    /// The rows have what the other source measures too (`borrow`), so its columns show.
+    #[serde(skip)]
+    pub lent: bool,
+}
+
+/// A row of the other source's data, as much of it as `Data::borrow` takes.
+#[derive(Deserialize)]
+struct Lent {
+    key: String,
+    eci: Option<f64>,
+    #[serde(default)]
+    tps: Option<f64>,
+    #[serde(default)]
+    ttft: Option<f64>,
+    #[serde(default)]
+    task_cost: Option<f64>,
+    #[serde(default)]
+    task_tokens: Option<f64>,
+}
+
+impl From<&Model> for Lent {
+    fn from(m: &Model) -> Self {
+        Lent {
+            key: m.key.clone(),
+            eci: m.eci,
+            tps: m.tps,
+            ttft: m.ttft,
+            task_cost: m.task_cost,
+            task_tokens: m.task_tokens,
+        }
+    }
+}
+
+/// The other source's cache, read for `Lent` alone.
+#[derive(Deserialize)]
+struct LentData {
+    #[serde(default)]
+    format: u32,
+    fetched: u64,
+    models: Vec<Lent>,
 }
 
 impl Data {
@@ -889,6 +961,22 @@ impl Data {
     pub fn update(&self) -> Option<&str> {
         let v = |s: &str| s.split('.').map(|n| n.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
         (v(&self.latest) > v(env!("CARGO_PKG_VERSION"))).then_some(self.latest.as_str())
+    }
+
+    /// Gives each row of `src`'s data what only the other source measures, and its index, from
+    /// that one's rows, which go by the same keys: one table shows both. With none, the row has
+    /// neither, whatever its cache kept.
+    fn borrow(&mut self, src: Source, other: Option<&[Lent]>) {
+        let by_key: HashMap<&str, &Lent> = other.into_iter().flatten().map(|l| (l.key.as_str(), l)).collect();
+        for m in &mut self.models {
+            let l = by_key.get(m.key.as_str());
+            m.other_index = l.and_then(|l| l.eci);
+            match src {
+                Source::Epoch => (m.tps, m.ttft) = l.map_or((None, None), |l| (l.tps, l.ttft)),
+                Source::Aa => (m.task_cost, m.task_tokens) = l.map_or((None, None), |l| (l.task_cost, l.task_tokens)),
+            }
+        }
+        self.lent = other.is_some();
     }
 
     pub fn stale(&self) -> bool {
@@ -1002,6 +1090,12 @@ pub fn load_cache() -> Option<Data> {
     let bytes = std::fs::read(cache_path(source())).ok()?;
     // One written in another format reads wrong here (a missing price as free), so it is no fallback.
     let mut d = serde_json::from_slice::<Data>(&bytes).ok().filter(|d| d.format == FORMAT)?;
+    // The other source's, unless fetched more than a day apart: its numbers would be older
+    // than the table says.
+    let other = std::fs::read(cache_path(source().other())).ok();
+    let other = other.and_then(|b| serde_json::from_slice::<LentData>(&b).ok());
+    let other = other.filter(|o| o.format == FORMAT && o.fetched.abs_diff(d.fetched) <= MAX_AGE.as_secs());
+    d.borrow(source(), other.as_ref().map(|o| o.models.as_slice()));
     // Value is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
@@ -1382,6 +1476,10 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
             return Err(e);
         }
     };
+    // Before the early data, so the other source's columns do not go to come back.
+    let lent: Option<Vec<Lent>> =
+        other.as_ref().and_then(|(_, o)| Some(o.as_ref().ok()?.models.iter().map(Lent::from).collect()));
+    data.borrow(src, lent.as_deref());
     // Only links hang on them, so without one the refresh still succeeds, and says so.
     let text = |xml: Result<Vec<u8>, Failure>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
     let (aa, epoch) = (text(aa), text(epoch));
@@ -3140,6 +3238,21 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row has what the other source measures and its index, by its key, or neither.
+    #[test]
+    fn a_row_borrows_the_other_sources_columns() {
+        let row = |key: &str| Model { key: key.into(), tps: Some(1.0), task_cost: Some(2.0), ..Default::default() };
+        let mut d = Data { models: vec![row("a"), row("b")], ..Default::default() };
+        let aa = [Lent::from(&Model { key: "a".into(), eci: Some(60.0), tps: Some(90.0), ..Default::default() })];
+        d.borrow(Source::Epoch, Some(&aa));
+        let got = |d: &Data, i: usize| (d.models[i].other_index, d.models[i].tps, d.models[i].task_cost);
+        assert_eq!(got(&d, 0), (Some(60.0), Some(90.0), Some(2.0)), "its own cost stays");
+        assert_eq!(got(&d, 1), (None, None, Some(2.0)), "a row it does not have: not what the cache kept");
+        assert!(d.lent);
+        d.borrow(Source::Epoch, None);
+        assert_eq!((got(&d, 0), d.lent), ((None, None, Some(2.0)), false));
+    }
 
     #[test]
     fn exec_line_quotes_every_argument() {
