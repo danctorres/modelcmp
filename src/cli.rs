@@ -103,6 +103,9 @@ struct ModelOut<'a> {
     /// The other source's overall index, when its data is cached too: AAII with "epoch", ECI with "aa"
     #[serde(skip_serializing_if = "Option::is_none")]
     other_index: Option<f64>,
+    /// Net improvement in real agent sessions, in percent, from arena.ai's Agent leaderboard
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arena_agent: Option<f64>,
     /// Output tokens per second, median, from Artificial Analysis
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens_per_second: Option<f64>,
@@ -162,6 +165,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
             .filter_map(|t| Some((t.name, (fit::shown(m, t, fit::fit(m, t)?) * 10.0).round() / 10.0)))
             .collect(),
         other_index: m.other_index,
+        arena_agent: m.arena,
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
         task_cost_usd: m.task_cost,

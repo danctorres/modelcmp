@@ -22,6 +22,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | coding per dollar, ranked 0-100 |
+| Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard |
 | $task | USD per coding task, [measured](#task) by Epoch AI |
 | Tok/task | output tokens per coding task, [measured](#task) by Epoch AI |
 | Tok/s | output tokens per second. From Artificial Analysis |
@@ -137,6 +138,15 @@ Artificial Analysis (`--source aa`, its API with your key):
   differ from the AAII, where Epoch's stay close to the ECI.
 - Its API lists no cost of a task, so `$task` and `Tok/task` are hidden with it.
 
+Arena (its Agent leaderboard, no key needed):
+
+- Arena is the score arena.ai publishes, its net improvement in real agent sessions, in
+  percent. It can be negative, and higher is better. modelcmp does not compute it.
+- Arena lists a model once per reasoning setting, and the column has the best of them.
+- It shows with either source, and counts toward no task score and no recommendation.
+- A refresh that cannot reach it keeps the scores of the last one. The column is empty once
+  Arena's newest leaderboard is more than two months old.
+
 With either source:
 
 - Value is computed by modelcmp: the model's coding percentile divided by its price, ranked
@@ -240,6 +250,7 @@ stored as `tool-dispatch`).
 | `cost` | `$task`, from Epoch AI |
 | `tokens` | `Tok/task`, from Epoch AI, in tokens |
 | `tps`, `ttft` | from Artificial Analysis |
+| `arena` | from Arena's Agent leaderboard, in percent |
 | `other` | the other source's index |
 
 A column of the source not in use needs both sources cached, as in the [table](#columns).
@@ -431,6 +442,7 @@ Each model carries these fields:
 | `source` | `epoch` or `aa` |
 | `tasks` | each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile |
 | `other_index` | the other source's index, AAII with `epoch` and ECI with `aa`, when both are cached |
+| `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `task_cost_usd` | `$task`, from Epoch AI, when the model has one |
 | `task_output_tokens` | `Tok/task`, in tokens, from Epoch AI, when the model has one |
 | `tokens_per_second`, `ttft_seconds` | from Artificial Analysis, when the model has them |

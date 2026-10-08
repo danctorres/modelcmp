@@ -18,7 +18,7 @@ use store::Store;
 #[derive(Parser)]
 #[command(
     version,
-    after_help = "Data: models.dev (prices), Epoch AI (benchmarks, CC-BY) or Artificial Analysis (benchmarks, https://artificialanalysis.ai/). Cached for 24h."
+    after_help = "Data: models.dev (prices), Epoch AI (benchmarks, CC-BY) or Artificial Analysis (benchmarks, https://artificialanalysis.ai/), Arena (agent leaderboard, CC-BY). Cached for 24h."
 )]
 struct Args {
     /// Re-download data now instead of using the cache

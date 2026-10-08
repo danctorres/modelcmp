@@ -125,6 +125,8 @@ For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list 
   needs no API key.
 - [Artificial Analysis](https://artificialanalysis.ai): benchmarks and speed, and it needs a
   free API key.
+- [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models rank in real agent sessions,
+  the Arena column, and it needs no API key.
 
 The TUI asks which benchmark source to use on its first start, and `B` changes it later.
 With both, one table shows the columns of each, and `|` picks the ones to show.
@@ -152,4 +154,4 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ## License
 
-[MIT](LICENSE). Benchmark data from Epoch AI is licensed CC-BY.
+[MIT](LICENSE). Benchmark data from Epoch AI and Arena is licensed CC-BY.

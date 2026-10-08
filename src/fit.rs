@@ -328,7 +328,7 @@ const FREE: f64 = 1e-9;
 
 /// A release date, "2026-09-18" or "2026-09", in months since 1970.
 // ponytail: months of the mean length, so a day or two off; nothing here turns on a day.
-fn months(date: &str) -> Option<f64> {
+pub fn months(date: &str) -> Option<f64> {
     let mut parts = date.split('-').map(|p| p.parse::<f64>().ok());
     let (year, month, day) = (parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(15.0));
     Some((year - 1970.0) * 12.0 + (month - 1.0) + (day - 1.0) / 30.44)

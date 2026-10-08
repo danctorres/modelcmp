@@ -368,6 +368,11 @@ pub fn score(x: Option<f64>) -> String {
     x.map_or("-".into(), |v| format!("{v:.0}"))
 }
 
+/// An Arena score, "+8.7" or "-1.2", and "0.0" with no sign.
+pub fn signed(v: f64) -> String {
+    if v == 0.0 { "0.0".into() } else { format!("{v:+.1}") }
+}
+
 /// The value a task shows for the model (`fit::shown`), when it qualifies.
 pub fn task_score(m: &Model, task: &str) -> Option<f64> {
     let t = fit::task(task)?;
@@ -730,6 +735,7 @@ pub fn detail_rows(
     // What a task came to, where the price is per token.
     v.extend(m.task_cost.map(|c| format!("  task cost:  ${} a coding task on DeepSWE (measured)", money(c))));
     v.extend(m.task_tokens.map(|t| format!("  task took:  {} output tokens (measured)", ctx(t as u64))));
+    v.extend(m.arena.map(|a| format!("  arena:      {}% net improvement in agent sessions (arena.ai)", signed(a))));
     v.extend([
         format!(
             "  features:   tools {} · reasoning {} · vision {} · open weights {}",
@@ -926,6 +932,10 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         if vals.iter().any(Option::is_some) {
             rows.push(Row { section: "scores", ..row(t.name, vals, |v| format!("{v:.0}"), true) });
         }
+    }
+    if models.iter().any(|m| m.arena.is_some()) {
+        let arena = models.iter().map(|m| m.arena).collect();
+        rows.push(Row { section: "scores", ..row("arena agent %", arena, signed, true) });
     }
     let mut benches: Vec<&String> = models.iter().flat_map(|m| m.scores.keys()).collect();
     benches.sort();

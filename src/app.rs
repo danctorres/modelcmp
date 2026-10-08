@@ -6,7 +6,7 @@ use crate::fit::{TASKS, Task};
 use crate::store::Store;
 use crate::view::{
     LEVELS, NO_ACCESS, NO_SELECTED, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach, level_label, money,
-    score, shown_via, task_line, task_score, tier_pick,
+    score, shown_via, signed, task_line, task_score, tier_pick,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -132,11 +132,14 @@ fn month(v: f64) -> String {
 /// the one of the source in use, whichever columns those are (`by_role`).
 const OTHER: &str = "other";
 
+/// The id of the Arena column, which neither benchmark source has its values from (`col_source`).
+const ARENA: &str = "arena";
+
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
 /// index, the task scores, Value and what a task cost and took when Epoch lists it, the other
 /// source's index, then speed when Artificial Analysis measures it. What the source in use does
 /// not measure is the other one's, when its data is there too (`absent`).
-pub const COLS: [Col; 16] = [
+pub const COLS: [Col; 17] = [
     Col {
         ranked: false,
         show: month,
@@ -184,6 +187,10 @@ pub const COLS: [Col; 16] = [
     col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
     col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
     Col { price: true, ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied()) },
+    Col {
+        show: signed,
+        ..col("Arena", ARENA, "net improvement in real agent sessions, %, measured by arena.ai", |m| m.arena)
+    },
     Col {
         only: Some(Source::Epoch),
         lower_better: true,
@@ -245,7 +252,7 @@ pub fn by_role(c: usize) -> usize {
     if crate::data::source() == Source::Aa && [ECI, AAII].contains(&(c + TEXT)) { ECI + AAII - 2 * TEXT - c } else { c }
 }
 /// Column index of $task, the first of what a run measured: a task's cost and tokens, then speed.
-const MEASURED: usize = TEXT + 12;
+const MEASURED: usize = TEXT + 13;
 /// First column of each group: names and release, price and context, scores, measured, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, MEASURED, VIA];
 /// Column index of where you have access.
@@ -284,7 +291,7 @@ pub fn absent(col: usize) -> bool {
 /// The benchmark source the column at cursor index `col` has its values from, when it has them
 /// from one: every column from the indexes on, the task scores and Value of the source in use.
 pub fn col_source(col: usize) -> Option<Source> {
-    numeric(col).filter(|_| col >= ECI).map(Col::from)
+    numeric(col).filter(|c| col >= ECI && c.id != ARENA).map(Col::from)
 }
 
 /// Whether the column at cursor index `col` is left out: `absent`, or turned off in `|`.
@@ -4544,7 +4551,9 @@ mod tests {
             (of("price"), of("ctx"), of("eci"), of("value"), of("cost")),
             (None, None, Some(Source::Epoch), Some(Source::Epoch), Some(Source::Epoch))
         );
-        assert!(COLS[ECI - TEXT..].iter().all(|c| c.only.is_some() || c.price || crate::fit::task(c.id).is_some()));
+        let sourced = |c: &Col| c.only.is_some() || c.price || c.id == ARENA || crate::fit::task(c.id).is_some();
+        assert!(COLS[ECI - TEXT..].iter().all(sourced));
+        assert_eq!(of(ARENA), None, "neither source's");
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
         assert_eq!(about("coding"), "Epoch AI, fitted from DeepSWE, FrontierCode and 3 more, ECI points");
         assert_eq!(
