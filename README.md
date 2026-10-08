@@ -142,16 +142,6 @@ harness.
   favorites and tasks of your own, local models, and the JSON for scripts.
 - `modelcmp --help`: every flag.
 
-## Contributing
-
-Issues and pull requests are welcome. Before opening a PR, run what CI runs:
-
-```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-```
-
-Commit messages follow [Conventional Commits](https://www.conventionalcommits.org).
-
 ## License
 
 [MIT](LICENSE). Benchmark data from Epoch AI and Arena is licensed CC-BY.
