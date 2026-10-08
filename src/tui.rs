@@ -2896,24 +2896,29 @@ fn detail(
     // A task's name in its colour, as its ★ in the table: on its fit line and after `favorite:`.
     let named = |t: &str| Span::styled(t.to_string(), fg(task_color(t)).add_modifier(BOLD));
     let lines = lines
-        .map(|(task, s)| match s.split_once(':') {
-            Some((k, v)) if k.trim() == "favorite" && v.trim() != "-" => {
-                let pad = v.len() - v.trim_start().len();
-                let mut spans = vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(v[..pad].to_string())];
-                for (i, t) in v.trim().split(", ").enumerate() {
-                    spans.extend((i > 0).then(|| Span::raw(", ")));
-                    spans.push(named(t));
+        .map(|(task, s)| {
+            // Outside the match: an `if let` guard needs a newer Rust than Cargo.toml asks for.
+            let fit = task.and_then(|t| Some((t, s.split_once(t)?)));
+            match s.split_once(':') {
+                Some((k, v)) if k.trim() == "favorite" && v.trim() != "-" => {
+                    let pad = v.len() - v.trim_start().len();
+                    let mut spans = vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(v[..pad].to_string())];
+                    for (i, t) in v.trim().split(", ").enumerate() {
+                        spans.extend((i > 0).then(|| Span::raw(", ")));
+                        spans.push(named(t));
+                    }
+                    Line::from(spans)
                 }
-                Line::from(spans)
+                _ if fit.is_some() => {
+                    let (t, (pre, post)) = fit.unwrap_or_default();
+                    Line::from(vec![Span::raw(pre.to_string()), named(t), Span::raw(post.to_string())])
+                }
+                Some((k, v)) if s.starts_with("  ") && is_label(k) => {
+                    Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(v.to_string())])
+                }
+                _ if s.ends_with(':') => heading(&s),
+                _ => Line::from(s),
             }
-            _ if let Some((t, (pre, post))) = task.and_then(|t| Some((t, s.split_once(t)?))) => {
-                Line::from(vec![Span::raw(pre.to_string()), named(t), Span::raw(post.to_string())])
-            }
-            Some((k, v)) if s.starts_with("  ") && is_label(k) => {
-                Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(v.to_string())])
-            }
-            _ if s.ends_with(':') => heading(&s),
-            _ => Line::from(s),
         })
         .collect();
     (title, lines)
