@@ -188,14 +188,14 @@ pub const COLS: [Col; 16] = [
         only: Some(Source::Epoch),
         lower_better: true,
         show: money,
-        ..col("$task", "cost", "USD one coding task cost on DeepSWE, as measured", |m| m.task_cost)
+        ..col("$task", "cost", "USD per coding task on DeepSWE, measured by Epoch AI", |m| m.task_cost)
     },
     Col {
         only: Some(Source::Epoch),
         lower_better: true,
         // In tokens, not thousands as Ctx: a task may take fewer than Ctx's 10,000 that tell them apart.
         show: |v| ctx(v as u64),
-        ..col("Tok/task", "tokens", "output tokens one coding task took on DeepSWE, as measured", |m| m.task_tokens)
+        ..col("Tok/task", "tokens", "output tokens per coding task on DeepSWE, measured by Epoch AI", |m| m.task_tokens)
     },
     Col {
         only: Some(Source::Aa),

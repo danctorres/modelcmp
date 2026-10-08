@@ -22,8 +22,8 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | coding per dollar, ranked 0-100 |
-| $task | $ one coding task cost, [measured](#task). From Epoch AI |
-| Tok/task | output tokens one coding task took, [measured](#task). From Epoch AI |
+| $task | USD per coding task, [measured](#task) by Epoch AI |
+| Tok/task | output tokens per coding task, [measured](#task) by Epoch AI |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
 | Via | the harnesses that have the model |
