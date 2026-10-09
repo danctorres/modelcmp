@@ -405,6 +405,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: overlay, highlight, filter, S, F, E, task"),
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
+            ("K", "Artificial Analysis API key, to add or replace it"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
             ("H", "default harness, for x, Y, --cmd and --id"),
         ],
@@ -546,11 +547,13 @@ pub enum Input {
         cur: usize,
     },
     /// Typing Artificial Analysis's API key: on the first start, where esc skips it for Epoch AI,
-    /// under `--source aa` with none saved, or when it turned the saved one down (`wrong`).
+    /// under `--source aa` with none saved, when it turned the saved one down (`wrong`), or on
+    /// `K` (`asked`), where esc and a click leave everything as it was.
     Key {
         text: String,
         cur: usize,
         wrong: bool,
+        asked: bool,
     },
     /// Typing a minimum (`>`) or maximum (`<`) for column `col`.
     Bound {
@@ -706,6 +709,17 @@ impl Input {
     /// A choice list with the cursor on `sel` and nothing searched yet.
     fn choose(title: &'static str, kind: Kind, items: Vec<(String, Effect)>, sel: usize) -> Self {
         Self::Choose { title, kind, items, list: List::at(sel) }
+    }
+
+    /// The API key prompt with nothing typed yet.
+    pub fn key(wrong: bool, asked: bool) -> Self {
+        Self::Key { text: String::new(), cur: 0, wrong, asked }
+    }
+
+    /// The key prompt `K` opened, which esc and a click leave: not one that esc answers with
+    /// Epoch AI, nor one for a key turned down.
+    fn leavable(&self) -> bool {
+        !matches!(self, Self::Key { asked: false, .. } | Self::Key { wrong: true, .. })
     }
 }
 
@@ -1147,6 +1161,11 @@ pub struct App {
     /// The TUI opened asking for Artificial Analysis's key, with no data: skipping it is Epoch AI.
     /// Not so with `--source`, which picked one for the run.
     pub first_start: bool,
+    /// The saved key that one typed on `K` replaced, back if the new one is turned down.
+    pub old_key: Option<String>,
+    /// A key was just saved: the switch to Artificial Analysis downloads, whatever is cached,
+    /// so that the key is checked.
+    unchecked: bool,
     /// What `q` asked to quit from, which any key but a second `q` goes back to: an open list.
     asked_from: Input,
     /// The terminal's background colour, when it told at start (`tui::terminal_bg`): with the
@@ -1212,6 +1231,8 @@ impl App {
             cache_on: 0.0,
             cache_hint: "",
             first_start: false,
+            old_key: None,
+            unchecked: false,
             asked_from: Input::None,
             term_bg: None,
         };
@@ -1848,6 +1869,7 @@ impl App {
         self.refresh_failed = res.is_err();
         match res {
             Ok(mut d) => {
+                self.old_key = None;
                 // An error still standing, as the start's of an unreadable user.json, is not
                 // replaced by the news that the refresh went well, nor by its warning. Why a
                 // key did nothing is. The news replaces no other message either: what a switch
@@ -1869,9 +1891,13 @@ impl App {
             // else, which the prompt would throw away.
             Err(e @ (Failure::BadKey | Failure::NoKey)) => {
                 let from_env = crate::data::aa_key_env().is_some();
-                if !from_env && self.input == Input::None {
+                // The prompt `K` opened meanwhile is the one to say so in.
+                if !from_env && let Input::Key { wrong, .. } = &mut self.input {
+                    *wrong |= e == Failure::BadKey;
                     self.report(Err(e.to_string()));
-                    self.input = Input::Key { text: String::new(), cur: 0, wrong: e == Failure::BadKey };
+                } else if !from_env && self.input == Input::None {
+                    self.report(Err(e.to_string()));
+                    self.input = Input::key(e == Failure::BadKey, false);
                 } else {
                     let fell = self.switch(Source::Epoch).is_some();
                     let why = if from_env { format!("{e} in {}", crate::data::AA_KEY_ENV) } else { e.to_string() };
@@ -1966,7 +1992,7 @@ impl App {
     /// downloaded, which replaces any refresh under way for the other source. Until then the
     /// table is empty rather than showing the other source's scores under this one's name.
     pub fn switched(&mut self, cached: Option<Data>) -> bool {
-        let fetch = cached.as_ref().is_none_or(Data::stale);
+        let fetch = std::mem::take(&mut self.unchecked) || cached.as_ref().is_none_or(Data::stale);
         self.set_data(cached.unwrap_or_default());
         (self.refreshing, self.refresh_failed) = (fetch, false);
         fetch
@@ -2654,8 +2680,8 @@ impl App {
         // leaves it. An entry or a note being written is only left, its panel staying open.
         let writing = self.editing() || matches!(self.input, Input::Note { .. });
         if m == Mouse::Close && !writing {
-            // The key prompt stays open: closing it would skip the key, for Epoch AI.
-            if matches!(self.input, Input::Key { .. }) {
+            // The key prompt stays open: closing it would skip the key, for Epoch AI. Not `K`'s.
+            if !self.input.leavable() {
                 return None;
             }
             if self.input != Input::None {
@@ -2676,8 +2702,8 @@ impl App {
             let search = matches!(self.input, Input::Search { .. });
             match m {
                 Mouse::Scroll(_) | Mouse::Cols(_) => return None,
-                // The key prompt stays open: closing it would skip the key, for Epoch AI.
-                _ if matches!(self.input, Input::Key { .. }) => return None,
+                // The key prompt stays open: closing it would skip the key, for Epoch AI. Not `K`'s.
+                _ if !self.input.leavable() => return None,
                 _ if search => drop(self.input_key(KeyCode::Enter, KeyModifiers::NONE)),
                 _ => return self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             }
@@ -3221,6 +3247,11 @@ impl App {
                 return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
+            // A saved key would not replace the environment's.
+            KeyCode::Char('K') if crate::data::aa_key_env().is_some() => {
+                self.refuse(format!("the key is from {}, change it there", crate::data::AA_KEY_ENV));
+            }
+            KeyCode::Char('K') => self.input = Input::key(false, true),
             KeyCode::Char('t') => {
                 let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
@@ -3342,17 +3373,30 @@ impl App {
                     self.rebuild();
                 }
             }
-            Input::Key { text, cur, wrong } => match code {
+            Input::Key { text, cur, wrong, asked } => match code {
                 KeyCode::Enter if !text.trim().is_empty() => {
+                    let (wrong, old) = (*wrong, crate::data::aa_key());
                     let res = crate::data::save_aa_key(text);
                     self.input = Input::None;
+                    // The key this one replaces, unless that one was turned down.
+                    if res.is_ok() && !wrong && self.old_key.is_none() {
+                        self.old_key.clone_from(&old);
+                    }
                     return match res {
                         // A refresh under way has the old key: start over, the shell drops it.
                         Ok(()) if crate::data::source() == Source::Aa => {
                             self.refreshing = false;
                             self.refresh()
                         }
-                        Ok(()) => self.switch(Source::Aa),
+                        Ok(()) => {
+                            self.unchecked = true;
+                            self.switch(Source::Aa)
+                        }
+                        // The one before is still saved, and still the key.
+                        Err(e) if old.is_some() && !wrong => {
+                            self.report(Err(format!("could not save the key: {e}")));
+                            None
+                        }
                         // No key that works, as with esc.
                         Err(e) => {
                             let effect = self.switch(Source::Epoch);
@@ -3361,11 +3405,25 @@ impl App {
                         }
                     };
                 }
-                // No key, or none that works: Epoch AI, which needs none. The saved one that
-                // was turned down goes, or every start would ask again.
                 KeyCode::Esc => {
-                    let wrong = *wrong;
+                    let (wrong, asked) = (*wrong, *asked);
                     self.input = Input::None;
+                    // The key that `K` replaced is back when the new one was turned down.
+                    if wrong
+                        && let Some(old) = self.old_key.take()
+                        && crate::data::save_aa_key(&old).is_ok()
+                    {
+                        self.refreshing = false;
+                        let effect = self.refresh();
+                        self.report(Err(format!("{}, the one before is back", Failure::BadKey)));
+                        return effect;
+                    }
+                    // `K` asked: what was there stays.
+                    if asked && !wrong {
+                        return None;
+                    }
+                    // No key, or none that works: Epoch AI, which needs none. The saved one that
+                    // was turned down goes, or every start would ask again.
                     let effect = self.switch(Source::Epoch);
                     if wrong {
                         self.report(Err(match crate::data::save_aa_key("") {
@@ -3954,7 +4012,7 @@ mod tests {
         assert_eq!(a.input, Input::None, "no key picks it");
         // The first start asks for the key alone, and a click beside it leaves it open.
         a.first_start = true;
-        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        a.input = Input::key(false, false);
         assert!(a.mouse(Mouse::Outside).is_none() && matches!(a.input, Input::Key { .. }), "a click beside it");
         // Skipping it is Epoch AI, loaded as the TUI opened with no data.
         assert!(matches!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch))));
@@ -3963,13 +4021,61 @@ mod tests {
         // A key typed there starts on Artificial Analysis.
         let mut k = app();
         k.first_start = true;
-        k.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        k.input = Input::key(false, false);
         press(&mut k, "key");
         assert!(matches!(code(&mut k, KeyCode::Enter), Some(Effect::Source(Source::Aa))));
         assert_eq!((crate::data::source(), crate::data::aa_key().as_deref()), (Source::Aa, Some("key")));
         crate::data::set_source(Source::Epoch);
         // A source never downloaded shows nothing until it is, not the other one's scores.
         assert!(a.switched(None) && a.data.models.is_empty() && a.refreshing);
+    }
+
+    #[test]
+    fn k_asks_for_the_key() {
+        // None yet: esc leaves Epoch AI, and a key typed there starts on Artificial Analysis.
+        let mut a = app();
+        press(&mut a, "K");
+        assert!(matches!(a.input, Input::Key { wrong: false, .. }));
+        assert_eq!(code(&mut a, KeyCode::Esc), None);
+        assert!(a.input == Input::None && crate::data::source() == Source::Epoch);
+        press(&mut a, "Kold");
+        assert!(matches!(code(&mut a, KeyCode::Enter), Some(Effect::Source(Source::Aa))));
+        // Esc keeps a key that works, and another one replaces it.
+        press(&mut a, "K");
+        assert_eq!(code(&mut a, KeyCode::Esc), None);
+        assert_eq!((crate::data::source(), crate::data::aa_key().as_deref()), (Source::Aa, Some("old")));
+        press(&mut a, "Knew");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Refresh));
+        assert_eq!(crate::data::aa_key().as_deref(), Some("new"));
+        // A click leaves it as esc does, unlike the prompts that esc answers with Epoch AI.
+        press(&mut a, "K");
+        assert!(a.mouse(Mouse::Outside).is_none() && a.input == Input::None);
+        // Turned down, the new key gives way to the one it replaced.
+        a.refreshed(Ok(Data::default()), tools());
+        press(&mut a, "Ktypo");
+        code(&mut a, KeyCode::Enter);
+        assert!(!a.refreshed(Err(Failure::BadKey), tools()));
+        assert!(matches!(a.input, Input::Key { wrong: true, .. }));
+        assert_eq!(code(&mut a, KeyCode::Esc), Some(Effect::Refresh));
+        assert_eq!((crate::data::source(), crate::data::aa_key().as_deref()), (Source::Aa, Some("new")));
+        assert!(a.failed && a.status.contains("rejected"), "{}", a.status);
+        // A rejection of the saved key lands in the prompt open for another, where esc removes it.
+        press(&mut a, "K");
+        assert!(!a.refreshed(Err(Failure::BadKey), tools()));
+        assert!(matches!(a.input, Input::Key { wrong: true, asked: true, .. }));
+        assert_eq!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch)));
+        assert_eq!(crate::data::aa_key(), None);
+        // A key typed on Epoch AI is checked by a download, whatever is cached.
+        press(&mut a, "Kkey");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.unchecked && a.switched(None) && !a.unchecked);
+        crate::data::save_aa_key("").unwrap();
+        // One from the environment is changed there.
+        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = Some("env".into()));
+        press(&mut a, "K");
+        assert!(a.input == Input::None && a.failed && a.status.contains(crate::data::AA_KEY_ENV));
+        crate::data::TEST_KEYS.with(|k| *k.borrow_mut() = [None, None]);
+        crate::data::set_source(Source::Epoch);
     }
 
     #[test]
@@ -6084,7 +6190,7 @@ mod tests {
         assert_eq!(press(&mut a, "qq"), Some(Effect::Quit));
         let mut a = app();
         a.first_start = true;
-        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        a.input = Input::key(false, false);
         assert!(press(&mut a, "q").is_none(), "a letter of the key on the first start");
         assert!(matches!(&a.input, Input::Key { text, .. } if text == "q"));
         assert_eq!(ctrl(&mut a, 'c'), Some(Effect::Quit), "ctrl-c quits at once");

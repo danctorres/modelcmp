@@ -78,7 +78,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     let (mut rx, mut pre) = (None, None);
     if ask {
         app.first_start = true;
-        app.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        app.input = Input::key(false, false);
         // The key is not answered yet: the default's download starts under the intro, for a skipped
         // key to take up, unless the CLI has left a cache that will do.
         pre = (force || data::load_cache().is_none_or(|d| d.stale())).then(spawn_refresh);
@@ -997,6 +997,10 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             }
             if stale(app) {
                 view.push("r refresh");
+            }
+            // Epoch AI is what no key, or one turned down, leaves.
+            if data::source() == data::Source::Epoch {
+                view.push("K api key");
             }
             let mut back = vec![];
             // Where esc goes back from, as in the overlays.
@@ -2271,7 +2275,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         }
         Input::Note { text, cur, .. } => Some(("note: ".to_string(), text, *cur)),
         // Hidden from anyone looking at the screen; one `*` per byte keeps `cur` in place.
-        Input::Key { text, cur, wrong } => {
+        Input::Key { text, cur, wrong, .. } => {
             masked = "*".repeat(text.len());
             Some((key_ask(*wrong), &masked, *cur))
         }
@@ -2303,7 +2307,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             (true, true) => "↓ ↑ move  enter pick  esc clear",
             // The key prompt, where esc is Epoch AI: as the first start's box says. One for a
             // key turned down says what esc does to it.
+            _ if matches!(app.input, Input::Key { wrong: true, .. }) && app.old_key.is_some() => {
+                "enter save  esc keep the old key"
+            }
             _ if matches!(app.input, Input::Key { wrong: true, .. }) => "enter save  esc remove the key",
+            _ if matches!(app.input, Input::Key { asked: true, .. }) => "enter save  esc cancel",
             _ if matches!(app.input, Input::Key { .. }) => "enter save  esc skip",
             _ => "enter apply  esc cancel",
         };
@@ -3155,7 +3163,7 @@ mod tests {
         let row = |lines: &[String], pat: &str| lines.iter().position(|l| l.contains(pat)).map(|y| y as u16);
         let mut a = app();
         a.first_start = true;
-        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        a.input = Input::key(false, false);
         a.store.warning = Some("user.json is not valid".into());
         let lines = screen(&mut a, 120, 30);
         assert!(lines[29].contains("user.json is not valid"), "the start's warning shows under it");
@@ -3164,7 +3172,7 @@ mod tests {
         assert!(tagline < ask, "the question is under the wordmark");
         assert_eq!(row(&lines, "ctrl+c quits"), Some(ask + key_lines(0).len() as u16), "every line of it");
         // The key is typed in the box, hidden, and not in the status bar.
-        a.input = Input::Key { text: "abc".into(), cur: 3, wrong: false };
+        a.input = Input::Key { text: "abc".into(), cur: 3, wrong: false, asked: false };
         let lines = screen(&mut a, 120, 30);
         assert_eq!(row(&lines, "key: ***"), Some(ask + 1 + KEY_ROW as u16));
         assert!(!lines[29].contains("API key"), "{}", lines[29]);
@@ -3226,12 +3234,16 @@ mod tests {
         let (buf, lines) = render(&mut a, 200, 4);
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
-        assert!(lines[3].contains("s sort  d dropdown  % no cache  r refresh  │  enter details"), "{}", lines[3]);
+        assert!(
+            lines[3].contains("s sort  d dropdown  % no cache  r refresh  K api key  │  enter details"),
+            "{}",
+            lines[3]
+        );
         a.refreshing = true;
         data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
         assert!(
-            lines[3].contains("s sort  d dropdown  % 90% cached  │"),
+            lines[3].contains("s sort  d dropdown  % 90% cached  K api key  │"),
             "off the default, the way back: {}",
             lines[3]
         );
@@ -3609,11 +3621,15 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  H harness  | columns  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "h l column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]
         );
+        // The key's hint goes once Artificial Analysis is the source.
+        data::set_source(data::Source::Aa);
+        assert!(!hints(&a, 200).contains(&"K api key"));
+        data::set_source(data::Source::Epoch);
         assert_eq!(buf[(cell(&lines[5], "│"), 5)].fg, MUTED, "groups are split by a muted rule");
         assert!((0..200).all(|x| buf[(x, 2)].bg == CURSOR), "row 0 is under the cursor");
         assert_eq!(buf[(cell(&lines[2], "anthropic"), 2)].fg, dev_color("anthropic"), "and keeps its colours");
@@ -3821,7 +3837,7 @@ mod tests {
     #[test]
     fn a_click_on_the_key_prompts_link_opens_where_a_key_is_made() {
         let mut a = app();
-        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        a.input = Input::key(false, false);
         let area = Rect::new(0, 0, 120, 12);
         let click = |x| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),

@@ -209,7 +209,7 @@ impl std::fmt::Display for Failure {
             Failure::NoKey => {
                 write!(
                     f,
-                    "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or start the TUI with --source aa, which asks for it"
+                    "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or press K in the TUI, which asks for it"
                 )
             }
             Failure::BadKey => f.write_str("Artificial Analysis rejected the API key"),

@@ -41,7 +41,8 @@ The source in use is Artificial Analysis when its key is there and works, else E
 - The TUI's first start asks for the key, under the wordmark: `enter` saves it, `esc` skips it.
   A click on `artificialanalysis.ai` there opens the page where a free key is made.
 - The key is `ARTIFICIAL_ANALYSIS_API_KEY`, else the one saved in `aa_key` next to `user.json`,
-  readable by you alone. `modelcmp --source aa` asks for one later.
+  readable by you alone. `K` in the TUI asks for one later, to add it or replace the saved
+  one, as `modelcmp --source aa` does with none saved.
 - A saved key that Artificial Analysis rejects is asked for again, and `esc` there leaves
   Epoch AI and removes the saved key. One rejected from the environment leaves Epoch AI at
   once, and a message says so. The command line does the same, unless `--source aa` asked

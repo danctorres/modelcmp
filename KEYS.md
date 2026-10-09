@@ -12,6 +12,7 @@ commands and JSON.
 | `esc` | back: closes an overlay, drops the highlight, clears the `/` filter, leaves `S`, then `F`, then `E`, then a task picked in recommend back to recommend |
 | `qq` `^c` | quit. The first `q` asks, `^c` does not. From an open list too, unless something is being typed there, and any other key is back on the list |
 | `r` | refresh data now |
+| `K` | Artificial Analysis's API key: type it to add or replace the saved one. `enter` saves it and loads Artificial Analysis, `esc` or a click elsewhere keeps what was there. A new key that is rejected is asked for again, and `esc` there brings back the one it replaced. A key set in `ARTIFICIAL_ANALYSIS_API_KEY` is changed there. `K api key` is a hint in the table's status bar while Epoch AI is the source |
 | `UU` | upgrade modelcmp when the frame's bottom left says a newer version is available. The first `U` asks. It closes the TUI, runs `brew upgrade` on a Homebrew install or `cargo install` of the new release on a cargo one, and starts the new version. A binary installed by hand gets the release's page opened instead |
 | `H` | your default harness: lists `any harness`, then the harnesses you have a model on, starting on yours. `enter` picks one, `esc` leaves it as it was, and `H harness` is a hint in the table's status bar. `x` starts on it and `Y` copies the id it takes, for a model it has, and `--cmd` and `--id` go by it when `--via` names none, after a favorite's own harness (`v` in `f`'s grid). It hides no model. Saved in `user.json`, as `modelcmp harness claude` sets it |
 
