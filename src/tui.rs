@@ -2801,8 +2801,8 @@ fn help(query: &str) -> Vec<Line<'static>> {
 }
 
 /// What a box of recommend's grid shows.
-const TIER_LEGEND: &str = "each tier's model: ★ your favorite, else the best free, up to $2, up to $5 and of all, \
-                           as name $/1M tokens (score on the task)";
+const TIER_LEGEND: &str = "the best model for each task at each price: free, low up to $2, mid up to $5 and high any, \
+                           or ★ your favorite. Each box shows the model's name, its price per 1M tokens and, in parentheses, its score on the task.";
 
 /// What recommend leaves out, and how to pick it anyway.
 const UNRATED: &str = "only models with a benchmark score are ranked, so a new model may be missing. \
@@ -2846,7 +2846,7 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
     let keyless = data::source() == data::Source::Epoch && data::aa_key().is_none();
     let mut warn: Vec<Line> = words(UNRATED);
     warn.extend(if keyless { words(MORE_RATED) } else { vec![] });
-    let warning = vec![Span::styled("warning: ", fg(BAD))];
+    let warning = vec![Span::styled("warning: ", fg(Color::Yellow))];
     v.extend(wrapped(warning, warn, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
     v.push(Line::default());
     let own = app.store.custom_tasks();
@@ -2914,11 +2914,6 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
     under.resize(under.len().max(3), Line::default());
     v.extend(under);
     let pin = pin..v.len();
-    v.push(Line::default());
-    let cli = words(
-        "CLI: modelcmp recommend · modelcmp list --task <task> [--tier low|mid|high] · modelcmp fav <task> <model> [--tier low|mid|high]",
-    );
-    v.extend(wrapped(vec![], cli, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
     (v, block.or(Some(0..among)), pin)
 }
 
@@ -4446,8 +4441,8 @@ mod tests {
         assert!(bar.contains("PICK") && bar.contains("Dev ▾"), "the prompt wins over its key hint: {bar}");
         assert_eq!(scrolled(4, "abcdefgh", 8, 8), 5, "text past its room starts where the cursor still shows");
         assert_eq!(scrolled(4, "abc", 3, 8), 0, "and text that fits, at its start");
-        // Recommend's legend and its last lines have no cursor: they show with the first and
-        // the last task.
+        // Recommend's legend has no cursor: it shows with the first task, and the lines under
+        // the grid with the last.
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
         let mut a = app();
         let mut screen = |a: &mut App, keys: &str| {
@@ -4457,9 +4452,9 @@ mod tests {
             (0..16).map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
         };
         let last = screen(&mut a, "RG");
-        assert!(last.contains("CLI: modelcmp recommend"), "{last}");
+        assert!(last.contains("  use for: "), "{last}");
         let first = screen(&mut a, "gg");
-        assert!(first.contains("each tier's model:"), "{first}");
+        assert!(first.contains("the best model for each task"), "{first}");
         // The lines under the grid, which say what the cursor is on, stay under the rows that scroll.
         let top = screen(&mut a, "j2l");
         assert!(top.contains("overall") && top.contains("  low:     no data"), "{top}");
