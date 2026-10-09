@@ -86,7 +86,7 @@ for a task and `/` filters. `enter` shows everything about a model, `o` opens it
 a site like OpenRouter, `x` starts a harness on it and `t` changes the theme. `?` lists the
 keys and `qq` quits.
 
-![The model recommended for each task and tier](https://github.com/user-attachments/assets/bb30bc6d-8b18-4315-a7e2-2d51c9d16c2f)
+![The model recommended for each task and tier](https://github.com/user-attachments/assets/781a6bce-e79b-4a00-af14-4cdd3c3767c5)
 
 <p align="center"><i>The model recommended for each task and tier.</i></p>
 
