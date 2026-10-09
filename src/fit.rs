@@ -258,9 +258,9 @@ pub fn months(date: &str) -> Option<f64> {
 /// of the best score is not (an index has no zero) and a gap in points is not either (each
 /// benchmark moves at its own pace); a percentile among every model ever scored counts a
 /// model at half the best score as near the top. A task scored for less than `WINDOW` months,
-/// or whose best has not risen in them, has no lag, and each of its tiers picks the best; nor
-/// has one whose best of then scored nothing, the benchmark being too hard to tell how far
-/// behind that was. "value" has none, being a rank.
+/// or whose best has not risen in them, has no lag, and each of its tiers picks the best. A
+/// best of then that scored nothing still gives a pace: the floor hides part of the rise, so
+/// the lags come out too long, the strict side. "value" has none, being a rank.
 // ponytail: a straight line over `WINDOW`; a benchmark whose scores rose in a few of those
 // months counts its models as closer than they are. The best score at each date if it bites.
 pub fn add_lag(models: &mut [Model], now: f64) {
@@ -274,7 +274,7 @@ pub fn add_lag(models: &mut [Model], now: f64) {
         let (best, old) = (best(false), best(true));
         let rate = (best - old) / WINDOW;
         for m in models.iter_mut() {
-            match score(m).filter(|_| rate > 0.0 && rate.is_finite() && old > 0.0) {
+            match score(m).filter(|_| rate > 0.0 && rate.is_finite()) {
                 Some(s) => m.lag.insert(t.name.to_string(), (best - s) / rate),
                 None => m.lag.remove(t.name),
             };
@@ -372,17 +372,17 @@ mod tests {
             model(Some(124.0), "2026-09-20"),
             model(None, "2026-09-20"),
         ];
-        ms[1].shown.insert("coding".into(), 50.0);
+        ms[1].shown.insert("coding".into(), 48.0);
         add_lag(&mut ms, now);
         let lag = |ms: &[Model], task: &str| ms.iter().map(|m| m.lag.get(task).copied()).collect::<Vec<_>>();
         assert_eq!(lag(&ms, "overall"), [Some(12.0), Some(3.0), Some(0.0), None]);
         assert_eq!(lag(&ms, "vision"), lag(&ms, "overall"), "ranked by the same index");
         assert_eq!(lag(&ms, "coding"), [None; 4], "one score, a year ago none: no pace to go by");
         assert_eq!(lag(&ms, "value"), [None; 4], "a rank, not a score");
-        // A year ago the best scored nothing: how far behind that was, no score says.
+        // A year ago the best scored nothing: a pace still, of 4 points a month.
         ms[0].shown.insert("coding".into(), 0.0);
         add_lag(&mut ms, now);
-        assert_eq!(lag(&ms, "coding"), [None; 4]);
+        assert_eq!(lag(&ms, "coding"), [Some(12.0), Some(0.0), None, None]);
         // Scored for under a year: no pace either, and the lags of the last data go.
         ms[0].release = "2026-01-01".into();
         add_lag(&mut ms, now);

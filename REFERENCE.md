@@ -276,8 +276,7 @@ your best. `--tier` picks one model from that list:
 
 - A month of progress is a twelfth of what the best score on the task rose in the last year,
   among the models listed here that the source scored.
-- A task scored for less than a year, or whose best of a year ago scored nothing, has no such
-  pace, and every tier picks the best.
+- A task scored for less than a year has no such pace, and every tier picks the best.
 - `value` lists the models within 8 months of your best on coding.
 
 ### Favorites
