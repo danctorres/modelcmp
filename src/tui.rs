@@ -255,7 +255,7 @@ fn key_lines(typed: usize) -> Vec<Line<'static>> {
     vec![
         what,
         Line::from(" for more models and speed metrics "),
-        Line::from(" without it, all benchmarks come from Epoch AI "),
+        Line::from(" or skip it and all benchmarks come from Epoch AI "),
         Line::default(),
         Line::from(format!("{KEY_ASK}{stars}")),
         Line::from(" enter saves · esc skips · ctrl+c quits").style(fg(MUTED)),
