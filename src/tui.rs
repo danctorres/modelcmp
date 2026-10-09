@@ -48,8 +48,8 @@ enum Refreshed {
 /// A refresh under way: where its result comes, and its steps for the frame's count.
 type Refresh = (Receiver<Refreshed>, data::Steps);
 
-/// `ask`: no source was ever picked, nor given with `--source`, and Artificial Analysis has no
-/// key: open on its key prompt, with no data until a key is typed or skipped.
+/// `ask`: the first start, with no `--source` and no key for Artificial Analysis: open on its
+/// key prompt, with no data until a key is typed or skipped.
 pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // Run by an agent or a script there is no terminal to draw on: say so before any download or
     // harness is started, not after.
@@ -59,7 +59,8 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // The first start of a version, so the first ever or the first after an upgrade, plays the
     // intro. Noted now, while the store is fresh from the file.
     let new = store.seen != env!("CARGO_PKG_VERSION");
-    if new {
+    // Not before the first start's question is answered, or quitting there would skip it for good.
+    if new && !ask {
         let _lock = crate::store::lock(&crate::store::path());
         store.reload_if_changed();
         store.seen = env!("CARGO_PKG_VERSION").into();
@@ -78,7 +79,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     if ask {
         app.first_start = true;
         app.input = Input::Key { text: String::new(), cur: 0, wrong: false };
-        // No source is picked yet: the default's download starts under the intro, for a skipped
+        // The key is not answered yet: the default's download starts under the intro, for a skipped
         // key to take up, unless the CLI has left a cache that will do.
         pre = (force || data::load_cache().is_none_or(|d| d.stale())).then(spawn_refresh);
     } else if (force || app.data.stale()) && app.refresh().is_some() {
@@ -439,7 +440,10 @@ fn event_loop(
             Some(Refreshed::Early(d)) => app.set_data(d),
             Some(Refreshed::Done(res, tools)) => {
                 rx = None;
-                app.refreshed(res, tools);
+                // The key did not work: Epoch AI's, from its cache or a download.
+                if app.refreshed(res, tools) && app.switched(data::load_cache()) {
+                    rx = Some(spawn_refresh());
+                }
             }
             None => {}
         }
@@ -595,12 +599,16 @@ fn event_loop(
                         ask_size(key, base);
                     }
                     Some(Effect::Source(src)) => {
-                        if let Err(e) = app.store.save() {
-                            app.report(Err(format!("could not save: {e}")));
+                        // The first start's question is answered: not asked again.
+                        if app.store.seen.is_empty() {
+                            app.store.seen = env!("CARGO_PKG_VERSION").into();
+                            if let Err(e) = app.store.save() {
+                                app.report(Err(format!("could not save: {e}")));
+                            }
                         }
                         // A refresh under way is for the other source: drop it, or it lands here.
-                        // The first start's is for the default: picked, it is the one to wait for.
-                        // One that ended before the pick is taken up all the same, for its warning.
+                        // The first start's is for the default: skipped to, it is the one to wait for.
+                        // One that ended before that is taken up all the same, for its warning.
                         let pre = pre.take().filter(|_| src == data::Source::default());
                         let fetch = app.switched(data::load_cache());
                         rx = pre.or_else(|| fetch.then(spawn_refresh));
@@ -727,14 +735,6 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             let x = usize::from(m.column.saturating_sub(rect.x + 2));
             let col = x.saturating_sub(fav_name_w(items) + 2) / BOX_W;
             return (col < BOXES).then_some(Mouse::Tick(row, col));
-        }
-        if let Input::Choose { kind: Kind::Source, items, list, .. } = &app.input {
-            let (label, effect) = &items[*choice_rows(items, &list.query).get(k)?];
-            // Past the box's padding and the entry's own space, as `choice_lines` draws it.
-            let x = usize::from(m.column - inner.x).checked_sub(2);
-            if source_link(label, effect).zip(x).is_some_and(|(l, x)| l.contains(&x)) {
-                return Some(Mouse::Link);
-            }
         }
         return (k < len).then_some(Mouse::Item(k));
     }
@@ -967,7 +967,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
         View::Table => {
-            let mut view = vec!["B benchmarks", "H harness", "| columns", "/ filter", "s sort"];
+            let mut view = vec!["H harness", "| columns", "/ filter", "s sort"];
             if app.menu(app.col) {
                 view.push("d dropdown");
             }
@@ -1122,14 +1122,6 @@ fn palette(app: &App) -> Option<&'static Palette> {
 const ACCENT: Color = Color::Magenta;
 const KEY: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
-/// A benchmark source's colour: the headers of the columns with its values, and its name on the
-/// frame's bottom border, so ECI or AAII says which one the task columns are of.
-const fn source_color(s: data::Source) -> Color {
-    match s {
-        data::Source::Epoch => Color::Cyan,
-        data::Source::Aa => Color::Yellow,
-    }
-}
 const GOOD: Color = Color::Green;
 const BAD: Color = Color::Red;
 /// A marked row's fill and its ✓, the ✓ of a ticked entry in a list and the count in the
@@ -1429,7 +1421,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
         };
-        // A state still too long would run over the version: the source goes, which `B` shows too.
+        // A state still too long would run over the version: the source goes.
         let named = state.chars().count() <= room;
         let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, app.col_name(app.sort_col));
         let sort_w = sort.chars().count();
@@ -1439,11 +1431,11 @@ fn draw(app: &mut App, f: &mut Frame) {
             .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
             .title_bottom(version)
             .title_bottom(
-                // The source in its colour, as the headers of its columns are.
+                // The source in the headers' colour.
                 Line::from_iter(
                     [
                         Span::styled(" models.dev + ", fg(MUTED)),
-                        Span::styled(data::source().label(), fg(source_color(data::source()))),
+                        Span::styled(data::source().label(), fg(ACCENT)),
                         Span::styled(" · ", fg(MUTED)),
                     ]
                     .into_iter()
@@ -1781,10 +1773,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         false => "",
     };
     // The column under the cursor: its header reversed, its cells bold and a thick rule under it,
-    // as VisiData shows its current column; the values keep their colours. A column with a
-    // benchmark source's values has its header in the source's colour (`source_color`).
+    // as VisiData shows its current column; the values keep their colours.
     let header = |i: usize| {
-        let style = fg(app.col_source(i).map_or(ACCENT, source_color)).add_modifier(BOLD);
+        let style = fg(ACCENT).add_modifier(BOLD);
         if i == app.col { style.add_modifier(Modifier::REVERSED) } else { style }
     };
     // The marks: the checkbox, then the ☆, then the ✗ box.
@@ -2232,7 +2223,6 @@ fn mode(app: &App) -> (&'static str, Color) {
                 Kind::Via => "VIA",
                 Kind::Fav => "FAV",
                 Kind::Theme => "THEME",
-                Kind::Source => "SOURCE",
                 Kind::Harness => "HARNESS",
                 Kind::Cols => "COLUMNS",
                 Kind::Open => "OPEN",
@@ -2311,8 +2301,10 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             (true, false) => "j k move  / search  space enter toggle  esc close",
             (true, true) if toggles => "↓ ↑ move  enter toggle  esc clear",
             (true, true) => "↓ ↑ move  enter pick  esc clear",
-            // The first start's key prompt, as its box says.
-            _ if app.first_start => "enter save  esc skip",
+            // The key prompt, where esc is Epoch AI: as the first start's box says. One for a
+            // key turned down says what esc does to it.
+            _ if matches!(app.input, Input::Key { wrong: true, .. }) => "enter save  esc remove the key",
+            _ if matches!(app.input, Input::Key { .. }) => "enter save  esc skip",
             _ => "enter apply  esc cancel",
         };
         let width = |s: &str| Span::raw(s).width();
@@ -2534,14 +2526,6 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     lines
 }
 
-/// The link in a source's entry of the "benchmarks?" list, as bytes of its ASCII label: the site
-/// its API key is had at, which its description ends with.
-fn source_link(label: &str, effect: &Effect) -> Option<Range<usize>> {
-    let site = data::Source::Aa.site();
-    (*effect == Effect::Source(data::Source::Aa) && label.ends_with(site))
-        .then(|| label.len() - site.len()..label.len())
-}
-
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `f`'s grid has lines of its own, `fav_lines`.
 fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line<'static>> {
@@ -2559,10 +2543,8 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
                 }
                 _ => Color::Reset,
             };
-            // A name, then what follows it muted: a source and what it takes, a harness and
-            // the command that opens it.
+            // A name, then what follows it muted: a harness and the command that opens it.
             let name = match effect {
-                Effect::Source(src) => Some((label.len() - src.about().len(), Style::new().add_modifier(BOLD))),
                 Effect::Launch(_) | Effect::Via(..) | Effect::Harness(_) | Effect::Col(_) => {
                     Some((label.find(' ').unwrap_or(label.len()), fg(color)))
                 }
@@ -2570,16 +2552,8 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
             };
             if let Some((end, style)) = name {
                 let (name, rest) = label.split_at(end);
-                // Where a key is had is a link: underlined, and a click on it opens the page (`hit`).
-                let mut spans = match source_link(label, effect) {
-                    Some(l) => vec![
-                        Span::styled(format!(" {name}"), style),
-                        Span::styled(label[end..l.start].to_string(), fg(MUTED)),
-                        Span::styled(label[l].to_string(), fg(MUTED).add_modifier(Modifier::UNDERLINED)),
-                        Span::styled(" ", fg(MUTED)),
-                    ],
-                    None => vec![Span::styled(format!(" {name}"), style), Span::styled(format!("{rest} "), fg(MUTED))],
-                };
+                let mut spans =
+                    vec![Span::styled(format!(" {name}"), style), Span::styled(format!("{rest} "), fg(MUTED))];
                 // A column has its checkbox, as an entry of a dropdown: ticked while it shows.
                 if let Effect::Col(c) = effect {
                     let on = !crate::app::hidden(*c);
@@ -2600,7 +2574,7 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
         Kind::Cols => " j k move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
-        Kind::Source | Kind::Harness => " j k move · / search · enter picks · esc close",
+        Kind::Harness => " j k move · / search · enter picks · esc close",
         Kind::Via => " j k move · / search · enter picks · esc back",
         Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
     };
@@ -3207,7 +3181,7 @@ mod tests {
         assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), MouseEvent { column: column - 1, ..click }), Some(Mouse::Outside));
         assert_eq!(a.mouse(Mouse::Link), Some(Effect::Open(data::AA_KEY_URL.into())));
         assert!(matches!(a.input, Input::Key { .. }), "the prompt stays for the key");
-        // Too small for both: over the table, as `B` asks later.
+        // Too small for both: over the table, as a rejected key is asked for later.
         let lines = screen(&mut a, 120, 12);
         assert!(row(&lines, "Model").is_some() && row(&lines, TAGLINE).is_none());
         // The key could not be saved: the table, where the status bar says so.
@@ -3439,11 +3413,6 @@ mod tests {
                 far("a task and muted", x, of(MUTED), 60.0);
             }
             p.accents.iter().for_each(|&x| far("a developer and muted", x, of(MUTED), 60.0));
-            // A header says by its colour whose values the column has: a source's, or neither's.
-            let heads = [of(ACCENT), of(source_color(data::Source::Epoch)), of(source_color(data::Source::Aa))];
-            for (i, &x) in heads.iter().enumerate() {
-                heads[i + 1..].iter().for_each(|&y| far("headers", x, y, 60.0));
-            }
             let [mark, cursor] = [MARK, CURSOR].map(|c| hex(fill(c, p)));
             far("the fills", mark, cursor, 14.0);
             // A match is told from the name around it by its yellow, as a gold ★ and a mid price
@@ -3640,7 +3609,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  B benchmarks  H harness  | columns  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "h l column  │  H harness  | columns  / filter  s sort  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -4000,9 +3969,8 @@ mod tests {
         let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
         let star = |m: &str| buf[at(lines.iter().position(|l| l.contains(m)).unwrap(), "★")].fg;
         assert_eq!(star("opus"), STAR, "no task picked: a gold ★ that says favorite for some task");
-        assert_eq!(buf[at(0, "Price")].fg, ACCENT, "the other headers are one colour");
-        // But those of a benchmark source's values, in its colour: ECI or AAII says which one
-        // the task columns are of, and the bottom border names it in that colour.
+        // Every header is one colour whichever source its values are from, as the source's
+        // name on the bottom border.
         data::set_lent(true);
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 10)).unwrap();
         for src in data::Source::ALL {
@@ -4015,10 +3983,9 @@ mod tests {
                 let y = rows.iter().position(|l| l.contains(on)).unwrap();
                 wide[(rows[y][..rows[y].find(pat).unwrap()].chars().count() as u16, y as u16)].fg
             };
-            let (epoch, aa, own) =
-                (source_color(data::Source::Epoch), source_color(data::Source::Aa), source_color(src));
-            assert_eq!((cell("ECI"), cell("AAII")), (epoch, aa));
-            assert_eq!((cell("Coding"), cell("Value"), cell(src.label())), (own, own, own));
+            for pat in ["Price", "ECI", "AAII", "Coding", "Value", src.label()] {
+                assert_eq!(cell(pat), ACCENT, "{pat}");
+            }
         }
         data::set_source(data::Source::Epoch);
         data::set_lent(false);
@@ -4637,9 +4604,6 @@ mod tests {
         assert_eq!(fgs(Kind::Open, "epoch.ai", Effect::Open(String::new())), [Some(Color::Reset)]);
         let pi = fgs(Kind::Launch, "pi --model x", Effect::Launch(vec![]));
         assert_eq!(pi, [Some(dev_color("pi")), Some(MUTED)], "the harness as in Via, its command muted");
-        let src = data::Source::Epoch;
-        let label = format!("{:<20} {}", src.label(), src.about());
-        assert_eq!(fgs(Kind::Source, &label, Effect::Source(src)), [None, Some(MUTED)], "what it takes muted");
     }
 
     #[test]

@@ -22,7 +22,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
 | Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
-| Value | coding per dollar, ranked 0-100 |
+| Value | Coding score per dollar of Price, ranked 0-100 |
 | $task | USD per coding task, [measured](#task) by Epoch AI |
 | Tok/task | output tokens per coding task, [measured](#task) by Epoch AI |
 | Tok/s | output tokens per second. From Artificial Analysis |
@@ -32,9 +32,20 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 
 One table shows the columns of both sources. The ones of the source not in use show when both
 are cached, which takes an Artificial Analysis key, and were fetched within a day of each other.
-ECI and AAII keep their places, and the table starts sorted by the one of the source picked with
-`B`. The task scores, Value and the recommendations stay with that source. In the TUI,
+ECI and AAII keep their places, and the table starts sorted by the one of the source in use.
+The task scores, Value and the recommendations stay with that source. In the TUI,
 `|` picks the columns to show.
+
+The source in use is Artificial Analysis when its key is there and works, else Epoch AI.
+
+- The TUI's first start asks for the key, under the wordmark: `enter` saves it, `esc` skips it.
+  A click on `artificialanalysis.ai` there opens the page where a free key is made.
+- The key is `ARTIFICIAL_ANALYSIS_API_KEY`, else the one saved in `aa_key` next to `user.json`,
+  readable by you alone. `modelcmp --source aa` asks for one later.
+- A saved key that Artificial Analysis rejects is asked for again, and `esc` there leaves
+  Epoch AI and removes the saved key. One rejected from the environment leaves Epoch AI at
+  once, and a message says so. The command line does the same, unless `--source aa` asked
+  for Artificial Analysis, which is then an error when no cached data is left to show.
 
 ### Price
 
@@ -72,7 +83,7 @@ With Epoch AI, the default, it is one widely run benchmark about the task:
 - Agentic: APEX-Agents
 - Reason: LMCA
 
-With Artificial Analysis (`B`, `--source aa`):
+With Artificial Analysis (its key, or `--source aa`):
 
 - Coding: the mean of Terminal-Bench 4.0 and SciCode
 - Agentic: Terminal-Bench 4.0
@@ -101,8 +112,7 @@ Where the numbers in the score columns come from.
 
 What a refresh downloads:
 
-- Both sources, Artificial Analysis only with its key, so switching between them needs no
-  second refresh.
+- Both sources, Artificial Analysis only with its key.
 - Each source's sitemap, with or without a key, to link the models that have a page there (`o`).
 - OpenRouter's list of models, for the Hugging Face repo it names for each.
 - For an open model OpenRouter names no repo for, the repo Hugging Face has under an id a
@@ -206,7 +216,7 @@ weigh a note when choosing.
 |---|---|
 | `--refresh` | re-downloads the data first |
 | `--cache PERCENT` | how much of the input Price reads from the prompt cache, 90 by default |
-| `--source epoch\|aa` | the benchmarks for this run. The default is the one picked with `B` |
+| `--source epoch\|aa` | the benchmarks for this run. The default is `aa` when its key is there and works, else `epoch` |
 | `--all` | on `list`, includes the models you have no access to. On `show`, adds the price at providers you have no harness for |
 | `--json` | on `list`, `show`, `compare` and `recommend`, as [JSON](#json) says |
 

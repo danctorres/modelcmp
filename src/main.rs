@@ -27,7 +27,7 @@ struct Args {
     /// Percent of input tokens read from the prompt cache in Price: 90 fits an agent session, 0 a one-off prompt (`%` in the TUI)
     #[arg(long, global = true, value_name = "PERCENT", default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
     cache: u8,
-    /// Benchmarks from: epoch (Epoch AI) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY or a key saved with `B`). Overrides `B` in the TUI for this run. With neither picked: aa when its key is there, else epoch
+    /// Benchmarks from: epoch (Epoch AI) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY or the key saved in the TUI). Without it: aa when its key is there and works, else epoch
     #[arg(long, global = true, value_parser = PossibleValuesParser::new(data::Source::ALL.map(|s| s.id())))]
     source: Option<String>,
     #[command(subcommand)]
@@ -234,13 +234,13 @@ fn main() {
     data::set_cached(f64::from(args.cache) / 100.0);
     let store = Store::load();
     data::set_models_dir(&store.models_dir);
-    let picked = args.source.as_deref().unwrap_or(&store.source);
-    let source = if picked.is_empty() { Some(data::Source::preferred()) } else { data::Source::parse(picked) };
-    data::set_source(source.unwrap_or_default());
+    let source = args.source.as_deref().and_then(data::Source::parse);
+    data::set_source(source.unwrap_or_else(data::Source::preferred));
     let result = match args.cmd {
         None => {
-            // Nothing to ask with a key there: Artificial Analysis is then the default.
-            let ask = args.source.is_none() && store.source.is_empty() && data::aa_key().is_none();
+            // Asked the first time the TUI opens, and not with a key there: Artificial Analysis
+            // is then the source.
+            let ask = source.is_none() && store.seen.is_empty() && data::aa_key().is_none();
             tui::run(store, args.refresh, ask).map_err(Exit::from)
         }
         Some(cmd) => {
@@ -264,7 +264,7 @@ fn main() {
                     "your favorites and exclusions may not apply: see the warning, then run again".to_string(),
                 ))
             } else {
-                run(cmd, args.refresh)
+                run(cmd, args.refresh, source.is_none())
             }
         }
     };
@@ -286,7 +286,8 @@ fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
     }
 }
 
-fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
+/// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
+fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
     // These name no model: they neither wait for a download nor fail without one.
     let bare = matches!(
         cmd,
@@ -298,7 +299,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     let data = if bare {
         data::Data::default()
     } else {
-        let (data, warn) = data::load(force).map_err(|e| e.to_string())?;
+        let (data, warn) = data::load(force, auto).map_err(|e| e.to_string())?;
         // The other source's columns sort and bound too, with its data there.
         data::set_lent(data.lent);
         if let Some(w) = warn {

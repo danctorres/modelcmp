@@ -118,24 +118,13 @@ impl Source {
         }
     }
 
-    /// What it takes and gives, for the `B` chooser.
-    pub fn about(self) -> &'static str {
-        match self {
-            Source::Epoch => "no API key needed, the cost of a coding task, fewer models and no speed metrics",
-            Source::Aa => "more models and speed metrics, needs an API key, free at artificialanalysis.ai",
-        }
-    }
-
-    /// The one to use when none was picked: Artificial Analysis once its key is there.
+    /// The one to use without `--source`: Artificial Analysis once its key is there.
     pub fn preferred() -> Source {
         if aa_key().is_some() { Source::Aa } else { Source::Epoch }
     }
 
-    /// By `id`; empty is the default.
+    /// By `id`.
     pub fn parse(s: &str) -> Option<Source> {
-        if s.is_empty() {
-            return Some(Source::default());
-        }
         Source::ALL.into_iter().find(|x| x.id() == s)
     }
 
@@ -218,7 +207,10 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Failure::NoKey => {
-                write!(f, "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or pick it with B in the TUI")
+                write!(
+                    f,
+                    "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or start the TUI with --source aa, which asks for it"
+                )
             }
             Failure::BadKey => f.write_str("Artificial Analysis rejected the API key"),
             Failure::Other(e) => f.write_str(e),
@@ -1722,8 +1714,12 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     Ok((data, other, [aa, epoch_pages, openrouter, arena], release))
 }
 
+/// Said after why Artificial Analysis's key did nothing: what is shown instead.
+pub const FELL_BACK: &str = " · benchmarks from Epoch AI";
+
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
-pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
+/// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
+pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => Ok((d, None)),
         cached => {
@@ -1739,6 +1735,11 @@ pub fn load(force: bool) -> Result<(Data, Option<String>), Failure> {
                 Ok(mut d) => {
                     let w = d.warning.take();
                     Ok((d, w))
+                }
+                Err(e @ Failure::BadKey) if auto => {
+                    eprintln!("warning: {e}{FELL_BACK}");
+                    set_source(Source::Epoch);
+                    load(force, false)
                 }
                 Err(e) => match cached {
                     Some(d) => {

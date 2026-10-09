@@ -1,7 +1,7 @@
 //! TUI state and key handling. No I/O here: side effects come back to the shell as `Effect`s,
 //! so every key is unit-testable.
 
-use crate::data::{Data, Failure, Model, Source};
+use crate::data::{Data, FELL_BACK, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::Store;
 use crate::view::{
@@ -202,7 +202,10 @@ pub const COLS: [Col; 17] = [
     col("Coding", "coding", "", |m| task_score(m, "coding")),
     col("Agentic", "agentic", "", |m| task_score(m, "agentic")),
     col("Reason", "reasoning", "", |m| task_score(m, "reasoning")),
-    Col { price: true, ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied()) },
+    Col {
+        price: true,
+        ..col("Value", "value", "Coding score per dollar of Price, ranked 0-100", |m| m.fit.get("value").copied())
+    },
     Col {
         only: Some(Source::Epoch),
         lower_better: true,
@@ -403,7 +406,6 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
-            ("B", "benchmarks from Epoch AI or Artificial Analysis"),
             ("H", "default harness, for x, Y, --cmd and --id"),
         ],
     ),
@@ -544,7 +546,7 @@ pub enum Input {
         cur: usize,
     },
     /// Typing Artificial Analysis's API key: on the first start, where esc skips it for Epoch AI,
-    /// after picking it with `B` with none saved, or when it turned the saved one down (`wrong`).
+    /// under `--source aa` with none saved, or when it turned the saved one down (`wrong`).
     Key {
         text: String,
         cur: usize,
@@ -596,8 +598,6 @@ pub enum Kind {
     Via,
     /// `t`: the theme, previewed under the cursor.
     Theme,
-    /// `B`: the benchmark source.
-    Source,
     /// `H`: your default harness.
     Harness,
     /// `|`: the columns the table shows; space or enter ticks one and the list stays open.
@@ -863,7 +863,7 @@ pub enum Effect {
     Harness(Option<&'static str>),
     /// The column at this cursor index; the `|` chooser's items, applied by `App` itself.
     Col(usize),
-    /// The `B` chooser's items; out of it, the source was switched and its data must be loaded.
+    /// The source was switched, by the key that came or did not work, and its data must be loaded.
     Source(crate::data::Source),
 }
 
@@ -1144,8 +1144,8 @@ pub struct App {
     pub cache_on: f64,
     /// The `%` hint while no input is cached, naming `cache_on`.
     pub cache_hint: &'static str,
-    /// The TUI opened on the `B` chooser, with no data, as no source was ever picked: closing it
-    /// picks the default. Not so with `--source`, which picked one for the run.
+    /// The TUI opened asking for Artificial Analysis's key, with no data: skipping it is Epoch AI.
+    /// Not so with `--source`, which picked one for the run.
     pub first_start: bool,
     /// What `q` asked to quit from, which any key but a second `q` goes back to: an open list.
     asked_from: Input,
@@ -1839,7 +1839,8 @@ impl App {
     }
 
     /// A background refresh finished.
-    pub fn refreshed(&mut self, res: Result<Data, Failure>, tools: Tools) {
+    /// True when the key did not work and the source is now Epoch AI, for the shell to load.
+    pub fn refreshed(&mut self, res: Result<Data, Failure>, tools: Tools) -> bool {
         // A runner may be installed since, and the sizes that did not come are asked for again.
         self.tools = tools;
         self.downloads.retain(|_, d| *d != Download::NoAnswer);
@@ -1850,7 +1851,7 @@ impl App {
                 // An error still standing, as the start's of an unreadable user.json, is not
                 // replaced by the news that the refresh went well, nor by its warning. Why a
                 // key did nothing is. The news replaces no other message either: what a switch
-                // of source said, `B to change`, stays when its download ends.
+                // of source said stays when its download ends.
                 let standing = self.failed && !self.refused;
                 match d.warning.take() {
                     Some(w) if standing => self.status = format!("{}; {w}", self.status),
@@ -1862,22 +1863,25 @@ impl App {
                 }
                 self.set_data(d);
             }
-            // One from the environment is yours to change there, as a saved one would not replace it.
-            Err(e @ Failure::BadKey) if crate::data::aa_key_env().is_some() => {
-                self.report(Err(format!("{e} in {}", crate::data::AA_KEY_ENV)));
-            }
-            // No key, or the saved one was turned down: ask for one, unless you are typing or
-            // choosing something else, which the prompt would throw away; `B` asks then.
+            // No key, or the saved one was turned down: ask for one, which esc answers with
+            // Epoch AI. Epoch AI at once for one from the environment, yours to change there as a
+            // saved one would not replace it, and while you are typing or choosing something
+            // else, which the prompt would throw away.
             Err(e @ (Failure::BadKey | Failure::NoKey)) => {
-                if self.input == Input::None {
+                let from_env = crate::data::aa_key_env().is_some();
+                if !from_env && self.input == Input::None {
                     self.report(Err(e.to_string()));
                     self.input = Input::Key { text: String::new(), cur: 0, wrong: e == Failure::BadKey };
                 } else {
-                    self.report(Err(format!("{e}; B then Artificial Analysis to enter one")));
+                    let fell = self.switch(Source::Epoch).is_some();
+                    let why = if from_env { format!("{e} in {}", crate::data::AA_KEY_ENV) } else { e.to_string() };
+                    self.report(Err(if fell { format!("{why}{FELL_BACK}") } else { why }));
+                    return fell;
                 }
             }
             Err(e) => self.report(Err(format!("refresh failed: {e}"))),
         }
+        false
     }
 
     /// The outcome of an action in the status bar, an error in red.
@@ -1931,21 +1935,17 @@ impl App {
         self.bounds.retain(|b| !hidden(b.0));
     }
 
-    /// The `B` chooser, each source saying what it takes.
-    pub fn ask_source(&mut self) {
-        let items =
-            Source::ALL.iter().map(|s| (format!("{:<20} {}", s.label(), s.about()), Effect::Source(*s))).collect();
-        let sel = Source::ALL.iter().position(|s| *s == crate::data::source()).unwrap_or(0);
-        self.input = Input::choose("benchmarks?", Kind::Source, items, sel);
-    }
-
     /// Use benchmarks from `src` from now on; the shell loads its data (`switched`). The first
-    /// pick loads it even when it is the default, as the TUI opened with none.
+    /// start loads it even when it is the default, as the TUI opened with none.
     fn switch(&mut self, src: Source) -> Option<Effect> {
         if src == crate::data::source() && !self.first_start {
             return None;
         }
         self.first_start = false;
+        // A dropdown still open lists the other source's benchmarks.
+        if matches!(self.input, Input::Menu { .. }) {
+            self.input = Input::None;
+        }
         // A pick is one of the other source's benchmarks.
         self.drop_benches(false);
         // And a bound on a task is on the other source's benchmark.
@@ -1958,8 +1958,7 @@ impl App {
                 *c = index_col();
             }
         }
-        self.store.source = src.id().to_string();
-        self.report(Ok(format!("benchmarks from {} · B to change", src.label())));
+        self.report(Ok(format!("benchmarks from {}", src.label())));
         Some(Effect::Source(src))
     }
 
@@ -2655,6 +2654,10 @@ impl App {
         // leaves it. An entry or a note being written is only left, its panel staying open.
         let writing = self.editing() || matches!(self.input, Input::Note { .. });
         if m == Mouse::Close && !writing {
+            // The key prompt stays open: closing it would skip the key, for Epoch AI.
+            if matches!(self.input, Input::Key { .. }) {
+                return None;
+            }
             if self.input != Input::None {
                 self.on_key(KeyCode::Esc.into());
             }
@@ -2673,8 +2676,8 @@ impl App {
             let search = matches!(self.input, Input::Search { .. });
             match m {
                 Mouse::Scroll(_) | Mouse::Cols(_) => return None,
-                // The first start's key prompt stays open: closing it would skip the key.
-                _ if self.first_start => return None,
+                // The key prompt stays open: closing it would skip the key, for Epoch AI.
+                _ if matches!(self.input, Input::Key { .. }) => return None,
                 _ if search => drop(self.input_key(KeyCode::Enter, KeyModifiers::NONE)),
                 _ => return self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             }
@@ -3222,7 +3225,6 @@ impl App {
                 let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
             }
-            KeyCode::Char('B') => self.ask_source(),
             KeyCode::Char('|') => self.ask_cols(),
             KeyCode::Char('H') => self.ask_harness(),
             KeyCode::Enter if self.view == View::Recommend && !row => {
@@ -3340,7 +3342,7 @@ impl App {
                     self.rebuild();
                 }
             }
-            Input::Key { text, cur, .. } => match code {
+            Input::Key { text, cur, wrong } => match code {
                 KeyCode::Enter if !text.trim().is_empty() => {
                     let res = crate::data::save_aa_key(text);
                     self.input = Input::None;
@@ -3351,20 +3353,28 @@ impl App {
                             self.refresh()
                         }
                         Ok(()) => self.switch(Source::Aa),
-                        // On the first start there is no table yet: the default's, as esc gives.
+                        // No key that works, as with esc.
                         Err(e) => {
-                            let effect = if self.first_start { self.switch(Source::preferred()) } else { None };
+                            let effect = self.switch(Source::Epoch);
                             self.report(Err(format!("could not save the key: {e}")));
                             effect
                         }
                     };
                 }
-                // Skipped on the first start: the default, which needs no key.
-                KeyCode::Esc if self.first_start => {
+                // No key, or none that works: Epoch AI, which needs none. The saved one that
+                // was turned down goes, or every start would ask again.
+                KeyCode::Esc => {
+                    let wrong = *wrong;
                     self.input = Input::None;
-                    return self.switch(Source::preferred());
+                    let effect = self.switch(Source::Epoch);
+                    if wrong {
+                        self.report(Err(match crate::data::save_aa_key("") {
+                            Ok(()) => format!("{}, now removed{FELL_BACK}", Failure::BadKey),
+                            Err(e) => format!("could not remove the key: {e}{FELL_BACK}"),
+                        }));
+                    }
+                    return effect;
                 }
-                KeyCode::Esc => self.input = Input::None,
                 _ => drop(edit(text, cur, code, mods, |_| true)),
             },
             Input::Note { key, text, cur } => match code {
@@ -3501,15 +3511,6 @@ impl App {
                                 self.report(Ok(format!("theme {name}")));
                                 return Some(Effect::Save);
                             }
-                            // Asked once: a key it turns down is asked for again (`refreshed`), and
-                            // picking it again when it is the source changes a saved key.
-                            Effect::Source(Source::Aa)
-                                if crate::data::aa_key().is_none()
-                                    || (crate::data::source() == Source::Aa && crate::data::aa_key_env().is_none()) =>
-                            {
-                                self.input = Input::Key { text: String::new(), cur: 0, wrong: false };
-                            }
-                            Effect::Source(src) => return self.switch(src),
                             Effect::Harness(h) => {
                                 self.store.harness = h.unwrap_or("").to_string();
                                 self.report(Ok(format!("default harness: {}", h.unwrap_or("any harness"))));
@@ -3947,41 +3948,25 @@ mod tests {
     }
 
     #[test]
-    fn b_picks_the_benchmark_source() {
+    fn the_key_picks_the_benchmark_source() {
         let mut a = app();
-        // `--source aa` with none ever picked: closing the chooser keeps it.
-        crate::data::set_source(Source::Aa);
         press(&mut a, "B");
-        assert!(code(&mut a, KeyCode::Esc).is_none() && a.input == Input::None);
-        assert_eq!((a.store.source.as_str(), crate::data::source()), ("", Source::Aa));
-        crate::data::set_source(Source::Epoch);
-        press(&mut a, "B");
-        let label = |a: &App, i: usize| match &a.input {
-            Input::Choose { items, .. } => items[i].0.clone(),
-            _ => String::new(),
-        };
-        assert!(label(&a, 0).contains("no API key") && label(&a, 1).contains("needs an API key"));
-        press(&mut a, "j");
-        code(&mut a, KeyCode::Enter);
-        assert!(matches!(a.input, Input::Key { .. }), "Artificial Analysis asks for its key");
-        assert!(code(&mut a, KeyCode::Esc).is_none() && a.input == Input::None, "esc leaves it, nothing switched");
+        assert_eq!(a.input, Input::None, "no key picks it");
         // The first start asks for the key alone, and a click beside it leaves it open.
         a.first_start = true;
         a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
         assert!(a.mouse(Mouse::Outside).is_none() && matches!(a.input, Input::Key { .. }), "a click beside it");
-        // Skipping it picks the default, and loads it.
+        // Skipping it is Epoch AI, loaded as the TUI opened with no data.
         assert!(matches!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch))));
-        assert_eq!((a.store.source.as_str(), crate::data::source()), ("epoch", Source::Epoch));
-        assert!(a.input == Input::None && !a.first_start);
-        press(&mut a, "B");
-        assert!(code(&mut a, KeyCode::Enter).is_none(), "picked before: nothing to switch");
+        assert_eq!((a.status.as_str(), crate::data::source()), ("benchmarks from Epoch AI", Source::Epoch));
+        assert!(a.input == Input::None && !a.first_start && !a.failed);
         // A key typed there starts on Artificial Analysis.
         let mut k = app();
         k.first_start = true;
         k.input = Input::Key { text: String::new(), cur: 0, wrong: false };
         press(&mut k, "key");
         assert!(matches!(code(&mut k, KeyCode::Enter), Some(Effect::Source(Source::Aa))));
-        assert_eq!((k.store.source.as_str(), crate::data::aa_key().as_deref()), ("aa", Some("key")));
+        assert_eq!((crate::data::source(), crate::data::aa_key().as_deref()), (Source::Aa, Some("key")));
         crate::data::set_source(Source::Epoch);
         // A source never downloaded shows nothing until it is, not the other one's scores.
         assert!(a.switched(None) && a.data.models.is_empty() && a.refreshing);
@@ -3990,25 +3975,39 @@ mod tests {
     #[test]
     fn a_rejected_key_is_asked_for_again() {
         let mut a = app();
-        a.refreshed(Err(Failure::BadKey), tools());
+        crate::data::set_source(Source::Aa);
+        assert!(!a.refreshed(Err(Failure::BadKey), tools()));
         assert!(matches!(a.input, Input::Key { wrong: true, .. }));
+        // A click beside a panel under it leaves it open, as one beside the prompt does.
+        assert!(a.mouse(Mouse::Close).is_none() && matches!(a.input, Input::Key { wrong: true, .. }));
+        assert_eq!(crate::data::source(), Source::Aa);
+        // Left unanswered, it is Epoch AI, and the status says why.
+        crate::data::save_aa_key("old").unwrap();
+        assert_eq!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch)));
+        assert!(a.failed && a.status.contains("rejected") && a.status.ends_with(FELL_BACK), "{}", a.status);
+        assert_eq!(crate::data::aa_key(), None, "the key turned down is not kept to ask again");
         // A new key while the old one's refresh is under way starts another.
         crate::data::set_source(Source::Aa);
+        a.refreshed(Err(Failure::BadKey), tools());
         a.refreshing = true;
         press(&mut a, "new");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Refresh));
         assert_eq!(crate::data::aa_key().as_deref(), Some("new"));
         crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = Some("env".into()));
         let mut e = app();
-        e.refreshed(Err(Failure::BadKey), tools());
+        assert!(e.refreshed(Err(Failure::BadKey), tools()), "Epoch AI at once");
         assert!(e.input == Input::None && e.status.contains(crate::data::AA_KEY_ENV), "fixed where it is set");
+        assert!(e.status.ends_with(FELL_BACK) && crate::data::source() == Source::Epoch, "{}", e.status);
         let mut b = app();
-        b.refreshed(Err("offline".into()), tools());
-        assert_eq!(b.input, Input::None, "any other failure is only reported");
+        crate::data::set_source(Source::Aa);
+        assert!(!b.refreshed(Err("offline".into()), tools()));
+        assert_eq!((&b.input, crate::data::source()), (&Input::None, Source::Aa), "any other failure is only reported");
+        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = None);
         let mut c = app();
         c.input = Input::Note { key: "gpt55".into(), text: "half".into(), cur: 4 };
-        c.refreshed(Err(Failure::NoKey), tools());
+        assert!(c.refreshed(Err(Failure::NoKey), tools()), "Epoch AI with no prompt");
         assert!(matches!(c.input, Input::Note { .. }), "a note being typed is kept");
+        crate::data::set_source(Source::Epoch);
     }
 
     #[test]
@@ -4145,7 +4144,7 @@ mod tests {
         press(&mut a, "s");
         assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
         assert!(a.col_about(a.col).starts_with("Artificial Analysis, "), "{}", a.col_about(a.col));
-        assert_eq!(a.col_source(a.col), Some(Source::Aa), "its header in that source's colour");
+        assert_eq!(a.col_source(a.col), Some(Source::Aa), "a double click opens that source's page");
         // Without the other source's data the pick goes, and the column is the task's score again.
         let mut data = std::mem::take(&mut a.data);
         data.lent = false;
@@ -4618,7 +4617,7 @@ mod tests {
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
         assert_eq!(about("coding"), "Epoch AI, WeirdML score (0-100)");
         assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100)");
-        assert_eq!(about("value"), "coding per dollar, ranked 0-100", "no benchmarks of its own");
+        assert_eq!(about("value"), "Coding score per dollar of Price, ranked 0-100", "no benchmarks of its own");
         crate::data::set_source(Source::Aa);
         assert_eq!(
             about("agentic"),
@@ -5844,9 +5843,9 @@ mod tests {
         // Nor after a refusal a key has since cleared.
         press(&mut a, "u");
         press(&mut a, "j");
-        a.status = "benchmarks from Epoch AI · B to change".into();
+        a.status = "benchmarks from Epoch AI".into();
         a.refreshed(Ok(Data::default()), tools());
-        assert!(a.status.ends_with("B to change"), "what a switch said outlasts its download");
+        assert_eq!(a.status, "benchmarks from Epoch AI", "what a switch said outlasts its download");
         a.report(Err("user.json is not valid".into()));
         a.refreshed(Ok(Data::default()), tools());
         assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");

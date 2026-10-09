@@ -1,4 +1,4 @@
-//! Marks, exclusions, notes, per-task favorites, the theme, the benchmark source and the columns left out, keyed by model key. ~/.config/modelcmp/user.json
+//! Marks, exclusions, notes, per-task favorites, the theme and the columns left out, keyed by model key. ~/.config/modelcmp/user.json
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,9 +50,6 @@ pub struct Store {
     /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub theme: String,
-    /// A `data::Source` id, picked with `B`; empty is Epoch AI, never picked: the TUI asks.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub source: String,
     /// The columns left out of the TUI's table with `|`, by `app::col_id`.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub hide: BTreeSet<String>,
