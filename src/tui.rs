@@ -218,6 +218,11 @@ const LOGO: [&str; 8] = [
     "██ ██ ██  ▀█████▀    ▀████▀██  ▀█████▀    ▀██  ▀█████▀   ██ ██ ██ ██ ▀▀▀▀  ",
     "                                                                  ▀▀       ",
 ];
+/// A link a click opens: blue and underlined, as on a web page.
+fn link() -> Style {
+    fg(Color::Blue).add_modifier(Modifier::UNDERLINED)
+}
+
 /// Under the wordmark, after a blank row.
 const TAGLINE: &str = "compare models, pick favorites, get recommendations";
 
@@ -247,7 +252,7 @@ const KEY_ROW: usize = 4;
 /// The lines of the first start's box: what the key gives and where it is had, a link (`hit`),
 /// the key being typed, `typed` bytes of it, and the keys, as under every list (`key_line`).
 fn key_lines(typed: usize) -> Vec<Line<'static>> {
-    let site = Span::styled(data::Source::Aa.site(), Style::new().add_modifier(Modifier::UNDERLINED));
+    let site = Span::styled(data::Source::Aa.site(), link());
     let what = Line::from(vec![Span::raw(" enter your free "), site, Span::raw(" API key ")]);
     // Hidden from anyone looking at the screen, as in the status bar.
     // Dots, not `*`: a font with ligatures joins three of those and lifts the middle one.
@@ -2363,7 +2368,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         // Underlined as a link: a click on it opens the page (`hit`).
         if let Some(link) = key_link(app) {
             let w = (link.end.min(hx)).saturating_sub(link.start);
-            buf.set_style(Rect::new(link.start, area.y, w, 1), Style::new().add_modifier(Modifier::UNDERLINED));
+            buf.set_style(Rect::new(link.start, area.y, w, 1), self::link());
         }
         if fits {
             // Its keys in their colour, as in the hints of the table's bar.
