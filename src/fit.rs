@@ -79,7 +79,8 @@ pub const AA_CODING: &str = "terminalbench_scicode_mean";
 /// not be about code. Math and factual-recall benchmarks stay out, and those Epoch no longer
 /// runs on new models: SWE-Bench verified, Terminal Bench, GSO-Bench, DeepResearch Bench (2026-10).
 /// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
-/// Listed with the general pick first, then in the table's column order: coding, agentic, reasoning, the cheaper pick, vision.
+/// Listed with the general pick first, then the ones a tier picks for, coding, agentic, reasoning and vision, and last
+/// the cheaper pick, which has one model and not one per tier.
 pub const TASKS: &[Task] = &[
     Task {
         name: "overall",
@@ -128,19 +129,19 @@ pub const TASKS: &[Task] = &[
         ],
     },
     Task {
-        name: "value",
-        about: "coding per dollar, among the models close to your best on coding",
-        when: "routine coding that needs no top reasoning",
-        need: Need::Coder,
+        name: "vision",
+        about: "image input (ranked by overall capability)",
+        when: "screenshots, UI mockups, diagrams as input",
+        need: Need::Vision,
         aa: None,
         aa_more: &[],
         benches: &[],
     },
     Task {
-        name: "vision",
-        about: "image input (ranked by overall capability)",
-        when: "screenshots, UI mockups, diagrams as input",
-        need: Need::Vision,
+        name: "value",
+        about: "coding per dollar, among the models close to your best on coding",
+        when: "routine coding that needs no top reasoning",
+        need: Need::Coder,
         aa: None,
         aa_more: &[],
         benches: &[],

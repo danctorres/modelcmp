@@ -230,7 +230,7 @@ weigh a note when choosing.
 
 ### Tasks
 
-The built-in tasks are `overall`, `coding`, `value`, `agentic`, `reasoning` and `vision`. For a
+The built-in tasks are `overall`, `coding`, `agentic`, `reasoning`, `vision` and `value`. For a
 large prompt, bound the context instead: `--min ctx=200`.
 
 Any other name given to `fav` is a task of your own (`debugging`, and `"Tool Dispatch"` is

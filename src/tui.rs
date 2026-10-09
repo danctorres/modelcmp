@@ -9,7 +9,7 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse,
-    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, YOURS, box_slot, choice_rows, group_starts, hidden,
+    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, MINE, box_slot, choice_rows, group_starts, hidden,
     menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
@@ -1169,7 +1169,7 @@ const STAR: Color = Color::Yellow;
 /// One colour per task in `TASKS` order: the ★ of its favorite and its name in recommend. Off the mark colour (light blue), the key hints' cyan, the worst
 /// value's red and yellow for a match; 16 colours leave no room to also skip the best's green, but no two are a pair.
 const TASK: [Color; 6] =
-    [Color::LightCyan, Color::Green, Color::Blue, Color::LightMagenta, Color::LightRed, Color::LightYellow];
+    [Color::LightCyan, Color::Green, Color::Blue, Color::LightMagenta, Color::LightYellow, Color::LightRed];
 /// The colours of the tasks of your own: none is a built-in task's, nor the gold of a ★ with no
 /// task at hand, nor the red of the ✗ and the worst value, so its ★ and name say which.
 const OWN: [Color; 3] = [Color::Magenta, Color::LightGreen, Color::Cyan];
@@ -1192,9 +1192,9 @@ fn tab_color(i: usize) -> Color {
     }
 }
 
-/// What follows the name of tab `i`: on yours `+N`, the selected models out of reach it shows too.
+/// What follows the name of tab `i`: on mine `+N`, the selected models out of reach it shows too.
 fn tab_plus(app: &App, i: usize) -> String {
-    if i == YOURS && app.marked_out > 0 { format!(" +{}", app.marked_out) } else { String::new() }
+    if i == MINE && app.marked_out > 0 { format!(" +{}", app.marked_out) } else { String::new() }
 }
 
 /// The cells tab `i` takes: its left edge, then its name and its key with a space around each.
@@ -2815,6 +2815,8 @@ const MORE_RATED: &str = "Artificial Analysis scores more models than Epoch AI, 
 /// to use it and its box's model in full. Where each name and box is goes to `spots`, and the
 /// lines of the cursor's row come back too, with the ones under the grid, for `overlay` to pin.
 fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'static>>, Option<Lines>, Lines) {
+    // `high`, the tier that takes any price.
+    const LAST: usize = TIERS.len() - 1;
     let mut block = None;
     let label = |s: &'static str| vec![Span::styled(s, fg(MUTED))];
     let words = |s: &str| s.split(' ').map(|w| Line::from(w.to_string())).collect();
@@ -2878,16 +2880,29 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         let pad = w.saturating_sub(Span::raw(name.as_str()).width());
         let mut spans = cursor(cur == Some((i, 0)), vec![Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD))]);
         spans.push(Span::raw(" ".repeat(pad)));
-        // One pick takes the row: a box as wide as the tiers', which every stop past the name is on.
-        let one = app.one_pick(i);
-        let (boxes, room) = if one { (1, TIERS.len() * (room + 2) - 2) } else { (TIERS.len(), room) };
-        // The one pick is `high`'s, the last: `free` may have none.
-        for (c, mut cell) in row.into_iter().skip(if one { TIERS.len() - 1 } else { 0 }).take(boxes).enumerate() {
+        // One pick is the row's only box, under the tier its price is: `high`'s, the last, as
+        // `free` may have none. Every stop past the name is on it. A price nobody lists is under
+        // `high`, which takes any, and no pick at all is a `-` under the first.
+        let one = app.one_pick(i).then(|| {
+            let tier = |c| TIERS.iter().position(|t| c <= t.1);
+            picks[i][LAST].map_or(0, |(m, _)| m.cost().and_then(tier).unwrap_or(LAST))
+        });
+        let mut row = row;
+        if let Some(at) = one {
+            let pick = row.pop().unwrap_or_default();
+            row = vec![vec![]; TIERS.len()];
+            row[at] = pick;
+        }
+        for (c, mut cell) in row.into_iter().enumerate() {
             // Padded to the box, so the cursor's fill is as wide on every one.
             cell.push(Span::raw(" ".repeat(room.saturating_sub(cell.iter().map(Span::width).sum()))));
             let x = w + 2 + c * (room + 2);
-            spots.push(Spot { lines: y..y + 1, x: x..x + room + 2, at: Stop::Recommend(i, c + 1) });
-            spans.extend(cursor(cur.is_some_and(|(row, sel)| row == i && (sel == c + 1 || one && sel > 0)), cell));
+            if one.is_none_or(|at| at == c) {
+                let stop = if one.is_some() { 1 } else { c + 1 };
+                spots.push(Spot { lines: y..y + 1, x: x..x + room + 2, at: Stop::Recommend(i, stop) });
+            }
+            let on = |(row, sel): (usize, usize)| row == i && one.map_or(sel == c + 1, |at| at == c && sel > 0);
+            spans.extend(cursor(cur.is_some_and(on), cell));
         }
         spots.push(Spot { lines: y..y + 1, x: 0..width, at: Stop::Recommend(i, 0) });
         if cur.is_some_and(|c| c.0 == i) {
@@ -2904,7 +2919,8 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         under.extend(wrapped(name, words(t.1), &space, width));
         under.extend(wrapped(label("  use for: "), words(t.2), &space, width));
         if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
-            let tier = if app.one_pick(i) { "pick" } else { TIERS[c].0 };
+            // The one pick is `high`'s, as in its box.
+            let (tier, c) = if app.one_pick(i) { ("pick", LAST) } else { (TIERS[c].0, c) };
             let mut line = vec![Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED))];
             line.extend(entry(app, t.0, c, picks[i][c], None));
             under.push(Line::from(line));
@@ -3641,7 +3657,7 @@ mod tests {
         let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
         assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
         // Back in the available view it shows only for being marked, and says so.
-        a.key(KeyCode::Char('A').into());
+        a.key(KeyCode::Char('m').into());
         let (_, lines) = render(&mut a, 203, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         assert!(lines[opus].contains("not available"), "{lines:?}");
@@ -3650,8 +3666,8 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(181, 20)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let tabs = &text(term.backend().buffer())[1];
-        assert!(tabs.contains(" yours +1 A "), "{tabs}");
-        assert_eq!(tab_ends(&a).next(), Some(14));
+        assert!(tabs.contains(" mine +1 m "), "{tabs}");
+        assert_eq!(tab_ends(&a).next(), Some(13));
     }
 
     #[test]
@@ -3874,7 +3890,7 @@ mod tests {
         assert_eq!(on(0, 5), Some(Mouse::Close), "beside the panel: closes it");
         assert_eq!(on(w - 1, 0), Some(Mouse::Close), "past the tabs too");
         assert_eq!(on(w - 1, h - 1), Some(Mouse::Key(KeyCode::Char('q'))), "a hint is still its key");
-        assert_eq!(on(10, 0), Some(Mouse::Tab(0)), "a tab is still that tab");
+        assert_eq!(on(9, 0), Some(Mouse::Tab(0)), "a tab is still that tab");
         assert_eq!(
             at(&mut a, "flash", KeyModifiers::CONTROL),
             Some(Mouse::Model(Stop::Compare(1))),
@@ -3989,21 +4005,21 @@ mod tests {
             row: y + 2,
             modifiers: KeyModifiers::NONE,
         };
-        // " │ yours A │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t │ help ?  ": a tab, the edge left
+        // " │ mine m │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t │ help ?  ": a tab, the edge left
         // of it too, and nothing right of the last one.
         assert_eq!(
-            [10, 11, 19, 65, 79, 91, 101, 110].map(|x| hit(&a, area, MouseEvent { row: x % 2, ..click(x, 0) })),
+            [9, 10, 18, 64, 78, 90, 100, 109].map(|x| hit(&a, area, MouseEvent { row: x % 2, ..click(x, 0) })),
             [Some(0), Some(1), Some(2), Some(5), Some(6), Some(7), Some(8), None].map(|i| i.map(Mouse::Tab))
         );
         // Cut off a narrow terminal, a tab is a hint in the status bar instead, help's the last.
         let cut = |w| hints(&a, w).into_iter().filter(|h| TABS.iter().any(|t| t.2 == *h)).collect::<Vec<_>>();
-        assert_eq!((cut(111), cut(110), cut(102)), (vec![], vec!["? help"], vec!["? help"]));
-        assert_eq!((cut(101), cut(79)), (vec!["t theme", "? help"], vec!["R recommend", "t theme", "? help"]));
+        assert_eq!((cut(110), cut(109), cut(101)), (vec![], vec!["? help"], vec!["? help"]));
+        assert_eq!((cut(100), cut(78)), (vec!["t theme", "? help"], vec!["R recommend", "t theme", "? help"]));
         assert_eq!(hints(&a, 79).last(), Some(&"? help"));
         // Over the open theme list a click on a tab is that tab, and elsewhere outside the list.
         a.key(KeyCode::Char('t').into());
         assert_eq!(
-            [10, 150].map(|x| hit(&a, area, MouseEvent { row: 1, ..click(x, 0) })),
+            [9, 150].map(|x| hit(&a, area, MouseEvent { row: 1, ..click(x, 0) })),
             [Some(Mouse::Tab(0)), Some(Mouse::Outside)]
         );
         a.key(KeyCode::Esc.into());
@@ -4460,7 +4476,7 @@ mod tests {
         assert!(top.contains("overall") && top.contains("  low:     no data"), "{top}");
         let last = screen(&mut a, "G");
         assert!(
-            last.contains("vision") && last.contains("  use for: screenshots") && !last.contains("among:"),
+            last.contains("value") && last.contains("  use for: routine coding") && !last.contains("among:"),
             "{last}"
         );
         // f's hints fit a terminal 80 columns wide, with a task of your own too.
@@ -4506,7 +4522,7 @@ mod tests {
         // ✗'s tab, on, opens the border left of the sort at 70 columns and is over the sort at 60.
         for (w, left) in [
             (60, "╭─────────── ECI: Epoch AI's overall capability…─"),
-            (70, "╭─── ECI: Epoch AI's overall capability index ────╯"),
+            (70, "╭─── ECI: Epoch AI's overall capability index ───╯"),
         ] {
             let lines = rows(&mut a, w);
             assert!(lines[2].starts_with(left) && lines[2].ends_with(" ▼ by ECI ╮"), "{}", lines[2]);
@@ -4544,7 +4560,7 @@ mod tests {
         let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.bg == Color::Yellow);
         assert_eq!(below.map(|c| c.fg), Some(Color::Black), "themes below the cursor");
         let tabs: String = (0..2).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
-        assert!(tabs.contains("yours") && !tabs.contains('╮'), "a list too tall leaves the tabs in view: {tabs}");
+        assert!(tabs.contains("mine") && !tabs.contains('╮'), "a list too tall leaves the tabs in view: {tabs}");
         for _ in 9..THEMES.len() {
             a.key(KeyCode::Char('j').into());
         }
@@ -4646,17 +4662,17 @@ mod tests {
             (0..101).map(|x| term.backend().buffer()[(x, y)].symbol()).collect::<String>()
         };
         // The tab that is on has a frame of its own, which runs down into the table's, open under it.
-        assert_eq!(row(&term, 0).trim_end(), " ╭─────────╮");
+        assert_eq!(row(&term, 0).trim_end(), " ╭────────╮");
         let tabs = row(&term, 1);
         assert!(
             tabs.starts_with(
-                " │ yours A │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t"
+                " │ mine m │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t"
             ),
             "{tabs}"
         );
         let top = row(&term, 2);
         assert!(top.ends_with("─ ▼ by ECI ╮"), "{top}");
-        assert!(top.starts_with("╭╯         ╰──────────"), "{top}");
+        assert!(top.starts_with("╭╯        ╰──────────"), "{top}");
         let (l, r) = top.split_once(" ECI: Epoch AI's overall capability index ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         // Recommend's tab is the one on over its panel.
@@ -4831,7 +4847,7 @@ mod tests {
         let lines = recommend(&a, 60, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(
-            text[0], "among: ● yours · ○ all · ○ ✓ selected · ○ ★ favorites ",
+            text[0], "among: ● mine · ○ all · ○ ✓ selected · ○ ★ favorites ",
             "the models it ranks come first, the dot on the ones in use"
         );
         let gap = text.iter().position(String::is_empty).unwrap();
@@ -4876,9 +4892,9 @@ mod tests {
         let (top, block, _) = recommend(&b, 200, &mut vec![]);
         let on: Vec<&Span> = top.iter().flat_map(|l| l.spans.iter()).filter(|s| s.style.bg == Some(CURSOR)).collect();
         assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..1), "{on:?} {block:?}");
-        let yours = top[0].spans.iter().find(|s| s.content == "● yours").unwrap();
+        let mine = top[0].spans.iter().find(|s| s.content == "● mine").unwrap();
         assert!(
-            yours.style == fg(ACCENT).add_modifier(BOLD) && top[0].to_string().ends_with(" (filtered)"),
+            mine.style == fg(ACCENT).add_modifier(BOLD) && top[0].to_string().ends_with(" (filtered)"),
             "{}",
             top[0]
         );
@@ -4899,6 +4915,27 @@ mod tests {
         assert_eq!(picks, ["flash", "▌opus", "opus"], "what each tier picks: low, mid and high");
         let value = all.iter().map(ToString::to_string).find(|l| l.starts_with(" value")).unwrap();
         assert_eq!(value.split_whitespace().collect::<Vec<_>>(), ["value", "-"], "a rank has one pick, not a tier's");
+        // That pick is under the tier its price is, not under `free`.
+        let mut data = std::mem::take(&mut b.data);
+        for m in &mut data.models {
+            m.fit.insert("coding".into(), 50.0);
+            m.fit.insert("value".into(), 50.0);
+            m.lag.insert("coding".into(), 0.0);
+        }
+        b.set_data(data);
+        let text: Vec<String> = recommend(&b, 200, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        let head = text.iter().find(|l| l.trim_start().starts_with("free")).unwrap();
+        let value = text.iter().find(|l| l.starts_with(" value")).unwrap();
+        let pick = b.tier_picks(TASKS.len() - 1)[TIERS.len() - 1].unwrap().0;
+        let tier = TIERS.iter().find(|t| pick.cost().unwrap() <= t.1).unwrap().0;
+        assert!(tier != "free" && value.find(&pick.name) == head.find(tier), "{head}\n{value}");
+        // The line under the grid names it too, on its box.
+        let was = (b.task_cur, b.task_sel);
+        (b.task_cur, b.task_sel) = (TASKS.len() - 1, 1);
+        let text: Vec<String> = recommend(&b, 200, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        let under = text.iter().find(|l| l.starts_with("  pick:")).unwrap();
+        assert!(under.contains(&b.current().unwrap().name), "{under}");
+        (b.task_cur, b.task_sel) = was;
         assert!(all.iter().any(|l| l.to_string() == "  mid:     opus $5.0 (150)"), "under the grid, the box's model");
         // A name is cut from its start to the room its box has, the price and score kept.
         let cut: String = entry(&b, "overall", 2, b.tier_picks(0)[2], Some(14)).iter().map(|s| &*s.content).collect();

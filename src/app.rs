@@ -466,7 +466,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("> <", "minimum / maximum for the column, e.g. > 60 enter"),
             ("d", "dropdown on a header with ▾, space enter toggle"),
             ("|", "columns to show, space enter toggle"),
-            ("a A", "all models, including ones you have no access to / yours only"),
+            ("a m", "all models, including ones you have no access to / mine only"),
             ("tab", "next tab, shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
             ("c", "clear filters, bounds, task, S, F and E, and the selection stays"),
@@ -523,10 +523,10 @@ const DOWNLOAD: &str = "↓ download";
 const VIA_KINDS: [&str; 3] = [LOCAL, NOT_LOCAL, DOWNLOAD];
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
-/// it is cut off: yours, all, the selected, favorite and excluded only, then the panels,
+/// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
 /// recommend and compare, the theme list and the help.
 pub const TABS: [(&str, char, &str); 9] = [
-    ("yours", 'A', "A yours"),
+    ("mine", 'm', "m mine"),
     ("all", 'a', "a all"),
     ("✓ selected", 'S', "S selected only"),
     ("★ favorites", 'F', "F favorites only"),
@@ -537,7 +537,7 @@ pub const TABS: [(&str, char, &str); 9] = [
     ("help", '?', "? help"),
 ];
 /// Where each tab is in `TABS`; the panels' are from recommend's on.
-pub const YOURS: usize = 0;
+pub const MINE: usize = 0;
 const ALL: usize = 1;
 pub const MARKED: usize = 2;
 pub const FAV: usize = 3;
@@ -945,7 +945,7 @@ pub enum Mouse {
     Cols(isize),
     /// Click on the # header: the first row, as `gg` goes.
     Top,
-    /// Click on tab `i`: yours or all alone, and ✓ ★ ✗ on or off, as `S` `F` `E`.
+    /// Click on tab `i`: mine or all alone, and ✓ ★ ✗ on or off, as `S` `F` `E`.
     Tab(usize),
     /// Click on a column header.
     Header(usize),
@@ -1129,7 +1129,7 @@ pub struct App {
     pub task_cur: usize,
     pub task_sel: usize,
     /// The cursor on recommend's `among` line instead, the models it ranks: on the tab `among`,
-    /// one of yours, all, selected and favorites.
+    /// one of mine, all, selected and favorites.
     pub among: Option<usize>,
     pub query: String,
     /// The query matched nothing as typed, so it is matched allowing a typo per word.
@@ -1144,7 +1144,7 @@ pub struct App {
     /// refresh or a source switch can drop a selected model while its mark stays. Set by
     /// `rebuild`, so a frame does not scan every model for it.
     pub marked_shown: usize,
-    /// How many of them are out of reach whatever `a`, which yours shows too: its tab's `+N`.
+    /// How many of them are out of reach whatever `a`, which mine shows too: its tab's `+N`.
     pub marked_out: usize,
     /// Whether `F` and `E` have a model to show, set by `rebuild` as the marks' count is: one
     /// the data no longer has is none, one out of reach still is.
@@ -1639,7 +1639,7 @@ impl App {
     /// Whether tab `i` has anything to show.
     pub fn tab_has(&self, i: usize) -> bool {
         match i {
-            YOURS => !self.no_access(),
+            MINE => !self.no_access(),
             MARKED => self.any_marked(),
             FAV => self.fav_shown,
             EXCLUDED => self.excluded_shown,
@@ -1649,7 +1649,7 @@ impl App {
         }
     }
 
-    /// Whether tab `i` is on: a panel's alone while it is open, else yours or all while none of
+    /// Whether tab `i` is on: a panel's alone while it is open, else mine or all while none of
     /// `S` `F` `E` is, and the one of those that is.
     pub fn tab_on(&self, i: usize) -> bool {
         let panel = match (&self.input, &self.view) {
@@ -1661,7 +1661,7 @@ impl App {
         };
         match i {
             _ if panel.is_some() || i >= RECOMMEND => panel == Some(i),
-            YOURS | ALL => self.only.is_none() && (i == ALL) == (self.all || self.no_access()),
+            MINE | ALL => self.only.is_none() && (i == ALL) == (self.all || self.no_access()),
             _ => self.only == Some(i),
         }
     }
@@ -1752,7 +1752,7 @@ impl App {
     /// a dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
         // A selected model shows even out of reach, so it can be compared, and `S` `F` `E` show
-        // theirs whatever `a`: the same models from yours as from all.
+        // theirs whatever `a`: the same models from mine as from all.
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
             (self.only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
                 && hits(
@@ -2216,7 +2216,7 @@ impl App {
         match self.only {
             Some(i) if i != EXCLUDED => i,
             _ if self.all || self.no_access() => ALL,
-            _ => YOURS,
+            _ => MINE,
         }
     }
 
@@ -2821,7 +2821,7 @@ impl App {
             && (self.view != View::Table || !(MARKED..RECOMMEND).contains(&i))
             && i < TABS.len()
         {
-            // With access to none a click on yours or all in recommend says so and stays, as `a`.
+            // With access to none a click on mine or all in recommend says so and stays, as `a`.
             if self.view == View::Recommend && i < MARKED && self.no_access() {
                 self.refuse(NO_ACCESS);
                 return None;
@@ -2982,14 +2982,14 @@ impl App {
         // On recommend's `among` line the cursor runs over the tabs, and enter or space picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
         match (code, among) {
-            // With access to none `a` and `A` say so and stay, as in the table.
-            (KeyCode::Char('a' | 'A'), _) if self.view == View::Recommend && self.no_access() => {
+            // With access to none `a` and `m` say so and stay, as in the table.
+            (KeyCode::Char('a' | 'm'), _) if self.view == View::Recommend && self.no_access() => {
                 self.refuse(NO_ACCESS);
                 return None;
             }
             // A tab's key leaves recommend for it, as a click on it does.
             (KeyCode::Char(c), _) if self.view == View::Recommend && TABS[..RECOMMEND].iter().any(|t| t.1 == c) => {
-                return self.set_tab(TABS.iter().position(|t| t.1 == c).unwrap_or(YOURS));
+                return self.set_tab(TABS.iter().position(|t| t.1 == c).unwrap_or(MINE));
             }
             (KeyCode::Enter | KeyCode::Char(' '), Some(i)) => return self.pick_among(i),
             (KeyCode::Char('h') | KeyCode::Left, Some(i)) => {
@@ -3374,10 +3374,10 @@ impl App {
                 }
             }
             // With access to none every model shows already.
-            KeyCode::Char('a' | 'A') if table && self.no_access() => self.refuse(NO_ACCESS),
-            // To the all tab, and `A` to yours, out of `S` `F` `E` too.
+            KeyCode::Char('a' | 'm') if table && self.no_access() => self.refuse(NO_ACCESS),
+            // To the all tab, and `m` to mine, out of `S` `F` `E` too.
             KeyCode::Char('a') if table => return self.set_tab(ALL),
-            KeyCode::Char('A') if table => return self.set_tab(YOURS),
+            KeyCode::Char('m') if table => return self.set_tab(MINE),
             KeyCode::Char('%') if table => {
                 let off = crate::data::cached() > 0.0;
                 crate::data::set_cached(if off { 0.0 } else { self.cache_on });
@@ -3821,7 +3821,7 @@ mod tests {
     fn tabs_show_one_set_of_models() {
         let mut a = app();
         let on = |a: &App| (0..TABS.len()).filter(|&i| a.tab_on(i)).collect::<Vec<_>>();
-        assert_eq!((on(&a), a.rows.len()), (vec![0], 3), "yours at start");
+        assert_eq!((on(&a), a.rows.len()), (vec![0], 3), "mine at start");
         code(&mut a, KeyCode::Tab);
         assert_eq!((on(&a), a.rows.len()), (vec![1], 4), "tab: all");
         code(&mut a, KeyCode::Tab);
@@ -3834,7 +3834,7 @@ mod tests {
         assert_eq!((on(&a), &a.view), (vec![5], &View::Recommend), "a click on a tab leaves help for it");
         a.mouse(Mouse::Tab(8));
         code(&mut a, KeyCode::Tab);
-        assert_eq!((on(&a), &a.view), (vec![0], &View::Table), "past help, the last, back to yours");
+        assert_eq!((on(&a), &a.view), (vec![0], &View::Table), "past help, the last, back to mine");
         a.mouse(Mouse::Tab(5));
         a.mouse(Mouse::Tab(5));
         assert_eq!(a.view, View::Recommend, "a click on recommend opens it, and again leaves it open");
@@ -3846,7 +3846,7 @@ mod tests {
         a.mouse(Mouse::Tab(0));
         code(&mut a, KeyCode::BackTab);
         code(&mut a, KeyCode::BackTab);
-        assert_eq!(on(&a), [7], "shift+tab goes back from yours to help, then the theme list");
+        assert_eq!(on(&a), [7], "shift+tab goes back from mine to help, then the theme list");
         code(&mut a, KeyCode::BackTab);
         assert_eq!(on(&a), [5], "with one model selected, shift+tab goes past compare");
         code(&mut a, KeyCode::BackTab);
@@ -3877,8 +3877,8 @@ mod tests {
         assert_eq!((on(&a), a.rows.len()), (vec![1], 4), "a goes to all, out of ★");
         press(&mut a, "a");
         assert_eq!(on(&a), [1], "a again stays on all");
-        press(&mut a, "FA");
-        assert_eq!((on(&a), a.rows.len()), (vec![0], 3), "A goes to yours");
+        press(&mut a, "Fm");
+        assert_eq!((on(&a), a.rows.len()), (vec![0], 3), "m goes to mine");
         a.mouse(Mouse::Tab(1));
         assert_eq!((on(&a), a.all, a.rows.len()), (vec![1], true, 4), "a click on all shows it alone");
         for m in &mut a.data.models {
@@ -3908,7 +3908,7 @@ mod tests {
         assert_eq!(
             (a.only == Some(EXCLUDED), a.rows.len()),
             (true, 1),
-            "E shows an excluded model out of reach from yours"
+            "E shows an excluded model out of reach from mine"
         );
         press(&mut a, "aE");
         assert_eq!((a.only == Some(EXCLUDED), a.rows.len()), (true, 1), "and the same from all");
@@ -4064,7 +4064,7 @@ mod tests {
         assert_eq!(at(&a), Some((Kind::Launch, 2, 1)), "x starts on it");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "H");
-        assert_eq!(at(&a), Some((Kind::Harness, 3, 2)), "on yours");
+        assert_eq!(at(&a), Some((Kind::Harness, 3, 2)), "on mine");
         press(&mut a, "gg");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.harness, "", "any harness: none");
@@ -5052,18 +5052,18 @@ mod tests {
         assert_eq!(front(&a), ["mini"]);
         press(&mut a, "E");
         assert_eq!((keys(&a), front(&a)), (vec!["gpt55"], vec!["mini".to_string()]), "E narrows no line");
-        assert_eq!((a.among_on(), a.filtered_too()), (YOURS, false), "nor does recommend say so");
+        assert_eq!((a.among_on(), a.filtered_too()), (MINE, false), "nor does recommend say so");
         press(&mut a, "E/mini");
         code(&mut a, KeyCode::Enter);
         assert!(a.filtered_too());
         // Recommend opens on its `among` line, before the first task: h l run over the tabs with
         // something to show, and enter picks the models it ranks, the panel staying open.
         press(&mut a, "cR");
-        assert_eq!((a.among, a.current().is_none()), (Some(YOURS), true), "on the one in use");
+        assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "on the one in use");
         press(&mut a, "l");
         assert_eq!((a.among, a.all), (Some(ALL), false), "moving picks none");
         press(&mut a, "l");
-        assert_eq!(a.among, Some(YOURS), "nothing selected, no favorite: past them, round the end");
+        assert_eq!(a.among, Some(MINE), "nothing selected, no favorite: past them, round the end");
         press(&mut a, "$");
         code(&mut a, KeyCode::Enter);
         assert_eq!((&a.view, a.among_on(), a.all), (&View::Recommend, ALL, true));
@@ -5076,12 +5076,12 @@ mod tests {
         assert_eq!(a.among, Some(ALL), "and the cursor stays off it");
         press(&mut a, "f");
         assert!(a.status.starts_with("the cursor is on the models to rank"), "{}", a.status);
-        a.mouse(Mouse::Model(Stop::Among(YOURS)));
-        assert_eq!((&a.view, a.among_on()), (&View::Recommend, YOURS), "a click picks too");
+        a.mouse(Mouse::Model(Stop::Among(MINE)));
+        assert_eq!((&a.view, a.among_on()), (&View::Recommend, MINE), "a click picks too");
         press(&mut a, "j");
         assert_eq!((a.among, a.task_cur), (None, 0), "j is back on the first task");
         press(&mut a, "Ggg");
-        assert_eq!(a.among, Some(YOURS), "gg is the top, the among line");
+        assert_eq!(a.among, Some(MINE), "gg is the top, the among line");
         press(&mut a, "1gg");
         assert_eq!((a.among, a.task_cur), (None, 0), "1gg is the first task");
         // A tab's key leaves recommend for it, as a click on the tab does.
@@ -5090,7 +5090,7 @@ mod tests {
         press(&mut a, "RS");
         assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, NO_SELECTED), "an empty one keeps the panel");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "A");
+        press(&mut a, "m");
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["mini"], "nor does the table");
@@ -5486,7 +5486,7 @@ mod tests {
     fn recommend_moves_a_model_cursor_that_the_row_keys_act_on() {
         let mut a = app();
         press(&mut a, "R");
-        assert_eq!((a.among, a.current().is_none()), (Some(YOURS), true), "the cursor starts on the among line");
+        assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "the cursor starts on the among line");
         press(&mut a, "jj");
         let front: Vec<String> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
@@ -5545,7 +5545,7 @@ mod tests {
         press(&mut a, "j");
         assert_eq!((a.task_cur, a.task_sel, a.current().is_none()), (2, TIERS.len(), true), "j k stay on the tier");
         press(&mut a, "RR");
-        assert_eq!((a.among, a.task_sel), (Some(YOURS), 0), "reopening starts on the among line");
+        assert_eq!((a.among, a.task_sel), (Some(MINE), 0), "reopening starts on the among line");
     }
 
     #[test]

@@ -39,7 +39,7 @@ enum Cmd {
     /// List models you have access to (all with --all): rank, bound and sort them
     #[command(alias = "ls")]
     List {
-        /// Best model per price level for a task (overall, coding, agentic, reasoning, value, vision): cheapest first, each row costing more and scoring higher. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
+        /// Best model per price level for a task (overall, coding, agentic, reasoning, vision, value): cheapest first, each row costing more and scoring higher. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
         /// One model from the task's list: your favorite for the tier, else for the task. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5, high = your best. A task of your own gives the tier's model, else the task's
@@ -189,7 +189,7 @@ enum Cmd {
     },
     /// Your favorite model for a task, or for one tier of it: --tier picks it and recommend marks it ★. Alone, shows them (`f` in the TUI)
     Fav {
-        /// overall, coding, agentic, reasoning, value or vision. Any other name is a task of your own, e.g. debugging, which has only the models you give it
+        /// overall, coding, agentic, reasoning, vision or value. Any other name is a task of your own, e.g. debugging, which has only the models you give it
         #[arg(value_parser = store::task_name)]
         task: Option<String>,
         #[arg(requires = "task", conflicts_with = "rm")]
