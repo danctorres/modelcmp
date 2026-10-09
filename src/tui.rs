@@ -245,28 +245,39 @@ const KEY_ASK: &str = " key: ";
 const KEY_ROW: usize = 4;
 
 /// The lines of the first start's box: what the key gives and where it is had, a link (`hit`),
-/// the key being typed, `typed` bytes of it, and the keys. Nothing in it is a list's entry, so
-/// only the keys are muted, as under every list.
+/// the key being typed, `typed` bytes of it, and the keys, as under every list (`key_line`).
 fn key_lines(typed: usize) -> Vec<Line<'static>> {
     let site = Span::styled(data::Source::Aa.site(), Style::new().add_modifier(Modifier::UNDERLINED));
     let what = Line::from(vec![Span::raw(" enter your free "), site, Span::raw(" API key ")]);
     // Hidden from anyone looking at the screen, as in the status bar.
-    // ponytail: a key longer than the box shows no more stars; scroll it if keys grow that long.
-    let stars = "*".repeat(typed.min(what.width() - KEY_ASK.len() - 1));
+    // Dots, not `*`: a font with ligatures joins three of those and lifts the middle one.
+    // ponytail: a key longer than the box shows no more dots; scroll it if keys grow that long.
+    let dots = "•".repeat(typed.min(what.width() - KEY_ASK.len() - 1));
     vec![
         what,
         Line::from(" for more models and speed metrics "),
         Line::from(" or skip it and all benchmarks come from Epoch AI "),
         Line::default(),
-        Line::from(format!("{KEY_ASK}{stars}")),
-        Line::from(" enter saves · esc skips · ctrl+c quits").style(fg(MUTED)),
+        Line::from(format!("{KEY_ASK}{dots}")),
+        key_line(" enter saves · esc skips · ctrl+c quits"),
+    ]
+}
+
+/// On the first start's screen, on the rows over the status bar: keys to try once the table is
+/// up, each with what it does, as the status bar's hints.
+fn try_lines() -> [Line<'static>; 3] {
+    [
+        Line::from("on the next screen, try").style(fg(MUTED)),
+        key_line("o open a model's page · x run it in a harness"),
+        key_line("R get recommendations · ? all keys"),
     ]
 }
 
 /// The first start asks for Artificial Analysis's API key under the wordmark, where the intro
 /// leaves it: where the wordmark is (`logo_at`), and the rows under it that the question's box is
 /// centred in. None once the key is typed or skipped, and on a screen too small for both, which
-/// asks over the table.
+/// asks over the table. With four more rows to spare they are kept under the box, for
+/// `try_lines` at the bottom.
 fn splash(app: &App, area: Rect) -> Option<((u16, u16, u16), Rect)> {
     if !app.first_start || !matches!(app.input, Input::Key { .. }) {
         return None;
@@ -275,7 +286,8 @@ fn splash(app: &App, area: Rect) -> Option<((u16, u16, u16), Rect)> {
     let body = Rect { height: area.height.checked_sub(1)?, ..area };
     // A blank row, then the box: its border and its lines.
     let ask = key_lines(0).len() as u16 + 3;
-    let at = logo_at(body, ask)?;
+    // Not at the cost of the tagline and the version.
+    let at = logo_at(body, ask + 4).filter(|at| at.2 == 3).or_else(|| logo_at(body, ask))?;
     Some((at, Rect { y: at.1 + LOGO.len() as u16 + at.2 + 1, height: ask - 1, ..body }))
 }
 
@@ -960,11 +972,11 @@ fn actions(keys: &str) -> Vec<&'static str> {
 /// drop them from the front, so the actions outlast the view's keys and the way back goes last.
 /// A toggle names what pressing it does; `A a S F E R C t ?` are on their tabs above the frame, and
 /// one cut off a terminal `width` wide is here instead; the rest of the keys are in `?`. `s` acts
-/// on the column picked with `h l`.
+/// on the column picked with `← →`.
 fn hints(app: &App, width: u16) -> Vec<&'static str> {
     let groups: Vec<Vec<&'static str>> = match app.view {
         View::Table if app.selecting() => {
-            vec![vec!["j k G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
+            vec![vec!["↓ ↑ G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
         View::Table => {
             let mut view = vec!["H harness", "| columns", "/ filter", "s sort"];
@@ -1008,19 +1020,19 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 back.push("esc back");
             }
             back.push("q quit");
-            vec![vec!["h l column"], view, actions("enter x o y space f e n"), back]
+            vec![vec!["← → column"], view, actions("enter x o y space f e n"), back]
         }
-        View::Detail(_) => vec![vec!["j k scroll"], actions("x o y space f e n"), BACK.to_vec()],
+        View::Detail(_) => vec![vec!["↓ ↑ scroll"], actions("x o y space f e n"), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
-        View::Help => vec![vec!["j k scroll"], vec!["/ search"], vec!["esc back", "q quit"]],
+        View::Help => vec![vec!["↓ ↑ scroll"], vec!["/ search"], vec!["esc back", "q quit"]],
         View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
         View::Compare => {
-            vec![vec!["j k scroll", "h l 0 $ model"], vec!["/ rows"], actions("enter x o y f e n"), BACK.to_vec()]
+            vec![vec!["↓ ↑ scroll", "← → 0 $ model"], vec!["/ rows"], actions("enter x o y f e n"), BACK.to_vec()]
         }
         // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
         // On the `among` line, the models it ranks.
         View::Recommend if app.among.is_some() => {
-            vec![vec!["j k task", "h l 0 $ which models"], vec!["enter pick"], BACK.to_vec()]
+            vec![vec!["↓ ↑ task", "← → 0 $ which models"], vec!["enter pick"], BACK.to_vec()]
         }
         View::Recommend if app.current().is_none() => {
             // A tier with no model has nothing for enter either.
@@ -1029,9 +1041,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 (_, Some(_)) => vec!["enter your model"],
                 _ => vec!["enter best models first"],
             };
-            vec![vec!["j k task", "h l 0 $ tier"], enter, BACK.to_vec()]
+            vec![vec!["↓ ↑ task", "← → 0 $ tier"], enter, BACK.to_vec()]
         }
-        View::Recommend => vec![vec!["j k task", "h l 0 $ tier"], actions("enter x o y space f e n"), BACK.to_vec()],
+        View::Recommend => vec![vec!["↓ ↑ task", "← → 0 $ tier"], actions("enter x o y space f e n"), BACK.to_vec()],
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
@@ -1059,12 +1071,26 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
 fn split_hint(hint: &str) -> (&str, &str) {
     let mut end = 0;
     for word in hint.split(' ') {
-        if word.chars().count() != 1 && !["enter", "esc", "space"].contains(&word) {
+        if word.chars().count() != 1 && !["enter", "esc", "space", "ctrl+c"].contains(&word) {
             break;
         }
         end += word.len() + 1;
     }
     hint.split_at(end.saturating_sub(1).min(hint.len()))
+}
+
+/// The line of keys under a list or in a box, `hint`'s parts between ` · `: muted, with each
+/// part's keys in the keys' colour, as the status bar has them.
+fn key_line(hint: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, part) in hint.split(" · ").enumerate() {
+        let text = part.trim_start();
+        let (key, what) = split_hint(text);
+        spans.push(Span::raw(format!("{}{}", if i == 0 { "" } else { " · " }, &part[..part.len() - text.len()])));
+        spans.push(Span::styled(key.to_string(), fg(KEY).add_modifier(BOLD)));
+        spans.push(Span::raw(what.to_string()));
+    }
+    Line::from(spans).style(fg(MUTED))
 }
 
 /// The key a click on a hint presses: only a hint with a single key has one.
@@ -1504,7 +1530,12 @@ fn draw(app: &mut App, f: &mut Frame) {
                 Line::from(""),
                 Line::from(vec![key("esc"), Span::raw(" back to the table, then")]),
                 Line::from(vec![key("space"), Span::raw(" selects the model under the cursor, or")]),
-                Line::from(vec![key("v"), Span::raw(" / shift+click highlights a range, and")]),
+                Line::from(vec![
+                    key("v"),
+                    Span::raw(" or "),
+                    key("shift+click"),
+                    Span::raw(" highlights a range, and"),
+                ]),
                 Line::from(vec![key("C"), Span::raw(" compares them")]),
             ];
             Some(("compare".into(), lines))
@@ -1583,6 +1614,13 @@ fn draw(app: &mut App, f: &mut Frame) {
         let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + text[..*cur].chars().count()) as u16;
         overlay(buf, within, KEY_TITLE, lines, &mut 0, MUTED, (0, 0, 0..0));
         cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
+        // At the bottom of the screen, with a blank row at least under the box.
+        if within.bottom() + 3 < bar.y {
+            for (hint, y) in try_lines().iter().zip(bar.y - 3..) {
+                let w = hint.width() as u16;
+                buf.set_line(within.x + within.width.saturating_sub(w) / 2, y, hint, w);
+            }
+        }
     }
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
@@ -2271,10 +2309,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             Some(("/".to_string(), q, *cur))
         }
         Input::Note { text, cur, .. } => Some(("note: ".to_string(), text, *cur)),
-        // Hidden from anyone looking at the screen; one `*` per byte keeps `cur` in place.
+        // Hidden from anyone looking at the screen, as dots (`key_lines`); one per byte keeps
+        // `cur` in place, at a dot's length each.
         Input::Key { text, cur, wrong, .. } => {
-            masked = "*".repeat(text.len());
-            Some((key_ask(*wrong), &masked, *cur))
+            masked = "•".repeat(text.len());
+            Some((key_ask(*wrong), &masked, *cur * "•".len()))
         }
         Input::Bound { col, min, text, cur } => {
             Some((format!("{} {} ", app.col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
@@ -2299,7 +2338,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         };
         let toggles = matches!(app.input, Input::Menu { .. }) || app.choosing_favs() || app.choosing_cols();
         let hint = match (menu, typing) {
-            (true, false) => "j k move  / search  space enter toggle  esc close",
+            (true, false) => "↓ ↑ move  / search  space enter toggle  esc close",
             (true, true) if toggles => "↓ ↑ move  enter toggle  esc clear",
             (true, true) => "↓ ↑ move  enter pick  esc clear",
             // The key prompt, where esc is Epoch AI: as the first start's box says. One for a
@@ -2327,7 +2366,13 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             buf.set_style(Rect::new(link.start, area.y, w, 1), Style::new().add_modifier(Modifier::UNDERLINED));
         }
         if fits {
-            buf.set_stringn(hx, area.y, hint, width(hint), fg(MUTED));
+            // Its keys in their colour, as in the hints of the table's bar.
+            let mut hx = hx;
+            for part in hint.split("  ") {
+                let (key, what) = split_hint(part);
+                hx = buf.set_stringn(hx, area.y, key, width(key), fg(KEY).add_modifier(BOLD)).0;
+                hx = buf.set_stringn(hx, area.y, what, width(what), fg(MUTED)).0 + 2;
+            }
         }
         let cx = x + (width(&label) + width(&typed[start..cur])) as u16;
         return typing.then_some(cx.min(hx.saturating_sub(1)));
@@ -2512,10 +2557,10 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     let hint = match (list.typing, own) {
         // While searching the letters are typed, as the status bar says.
         (true, _) => " ↓ ↑ move · enter toggle · esc clear",
-        // `r` and `a` are said once there is a task of your own. `j k` and enter work too, left
+        // `r` and `a` are said once there is a task of your own. `↓ ↑` and enter work too, left
         // unsaid: with them the line is wider than 80 columns hold.
-        (_, true) => " h l tier · / search · space toggle · v via · r rename · a about · esc close",
-        _ => " j k h l move · / search · space enter toggle · v via · esc close",
+        (_, true) => " ← → tier · / search · space toggle · v via · r rename · a about · esc close",
+        _ => " ↓ ↑ ← → move · / search · space enter toggle · v via · esc close",
     };
     // As wide as the hint at most, so the box keeps its width as the cursor moves.
     let width = hint.chars().count();
@@ -2525,8 +2570,8 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     // hint it stands for.
     lines.push(match &list.edit {
         Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
-        Some(_) => Line::from(format!("{:<width$}", " enter apply · esc cancel")).style(fg(MUTED)),
-        None => Line::from(hint).style(fg(MUTED)),
+        Some(_) => key_line(&format!("{:<width$}", " enter apply · esc cancel")),
+        None => key_line(hint),
     });
     lines
 }
@@ -2576,14 +2621,14 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
     let hint = match kind {
         _ if typing && kind == Kind::Cols => " ↓ ↑ move · enter toggle · esc clear",
         _ if typing => " ↓ ↑ move · enter pick · esc clear",
-        Kind::Cols => " j k move · / search · space enter toggle · esc | close",
+        Kind::Cols => " ↓ ↑ move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
-        Kind::Theme => " j k preview · / search · enter saves · esc t close",
-        Kind::Harness => " j k move · / search · enter picks · esc close",
-        Kind::Via => " j k move · / search · enter picks · esc back",
-        Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
+        Kind::Theme => " ↓ ↑ preview · / search · enter saves · esc t close",
+        Kind::Harness => " ↓ ↑ move · / search · enter picks · esc close",
+        Kind::Via => " ↓ ↑ move · / search · enter picks · esc back",
+        Kind::Open | Kind::Launch => " ↓ ↑ move · / search · enter opens · esc close",
     };
-    lines.push(Line::from(hint).style(fg(MUTED)));
+    lines.push(key_line(hint));
     lines
 }
 /// The first line in view of a list `shown` lines tall with the cursor on `sel`: where it was,
@@ -3046,7 +3091,7 @@ fn compare(
     out.extend(verdict_lines(models));
     out.push(Line::default());
     if shown < n {
-        out.push(Line::from(format!("models {}-{} of {n} · h l move", first + 1, first + shown)).style(fg(MUTED)));
+        out.push(key_line(&format!("models {}-{} of {n} · ← → move", first + 1, first + shown)));
     }
     let top = out.len();
     // The model row carries `‹` and `›` for models scrolled off, as the table's header does.
@@ -3169,10 +3214,17 @@ mod tests {
         let (tagline, ask) = (row(&lines, TAGLINE).unwrap(), row(&lines, KEY_TITLE).unwrap());
         assert!(tagline < ask, "the question is under the wordmark");
         assert_eq!(row(&lines, "ctrl+c quits"), Some(ask + key_lines(0).len() as u16), "every line of it");
+        let tries = row(&lines, "on the next screen, try");
+        assert_eq!(tries, Some(26), "keys to try, at the bottom");
+        assert_eq!(row(&lines, "o open a model's page · x run it in a harness"), tries.map(|y| y + 1));
+        assert_eq!(row(&lines, "R get recommendations · ? all keys"), tries.map(|y| y + 2));
+        assert!(try_lines().iter().all(|l| l.width() <= LOGO[0].chars().count()), "as wide as the wordmark at most");
+        let short = screen(&mut a, 120, 24);
+        assert!(row(&short, TAGLINE).is_some() && row(&short, "next screen").is_none(), "the question alone");
         // The key is typed in the box, hidden, and not in the status bar.
         a.input = Input::Key { text: "abc".into(), cur: 3, wrong: false, asked: false };
         let lines = screen(&mut a, 120, 30);
-        assert_eq!(row(&lines, "key: ***"), Some(ask + 1 + KEY_ROW as u16));
+        assert_eq!(row(&lines, "key: •••"), Some(ask + 1 + KEY_ROW as u16));
         assert!(!lines[29].contains("API key"), "{}", lines[29]);
         // A click on the box's link opens where a key is made, and one beside it does nothing.
         let at = lines[usize::from(ask) + 1].find("artificialanalysis.ai").unwrap();
@@ -3619,7 +3671,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "h l column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "← → column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -3692,10 +3744,15 @@ mod tests {
     #[test]
     fn a_click_on_a_hint_presses_its_key() {
         use ratatui::crossterm::event::KeyModifiers;
-        assert_eq!(split_hint("h l 0 $ model"), ("h l 0 $", " model"));
+        assert_eq!(split_hint("← → 0 $ model"), ("← → 0 $", " model"));
         assert_eq!(split_hint("enter best models first"), ("enter", " best models first"));
+        // Under a list, each part's keys in their colour and the rest muted.
+        let line = key_line(" ↓ ↑ move · esc t close · ctrl+c quits");
+        assert_eq!(line.to_string(), " ↓ ↑ move · esc t close · ctrl+c quits");
+        let keys = line.spans.iter().filter(|s| s.style.fg == Some(KEY)).map(|s| &*s.content);
+        assert_eq!(keys.collect::<Vec<_>>(), ["↓ ↑", "esc t", "ctrl+c"]);
         assert_eq!(
-            (hint_key("s sort"), hint_key("esc back"), hint_key("space select"), hint_key("j k scroll")),
+            (hint_key("s sort"), hint_key("esc back"), hint_key("space select"), hint_key("↓ ↑ scroll")),
             (Some(KeyCode::Char('s')), Some(KeyCode::Esc), Some(KeyCode::Char(' ')), None)
         );
         let mut a = app();
@@ -4681,7 +4738,7 @@ mod tests {
             let lines = fav_lines(&a, &items, &List { edit, ..Default::default() }, 80);
             [lines[1].to_string(), lines.last().unwrap().to_string()]
         };
-        let wide = " j k h l move · / search · space enter toggle · v via · esc close".chars().count();
+        let wide = " ↓ ↑ ← → move · / search · space enter toggle · v via · esc close".chars().count();
         assert_eq!(
             text(What::Rename("x".into()), "y", None),
             [" y ".to_string(), format!("{:<wide$}", " enter apply · esc cancel")],

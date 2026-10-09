@@ -39,7 +39,8 @@ The task scores, Value and the recommendations stay with that source. In the TUI
 The source in use is Artificial Analysis when its key is there and works, else Epoch AI.
 
 - The TUI's first start asks for the key, under the wordmark: `enter` saves it, `esc` skips it.
-  A click on `artificialanalysis.ai` there opens the page where a free key is made.
+  A click on `artificialanalysis.ai` there opens the page where a free key is made. The bottom
+  of that screen names keys to try on the next one: `o`, `x`, `R` and `?`.
 - The key is `ARTIFICIAL_ANALYSIS_API_KEY`, else the one saved in `aa_key` next to `user.json`,
   readable by you alone. `K` in the TUI asks for one later, to add it or replace the saved
   one, as `modelcmp --source aa` does with none saved.
