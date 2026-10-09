@@ -241,20 +241,21 @@ fn logo_at(a: Rect, below: u16) -> Option<(u16, u16, u16)> {
 const KEY_TITLE: &str = "Artificial Analysis API key?";
 /// What the key is typed after there, on line `KEY_ROW` of the box.
 const KEY_ASK: &str = " key: ";
-const KEY_ROW: usize = 3;
+const KEY_ROW: usize = 4;
 
 /// The lines of the first start's box: what the key gives and where it is had, a link (`hit`),
 /// the key being typed, `typed` bytes of it, and the keys. Nothing in it is a list's entry, so
 /// only the keys are muted, as under every list.
 fn key_lines(typed: usize) -> Vec<Line<'static>> {
     let site = Span::styled(data::Source::Aa.site(), Style::new().add_modifier(Modifier::UNDERLINED));
-    let what = Line::from(vec![Span::raw(" for more models and speed metrics, free at "), site, Span::raw(" ")]);
+    let what = Line::from(vec![Span::raw(" enter your free "), site, Span::raw(" API key ")]);
     // Hidden from anyone looking at the screen, as in the status bar.
     // ponytail: a key longer than the box shows no more stars; scroll it if keys grow that long.
     let stars = "*".repeat(typed.min(what.width() - KEY_ASK.len() - 1));
     vec![
         what,
-        Line::from(" without one all the benchmarks are from Epoch AI "),
+        Line::from(" for more models and speed metrics "),
+        Line::from(" without it, all benchmarks come from Epoch AI "),
         Line::default(),
         Line::from(format!("{KEY_ASK}{stars}")),
         Line::from(" enter saves · esc skips · ctrl+c quits").style(fg(MUTED)),
