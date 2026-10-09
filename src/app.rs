@@ -1138,7 +1138,7 @@ pub struct App {
     pub overlay_query: String,
     /// Rows visible in the body, set by the renderer; drives page movement.
     pub page: u16,
-    /// First of the columns right of Dev shown when they do not all fit; the renderer keeps
+    /// First of the columns right of Model shown, 0 being Dev, when they do not all fit; the renderer keeps
     /// the selected one in view.
     pub hscroll: usize,
     pub count: usize,

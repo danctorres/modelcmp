@@ -1641,11 +1641,11 @@ struct Layout {
     /// Where the "Via" and "Notes" columns start and their widths, if there is room.
     via: Option<(u16, u16)>,
     notes: Option<(u16, u16)>,
-    /// The first column right of Dev shown (0 is Released, the last Notes), for `App::hscroll`.
+    /// The first column right of Model shown (0 is Dev, the last Notes), for `App::hscroll`.
     first: usize,
-    /// Columns cut off on the right; `‹` after Dev and `›` on the frame say where to scroll.
+    /// Columns cut off on the right; `‹` after Model and `›` on the frame say where to scroll.
     more: bool,
-    /// Where a `│` parts two groups of columns (`GROUPS`): after Dev when scrolled, and before
+    /// Where a `│` parts two groups of columns (`GROUPS`): after Model when scrolled, and before
     /// each group that starts right of it.
     seps: Vec<u16>,
 }
@@ -1688,22 +1688,25 @@ fn layout(width: u16, app: &App) -> Layout {
     // each with a spare cell: some terminals draw them two cells wide, and the
     // spare keeps that off the neighbour.
     let name_x = app.rows.len().max(1).to_string().len() as u16 + 7;
-    // The columns right of Dev scroll sideways: only as far as it takes to show the selected
-    // one, keeping the last position otherwise. Model and Dev stay put.
+    // The columns right of Model scroll sideways, Dev the first of them: only as far as it takes
+    // to show the selected one, keeping the last position otherwise. Model stays put.
     let ws: Vec<u16> = widths.into_iter().chain([via_w, notes_w]).collect();
-    // A column starting a group has a `│` in its gap, one cell wider; so does the first shown
-    // when scrolled, parting it from Dev. Released, in Dev's group, has neither.
-    let starts = group_starts();
-    let sep = |k: usize| u16::from(starts.contains(&(k + 2)));
     // A column left out takes no room at all.
     let ws: Vec<u16> = ws.into_iter().enumerate().map(|(k, w)| if hidden(k + 2) { 0 } else { w }).collect();
-    // Model is not cut to make room for every column: those right of Dev scroll, and `›` says
-    // so. Only for one, the widest number, so a long name never leaves the table with none.
-    let keep = ws[..COLS.len()].iter().max().map_or(0, |w| w + GAP + 1);
-    let name_w = longest.min(width.saturating_sub(name_x + GAP + dev_w + GAP + keep)).max(NAME_MIN);
-    let mut x = name_x + name_w + GAP + dev_w + GAP;
+    // By cursor index less one: Dev, the numbers, Via and Notes.
+    let ws: Vec<u16> = std::iter::once(dev_w).chain(ws).collect();
+    // A column starting a group has a `│` in its gap, one cell wider; so does the first shown
+    // when scrolled, parting it from Model. Dev and Released, in Model's group, have neither.
+    let starts = group_starts();
+    let sep = |k: usize| u16::from(starts.contains(&(k + 1)));
+    // Model is not cut to make room for every column: those right of it scroll, and `›` says
+    // so. Only for one, the widest of Dev and the numbers, so a long name never leaves the
+    // table with none.
+    let keep = ws[..=COLS.len()].iter().max().map_or(0, |w| w + GAP + 1);
+    let name_w = longest.min(width.saturating_sub(name_x + GAP + keep)).max(NAME_MIN);
+    let mut x = name_x + name_w + GAP;
     let room = width.saturating_sub(x) + GAP;
-    let first = match app.col.checked_sub(2) {
+    let first = match app.col.checked_sub(1) {
         Some(s) => {
             // The leftmost first column that still shows column `s`. Each column brought in on
             // the left costs its width and gap, and the one it displaces as first its `│`;
@@ -1712,7 +1715,7 @@ fn layout(width: u16, app: &App) -> Layout {
                 let (mut lo, mut used) = (s, ws[s] + GAP);
                 for k in (0..s).rev().filter(|&k| ws[k] > 0) {
                     let cost = ws[k] + GAP + sep(lo);
-                    // Plus the first's own `│`, unless it is Released.
+                    // Plus the first's own `│`, unless it is Dev.
                     if used + cost + u16::from(k > 0) > room {
                         break;
                     }
@@ -1728,13 +1731,13 @@ fn layout(width: u16, app: &App) -> Layout {
         None => 0,
     };
     let (mut cols, mut tail, mut more, mut seps) = (Vec::with_capacity(COLS.len()), [None; 2], false, vec![]);
-    let mut started = false;
+    let (mut started, mut dev_w) = (false, 0);
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
         let part = if started { sep(k) == 1 } else { k > 0 };
         x += u16::from(part);
-        // Via and Notes are cut to the room left rather than dropped, so none of it is blank.
-        // Not a number: cut short it reads as another number.
-        let w = if k < COLS.len() { w } else { w.min(width.saturating_sub(x)) };
+        // Dev, Via and Notes are cut to the room left rather than dropped, so none of it is
+        // blank. Not a number: cut short it reads as another number.
+        let w = if (1..=COLS.len()).contains(&k) { w } else { w.min(width.saturating_sub(x)) };
         started = true;
         if w == 0 || x + w > width {
             more = true;
@@ -1744,9 +1747,10 @@ fn layout(width: u16, app: &App) -> Layout {
         if part {
             seps.push(x - 2);
         }
-        match k.checked_sub(COLS.len()) {
-            Some(t) => tail[t] = Some((x, w)),
-            None => cols.push((k, x, w)),
+        match k.checked_sub(1).map(|n| (n, n.checked_sub(COLS.len()))) {
+            None => dev_w = w,
+            Some((_, Some(t))) => tail[t] = Some((x, w)),
+            Some((n, None)) => cols.push((n, x, w)),
         }
         x += w + GAP;
     }
@@ -1789,9 +1793,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
     buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
     buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
-    if first > 0 && dev_x + dev_w < area.right() {
-        // Columns scrolled off to the left.
-        buf.set_stringn(dev_x + dev_w, y, "‹", 1, MORE);
+    if first > 0 && name_x + name_w < area.right() {
+        // Columns scrolled off to the left, Dev the first.
+        buf.set_stringn(name_x + name_w, y, "‹", 1, MORE);
     }
     for &(i, x, w) in &cols {
         let text = format!("{}{}{}", arrow(i + 2), col_head(app, i + 2), if app.menu(i + 2) { " ▾" } else { "" });
@@ -4079,7 +4083,11 @@ mod tests {
     fn narrow_table_drops_columns_and_hints_without_panicking() {
         let mut a = app();
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "▼ECI"], "the cursor starts on the index");
+        assert_eq!(
+            words(&lines[0]),
+            ["#", "Model", "‹│", "$out", "Ctx", "│", "▼ECI"],
+            "the cursor starts on the index, and Dev scrolls off"
+        );
         assert!(layout(46, &a).more, "columns cut off on the right");
         assert!(!layout(400, &a).more, "all columns fit");
         assert_eq!(layout(400, &a).first, 0, "a window made wide again shows the columns scrolled off on the left");
@@ -4107,11 +4115,11 @@ mod tests {
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false), "all rows fit");
         assert!(lines[3].ends_with("? help"), "{}", lines[3]);
         assert!(!lines[3].contains("space select"), "hints that do not fit are dropped whole");
-        // Moving past the right edge scrolls the columns right of Dev; Model and Dev stay.
+        // Moving past the right edge scrolls the columns right of Model, Dev too; Model stays.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "Notes"]);
-        // A column wider than the room right of Dev is cut, not dropped.
+        assert_eq!(words(&lines[0]), ["#", "Model", "‹│", "Via", "▾", "Notes"]);
+        // A column wider than the room right of Model is cut, not dropped.
         a.store.set_note("opus", &"x".repeat(40));
         for w in 44..80 {
             let l = layout(w, &a);
@@ -4120,15 +4128,19 @@ mod tests {
         a.store.set_note("opus", "");
         a.col = VIA;
         let (_, lines) = render(&mut a, 47, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "‹│", "Via", "▾"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "‹│", "Via", "▾", "Notes"]);
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
         let (_, lines) = render(&mut a, 56, 4);
-        assert_eq!(words(&lines[0])[4..], ["‹│", "$task", "Tok/task"], "scrolls back only as far as needed");
+        assert_eq!(
+            words(&lines[0])[2..],
+            ["‹│", "$task", "Tok/task", "│", "Via", "▾"],
+            "scrolls back only as far as needed"
+        );
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 56, 4);
-        assert_eq!(words(&lines[0])[4..], ["‹│", "$task", "Tok/task"], "{}", lines[0]);
+        assert_eq!(words(&lines[0])[2..], ["‹│", "$task", "Tok/task", "│", "Via", "▾"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 48, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");
