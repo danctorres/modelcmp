@@ -239,7 +239,8 @@ fn main() {
     data::set_source(source.unwrap_or_default());
     let result = match args.cmd {
         None => {
-            let ask = args.source.is_none() && store.source.is_empty();
+            // Nothing to ask with a key there: Artificial Analysis is then the default.
+            let ask = args.source.is_none() && store.source.is_empty() && data::aa_key().is_none();
             tui::run(store, args.refresh, ask).map_err(Exit::from)
         }
         Some(cmd) => {

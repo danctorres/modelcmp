@@ -48,8 +48,8 @@ enum Refreshed {
 /// A refresh under way: where its result comes, and its steps for the frame's count.
 type Refresh = (Receiver<Refreshed>, data::Steps);
 
-/// `ask`: no source was ever picked, nor given with `--source`: open on the `B` chooser, with
-/// no data until one is picked.
+/// `ask`: no source was ever picked, nor given with `--source`, and Artificial Analysis has no
+/// key: open on its key prompt, with no data until a key is typed or skipped.
 pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // Run by an agent or a script there is no terminal to draw on: say so before any download or
     // harness is started, not after.
@@ -77,15 +77,15 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     let (mut rx, mut pre) = (None, None);
     if ask {
         app.first_start = true;
-        app.ask_source();
-        // No source is picked yet: the default's download starts under the intro, for the pick
-        // to take up, unless the CLI has left a cache that will do.
+        app.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        // No source is picked yet: the default's download starts under the intro, for a skipped
+        // key to take up, unless the CLI has left a cache that will do.
         pre = (force || data::load_cache().is_none_or(|d| d.stale())).then(spawn_refresh);
     } else if (force || app.data.stale()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
     // After the refresh starts, which clears the status: it is your marks and notes that are at
-    // stake. The first start keeps it for the pick, as a key under its question clears the status.
+    // stake. The first start keeps it until its key prompt closes, which has the status bar.
     if !ask && let Some(w) = app.store.warning.take() {
         app.report(Err(w));
     }
@@ -237,18 +237,42 @@ fn logo_at(a: Rect, below: u16) -> Option<(u16, u16, u16)> {
     Some((a.x + (a.width - w) / 2, a.y + (a.height - rows - under - below) / 2, under))
 }
 
-/// The first start asks for the benchmarks under the wordmark, where the intro leaves it: where
-/// the wordmark is (`logo_at`), and the rows under it that the question's box is centred in. None
-/// once a source is picked, on a screen too small for both, which asks over the table, and with
-/// neither the question nor its API key prompt open, as when the key could not be saved.
+/// The first start's question, the title of its box under the wordmark.
+const KEY_TITLE: &str = "Artificial Analysis API key?";
+/// What the key is typed after there, on line `KEY_ROW` of the box.
+const KEY_ASK: &str = " key: ";
+const KEY_ROW: usize = 3;
+
+/// The lines of the first start's box: what the key gives and where it is had, a link (`hit`),
+/// the key being typed, `typed` bytes of it, and the keys. Nothing in it is a list's entry, so
+/// only the keys are muted, as under every list.
+fn key_lines(typed: usize) -> Vec<Line<'static>> {
+    let site = Span::styled(data::Source::Aa.site(), Style::new().add_modifier(Modifier::UNDERLINED));
+    let what = Line::from(vec![Span::raw(" for more models and speed metrics, free at "), site, Span::raw(" ")]);
+    // Hidden from anyone looking at the screen, as in the status bar.
+    // ponytail: a key longer than the box shows no more stars; scroll it if keys grow that long.
+    let stars = "*".repeat(typed.min(what.width() - KEY_ASK.len() - 1));
+    vec![
+        what,
+        Line::from(" without one all the benchmarks are from Epoch AI "),
+        Line::default(),
+        Line::from(format!("{KEY_ASK}{stars}")),
+        Line::from(" enter saves · esc skips · ctrl+c quits").style(fg(MUTED)),
+    ]
+}
+
+/// The first start asks for Artificial Analysis's API key under the wordmark, where the intro
+/// leaves it: where the wordmark is (`logo_at`), and the rows under it that the question's box is
+/// centred in. None once the key is typed or skipped, and on a screen too small for both, which
+/// asks over the table.
 fn splash(app: &App, area: Rect) -> Option<((u16, u16, u16), Rect)> {
-    if !app.first_start || !matches!(app.input, Input::Choose { kind: Kind::Source, .. } | Input::Key { .. }) {
+    if !app.first_start || !matches!(app.input, Input::Key { .. }) {
         return None;
     }
-    // Above the status bar, where a search of the list and an API key are typed.
+    // Above the status bar.
     let body = Rect { height: area.height.checked_sub(1)?, ..area };
-    // A blank row, then the box: its border, a line per source and the key hint.
-    let ask = data::Source::ALL.len() as u16 + 4;
+    // A blank row, then the box: its border and its lines.
+    let ask = key_lines(0).len() as u16 + 3;
     let at = logo_at(body, ask)?;
     Some((at, Rect { y: at.1 + LOGO.len() as u16 + at.2 + 1, height: ask - 1, ..body }))
 }
@@ -649,6 +673,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         return None;
     }
     let pos = ratatui::layout::Position::new(m.column, m.row);
+    // The first start's box has one thing to click, its link, on its first line.
+    if let Some((_, within)) = splash(app, area) {
+        let lines = key_lines(0);
+        let rect = overlay_rect(within, KEY_TITLE, &lines);
+        let x = rect.x + 2 + lines[0].spans[0].width() as u16;
+        let link = m.row == rect.y + 1 && (x..x + lines[0].spans[1].width() as u16).contains(&m.column);
+        return Some(if link && !mark && !extend { Mouse::Link } else { Mouse::Outside });
+    }
     // Under the tabs' two lines and the frame's top border.
     let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
     let l = layout(inner.width, app);
@@ -1457,7 +1489,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     }
     let buf = f.buffer_mut();
     // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
-    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y));
+    let mut cursor = status(buf, bar, app, splash.is_some()).map(|x| (x, bar.y));
     // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
     let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
     let lines = match app.view {
@@ -1551,6 +1583,15 @@ fn draw(app: &mut App, f: &mut Frame) {
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
         overlay(buf, body, &title, lines, &mut 0, Color::Reset, (0, 0, 0..0));
     }
+    // The first start's question, under the wordmark, its border muted as the table's frame.
+    // The key is typed in it, on its own line.
+    if let (Some((_, within)), Input::Key { text, cur, .. }) = (splash, &app.input) {
+        let lines = key_lines(text.len());
+        let rect = overlay_rect(within, KEY_TITLE, &lines);
+        let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + cur) as u16;
+        overlay(buf, within, KEY_TITLE, lines, &mut 0, MUTED, (0, 0, 0..0));
+        cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
+    }
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
         let rect = overlay_rect(within, title, &lines);
@@ -1570,11 +1611,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         // error on the line under the entry if it bites.
         let from = if *sel + 1 >= rows || list.edit.is_some() { lines.len().saturating_sub(shown) } else { *top };
         let mut scroll = list_top(from, *sel + head, shown) as u16;
-        // Under the wordmark the box is muted, as the table's frame; over the table it has
-        // the text's colour, as every box there, which parts it from that frame.
-        let border = if splash.is_some() { MUTED } else { Color::Reset };
         let ends = (head, lines.len() - rows - head, 0..0);
-        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, border, ends);
+        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, Color::Reset, ends);
         *top = usize::from(scroll);
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
@@ -2209,8 +2247,9 @@ fn mode(app: &App) -> (&'static str, Color) {
     }
 }
 
-/// Returns the cursor column while a search, note or bound is being typed.
-fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
+/// Returns the cursor column while a search, note or bound is being typed. `boxed`: the first
+/// start's key is typed in its box (`splash`), not here.
+fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
     let width = area.width as usize;
     let (mode, color) = mode(app);
     let end = pill(buf, area.x, area.y, mode, color, area.width);
@@ -2222,12 +2261,12 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             | Input::Unfavorite
             | Input::Unexclude
             | Input::Choose { list: List { typing: false, .. }, .. }
-    ) {
-        // The question is in a box in the middle of the screen. Under the first start's, the
-        // start's warning shows until the pick reports it.
-        // And what a pick could not save, which the next key clears.
-        if let Some(w) = app.store.warning.as_deref().or(app.failed.then_some(app.status.as_str())) {
-            buf.set_stringn(x, area.y, w, usize::from(area.right().saturating_sub(x)), fg(BAD));
+    ) || boxed
+    {
+        // The question is in a box in the middle of the screen. Under it, what a pick could not
+        // save, which the next key clears.
+        if app.failed {
+            buf.set_stringn(x, area.y, &app.status, usize::from(area.right().saturating_sub(x)), fg(BAD));
         }
         return None;
     }
@@ -2270,6 +2309,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             (true, false) => "j k move  / search  space enter toggle  esc close",
             (true, true) if toggles => "↓ ↑ move  enter toggle  esc clear",
             (true, true) => "↓ ↑ move  enter pick  esc clear",
+            // The first start's key prompt, as its box says.
+            _ if app.first_start => "enter save  esc skip",
             _ => "enter apply  esc cancel",
         };
         let width = |s: &str| Span::raw(s).width();
@@ -2500,9 +2541,8 @@ fn source_link(label: &str, effect: &Effect) -> Option<Range<usize>> {
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
-/// `first`: the first start's question, where esc picks the default and `B` asks again later.
 /// `f`'s grid has lines of its own, `fav_lines`.
-fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool) -> Vec<Line<'static>> {
+fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
@@ -2558,7 +2598,6 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, first: bool
         Kind::Cols => " j k move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " j k preview · / search · enter saves · esc t close",
-        Kind::Source if first => " j k move · / search · enter picks · esc default · B changes it later",
         Kind::Source | Kind::Harness => " j k move · / search · enter picks · esc close",
         Kind::Via => " j k move · / search · enter picks · esc back",
         Kind::Open | Kind::Launch => " j k move · / search · enter opens · esc close",
@@ -2573,16 +2612,15 @@ fn list_top(top: usize, sel: usize, shown: usize) -> usize {
 }
 
 /// An open chooser's lines and the area its box is centred in, for `draw` and `hit` alike: the
-/// frame between the tabs and the status bar, or on the first start the rows under the wordmark
-/// (`splash`). A terminal too short for a box there has it over the tabs.
+/// frame between the tabs and the status bar. A terminal too short for a box there has it over
+/// the tabs.
 fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
     let Input::Choose { kind, items, list, .. } = &app.input else { return None };
     let tabs = if area.height < 6 { 0 } else { 2 };
-    let body = Rect { y: area.y + tabs, height: area.height - 1 - tabs, ..area };
-    let within = splash(app, area).map_or(body, |s| s.1);
+    let within = Rect { y: area.y + tabs, height: area.height - 1 - tabs, ..area };
     let lines = match kind {
         Kind::Fav => fav_lines(app, items, list, edit_room(within)),
-        _ => choice_lines(*kind, items, list, app.first_start),
+        _ => choice_lines(*kind, items, list),
     };
     Some((within, lines))
 }
@@ -3141,28 +3179,30 @@ mod tests {
         let row = |lines: &[String], pat: &str| lines.iter().position(|l| l.contains(pat)).map(|y| y as u16);
         let mut a = app();
         a.first_start = true;
-        a.ask_source();
-        a.store.warning = Some("user.json is not valid".into());
+        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
         let lines = screen(&mut a, 120, 30);
-        assert!(lines[29].contains("user.json is not valid"), "the start's warning shows under it");
         assert_eq!(row(&lines, "Model"), None, "no table behind the question");
-        let (tagline, ask) = (row(&lines, TAGLINE).unwrap(), row(&lines, "benchmarks?").unwrap());
+        let (tagline, ask) = (row(&lines, TAGLINE).unwrap(), row(&lines, KEY_TITLE).unwrap());
         assert!(tagline < ask, "the question is under the wordmark");
-        // A click lands on the entry where it is drawn.
+        assert_eq!(row(&lines, "ctrl+c quits"), Some(ask + key_lines(0).len() as u16), "every line of it");
+        // The key is typed in the box, hidden, and not in the status bar.
+        a.input = Input::Key { text: "abc".into(), cur: 3, wrong: false };
+        let lines = screen(&mut a, 120, 30);
+        assert_eq!(row(&lines, "key: ***"), Some(ask + 1 + KEY_ROW as u16));
+        assert!(!lines[29].contains("API key"), "{}", lines[29]);
+        // A click on the box's link opens where a key is made, and one beside it does nothing.
+        let at = lines[usize::from(ask) + 1].find("artificialanalysis.ai").unwrap();
+        let column = lines[usize::from(ask) + 1][..at].chars().count() as u16;
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 60,
-            row: row(&lines, "Artificial Analysis").unwrap(),
+            column,
+            row: ask + 1,
             modifiers: KeyModifiers::NONE,
         };
-        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), click), Some(Mouse::Item(1)));
-        // And on its link opens where a key is made, the question staying.
-        let site = lines[usize::from(click.row)].find("artificialanalysis.ai").unwrap();
-        let column = lines[usize::from(click.row)][..site].chars().count() as u16;
-        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), MouseEvent { column, ..click }), Some(Mouse::Link));
-        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), MouseEvent { column: column - 1, ..click }), Some(Mouse::Item(1)));
+        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), click), Some(Mouse::Link));
+        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), MouseEvent { column: column - 1, ..click }), Some(Mouse::Outside));
         assert_eq!(a.mouse(Mouse::Link), Some(Effect::Open(data::AA_KEY_URL.into())));
-        assert!(matches!(a.input, Input::Choose { kind: Kind::Source, .. }));
+        assert!(matches!(a.input, Input::Key { .. }), "the prompt stays for the key");
         // Too small for both: over the table, as `B` asks later.
         let lines = screen(&mut a, 120, 12);
         assert!(row(&lines, "Model").is_some() && row(&lines, TAGLINE).is_none());
@@ -3234,7 +3274,7 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         table(&mut buf, Rect { height: height - 1, ..area }, app);
-        status(&mut buf, Rect { y: height - 1, height: 1, ..area }, app);
+        status(&mut buf, Rect { y: height - 1, height: 1, ..area }, app, false);
         let lines = text(&buf);
         (buf, lines)
     }
@@ -4096,7 +4136,7 @@ mod tests {
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);
             table(&mut buf, area, &mut a);
-            status(&mut buf, area, &a);
+            status(&mut buf, area, &a, false);
         }
     }
 
@@ -4156,18 +4196,22 @@ mod tests {
         a.input = Input::Search { cur: 3, was: String::new() };
         a.query = "gem".into();
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
-        assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 4));
+        assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a, false), Some(8 + 1 + 4));
         let line: String = (0..14).map(|x| buf[(x, 0)].symbol()).collect();
         assert_eq!(line, " SEARCH  /gem ");
         a.input = Input::Search { cur: 1, was: String::new() };
-        assert_eq!(status(&mut buf, Rect::new(0, 0, 40, 1), &a), Some(8 + 1 + 2), "the cursor sits inside the text");
+        assert_eq!(
+            status(&mut buf, Rect::new(0, 0, 40, 1), &a, false),
+            Some(8 + 1 + 2),
+            "the cursor sits inside the text"
+        );
         a.input = Input::Bound { col: PRICE + 1, min: true, text: "4".into(), cur: 1 };
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
-        status(&mut buf, Rect::new(0, 0, 40, 1), &a);
+        status(&mut buf, Rect::new(0, 0, 40, 1), &a, false);
         assert_eq!((0..15).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  $in ≥ 4");
         a.input = Input::Bound { col: ECI - 1, min: true, text: "200".into(), cur: 3 };
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
-        assert_eq!(status(&mut buf, Rect::new(0, 0, 60, 1), &a), Some(8 + 6 + 3), "the k is after the cursor");
+        assert_eq!(status(&mut buf, Rect::new(0, 0, 60, 1), &a, false), Some(8 + 6 + 3), "the k is after the cursor");
         assert_eq!((0..18).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  Ctx ≥ 200k", "in thousands");
     }
 
@@ -4582,7 +4626,7 @@ mod tests {
     #[test]
     fn a_list_colours_what_the_table_does() {
         let fgs = |kind, label: &str, effect| {
-            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), false);
+            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default());
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
         assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
@@ -4605,10 +4649,10 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), false);
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"));
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &search("gr"), false);
+        let lines = choice_lines(Kind::Theme, &items, &search("gr"));
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.

@@ -128,7 +128,8 @@ For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list 
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models rank in real agent sessions,
   the Arena column, and it needs no API key.
 
-The TUI asks which benchmark source to use on its first start, and `B` changes it later.
+The TUI asks for the Artificial Analysis key on its first start, which `esc` skips, and `B`
+changes the source later.
 With both, one table shows the columns of each, and `|` picks the ones to show.
 Data is cached for 24 hours.
 

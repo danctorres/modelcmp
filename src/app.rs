@@ -546,8 +546,8 @@ pub enum Input {
         text: String,
         cur: usize,
     },
-    /// Typing Artificial Analysis's API key: after picking it with `B` with none saved, or when
-    /// it turned the saved one down (`wrong`).
+    /// Typing Artificial Analysis's API key: on the first start, where esc skips it for Epoch AI,
+    /// after picking it with `B` with none saved, or when it turned the saved one down (`wrong`).
     Key {
         text: String,
         cur: usize,
@@ -1920,7 +1920,7 @@ impl App {
         self.bounds.retain(|b| !hidden(b.0));
     }
 
-    /// The `B` chooser, each source saying what it takes; the TUI opens with it until one is picked.
+    /// The `B` chooser, each source saying what it takes.
     pub fn ask_source(&mut self) {
         let items =
             Source::ALL.iter().map(|s| (format!("{:<20} {}", s.label(), s.about()), Effect::Source(*s))).collect();
@@ -2662,6 +2662,8 @@ impl App {
             let search = matches!(self.input, Input::Search { .. });
             match m {
                 Mouse::Scroll(_) | Mouse::Cols(_) => return None,
+                // The first start's key prompt stays open: closing it would skip the key.
+                _ if self.first_start => return None,
                 _ if search => drop(self.input_key(KeyCode::Enter, KeyModifiers::NONE)),
                 _ => return self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             }
@@ -2700,8 +2702,6 @@ impl App {
                     self.input = Input::None;
                     self.on_mouse(m)
                 }
-                // The first start's question stays open: closing it would pick the default.
-                _ if self.first_start && matches!(self.input, Input::Choose { kind: Kind::Source, .. }) => None,
                 // Outside, or anything else that is not an entry: close it. A search takes an
                 // esc of its own first.
                 _ => {
@@ -3340,14 +3340,19 @@ impl App {
                             self.refresh()
                         }
                         Ok(()) => self.switch(Source::Aa),
+                        // On the first start there is no table yet: the default's, as esc gives.
                         Err(e) => {
+                            let effect = if self.first_start { self.switch(Source::preferred()) } else { None };
                             self.report(Err(format!("could not save the key: {e}")));
-                            None
+                            effect
                         }
                     };
                 }
-                // On the first start, back to the choice: there is no data to go back to.
-                KeyCode::Esc if self.first_start => self.ask_source(),
+                // Skipped on the first start: the default, which needs no key.
+                KeyCode::Esc if self.first_start => {
+                    self.input = Input::None;
+                    return self.switch(Source::preferred());
+                }
                 KeyCode::Esc => self.input = Input::None,
                 _ => drop(edit(text, cur, code, mods, |_| true)),
             },
@@ -3425,8 +3430,7 @@ impl App {
                 let at = choice_rows(items, &list.query).get(list.sel).copied();
                 match code {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
-                    // Not on the first start's choice, which has no table to go back to.
-                    KeyCode::Char('q') if list.idle() && !self.first_start => self.ask_quit(),
+                    KeyCode::Char('q') if list.idle() => self.ask_quit(),
                     // Space ticks a column and keeps the list open, as in f's grid, and so does enter.
                     KeyCode::Char(' ') | KeyCode::Enter
                         if *kind == Kind::Cols && (code == KeyCode::Enter || !list.typing) =>
@@ -3490,9 +3494,7 @@ impl App {
                             // picking it again when it is the source changes a saved key.
                             Effect::Source(Source::Aa)
                                 if crate::data::aa_key().is_none()
-                                    || (crate::data::source() == Source::Aa
-                                        && !self.first_start
-                                        && crate::data::aa_key_env().is_none()) =>
+                                    || (crate::data::source() == Source::Aa && crate::data::aa_key_env().is_none()) =>
                             {
                                 self.input = Input::Key { text: String::new(), cur: 0, wrong: false };
                             }
@@ -3513,11 +3515,6 @@ impl App {
                         }
                     }
                     _ if list.key(code, mods, at, |q| choice_rows(items, q).len(), false) => {}
-                    // Closing the first start's choice picks the default.
-                    KeyCode::Esc if self.first_start && *kind == Kind::Source => {
-                        self.input = Input::None;
-                        return self.switch(Source::preferred());
-                    }
                     // Esc leaves the harnesses for f's grid they were opened from, on the same task.
                     KeyCode::Esc if *kind == Kind::Via => {
                         if let Some((_, Effect::Via(key, slot, _))) = items.first() {
@@ -3947,9 +3944,7 @@ mod tests {
         assert!(code(&mut a, KeyCode::Esc).is_none() && a.input == Input::None);
         assert_eq!((a.store.source.as_str(), crate::data::source()), ("", Source::Aa));
         crate::data::set_source(Source::Epoch);
-        a.first_start = true;
-        a.ask_source();
-        assert!(a.mouse(Mouse::Outside).is_none() && matches!(a.input, Input::Choose { .. }), "a click beside it");
+        press(&mut a, "B");
         let label = |a: &App, i: usize| match &a.input {
             Input::Choose { items, .. } => items[i].0.clone(),
             _ => String::new(),
@@ -3958,13 +3953,25 @@ mod tests {
         press(&mut a, "j");
         code(&mut a, KeyCode::Enter);
         assert!(matches!(a.input, Input::Key { .. }), "Artificial Analysis asks for its key");
-        code(&mut a, KeyCode::Esc);
-        assert!(matches!(a.input, Input::Choose { .. }), "on the first start, esc goes back to the choice");
-        // Closing the first start's choice picks the default, and loads it.
+        assert!(code(&mut a, KeyCode::Esc).is_none() && a.input == Input::None, "esc leaves it, nothing switched");
+        // The first start asks for the key alone, and a click beside it leaves it open.
+        a.first_start = true;
+        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        assert!(a.mouse(Mouse::Outside).is_none() && matches!(a.input, Input::Key { .. }), "a click beside it");
+        // Skipping it picks the default, and loads it.
         assert!(matches!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch))));
         assert_eq!((a.store.source.as_str(), crate::data::source()), ("epoch", Source::Epoch));
+        assert!(a.input == Input::None && !a.first_start);
         press(&mut a, "B");
         assert!(code(&mut a, KeyCode::Enter).is_none(), "picked before: nothing to switch");
+        // A key typed there starts on Artificial Analysis.
+        let mut k = app();
+        k.first_start = true;
+        k.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        press(&mut k, "key");
+        assert!(matches!(code(&mut k, KeyCode::Enter), Some(Effect::Source(Source::Aa))));
+        assert_eq!((k.store.source.as_str(), crate::data::aa_key().as_deref()), ("aa", Some("key")));
+        crate::data::set_source(Source::Epoch);
         // A source never downloaded shows nothing until it is, not the other one's scores.
         assert!(a.switched(None) && a.data.models.is_empty() && a.refreshing);
     }
@@ -6030,8 +6037,9 @@ mod tests {
         assert_eq!(press(&mut a, "qq"), Some(Effect::Quit));
         let mut a = app();
         a.first_start = true;
-        a.ask_source();
-        assert!(press(&mut a, "q").is_none() && matches!(a.input, Input::Choose { .. }), "not on the first start");
+        a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        assert!(press(&mut a, "q").is_none(), "a letter of the key on the first start");
+        assert!(matches!(&a.input, Input::Key { text, .. } if text == "q"));
         assert_eq!(ctrl(&mut a, 'c'), Some(Effect::Quit), "ctrl-c quits at once");
     }
 
