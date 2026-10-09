@@ -20,9 +20,9 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Ctx | context window, in tokens |
 | ECI | Epoch Capabilities Index. From Epoch AI |
 | AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
+| Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | coding per dollar, ranked 0-100 |
-| Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard |
 | $task | USD per coding task, [measured](#task) by Epoch AI |
 | Tok/task | output tokens per coding task, [measured](#task) by Epoch AI |
 | Tok/s | output tokens per second. From Artificial Analysis |

@@ -90,7 +90,7 @@ struct ModelOut<'a> {
     /// The model's page, the one `open` opens: the first site of `pages` to have one, null when none has
     url: Option<String>,
     /// Site -> the model's page there, for each of models.dev, epoch.ai, artificialanalysis.ai,
-    /// openrouter.ai and huggingface.co that has one
+    /// openrouter.ai and huggingface.co that has one, and arena.ai's agent leaderboard when it ranks the model
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<BTreeMap<&'static str, String>>,
     /// The overall index of `source`: Epoch Capabilities Index, or Artificial Analysis Intelligence Index

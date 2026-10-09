@@ -26,6 +26,8 @@ const AA_API_URL: &str = "https://artificialanalysis.ai/api/v2/data/llms/models"
 // ponytail: one page of 100 rows, twice what the leaderboard has, and a warning past that
 // (`Arena::cut`). Page with `offset` then.
 const ARENA_URL: &str = "https://datasets-server.huggingface.co/rows?dataset=lmarena-ai/leaderboard-dataset&config=agent&split=latest&offset=0&length=100";
+/// The leaderboard itself, which `o` and a click on a model's Arena score open (`arena_page`).
+const ARENA_PAGE: &str = "https://arena.ai/leaderboard/agent";
 /// modelcmp's newest release, fetched with the data so a new version is told once a day at most.
 const RELEASE_URL: &str = "https://api.github.com/repos/danctorres/modelcmp/releases/latest";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
@@ -872,15 +874,21 @@ impl Model {
         offered.or(self.hf.as_deref())
     }
 
+    /// Arena's Agent leaderboard, for a model it ranks (`arena`): Arena has no page per model.
+    pub fn arena_page(&self) -> Option<String> {
+        self.arena.map(|_| ARENA_PAGE.to_string())
+    }
+
     /// The model's pages, (site, url), of the sites that have one: models.dev, the benchmark
-    /// sources, OpenRouter, then Hugging Face (`hf_repo`). None is a guess: a model no site has
-    /// a page for has no link.
+    /// sources, OpenRouter, Hugging Face (`hf_repo`), then Arena's leaderboard (`arena_page`).
+    /// None is a guess: a model no site has a page for has no link.
     pub fn links(&self) -> Vec<(&'static str, String)> {
         let md = self.md_page().map(|url| ("models.dev", url));
         let sources = Source::ALL.into_iter().filter_map(|s| Some((s.site(), self.page(s)?)));
         let or = self.openrouter.as_ref().map(|id| ("openrouter.ai", format!("https://openrouter.ai/{id}")));
         let hf = self.hf_repo().map(|repo| ("huggingface.co", format!("https://huggingface.co/{repo}")));
-        md.into_iter().chain(sources).chain(or).chain(hf).collect()
+        let arena = self.arena_page().map(|url| ("arena.ai", url));
+        md.into_iter().chain(sources).chain(or).chain(hf).chain(arena).collect()
     }
 
     /// The first of `links`, which `o` then `enter` opens. Err says that no site has the model.
@@ -3743,6 +3751,9 @@ mod tests {
         m.openrouter = None;
         assert_eq!(sites(&m).len(), 3, "no search on OpenRouter for a model it does not list");
         assert!(Model::default().links().is_empty(), "no site has it: no link");
+        let ranked = Model { arena: Some(8.7), hf: Some("a/b".into()), ..Default::default() };
+        let arena = ("arena.ai", "https://arena.ai/leaderboard/agent".to_string());
+        assert_eq!(ranked.links().last(), Some(&arena), "Arena's leaderboard last, for a model it ranks");
         let local = |provider: &str, id: &str| Model {
             offers: vec![Offer { provider: provider.into(), id: id.into(), local: true, ..Default::default() }],
             ..Default::default()

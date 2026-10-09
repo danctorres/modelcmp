@@ -126,8 +126,8 @@ enum Cmd {
     /// Open the model's web page (`o` in the TUI)
     Open {
         model: String,
-        /// The site: models.dev, epoch.ai, artificialanalysis.ai (or aa), openrouter.ai or
-        /// huggingface.co (or hf), a prefix will do. The first of them to have the model when left out
+        /// The site: models.dev, epoch.ai, artificialanalysis.ai (or aa), openrouter.ai,
+        /// huggingface.co (or hf) or arena.ai, its agent leaderboard, a prefix will do. The first of them to have the model when left out
         #[arg(long)]
         on: Option<String>,
     },

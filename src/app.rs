@@ -136,8 +136,9 @@ const OTHER: &str = "other";
 const ARENA: &str = "arena";
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
-/// index, the task scores, Value and what a task cost and took when Epoch lists it, the other
-/// source's index, then speed when Artificial Analysis measures it. What the source in use does
+/// index, the other source's and Arena's score, the three overall scores side by side, the task
+/// scores, Value and what a task cost and took when Epoch lists it, then speed when Artificial
+/// Analysis measures it. What the source in use does
 /// not measure is the other one's, when its data is there too (`absent`).
 pub const COLS: [Col; 17] = [
     Col {
@@ -183,14 +184,14 @@ pub const COLS: [Col; 17] = [
     // The two indexes, each in its place whichever source is in use, and named in `Col::text`.
     Col { only: Some(Source::Epoch), ..col("", "eci", "", |m| m.index(Source::Epoch)) },
     Col { only: Some(Source::Aa), ..col("", OTHER, "", |m| m.index(Source::Aa)) },
-    col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
-    col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
-    col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
-    Col { price: true, ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied()) },
     Col {
         show: signed,
         ..col("Arena", ARENA, "net improvement in real agent sessions, %, measured by arena.ai", |m| m.arena)
     },
+    col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
+    col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
+    Col { price: true, ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied()) },
     Col {
         only: Some(Source::Epoch),
         lower_better: true,
@@ -350,7 +351,7 @@ pub fn has_menu(col: usize) -> bool {
 
 /// Coding, Agentic and Reason: the columns `col_benches` has benchmarks for, with either
 /// source. Asked of every header on every frame, so not looked up.
-const TASK_COLS: std::ops::RangeInclusive<usize> = AAII + 1..=AAII + 3;
+const TASK_COLS: std::ops::RangeInclusive<usize> = AAII + 2..=AAII + 4;
 
 /// The benchmarks the dropdown of the task column at cursor index `col` lists.
 fn col_benches(col: usize) -> Option<(&'static str, &'static [&'static str])> {
@@ -2815,9 +2816,11 @@ impl App {
                 self.val(self.rows[n], col)?;
                 let m = self.current()?;
                 // Where each comes from: the release, prices and context from models.dev, the
-                // rest from the source that measures it.
+                // rest from the source that measures it, which is Arena for its own score.
                 let (site, page) = if col < ECI {
                     ("models.dev", m.price_page())
+                } else if numeric(col).is_some_and(|c| c.id == ARENA) {
+                    ("arena.ai", m.arena_page())
                 } else {
                     let src = numeric(col).map_or_else(crate::data::source, Col::from);
                     (src.site(), m.page(src))
@@ -4035,7 +4038,7 @@ mod tests {
             let m = a.data.models.iter_mut().find(|m| m.key == key).unwrap();
             m.scores.insert("DeepSWE".into(), s);
         }
-        a.col = ECI + 2;
+        a.col = ECI + 3;
         press(&mut a, "d");
         assert_eq!(menu(&a)[..2], [("all", 2), ("DeepSWE", 2)], "each with the models it scored");
         // The entry already shown changes nothing: a bound typed for the column stays.
@@ -4061,8 +4064,8 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.task.is_some(), a.col_name(ECI + 2)), (true, "Coding"));
-        a.col = ECI + 2;
+        assert_eq!((a.task.is_some(), a.col_name(ECI + 3)), (true, "Coding"));
+        a.col = ECI + 3;
         press(&mut a, "d");
         assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "Coding"));
         assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()));
@@ -4087,7 +4090,7 @@ mod tests {
         assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
         // A task with no other benchmark still has its dropdown, which names the one.
         code(&mut a, KeyCode::Esc);
-        a.col = ECI + 3;
+        a.col = ECI + 4;
         press(&mut a, "d");
         assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0"]);
     }
@@ -4644,7 +4647,7 @@ mod tests {
         assert_eq!((cols, a.col), (vec![PRICE, ECI, MEASURED, VIA, NOTES], 0), "w wraps from the last column");
         press(&mut a, "b");
         assert_eq!(a.col, VIA, "b wraps from the first");
-        a.col = ECI + 2;
+        a.col = ECI + 3;
         press(&mut a, "b");
         assert_eq!(a.col, ECI, "b to the start of the group first");
         press(&mut a, "b");
@@ -4667,7 +4670,7 @@ mod tests {
     fn bounds_filter_and_replace() {
         let mut a = app();
         a.col = ECI;
-        press(&mut a, "al");
+        press(&mut a, "all");
         assert_eq!(numeric(a.col).unwrap().name, "Coding");
         press(&mut a, ">50");
         assert!(matches!(a.input, Input::Bound { min: true, .. }));
@@ -5869,6 +5872,14 @@ mod tests {
         assert_eq!((a.selected(), &a.view), (0, &View::Table), "its row highlighted");
         let provider = open("https://models.dev/providers/p/");
         assert_eq!(a.mouse(Mouse::Cell(0, PRICE)), provider, "a price: the page of the provider you'd pay");
+        let arena = TEXT + COLS.iter().position(|c| c.id == ARENA).unwrap();
+        a.data.models[0].arena = Some(8.7);
+        a.fill();
+        assert_eq!(
+            a.mouse(Mouse::Cell(0, arena)),
+            open("https://arena.ai/leaderboard/agent"),
+            "Arena's: its leaderboard"
+        );
         a.data.models[0].epoch = None;
         let said = (a.mouse(Mouse::Cell(0, ECI)), a.status.as_str());
         assert_eq!(said, (None, "gpt55 has no page on epoch.ai"), "a score Epoch has no page for says so");
