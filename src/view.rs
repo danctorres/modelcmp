@@ -654,6 +654,32 @@ pub fn in_reach(m: &Model, all: bool, any: bool) -> bool {
 }
 
 /// Via as shown: the harnesses, or `OUT_OF_REACH` for a model you have no access to.
+/// A harness as Via names it, short so a model's harnesses fit on its line. The dropdown says
+/// which is which.
+pub fn short(harness: &str) -> &str {
+    match harness {
+        "opencode" => "oc",
+        "claude" => "cc",
+        "codex" => "cx",
+        "gemini" => "gem",
+        "copilot" => "cp",
+        crate::data::OLLAMA => "oll",
+        crate::data::LLAMA => "llm",
+        h => h,
+    }
+}
+
+/// The names a search finds `harness` by: its own, then the short one when it has another.
+pub fn via_names(harness: &str) -> String {
+    let short = short(harness);
+    if short == harness { short.into() } else { format!("{harness} {short}") }
+}
+
+/// What a search reads of `m`'s Via: each harness by its names, joined by ", ".
+pub fn via_text(m: &Model) -> String {
+    m.via.iter().map(|h| via_names(h)).collect::<Vec<_>>().join(", ")
+}
+
 pub fn shown_via(m: &Model, any: bool) -> Vec<&str> {
     if in_reach(m, false, any) { m.via.iter().map(String::as_str).collect() } else { vec![OUT_OF_REACH] }
 }

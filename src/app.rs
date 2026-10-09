@@ -1138,9 +1138,6 @@ pub struct App {
     pub overlay_query: String,
     /// Rows visible in the body, set by the renderer; drives page movement.
     pub page: u16,
-    /// The row on each line of the table's body, set by the renderer: a row with many
-    /// harnesses takes several, so a click finds its row here.
-    pub lines: Vec<usize>,
     /// First of the columns right of Model shown, 0 being Dev, when they do not all fit; the renderer keeps
     /// the selected one in view.
     pub hscroll: usize,
@@ -1222,7 +1219,6 @@ impl App {
             panel: None,
             overlay_query: String::new(),
             page: 20,
-            lines: vec![],
             hscroll: 0,
             count: 0,
             g_pending: None,
@@ -1722,7 +1718,7 @@ impl App {
             (self.only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
                 && hits(
                     &self.query,
-                    [&m.name, &m.developer, &m.via.join(", "), self.store.note(&m.key).unwrap_or("")],
+                    [&m.name, &m.developer, &crate::view::via_text(m), self.store.note(&m.key).unwrap_or("")],
                     self.typos,
                 )
                 .is_some()
@@ -1806,7 +1802,7 @@ impl App {
             // By name, or by developer or access with names breaking ties.
             let text = |m: &Model| match self.sort_col {
                 1 => m.developer.to_lowercase(),
-                VIA => self.shown_via(m).join(", "),
+                VIA => self.shown_via(m).into_iter().map(crate::view::short).collect::<Vec<_>>().join(" "),
                 NOTES => self.store.note(&m.key).unwrap_or("").to_lowercase(),
                 _ => String::new(),
             };

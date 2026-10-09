@@ -27,7 +27,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Tok/task | output tokens per coding task, [measured](#task) by Epoch AI |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
-| Via | the harnesses that have the model, three to a line |
+| Via | the harnesses that have the model, by a [short name](#what-you-have) |
 | Notes | your note on it |
 
 One table shows the columns of both sources. The ones of the source not in use show when both
@@ -368,13 +368,17 @@ A refresh asks each harness on your `PATH` which models it has, and the Via colu
   `~/.copilot/session-state/`. The VS Code extension alone is not enough, install the CLI.
 - ollama and llama.cpp give the models on your machine, as below.
 
+Via names them short, so a model's harnesses fit on its line: `oc` opencode, `pi`, `omp`, `cc`
+claude, `cx` codex, `gem` gemini, `cp` copilot, `oll` ollama and `llm` llama-cli. The Via
+dropdown (`d`) says which is which, and a search (`/`) takes either name.
+
 Under WSL the harnesses are asked in a new session, as `x` launches them, so a key exported by
 hand in your shell does not count. A harness that fails to list its models keeps the ones from
 the last refresh, and the refresh says so.
 
 ## Models on your machine
 
-The models ollama and llama.cpp run here show as free, with `ollama` or `llama-cli` in Via. `ollama`, or
+The models ollama and llama.cpp run here show as free, with `oll` or `llm` in Via. `ollama`, or
 llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`, and the model must be one of these:
 
 | You have | What makes it show |
