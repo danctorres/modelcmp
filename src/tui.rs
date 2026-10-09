@@ -2859,6 +2859,12 @@ fn help(query: &str) -> Vec<Line<'static>> {
 const TIER_LEGEND: &str = "each tier's model: ★ your favorite, else the best free, up to $2, up to $5 and of all, \
                            as name $/1M tokens (score on the task)";
 
+/// What recommend leaves out, and how to pick it anyway.
+const UNRATED: &str = "only models with a benchmark score are ranked, so a new model may be missing. \
+                       To pick an unranked model for a task, favorite it with f in the table.";
+/// After `UNRATED` on Epoch AI with no key for the other source.
+const MORE_RATED: &str = "Artificial Analysis scores more models than Epoch AI, K takes its API key.";
+
 /// A row per task, the built-in ones and then your own, with a box per tier for the model it
 /// picks, as `--tier` does, wrapped to `width`; under the grid, what the cursor's task is, when
 /// to use it and its box's model in full. Where each name and box is goes to `spots`, and the
@@ -2892,6 +2898,11 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
     }
     let among = v.len();
     v.extend(wrapped(vec![], words(TIER_LEGEND), &space, width).into_iter().map(|l| l.style(fg(MUTED))));
+    let keyless = data::source() == data::Source::Epoch && data::aa_key().is_none();
+    let mut warn: Vec<Line> = words(UNRATED);
+    warn.extend(if keyless { words(MORE_RATED) } else { vec![] });
+    let warning = vec![Span::styled("warning: ", fg(BAD))];
+    v.extend(wrapped(warning, warn, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
     v.push(Line::default());
     let own = app.store.custom_tasks();
     let about = |t| app.store.about(t).unwrap_or(CUSTOM_ABOUT);
@@ -4887,7 +4898,15 @@ mod tests {
             "the models it ranks come first, the dot on the ones in use"
         );
         let gap = text.iter().position(String::is_empty).unwrap();
-        assert!(gap > 2 && text[1..gap].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..gap]);
+        let warn = text.iter().position(|l| l.starts_with("warning: ")).unwrap();
+        assert!(warn > 2 && text[1..warn].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..warn]);
+        // Then what it leaves out, and the other source while there is no key for it.
+        let said = text[warn..gap].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+        assert_eq!(said, format!("warning: {UNRATED} {MORE_RATED}"));
+        data::save_aa_key("k").unwrap();
+        let keyed = recommend(&a, 60, &mut vec![]).0.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" ");
+        assert!(keyed.contains("in the table.") && !keyed.contains("API key"), "{keyed}");
+        data::save_aa_key("").unwrap();
         let head = gap + 1;
         assert_eq!(text[head].split_whitespace().collect::<Vec<_>>(), ["free", "low", "mid", "high"], "a box per tier");
         // A row per task, the cursor on the cursor task's name alone.
@@ -4985,5 +5004,8 @@ mod tests {
         a.store.toggle_favorite("debugging:low", "flash");
         let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();
         assert_eq!(models(&text[own]), ["flash $0.10", "opus $5.0", "opus $5.0"]);
+        // The key the warning names asks for it over the panel.
+        a.key(KeyCode::Char('K').into());
+        assert!(a.input != Input::None && a.view == View::Recommend, "{:?}", a.input);
     }
 }
