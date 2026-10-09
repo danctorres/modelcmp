@@ -81,10 +81,18 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
 
 /// The benchmarks the dropdown of the task column `id` lists, after the entry for the task's
 /// score: "all" with Epoch, which fits them into one, the task's own field with Artificial
-/// Analysis, which may have no other about the task: the dropdown then names that one.
-fn benched(id: &str) -> Option<(&'static str, &'static [&'static str])> {
-    let (own, more) = crate::fit::task(id)?.sourced();
-    (own.is_some() || !more.is_empty()).then_some((own.unwrap_or("all"), more))
+/// Analysis, which may have no other about the task: the dropdown then names that one. The
+/// other source's about the task come last, with its data at hand too.
+fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    let task = crate::fit::task(id)?;
+    let (own, more) = task.sourced();
+    let all: Vec<_> = more.iter().copied().chain(task.lent()).collect();
+    (own.is_some() || !all.is_empty()).then_some((own.unwrap_or("all"), all))
+}
+
+/// A benchmark's entry in a task column's dropdown: its name and the source that runs it.
+pub fn bench_label(b: &str) -> String {
+    format!("{b} · {}", crate::fit::bench_source(b).label())
 }
 
 fn positive(x: f64) -> Option<f64> {
@@ -291,7 +299,7 @@ pub fn absent(col: usize) -> bool {
 
 /// The benchmark source the column at cursor index `col` has its values from, when it has them
 /// from one: every column from the indexes on, the task scores and Value of the source in use.
-pub fn col_source(col: usize) -> Option<Source> {
+fn base_col_source(col: usize) -> Option<Source> {
     numeric(col).filter(|c| col >= ECI && c.id != ARENA).map(Col::from)
 }
 
@@ -354,7 +362,7 @@ pub fn has_menu(col: usize) -> bool {
 const TASK_COLS: std::ops::RangeInclusive<usize> = AAII + 2..=AAII + 4;
 
 /// The benchmarks the dropdown of the task column at cursor index `col` lists.
-fn col_benches(col: usize) -> Option<(&'static str, &'static [&'static str])> {
+fn col_benches(col: usize) -> Option<(&'static str, Vec<&'static str>)> {
     benched(numeric(col)?.id)
 }
 
@@ -1246,6 +1254,14 @@ impl App {
         // The other source's columns come and go with its data.
         crate::data::set_lent(self.data.lent);
         self.off_hidden();
+        // And so does a pick of one of its benchmarks, with the bounds typed for it.
+        for c in 0..COLS.len() {
+            let listed = |b| col_benches(c + TEXT).is_some_and(|(_, benches)| benches.contains(&b));
+            if self.bench[c].is_some_and(|b| !listed(b)) {
+                self.bench[c] = None;
+                self.bounds.retain(|b| b.0 != c + TEXT);
+            }
+        }
         self.fill();
         // A refresh that could not ask for the newest release leaves nothing to upgrade to.
         if self.input == Input::Upgrade && self.data.update().is_none() {
@@ -1266,7 +1282,7 @@ impl App {
         let pick = self.bench[c];
         for (v, m) in self.vals.iter_mut().zip(&self.data.models) {
             v[c] = match pick {
-                Some(b) => m.scores.get(b).map(|s| s * 100.0),
+                Some(b) => m.bench(b).map(|s| s * 100.0),
                 None => (COLS[c].get)(m),
             };
         }
@@ -1306,6 +1322,12 @@ impl App {
         *self.bench.get(col.checked_sub(TEXT)?)?
     }
 
+    /// The benchmark source the column at cursor index `col` shows the values of: a picked
+    /// benchmark's, else `base_col_source`.
+    pub fn col_source(&self, col: usize) -> Option<Source> {
+        self.col_bench(col).map(crate::fit::bench_source).or_else(|| base_col_source(col))
+    }
+
     /// Header of the column at cursor index `col`: a task column's picked benchmark, else `col_name`.
     pub fn col_name(&self, col: usize) -> &'static str {
         self.col_bench(col).unwrap_or_else(|| base_col_name(col))
@@ -1314,7 +1336,7 @@ impl App {
     /// What the column at cursor index `col` means.
     pub fn col_about(&self, col: usize) -> String {
         match self.col_bench(col) {
-            Some(_) => of_source("score on this benchmark alone, 0-100"),
+            Some(b) => format!("{}, score on this benchmark alone, 0-100", crate::fit::bench_source(b).label()),
             None => base_col_about(col),
         }
     }
@@ -1369,7 +1391,7 @@ impl App {
             }
             Input::Menu { col, items, list } => {
                 // The ticks the dropdown draws: "any" has one while nothing is picked.
-                let bench: Vec<String> = self.col_bench(*col).into_iter().map(String::from).collect();
+                let bench: Vec<String> = self.col_bench(*col).into_iter().map(bench_label).collect();
                 let picked = match *col {
                     1 => &self.dev,
                     VIA => &self.via,
@@ -2448,11 +2470,11 @@ impl App {
         // The first entry of a task's dropdown counts the models with the task's score.
         let scored = numeric(col).filter(|_| benches.is_some());
         let first = scored.map_or(ms.len(), |c| ms.iter().filter(|(_, m)| (c.get)(m).is_some()).count());
-        let (mut items, picked) = if let Some((_, benches)) = benches {
+        let (mut items, picked) = if let Some((_, benches)) = &benches {
             // How many models each benchmark scored.
-            let count = |b: &str| ms.iter().filter(|(_, m)| m.scores.contains_key(b)).count();
+            let count = |b: &str| ms.iter().filter(|(_, m)| m.bench(b).is_some()).count();
             let picked = self.col_bench(col).and_then(|b| benches.iter().position(|x| *x == b));
-            (benches.iter().map(|&b| (b.to_string(), count(b))).collect(), picked)
+            (benches.iter().map(|&b| (bench_label(b), count(b))).collect(), picked)
         } else if col == 1 || col == VIA {
             let by_dev = col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
@@ -2487,7 +2509,7 @@ impl App {
                 .collect();
             (items, self.price_level())
         };
-        items.insert(0, (benches.map_or("any", |b| b.0).into(), first));
+        items.insert(0, (benches.as_ref().map_or("any".into(), |b| bench_label(b.0)), first));
         // The entry a task column shows already keeps the bounds on it: it counts what the table shows.
         if benches.is_some() {
             items[picked.map_or(0, |i| i + 1)].1 =
@@ -2822,7 +2844,7 @@ impl App {
                 } else if numeric(col).is_some_and(|c| c.id == ARENA) {
                     ("arena.ai", m.arena_page())
                 } else {
-                    let src = numeric(col).map_or_else(crate::data::source, Col::from);
+                    let src = self.col_source(col).unwrap_or_else(crate::data::source);
                     (src.site(), m.page(src))
                 };
                 if page.is_none() {
@@ -4047,7 +4069,7 @@ mod tests {
         }
         a.col = ECI + 3;
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("all", 2), ("DeepSWE", 2)], "each with the models it scored");
+        assert_eq!(menu(&a)[..2], [("all · Epoch AI", 2), ("DeepSWE · Epoch AI", 2)], "each with the models it scored");
         // The entry already shown changes nothing: a bound typed for the column stays.
         a.bounds.push((a.col, 1.0, f64::MAX));
         press(&mut a, " ");
@@ -4064,10 +4086,14 @@ mod tests {
         // already keeps it, and counts what the table shows.
         a.bounds.push((a.col, 1e9, f64::MAX));
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("all", 0), ("DeepSWE", 2)]);
+        assert_eq!(menu(&a)[..2], [("all · Epoch AI", 0), ("DeepSWE · Epoch AI", 2)]);
         // A task's line is drawn from its score: choosing one shows it again, and no other is picked.
         press(&mut a, "j ");
-        assert_eq!(menu(&a)[..2], [("all", 2), ("DeepSWE", 2)], "the open list counts again, the bound gone");
+        assert_eq!(
+            menu(&a)[..2],
+            [("all · Epoch AI", 2), ("DeepSWE · Epoch AI", 2)],
+            "the open list counts again, the bound gone"
+        );
         code(&mut a, KeyCode::Esc);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
@@ -4092,14 +4118,42 @@ mod tests {
         let m = a.data.models.iter_mut().find(|m| m.key == "mini").unwrap();
         m.scores.insert("scicode".into(), 0.3);
         press(&mut a, "d");
-        assert_eq!(menu(&a), [(crate::fit::AA_CODING, 2), ("terminalbench_v4_0", 0), ("scicode", 1)]);
+        let named = |b: &str| format!("{b} · Artificial Analysis");
+        let want = [(crate::fit::AA_CODING, 2), ("terminalbench_v4_0", 0), ("scicode", 1)].map(|(b, n)| (named(b), n));
+        assert_eq!(menu(&a), want.iter().map(|(b, n)| (b.as_str(), *n)).collect::<Vec<_>>());
         press(&mut a, "G ");
         assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
         // A task with no other benchmark still has its dropdown, which names the one.
         code(&mut a, KeyCode::Esc);
         a.col = ECI + 4;
         press(&mut a, "d");
-        assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0"]);
+        assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0 · Artificial Analysis"]);
+    }
+
+    /// With both sources' data a task's dropdown lists the other's benchmarks too, named as its.
+    #[test]
+    fn a_task_dropdown_lists_the_other_sources_benchmarks() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        data.models.iter_mut().find(|m| m.key == "mini").unwrap().other_scores.insert("scicode".into(), 0.3);
+        data.lent = true;
+        a.set_data(data);
+        a.col = ECI + 3;
+        press(&mut a, "d");
+        let names: Vec<&str> = menu(&a).iter().map(|e| e.0).collect();
+        assert_eq!(names[..2], ["all · Epoch AI", "DeepSWE · Epoch AI"], "its own first, each named with its source");
+        assert_eq!(menu(&a).last(), Some(&("scicode · Artificial Analysis", 1)));
+        press(&mut a, "G ");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "s");
+        assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
+        assert!(a.col_about(a.col).starts_with("Artificial Analysis, "), "{}", a.col_about(a.col));
+        assert_eq!(a.col_source(a.col), Some(Source::Aa), "its header in that source's colour");
+        // Without the other source's data the pick goes, and the column is the task's score again.
+        let mut data = std::mem::take(&mut a.data);
+        data.lent = false;
+        a.set_data(data);
+        assert_eq!((a.col_bench(a.col), a.col_name(a.col)), (None, "Coding"));
     }
 
     #[test]
@@ -4556,7 +4610,7 @@ mod tests {
         assert!(base_col_about(0).contains("Via"));
         assert!(base_col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
-        let of = |id| col_source(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
+        let of = |id| base_col_source(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
         assert_eq!(
             (of("price"), of("ctx"), of("eci"), of("value"), of("cost")),
             (None, None, Some(Source::Epoch), Some(Source::Epoch), Some(Source::Epoch))

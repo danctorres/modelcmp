@@ -1586,9 +1586,9 @@ fn draw(app: &mut App, f: &mut Frame) {
     // The first start's question, under the wordmark, its border muted as the table's frame.
     // The key is typed in it, on its own line.
     if let (Some((_, within)), Input::Key { text, cur, .. }) = (splash, &app.input) {
-        let lines = key_lines(text.len());
+        let lines = key_lines(text.chars().count());
         let rect = overlay_rect(within, KEY_TITLE, &lines);
-        let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + cur) as u16;
+        let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + text[..*cur].chars().count()) as u16;
         overlay(buf, within, KEY_TITLE, lines, &mut 0, MUTED, (0, 0, 0..0));
         cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
     }
@@ -1783,7 +1783,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     // as VisiData shows its current column; the values keep their colours. A column with a
     // benchmark source's values has its header in the source's colour (`source_color`).
     let header = |i: usize| {
-        let style = fg(crate::app::col_source(i).map_or(ACCENT, source_color)).add_modifier(BOLD);
+        let style = fg(app.col_source(i).map_or(ACCENT, source_color)).add_modifier(BOLD);
         if i == app.col { style.add_modifier(Modifier::REVERSED) } else { style }
     };
     // The marks: the checkbox, then the ☆, then the ✗ box.
@@ -1983,7 +1983,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     }
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
     let bench = if let Input::Menu { col, .. } = &app.input { app.col_bench(*col) } else { None };
-    let bench: Vec<String> = bench.into_iter().map(String::from).collect();
+    let bench: Vec<String> = bench.into_iter().map(crate::app::bench_label).collect();
     if let Input::Menu { col, items, list } = &mut app.input {
         let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
         let picked = match *col {
@@ -2264,9 +2264,10 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
     ) || boxed
     {
         // The question is in a box in the middle of the screen. Under it, what a pick could not
-        // save, which the next key clears.
-        if app.failed {
-            buf.set_stringn(x, area.y, &app.status, usize::from(area.right().saturating_sub(x)), fg(BAD));
+        // save, which the next key clears, else the start's warning, kept while the first
+        // start's question is open.
+        if let Some(w) = app.failed.then_some(app.status.as_str()).or(app.store.warning.as_deref()) {
+            buf.set_stringn(x, area.y, w, usize::from(area.right().saturating_sub(x)), fg(BAD));
         }
         return None;
     }
@@ -3180,7 +3181,9 @@ mod tests {
         let mut a = app();
         a.first_start = true;
         a.input = Input::Key { text: String::new(), cur: 0, wrong: false };
+        a.store.warning = Some("user.json is not valid".into());
         let lines = screen(&mut a, 120, 30);
+        assert!(lines[29].contains("user.json is not valid"), "the start's warning shows under it");
         assert_eq!(row(&lines, "Model"), None, "no table behind the question");
         let (tagline, ask) = (row(&lines, TAGLINE).unwrap(), row(&lines, KEY_TITLE).unwrap());
         assert!(tagline < ask, "the question is under the wordmark");

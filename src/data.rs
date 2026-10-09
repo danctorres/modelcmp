@@ -748,6 +748,9 @@ pub struct Model {
     /// The other source's overall index, with its data at hand too (`Data::borrow`).
     #[serde(skip)]
     pub other_index: Option<f64>,
+    /// The other source's `scores`, with its data at hand too (`Data::borrow`).
+    #[serde(skip)]
+    pub other_scores: BTreeMap<String, f64>,
     #[serde(skip)]
     pub available: bool,
     /// Every `Offer::via` of the model, once each.
@@ -759,6 +762,12 @@ impl Model {
     /// The overall index `of` gives it: the one in use has it in `eci`, the other in `other_index`.
     pub fn index(&self, of: Source) -> Option<f64> {
         if of == source() { self.eci } else { self.other_index }
+    }
+
+    /// Its score (0..1) on the benchmark `b`, of whichever source runs it.
+    pub fn bench(&self, b: &str) -> Option<f64> {
+        let of = if crate::fit::bench_source(b) == source() { &self.scores } else { &self.other_scores };
+        of.get(b).copied()
     }
 
     /// The offer you'd actually use: cheapest available paid one, else a free one of yours,
@@ -947,6 +956,8 @@ struct Lent {
     task_cost: Option<f64>,
     #[serde(default)]
     task_tokens: Option<f64>,
+    #[serde(default)]
+    scores: BTreeMap<String, f64>,
 }
 
 impl From<&Model> for Lent {
@@ -958,6 +969,7 @@ impl From<&Model> for Lent {
             ttft: m.ttft,
             task_cost: m.task_cost,
             task_tokens: m.task_tokens,
+            scores: m.scores.clone(),
         }
     }
 }
@@ -991,17 +1003,21 @@ impl Data {
     /// Gives each row of `src`'s data what only the other source measures, and its index, from
     /// that one's rows, which go by the same keys: one table shows both. With none, the row has
     /// neither, whatever its cache kept.
-    fn borrow(&mut self, src: Source, other: Option<&[Lent]>) {
-        let by_key: HashMap<&str, &Lent> = other.into_iter().flatten().map(|l| (l.key.as_str(), l)).collect();
-        for m in &mut self.models {
-            let l = by_key.get(m.key.as_str());
-            m.other_index = l.and_then(|l| l.eci);
-            match src {
-                Source::Epoch => (m.tps, m.ttft) = l.map_or((None, None), |l| (l.tps, l.ttft)),
-                Source::Aa => (m.task_cost, m.task_tokens) = l.map_or((None, None), |l| (l.task_cost, l.task_tokens)),
-            }
-        }
+    fn borrow(&mut self, src: Source, other: Option<Vec<Lent>>) {
         self.lent = other.is_some();
+        let mut by_key: HashMap<String, Lent> =
+            other.into_iter().flatten().map(|mut l| (std::mem::take(&mut l.key), l)).collect();
+        for m in &mut self.models {
+            let l = by_key.remove(m.key.as_str());
+            m.other_index = l.as_ref().and_then(|l| l.eci);
+            match src {
+                Source::Epoch => (m.tps, m.ttft) = l.as_ref().map_or((None, None), |l| (l.tps, l.ttft)),
+                Source::Aa => {
+                    (m.task_cost, m.task_tokens) = l.as_ref().map_or((None, None), |l| (l.task_cost, l.task_tokens))
+                }
+            }
+            m.other_scores = l.map(|l| l.scores).unwrap_or_default();
+        }
     }
 
     pub fn stale(&self) -> bool {
@@ -1120,7 +1136,7 @@ pub fn load_cache() -> Option<Data> {
     let other = std::fs::read(cache_path(source().other())).ok();
     let other = other.and_then(|b| serde_json::from_slice::<LentData>(&b).ok());
     let other = other.filter(|o| o.format == FORMAT && o.fetched.abs_diff(d.fetched) <= MAX_AGE.as_secs());
-    d.borrow(source(), other.as_ref().map(|o| o.models.as_slice()));
+    d.borrow(source(), other.map(|o| o.models));
     // Value is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
@@ -1504,7 +1520,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     // Before the early data, so the other source's columns do not go to come back.
     let lent: Option<Vec<Lent>> =
         other.as_ref().and_then(|(_, o)| Some(o.as_ref().ok()?.models.iter().map(Lent::from).collect()));
-    data.borrow(src, lent.as_deref());
+    data.borrow(src, lent);
     // Only links hang on them, so without one the refresh still succeeds, and says so.
     let text = |xml: Result<Vec<u8>, Failure>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
     let (aa, epoch) = (text(aa), text(epoch));
@@ -3408,14 +3424,18 @@ mod tests {
     fn a_row_borrows_the_other_sources_columns() {
         let row = |key: &str| Model { key: key.into(), tps: Some(1.0), task_cost: Some(2.0), ..Default::default() };
         let mut d = Data { models: vec![row("a"), row("b")], ..Default::default() };
-        let aa = [Lent::from(&Model { key: "a".into(), eci: Some(60.0), tps: Some(90.0), ..Default::default() })];
-        d.borrow(Source::Epoch, Some(&aa));
+        let mut a = Model { key: "a".into(), eci: Some(60.0), tps: Some(90.0), ..Default::default() };
+        a.scores.insert("scicode".into(), 0.3);
+        let aa = [Lent::from(&a)];
+        d.borrow(Source::Epoch, Some(aa.into()));
+        assert_eq!((d.models[0].bench("scicode"), d.models[1].bench("scicode")), (Some(0.3), None));
         let got = |d: &Data, i: usize| (d.models[i].other_index, d.models[i].tps, d.models[i].task_cost);
         assert_eq!(got(&d, 0), (Some(60.0), Some(90.0), Some(2.0)), "its own cost stays");
         assert_eq!(got(&d, 1), (None, None, Some(2.0)), "a row it does not have: not what the cache kept");
         assert!(d.lent);
         d.borrow(Source::Epoch, None);
         assert_eq!((got(&d, 0), d.lent), ((None, None, Some(2.0)), false));
+        assert_eq!(d.models[0].bench("scicode"), None);
     }
 
     #[test]

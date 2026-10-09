@@ -58,6 +58,22 @@ impl Task {
             _ => (None, self.benches),
         }
     }
+
+    /// The other source's benchmarks about the task, with its data at hand too (`Data::borrow`):
+    /// the column's dropdown lists them after `sourced`'s.
+    pub fn lent(&self) -> Vec<&'static str> {
+        match crate::data::source() {
+            _ if !crate::data::lent() => vec![],
+            crate::data::Source::Aa => self.benches.to_vec(),
+            _ => self.aa.into_iter().chain(self.aa_more.iter().copied()).collect(),
+        }
+    }
+}
+
+/// The source that runs the benchmark `b` of a task.
+pub fn bench_source(b: &str) -> crate::data::Source {
+    let aa = TASKS.iter().any(|t| t.aa == Some(b) || t.aa_more.contains(&b));
+    if aa { crate::data::Source::Aa } else { crate::data::Source::Epoch }
 }
 
 /// Artificial Analysis's overall index, its ECI.
