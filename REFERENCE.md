@@ -156,6 +156,7 @@ Arena (its Agent leaderboard, no key needed):
 - A refresh that cannot reach it keeps the scores of the last one, and with none to keep it
   leaves the column empty, and the first start or command an hour later tries again. The
   column is empty once Arena's newest leaderboard is more than two months old.
+- The TUI shows the table before Arena has answered, with the last refresh's scores until then.
 
 With either source:
 

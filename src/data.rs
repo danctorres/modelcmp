@@ -1514,7 +1514,8 @@ fn progress_text(total: usize, awaited: &[&str]) -> String {
 /// Download the sources and ask the harnesses in parallel, merge, write cache. `steps` counts
 /// them for `progress`. `early` gets the data as soon as it is downloaded, when harnesses are
 /// still listing their models, which have the ones the cache had until the whole answer: they
-/// are not waited for to show the rest.
+/// are not waited for to show the rest. Nor is Arena's leaderboard, whose column has the scores
+/// the cache had until it is in.
 pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
     load_repos();
     let src = source();
@@ -1534,7 +1535,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let res = download(src, key.as_deref(), steps);
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
-    let (mut data, mut other, [aa, epoch, openrouter, arena], more, release) = match res {
+    let (mut data, mut other, [aa, epoch, openrouter], release, late) = match res {
         Ok(d) => d,
         Err(e) => {
             let _ = harness.join();
@@ -1570,8 +1571,43 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let openrouter = openrouter.unwrap_or_default();
     let unnamed = (!hf_listed(&mut data.models, &openrouter))
         .then(|| "openrouter.ai did not list its models: links to huggingface.co may be missing".to_string());
+    // Only the update notice hangs on it, so without it the refresh still succeeds.
+    data.latest = release
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
+        .unwrap_or_default();
+    let mut listed: BTreeMap<_, _> = answers.try_iter().collect();
+    let awaited: Vec<_> = asked.iter().map(|h| h.0).filter(|h| !listed.contains_key(*h)).collect();
+    // Built only for who shows it: a command waits for the whole of it anyway.
+    if let Some(early) = early.filter(|_| !awaited.is_empty()) {
+        let mut first = Data { warning: None, ..data.clone() };
+        first.harness = keep_listed(listed.clone(), || was.harness(false)).0;
+        // A harness still listing keeps what the cache has for it, and so what the table shows,
+        // whether or not the last refresh kept it: its marks do not go to come back.
+        let mut shown = was.harness(true);
+        first.harness.extend(awaited.iter().filter_map(|h| Some((h.to_string(), shown.remove(*h)?))));
+        first.listing = awaited.iter().any(|h| !first.harness.contains_key(*h));
+        // Arena's leaderboard, the slowest download, is not waited for either.
+        if let Some(arena) = Arena::cached(&cache).filter(|a| a.current(now())) {
+            arena.score(&mut first.models);
+            first.arena_date.clone_from(&arena.date);
+        }
+        first.apply_available();
+        early(first);
+    }
+    // After the early data, which does not wait for it, and while the harnesses answer.
+    step(steps, "huggingface.co");
+    let (mut found, mut asks): (Asked, _) = (kept("hf.json"), HF_ASKS);
+    hf_found(&mut data.models, &mut found, &mut asks, hf_spelled);
+    if let Some((_, Ok(o))) = &mut other {
+        hf_found(&mut o.models, &mut found, &mut asks, hf_spelled);
+    }
+    keep("hf.json", &found);
+    answered(steps, "huggingface.co");
     // Only the Arena column hangs on it: without it, the scores of the last refresh are kept,
     // and none show once Arena has published no leaderboard for `ARENA_MAX_AGE`.
+    let [arena, more @ ..] = late.all(steps);
     let ranked = Arena::parse(&arena.unwrap_or_default());
     let unranked = ranked.is_none().then_some("huggingface.co did not send Arena's agent leaderboard");
     let arena = ranked.or_else(|| Arena::cached(&cache)).unwrap_or_default();
@@ -1606,35 +1642,6 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         arena.score(&mut o.models);
         (o.arena_date, o.arena_missed) = (arena.date.clone(), data.arena_missed);
     }
-    // Only the update notice hangs on it, so without it the refresh still succeeds.
-    data.latest = release
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
-        .unwrap_or_default();
-    let mut listed: BTreeMap<_, _> = answers.try_iter().collect();
-    let awaited: Vec<_> = asked.iter().map(|h| h.0).filter(|h| !listed.contains_key(*h)).collect();
-    // Built only for who shows it: a command waits for the whole of it anyway.
-    if let Some(early) = early.filter(|_| !awaited.is_empty()) {
-        let mut first = Data { warning: None, ..data.clone() };
-        first.harness = keep_listed(listed.clone(), || was.harness(false)).0;
-        // A harness still listing keeps what the cache has for it, and so what the table shows,
-        // whether or not the last refresh kept it: its marks do not go to come back.
-        let mut shown = was.harness(true);
-        first.harness.extend(awaited.iter().filter_map(|h| Some((h.to_string(), shown.remove(*h)?))));
-        first.listing = awaited.iter().any(|h| !first.harness.contains_key(*h));
-        first.apply_available();
-        early(first);
-    }
-    // After the early data, which does not wait for it, and while the harnesses answer.
-    step(steps, "huggingface.co");
-    let (mut found, mut asks): (Asked, _) = (kept("hf.json"), HF_ASKS);
-    hf_found(&mut data.models, &mut found, &mut asks, hf_spelled);
-    if let Some((_, Ok(o))) = &mut other {
-        hf_found(&mut o.models, &mut found, &mut asks, hf_spelled);
-    }
-    keep("hf.json", &found);
-    answered(steps, "huggingface.co");
     // Until the last harness has answered. One that never does, its thread dead, is silent.
     listed.extend(answers.iter());
     let _ = harness.join();
@@ -1673,15 +1680,38 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
 }
 
 /// What `download` gives: the merged data, the other source's when it was asked for, then
-/// Artificial Analysis's and Epoch's sitemaps, OpenRouter's models, Arena's agent leaderboard,
-/// its signals (`ARENA_MORE`) and modelcmp's newest release, which a refresh can do without.
-type Downloaded = (
-    Data,
-    Option<(Source, Result<Data, Failure>)>,
-    [Result<Vec<u8>, Failure>; 4],
-    [Result<Vec<u8>, Failure>; 5],
-    Result<Vec<u8>, Failure>,
-);
+/// Artificial Analysis's and Epoch's sitemaps, OpenRouter's models and modelcmp's newest release,
+/// which a refresh can do without, and Arena's downloads, still under way.
+type Downloaded =
+    (Data, Option<(Source, Result<Data, Failure>)>, [Result<Vec<u8>, Failure>; 3], Result<Vec<u8>, Failure>, Late);
+
+/// Where Arena's downloads start in `download`'s: its agent leaderboard, then `ARENA_MORE`.
+const ARENA_AT: usize = 7;
+
+/// Arena's downloads, which `download` does not wait for: the ones it `got`, and the rest as
+/// they come, until `end`.
+struct Late {
+    got: [Result<Vec<u8>, Failure>; 6],
+    rx: std::sync::mpsc::Receiver<(usize, Result<Vec<u8>, Failure>)>,
+    end: Instant,
+    sites: Vec<&'static str>,
+}
+
+impl Late {
+    /// All of them, waited for until `end`: one that did not come is a failure.
+    fn all(mut self, steps: &Steps) -> [Result<Vec<u8>, Failure>; 6] {
+        let timed =
+            std::iter::from_fn(|| self.rx.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok());
+        // The ones that came before `end`, when it is past.
+        for (i, res) in timed.chain(self.rx.try_iter()) {
+            if let Some(at) = i.checked_sub(ARENA_AT) {
+                self.got[at] = res;
+            }
+        }
+        self.sites.into_iter().for_each(|site| answered(steps, site));
+        self.got
+    }
+}
 
 /// How long the downloads a refresh can do without are waited for once it has the others.
 const GRACE: Duration = Duration::from_secs(10);
@@ -1689,7 +1719,7 @@ const GRACE: Duration = Duration::from_secs(10);
 /// The sources, downloaded in parallel and merged. It returns at the first failure of a download
 /// it cannot do without, models.dev's and the source's scores, leaving the others to end on
 /// their own: none is waited for once the refresh cannot finish, and the links and the newest
-/// release no longer than `GRACE` once it can.
+/// release no longer than `GRACE` once it can. Arena's are not waited for at all, but by `Late`.
 fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded, Failure> {
     const URLS: [&str; 13] = [
         MODELS_URL,
@@ -1708,7 +1738,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     ];
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut sites = vec![];
+    let (mut sites, mut left) = (vec![], 0);
     for (i, url) in URLS.into_iter().enumerate() {
         // Artificial Analysis's scores are asked for only with its key.
         let key = if url == AA_API_URL { key.map(String::from) } else { None };
@@ -1721,7 +1751,8 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         let site =
             url.split('/').nth(2).unwrap_or(url).trim_start_matches("api.").trim_start_matches("datasets-server.");
         step(&steps, site);
-        sites.push(site);
+        sites.push((i, site));
+        left += usize::from(i < ARENA_AT);
         std::thread::spawn(move || {
             let res = if pages { epoch_pages(url) } else { fetch(url, key.as_deref()) };
             answered(&steps, site);
@@ -1734,7 +1765,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     // other source's scores are among them, though not needed: they fill its cache, and Epoch's
     // names decide which key a merged row keeps, which your favorites and notes hang on.
     let (mut missing, mut end) = (2 + usize::from(key.is_some()), None::<Instant>);
-    loop {
+    while left > 0 {
         let next = match end {
             None => rx.recv().ok(),
             Some(end) => rx.recv_timeout(end.saturating_duration_since(Instant::now())).ok(),
@@ -1749,11 +1780,15 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
                 end = Some(Instant::now() + GRACE);
             }
         }
+        left -= usize::from(i < ARENA_AT);
         got[i] = res;
     }
     // A download not waited for is awaited no more, before the merge and not after it.
-    sites.into_iter().for_each(|site| answered(steps, site));
-    let [models, epoch, api, aa, epoch_pages, openrouter, release, arena, more @ ..] = got;
+    let (sites, late): (Vec<_>, Vec<_>) = sites.into_iter().partition(|(i, _)| *i < ARENA_AT);
+    sites.into_iter().for_each(|(_, site)| answered(steps, site));
+    let [models, epoch, api, aa, epoch_pages, openrouter, release, arena @ ..] = got;
+    let sites = late.into_iter().map(|(_, site)| site).collect();
+    let late = Late { got: arena, rx, end: end.unwrap_or_else(Instant::now), sites };
     let models = models?;
     let ep = epoch.and_then(|z| Ok(parse_epoch(&z)?));
     let by_epoch = || -> Result<Data, Failure> {
@@ -1779,7 +1814,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         Source::Epoch => (by_epoch()?, key.map(|_| (Source::Aa, by_aa()))),
         Source::Aa => (by_aa()?, Some((Source::Epoch, by_epoch()))),
     };
-    Ok((data, other, [aa, epoch_pages, openrouter, arena], more, release))
+    Ok((data, other, [aa, epoch_pages, openrouter], release, late))
 }
 
 /// Said after why Artificial Analysis's key did nothing: what is shown instead.
@@ -3462,6 +3497,21 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Arena's downloads are had when asked for after their time is up, and the others left out.
+    #[test]
+    fn arena_downloads_that_came_are_had_past_their_end() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((ARENA_AT + 1, Ok(b"signal".to_vec()))).unwrap();
+        tx.send((0, Ok(b"models".to_vec()))).unwrap();
+        let steps = Steps::default();
+        step(&steps, "huggingface.co");
+        let got = std::array::from_fn(|i| if i == 0 { Ok(b"agent".to_vec()) } else { Err("no reply".into()) });
+        let late = Late { got, rx, end: Instant::now(), sites: vec!["huggingface.co"] };
+        let all = late.all(&steps).map(Result::ok);
+        assert_eq!(all[..3], [Some(b"agent".to_vec()), Some(b"signal".to_vec()), None]);
+        assert_eq!(progress(&steps), "1/1", "and are awaited no more");
+    }
 
     /// A row has what the other source measures and its index, by its key, or neither.
     #[test]
