@@ -402,10 +402,8 @@ pub fn frontier<'m, T: Copy>(
 /// A task's price frontier, cheapest first: each entry costs more and scores higher, the last
 /// being the best model for the task. Each price level keeps only its best entry, since models
 /// that close in price are not worth choosing between. Models without a price or a score are
-/// left out, as are those further behind the best of them than the `low` tier allows, on
-/// coding for "value": the frontier is a recommendation, and cheap alone is not one. What a
-/// tier picks stays on the line though its level has a better entry, so that the tier's is the
-/// cheapest good enough for it, and so does a favorite of the frontier. The `favorites` join the line
+/// left out, and for "value" those far behind the best of them on coding (`FLOOR`). A
+/// favorite of the frontier stays on the line though its level has a better entry. The `favorites` join the line
 /// whether or not they earn a place on it, and are ranked only if they are among `models`;
 /// with no score for the task, a favorite's score is NaN, which `priced` shows as `-`, and no
 /// tier picks it on merit.
@@ -418,12 +416,11 @@ pub fn task_frontier<'a>(
     // Not one only your machine runs, whose scores and context are not that copy's: free, it
     // would take every tier it has the score for. A favorite is still on the line.
     let ranked = fit::rank(models.filter(|m| !m.local()), t);
-    // Behind the best the frontier can take, which has a price; "value" on coding, with no
-    // line while coding has no pace.
+    // "value" alone leaves out the models far behind the best with a price, on coding, and has
+    // no line while coding has no pace: coding per dollar, a weak free model would top it.
     let coder = matches!(t.need, fit::Need::Coder);
-    let behind =
-        behind(ranked.iter().map(|e| e.0).filter(|m| m.cost().is_some()), if coder { "coding" } else { t.name });
-    let near = |m: &Model| behind(m).map_or(!coder, |b| b <= TIERS[0].1);
+    let behind = behind(ranked.iter().map(|e| e.0).filter(|m| m.cost().is_some()), "coding");
+    let near = |m: &Model| !coder || behind(m).is_some_and(|b| b <= FLOOR);
     let ranked: Vec<_> = ranked.iter().copied().filter(|(m, _)| near(m)).collect();
     let mut v = frontier(&ranked, |(m, _)| m, |m| task_score(m, t.name));
     let fav = |m: &Model| favorites.iter().any(|f| f.key == m.key);
@@ -431,16 +428,12 @@ pub fn task_frontier<'a>(
         |a: &(&Model, f64), b: &(&Model, f64)| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal);
     // A favorite ahead of the models it ties, as on the frontier the same price is the same score.
     let favored = |a: &(&Model, f64), b: &(&Model, f64)| fav(b.0).cmp(&fav(a.0));
-    // What each tier picks of the whole frontier, cheapest first.
-    v.sort_by(|a, b| dearest(b, a).then_with(|| favored(a, b)));
-    let picked: Vec<&str> =
-        TIERS.iter().filter_map(|x| pick(v.iter(), t.name, x.0)).map(|e| e.0.key.as_str()).collect();
     // Dearest first so each level keeps its best, then back to cheapest first.
     v.sort_by(|a, b| dearest(a, b).then_with(|| favored(a, b)));
     let mut last = None;
     v.retain(|(m, _)| {
         let l = Some(level(m.cost().unwrap_or(0.0)));
-        std::mem::replace(&mut last, l) != l || fav(m) || picked.contains(&m.key.as_str())
+        std::mem::replace(&mut last, l) != l || fav(m)
     });
     let mut off = Vec::new();
     for &f in favorites {
@@ -497,13 +490,19 @@ pub fn by_value(x: Option<f64>, y: Option<f64>, desc: bool) -> std::cmp::Orderin
     }
 }
 
-/// `--tier` names and how far behind your best model each lets its pick be, in months of
-/// progress (`fit::add_lag`). A tier picks the cheapest frontier entry no further behind than
-/// that, so `high` the best, to the whole point as the frontier compares; the best too on a
-/// task with no such scale.
-// ponytail: fixed months, picked from how the tiers fell on 2026-10's data; tune them if the
-// picks look off.
-pub const TIERS: [(&str, f64); 3] = [("low", 8.0), ("mid", 3.0), ("high", 0.0)];
+/// `--tier` names and the dearest each takes, in blended $/1M, edges of `LEVELS`: `free`, `low`
+/// up to Flash and Haiku, `mid` up to Sonnet and Pro, `high` any. A tier picks the best frontier
+/// entry at its price or under, so `high` the best, and two tiers the same model when none
+/// dearer that the next may take is better.
+pub const TIERS: [(&str, f64); 4] = [("free", 0.0), ("low", 2.0), ("mid", 5.0), ("high", f64::INFINITY)];
+
+/// Whether `tier` may hold `m`: `free` only a free model, as your favorite too, and the others any.
+pub fn takes(tier: &str, m: &Model) -> bool {
+    tier != TIERS[0].0 || m.cost() == Some(0.0)
+}
+
+/// How far behind your best on coding a model makes "value"'s line, in months of progress (`fit::add_lag`).
+const FLOOR: f64 = 8.0;
 
 /// How far a model is behind the best of `models` on `task`, in months of progress
 /// (`Model::lag`); none for a model, or a task, without it.
@@ -512,15 +511,18 @@ fn behind<'a>(models: impl Iterator<Item = &'a Model>, task: &str) -> impl Fn(&M
     move |m| m.lag.get(task).map(|l| l - best)
 }
 
-/// The entry of a task's cheapest-first frontier that `tier` picks; `None` for an empty frontier.
+/// The entry of a task's cheapest-first frontier that `tier` picks: the last at its price or
+/// under, which is the best of them, else the cheapest there is. `None` for an empty frontier,
+/// and for `free` with no free model on it.
 pub fn pick<'a, 'm: 'a>(
-    front: impl Iterator<Item = &'a (&'m Model, f64)> + Clone,
-    task: &str,
+    mut front: impl Iterator<Item = &'a (&'m Model, f64)> + Clone,
     tier: &str,
 ) -> Option<&'a (&'m Model, f64)> {
-    let limit = TIERS.iter().find(|t| t.0 == tier).map_or(0.0, |t| t.1);
-    let behind = behind(front.clone().map(|e| e.0), task);
-    front.clone().find(|(m, _)| behind(m).is_some_and(|b| b <= limit)).or(front.last())
+    let cap = TIERS.iter().find(|t| t.0 == tier).map_or(f64::INFINITY, |t| t.1);
+    // The dearest of them, the first of two at one price: a favorite, as `task_frontier` has them.
+    let within = front.clone().filter(|(m, _)| m.cost().is_some_and(|c| c <= cap));
+    let best = within.reduce(|best, e| if e.0.cost() > best.0.cost() { e } else { best });
+    best.or(front.next().filter(|e| takes(tier, e.0)))
 }
 
 /// The entry of a task's line (`task_line`) that `tier` picks, as `--tier` does: your favorite
@@ -534,8 +536,9 @@ pub fn tier_pick<'m>(
     task: &str,
     tier: &str,
 ) -> Option<(&'m Model, f64)> {
-    let fav = store.tier_favorites(task, tier).find_map(|k| front.iter().find(|(m, _)| m.key == k)).copied();
-    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), task, tier).copied())
+    let on_line = |k| front.iter().find(|(m, _)| m.key == k && takes(tier, m));
+    let fav = store.tier_favorites(task, tier).find_map(on_line).copied();
+    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), tier).copied())
 }
 
 /// `$1.5`, or `free`.
@@ -1023,22 +1026,22 @@ mod tests {
     }
 
     #[test]
-    fn tiers_pick_the_cheapest_good_enough() {
-        let model = |key: &str, lag: f64| Model {
+    fn tiers_pick_the_best_at_their_price() {
+        let model = |key: &str, price: f64| Model {
             key: key.into(),
-            lag: [("coding".to_string(), lag)].into(),
+            offers: vec![Offer { input: price, output: price, ..Default::default() }],
             ..Default::default()
         };
-        // Months behind the source's best, which is none of them: the tiers go by yours.
-        let ms = [model("free", 14.0), model("mini", 9.5), model("sonnet", 5.0), model("opus", 2.0)];
+        let ms = [model("free", 0.0), model("flash", 1.0), model("sonnet", 3.0), model("opus", 5.4)];
         let front: Vec<(&Model, f64)> = ms.iter().map(|m| (m, 0.0)).collect();
-        let key = |front: &[(&Model, f64)], task, tier| pick(front.iter(), task, tier).map(|e| e.0.key.clone());
-        assert_eq!(key(&front, "coding", "low").as_deref(), Some("mini"), "7.5 months behind opus");
-        assert_eq!(key(&front, "coding", "mid").as_deref(), Some("sonnet"), "3 months behind is still mid");
-        assert_eq!(key(&front, "coding", "high").as_deref(), Some("opus"));
-        assert_eq!(key(&front[..2], "coding", "mid").as_deref(), Some("mini"), "behind the best there is");
-        assert_eq!(key(&front, "value", "low").as_deref(), Some("opus"), "no such scale: the best");
-        assert_eq!(key(&[], "coding", "low"), None);
+        let key = |front: &[(&Model, f64)], tier| pick(front.iter(), tier).map(|e| e.0.key.clone());
+        let picks = |front: &[(&Model, f64)]| TIERS.map(|t| key(front, t.0).unwrap_or_default());
+        assert_eq!(picks(&front), ["free", "flash", "sonnet", "opus"], "the best free, up to $2, up to $5, of all");
+        assert_eq!(picks(&front[..2])[1..], ["flash", "flash", "flash"], "the best is cheap: every tier's");
+        assert_eq!(picks(&[front[0], front[3]]), ["free", "free", "free", "opus"], "none between: not opus for mid");
+        assert_eq!(key(&front[2..], "low").as_deref(), Some("sonnet"), "none at low's price: the cheapest");
+        assert_eq!(key(&front[1..], "free"), None, "and none for free: it never costs");
+        assert_eq!(key(&[], "low"), None);
     }
 
     #[test]
@@ -1186,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tier_picks_the_cheapest_of_the_whole_frontier() {
+    fn a_tier_picks_the_best_of_its_price_on_the_line() {
         let model = |key: &str, score: f64, price: f64, lag: f64| Model {
             key: key.into(),
             fit: [("coding".to_string(), score)].into(),
@@ -1203,29 +1206,25 @@ mod tests {
             let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), &[]);
             tier_pick(&line, &off, &Store::default(), "coding", tier).unwrap().0.key.clone()
         };
-        // a and b share the ≤$2 level, c is beaten: mid is a, a third of b's price.
+        // a and b share the ≤$2 level, c is beaten: b is the level's best, and low's and mid's.
         let ms = [
             model("a", 162.0, 0.6, 3.0),
             model("c", 160.0, 0.8, 5.0),
             model("b", 164.0, 1.9, 1.0),
             model("top", 165.0, 10.0, 0.0),
         ];
-        assert_eq!(keys(&ms, &[], "coding"), (vec!["a", "b", "top"], vec![]), "a stays, as what mid picks");
-        assert_eq!((pick(&ms, "low"), pick(&ms, "mid"), pick(&ms, "high")), ("a".into(), "a".into(), "top".into()));
+        assert_eq!(keys(&ms, &[], "coding"), (vec!["b", "top"], vec![]), "a is cheaper, and not the best at its price");
+        assert_eq!((pick(&ms, "low"), pick(&ms, "mid"), pick(&ms, "high")), ("b".into(), "b".into(), "top".into()));
         let ms = [ms[0].clone(), ms[2].clone(), model("mini", 163.0, 1.0, 2.0), ms[3].clone()];
-        assert_eq!(keys(&ms, &[], "coding").0, ["a", "b", "top"], "mini is no tier's: b is its level's best");
-        assert_eq!(
-            keys(&ms, &[&ms[2]], "coding"),
-            (vec!["a", "mini", "b", "top"], vec![]),
-            "a favorite of the frontier"
-        );
+        assert_eq!(keys(&ms, &[], "coding").0, ["b", "top"], "b is its level's best");
+        assert_eq!(keys(&ms, &[&ms[2]], "coding"), (vec!["mini", "b", "top"], vec![]), "a favorite of the frontier");
         let mut ms = ms;
         ms[0].offers = vec![Offer { local: true, available: true, ..Default::default() }];
-        assert_eq!(keys(&ms, &[], "coding").0, ["mini", "b", "top"], "one only your machine runs is not picked");
-        assert_eq!(keys(&ms, &[&ms[0]], "coding"), (vec!["a", "mini", "b", "top"], vec!["a"]), "but as a favorite");
-        // The level past the last edge has no top: $16 within 8 months, not the $75 best.
+        assert_eq!(keys(&ms, &[], "coding").0, ["b", "top"], "one only your machine runs is not picked");
+        assert_eq!(keys(&ms, &[&ms[0]], "coding"), (vec!["a", "b", "top"], vec!["a"]), "but as a favorite");
+        // None at low's price: the cheapest on the line, which the one level these share has one of.
         let dear = [model("a", 157.0, 16.0, 8.0), model("top", 165.0, 75.0, 0.0)];
-        assert_eq!(pick(&dear, "low"), "a");
+        assert_eq!(pick(&dear, "low"), "top");
         // Value goes by your best on coding, 9 months behind the source's, not by the source's.
         let mut old =
             [model("mine", 150.0, 1.0, 9.0), model("cheap", 147.0, 0.2, 12.0), model("weak", 140.0, 0.0, 19.0)];

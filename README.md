@@ -26,7 +26,7 @@ installed, shows which one has each model, and starts it on the model you pick.
   You can set your favorite for a task, exclude models you cannot use, write notes, start a
   harness or download and run a local model.
 - **Your agent** gets a CLI that gives it your favorite for the task, or the recommended model
-  for each of three tiers, cheapest to best. In a multi-agent setup, an orchestrator in one
+  for each of four tiers, free to best. In a multi-agent setup, an orchestrator in one
   harness (e.g. `Opus 5.5` in `Claude Code`) can find a cheaper model in another (e.g.
   `DeepSeek V4 Pro` in `pi`), or a local one (e.g. `Qwen3.8 Flash Next` in `llama.cpp`), and
   hand it a subtask.
@@ -90,8 +90,8 @@ keys and `qq` quits.
 
 <p align="center"><i>The model recommended for each task and tier.</i></p>
 
-Each task has three tiers, `low`, `mid` and `high`, from routine work to the hardest. `low` and
-`mid` get the cheapest model that scores enough, and `high` gets the best one. A favorite you set
+Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
+and `mid` the best up to $2 and up to $5 per 1M tokens, and `high` the best one. A favorite you set
 beats that pick.
 
 To get a local model, press `a` in the TUI to list every model, then `x` on one and pick its

@@ -312,7 +312,7 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
             Some(_) if o.no_fav => vec![],
             Some(tier) => store
                 .tier_favorites(c, tier)
-                .find_map(|k| line.iter().find(|m| m.key == k).copied())
+                .find_map(|k| line.iter().find(|m| m.key == k && crate::view::takes(tier, m)).copied())
                 .into_iter()
                 .collect(),
             None => line,
@@ -405,6 +405,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     let (mut said, mut found) = (Vec::new(), false);
     for (name, task, when) in tasks.into_iter().filter(|t| o.custom.as_deref().is_none_or(|c| c == t.0)) {
         let mut lines: Vec<(String, String)> = Vec::new();
+        let asked = o.tier.is_some();
         for (tier, _) in TIERS.iter().filter(|x| o.tier.as_deref().is_none_or(|t| t == x.0)) {
             let o = ListOpts {
                 task,
@@ -416,6 +417,10 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
                 ..o.clone()
             };
             let line = tier_line(data, store, &o)?;
+            // Most tasks have no free model: no line for it, unless it is the tier asked for.
+            if *tier == TIERS[0].0 && !asked && line.starts_with(NO_MODEL) {
+                continue;
+            }
             match lines.last_mut() {
                 Some((tiers, l)) if *l == line => *tiers = format!("{tiers}/{tier}"),
                 _ => lines.push(((*tier).into(), line)),

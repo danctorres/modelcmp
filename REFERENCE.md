@@ -264,20 +264,23 @@ models out.
 
 ### Tiers
 
-`--task` keeps the best model of each price level (free, up to $0.5, $2, $5, $15, and above),
-and what a tier picks even when its level has a better one. It goes down to 8 months behind
-your best. `--tier` picks one model from that list:
+`--task` keeps the best model of each price level (free, up to $0.5, $2, $5, $15, and above).
+`--tier` picks one model from that list, the best at the tier's price:
 
 | Tier | Its pick |
 |---|---|
-| `low` | the cheapest within 8 months of progress of your best model on the task |
-| `mid` | the cheapest within 3 months |
+| `free` | the best free model, and none when the list has no free one |
+| `low` | the best up to $2 per 1M tokens |
+| `mid` | the best up to $5 |
 | `high` | your best. It is the best to the whole point: of two models a fraction of a point apart, the cheaper |
 
-- A month of progress is a twelfth of what the best score on the task rose in the last year,
-  among the models listed here that the source scored.
-- A task scored for less than a year has no such pace, and every tier picks the best.
-- `value` lists the models within 8 months of your best on coding.
+- Two tiers pick the same model when none dearer that the next may take is better. A tier
+  never takes a worse model to differ from the next.
+- With no model at its price, `low` or `mid` picks the cheapest of the list. `free` never
+  holds a model that costs, your favorite included.
+- `value` lists the models within 8 months of progress of your best on coding. A month of
+  progress is a twelfth of what the best coding score rose in the last year, among the models
+  listed here that the source scored.
 
 ### Favorites
 

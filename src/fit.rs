@@ -14,7 +14,7 @@ pub enum Need {
     None,
     Tools,
     Vision,
-    /// No further behind your best on coding than the `low` tier allows: cheap alone is not
+    /// No further behind your best on coding than a task's line allows (`view::FLOOR`): cheap alone is not
     /// enough. A cut of the task's line (`view::task_frontier`), not of the score: none makes
     /// the line while coding has no pace to tell by (`add_lag`).
     Coder,
@@ -258,7 +258,7 @@ pub fn months(date: &str) -> Option<f64> {
 /// of the best score is not (an index has no zero) and a gap in points is not either (each
 /// benchmark moves at its own pace); a percentile among every model ever scored counts a
 /// model at half the best score as near the top. A task scored for less than `WINDOW` months,
-/// or whose best has not risen in them, has no lag, and each of its tiers picks the best. A
+/// or whose best has not risen in them, has no lag, and its line leaves none out for it. A
 /// best of then that scored nothing still gives a pace: the floor hides part of the rise, so
 /// the lags come out too long, the strict side. "value" has none, being a rank.
 // ponytail: a straight line over `WINDOW`; a benchmark whose scores rose in a few of those

@@ -2724,7 +2724,7 @@ fn help(query: &str) -> Vec<Line<'static>> {
 }
 
 /// What a box of recommend's grid shows.
-const TIER_LEGEND: &str = "each tier's model: ★ your favorite, else the cheapest that scores enough (high: the best), \
+const TIER_LEGEND: &str = "each tier's model: ★ your favorite, else the best free, up to $2, up to $5 and of all, \
                            as name $/1M tokens (score on the task)";
 
 /// A row per task, the built-in ones and then your own, with a box per tier for the model it
@@ -2793,7 +2793,8 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         // One pick takes the row: a box as wide as the tiers', which every stop past the name is on.
         let one = app.one_pick(i);
         let (boxes, room) = if one { (1, TIERS.len() * (room + 2) - 2) } else { (TIERS.len(), room) };
-        for (c, mut cell) in row.into_iter().take(boxes).enumerate() {
+        // The one pick is `high`'s, the last: `free` may have none.
+        for (c, mut cell) in row.into_iter().skip(if one { TIERS.len() - 1 } else { 0 }).take(boxes).enumerate() {
             // Padded to the box, so the cursor's fill is as wide on every one.
             cell.push(Span::raw(" ".repeat(room.saturating_sub(cell.iter().map(Span::width).sum()))));
             let x = w + 2 + c * (room + 2);
@@ -3717,7 +3718,7 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
             m.fit.insert("overall".into(), pct);
-            // flash is 6 months behind opus: `low`, and no further.
+            // flash is 6 months behind opus, so on the line, and at low's and mid's price.
             m.lag.insert("overall".into(), (100.0 - pct) / 5.0);
         }
         a.set_data(data);
@@ -3755,10 +3756,10 @@ mod tests {
         );
         a.key(KeyCode::Esc.into());
         a.key(KeyCode::Char('R').into());
-        // Overall's row: flash for low, then opus for mid and high.
+        // Overall's row: none for free, flash for low, then opus for mid and high.
         assert_eq!(
             (at(&mut a, "opus $", none), at(&mut a, "flash $", none)),
-            (Some(Mouse::Open(Stop::Recommend(0, 2))), Some(Mouse::Open(Stop::Recommend(0, 1))))
+            (Some(Mouse::Open(Stop::Recommend(0, 3))), Some(Mouse::Open(Stop::Recommend(0, 2))))
         );
         assert_eq!(at(&mut a, "✓ selected", none), Some(Mouse::Open(Stop::Among(MARKED))), "a tab of the among line");
         let name = Some(Mouse::Open(Stop::Recommend(1, 0)));
@@ -3769,18 +3770,18 @@ mod tests {
         assert_eq!((a.task_cur, a.task_sel, a.current().is_none()), (1, 0, true), "a click moves to the task");
         a.mouse(Mouse::Model(Stop::Compare(2)));
         assert_eq!((a.task_cur, a.task_sel), (1, 0), "compare's stop is none of recommend's");
-        a.mouse(Mouse::Model(Stop::Recommend(0, 2)));
+        a.mouse(Mouse::Model(Stop::Recommend(0, 3)));
         assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (0, "opus"), "a click moves to the model");
         let was = a.store.is_marked("flash");
-        assert_eq!(a.mouse(Mouse::MarkModel(Stop::Recommend(0, 1))), Some(Effect::Save));
+        assert_eq!(a.mouse(Mouse::MarkModel(Stop::Recommend(0, 2))), Some(Effect::Save));
         assert_ne!(a.store.is_marked("flash"), was, "a right click toggles its selection, as space does");
-        a.mouse(Mouse::Open(Stop::Recommend(0, 1)));
+        a.mouse(Mouse::Open(Stop::Recommend(0, 2)));
         assert!(
             matches!(a.view, View::Detail(Back::Recommend(_))) && a.current().unwrap().key == "flash",
             "a double click on a model opens its details"
         );
         a.key(KeyCode::Esc.into());
-        assert_eq!((&a.view, a.task_sel), (&View::Recommend, 1), "esc goes back to it");
+        assert_eq!((&a.view, a.task_sel), (&View::Recommend, 2), "esc goes back to it");
         a.mouse(Mouse::Open(Stop::Recommend(0, 0)));
         assert_eq!(a.view, View::Table, "a double click on a task ranks by it");
         a.store.toggle_favorite("debugging", "flash");
@@ -4030,7 +4031,7 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
             m.fit.insert("coding".into(), pct);
-            // flash is 6 months behind opus: `low`, and no further.
+            // flash is 6 months behind opus, so on the line, and at low's and mid's price.
             m.lag.insert("coding".into(), (100.0 - pct) / 5.0);
         }
         a.set_data(data);
@@ -4041,13 +4042,15 @@ mod tests {
         let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert!(spans[star + 1].content.starts_with("opus "), "★ then the name: {:?}", spans[star + 1]);
         assert_eq!(spans[star + 1].style.fg, Some(LEVEL[level(5.0)]), "the name keeps its price level");
-        // A favorite off the frontier, flash under the low tier's floor, is grey and says so.
+        // A favorite off the frontier, flash dearer than opus and scoring less, is grey and says so.
         let mut data = std::mem::take(&mut a.data);
-        data.models.iter_mut().find(|m| m.key == "flash").unwrap().lag.insert("coding".into(), 12.0);
+        for o in &mut data.models.iter_mut().find(|m| m.key == "flash").unwrap().offers {
+            (o.input, o.output) = (6.0, 6.0);
+        }
         a.store.toggle_favorite("coding", "flash");
         a.set_data(data);
         // Under the grid, the box under the cursor says why.
-        (a.view, a.among, a.task_cur, a.task_sel) = (View::Recommend, None, 1, 1);
+        (a.view, a.among, a.task_cur, a.task_sel) = (View::Recommend, None, 1, 2);
         let lines = recommend(&a, 200, &mut vec![]).0;
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let star = spans.iter().rposition(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
@@ -4319,7 +4322,7 @@ mod tests {
         let first = screen(&mut a, "gg");
         assert!(first.contains("each tier's model:"), "{first}");
         // The lines under the grid, which say what the cursor is on, stay under the rows that scroll.
-        let top = screen(&mut a, "jl");
+        let top = screen(&mut a, "j2l");
         assert!(top.contains("overall") && top.contains("  low:     no data"), "{top}");
         let last = screen(&mut a, "G");
         assert!(
@@ -4693,7 +4696,7 @@ mod tests {
         let gap = text.iter().position(String::is_empty).unwrap();
         assert!(gap > 2 && text[1..gap].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..gap]);
         let head = gap + 1;
-        assert_eq!(text[head].split_whitespace().collect::<Vec<_>>(), ["low", "mid", "high"], "a box per tier");
+        assert_eq!(text[head].split_whitespace().collect::<Vec<_>>(), ["free", "low", "mid", "high"], "a box per tier");
         // A row per task, the cursor on the cursor task's name alone.
         let names: Vec<&str> = text[head + 1..].iter().map_while(|l| l.split_whitespace().next()).collect();
         let bare: Vec<&str> = names.iter().map(|n| n.trim_matches(['▌', '▐'])).collect();
@@ -4714,11 +4717,11 @@ mod tests {
         let mut data = std::mem::take(&mut b.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
             m.fit.insert("overall".into(), pct);
-            // flash is 6 months behind opus: `low`, and no further.
+            // flash is 6 months behind opus, so on the line, and at low's and mid's price.
             m.lag.insert("overall".into(), (100.0 - pct) / 5.0);
         }
         b.set_data(data);
-        (b.view, b.task_sel) = (View::Recommend, 2);
+        (b.view, b.task_sel) = (View::Recommend, 3);
         // On the `among` line it is on a tab alone, the one in use bold, and "(filtered)" says a search narrows them.
         (b.among, b.query) = (Some(1), "o".into());
         let (top, block, _) = recommend(&b, 200, &mut vec![]);
@@ -4749,7 +4752,7 @@ mod tests {
         assert_eq!(value.split_whitespace().collect::<Vec<_>>(), ["value", "-"], "a rank has one pick, not a tier's");
         assert!(all.iter().any(|l| l.to_string() == "  mid:     opus $5.0 (150)"), "under the grid, the box's model");
         // A name is cut from its start to the room its box has, the price and score kept.
-        let cut: String = entry(&b, "overall", 1, b.tier_picks(0)[1], Some(14)).iter().map(|s| &*s.content).collect();
+        let cut: String = entry(&b, "overall", 2, b.tier_picks(0)[2], Some(14)).iter().map(|s| &*s.content).collect();
         assert_eq!(cut, "…us $5.0 (150)");
         // Among all, a model out of reach is grey, and says so under the grid; one of yours keeps its price's colour.
         let mut data = std::mem::take(&mut b.data);
