@@ -218,6 +218,17 @@ const LOGO: [&str; 8] = [
     "██ ██ ██  ▀█████▀    ▀████▀██  ▀█████▀    ▀██  ▀█████▀   ██ ██ ██ ██ ▀▀▀▀  ",
     "                                                                  ▀▀       ",
 ];
+/// The wordmark where the big one has no room, a tiled or split window: the same letters, smaller.
+const SMALL: [&str; 4] = [
+    "                    ██        ██                        ",
+    "██▀██▀█▄ ▄█▀▀█▄ ▄█▀▀██ ▄████▄ ██  ▄█▀▀▀▀ ██▀██▀█▄ ██▀▀█▄",
+    "██ ██ ██ ▀█▄▄█▀ ▀█▄▄██ ▀█▄▄▄▄ ▀█▄ ▀█▄▄▄▄ ██ ██ ██ ██▄▄█▀",
+    "                                                  ██    ",
+];
+/// The wordmarks, the first that fits is shown (`logo_at`).
+const LOGOS: [&[&str]; 2] = [&LOGO, &SMALL];
+/// A wordmark's corner, the rows under it that the tagline and the version take, and its rows.
+type At = (u16, u16, u16, &'static [&'static str]);
 /// A link a click opens: blue and underlined, as on a web page.
 fn link() -> Style {
     fg(Color::Blue).add_modifier(Modifier::UNDERLINED)
@@ -226,11 +237,11 @@ fn link() -> Style {
 /// Under the wordmark, after a blank row.
 const TAGLINE: &str = "compare models, pick favorites, get recommendations";
 
-/// Where the wordmark goes in `a`: its corner, and the rows under it that the tagline and the
-/// version take, as far as there is room for them (0, 2 or 3). It is centred with `below` more
+/// Where the wordmark `logo` goes in `a`: its corner, and the rows under it that the tagline and
+/// the version take, as far as there is room for them (0, 2 or 3). It is centred with `below` more
 /// rows kept free under those. None in an area too small.
-fn logo_at(a: Rect, below: u16) -> Option<(u16, u16, u16)> {
-    let (w, rows) = (LOGO[0].chars().count() as u16, LOGO.len() as u16);
+fn logo_at(logo: &'static [&'static str], a: Rect, below: u16) -> Option<At> {
+    let (w, rows) = (logo[0].chars().count() as u16, logo.len() as u16);
     if a.width < w || a.height < rows + below {
         return None;
     }
@@ -240,7 +251,7 @@ fn logo_at(a: Rect, below: u16) -> Option<(u16, u16, u16)> {
         2 => 2,
         _ => 3,
     };
-    Some((a.x + (a.width - w) / 2, a.y + (a.height - rows - under - below) / 2, under))
+    Some((a.x + (a.width - w) / 2, a.y + (a.height - rows - under - below) / 2, under, logo))
 }
 
 /// The first start's question, the title of its box under the wordmark.
@@ -283,7 +294,7 @@ fn try_lines() -> [Line<'static>; 3] {
 /// centred in. None once the key is typed or skipped, and on a screen too small for both, which
 /// asks over the table. With four more rows to spare they are kept under the box, for
 /// `try_lines` at the bottom.
-fn splash(app: &App, area: Rect) -> Option<((u16, u16, u16), Rect)> {
+fn splash(app: &App, area: Rect) -> Option<(At, Rect)> {
     if !app.first_start || !matches!(app.input, Input::Key { .. }) {
         return None;
     }
@@ -292,21 +303,17 @@ fn splash(app: &App, area: Rect) -> Option<((u16, u16, u16), Rect)> {
     // A blank row, then the box: its border and its lines.
     let ask = key_lines(0).len() as u16 + 3;
     // Not at the cost of the tagline and the version.
-    let at = logo_at(body, ask + 4).filter(|at| at.2 == 3).or_else(|| logo_at(body, ask))?;
-    Some((at, Rect { y: at.1 + LOGO.len() as u16 + at.2 + 1, height: ask - 1, ..body }))
+    let at = LOGOS
+        .into_iter()
+        .find_map(|l| logo_at(l, body, ask + 4).filter(|at| at.2 == 3).or_else(|| logo_at(l, body, ask)))?;
+    Some((at, Rect { y: at.1 + at.3.len() as u16 + at.2 + 1, height: ask - 1, ..body }))
 }
 
 /// The wordmark with its corner at `(x, y)`, each cell in the style its column and row give, and
 /// under it, where `under` leaves them room (`logo_at`), the first `typed` bytes of the tagline
 /// and, once that is whole, the version. Rows past the end of `a` are left out.
-fn wordmark(
-    buf: &mut Buffer,
-    a: Rect,
-    (x, y, under): (u16, u16, u16),
-    typed: usize,
-    style: impl Fn(usize, usize) -> Style,
-) {
-    for (r, row) in LOGO.iter().enumerate() {
+fn wordmark(buf: &mut Buffer, a: Rect, (x, y, under, logo): At, typed: usize, style: impl Fn(usize, usize) -> Style) {
+    for (r, row) in logo.iter().enumerate() {
         let yr = y + r as u16;
         if yr >= a.bottom() {
             break;
@@ -315,7 +322,7 @@ fn wordmark(
             buf[(x + c as u16, yr)].set_char(ch).set_style(style(c, r));
         }
     }
-    let (rows, tw) = (LOGO.len() as u16, TAGLINE.len());
+    let (rows, tw) = (logo.len() as u16, TAGLINE.len());
     if under > 0 && typed > 0 {
         buf.set_string(a.x + (a.width - tw as u16) / 2, y + rows + 1, &TAGLINE[..typed], fg(Color::Reset));
         if under == 3 && typed == tw {
@@ -329,8 +336,9 @@ fn wordmark(
 /// from below the screen and easing to a stop in the middle, then a rainbow rolling across it on a
 /// diagonal, each cell running red to blue before it settles on the accent, the tagline typing in
 /// under it as the rainbow passes and the version showing under that once it is whole. Any key
-/// skips it, and is not passed on; a terminal too small for it skips it too. On the first start
-/// it stops above the question that follows (`splash`), and stays.
+/// skips it, and is not passed on. A window too small for the wordmark has the small one, and one
+/// too small for that skips it too. On the first start it stops above the question that follows
+/// (`splash`), and stays.
 fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     // The hue wheel up to the accent, so the last step into magenta is a small one.
     const RAINBOW: [Color; 5] = [Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue];
@@ -340,24 +348,25 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     const STEP: usize = 3;
     /// Frames the glide takes at most: it ends as soon as the wordmark rounds into place.
     const SLIDE: usize = 20;
-    let (w, rows, tw) = (LOGO[0].chars().count(), LOGO.len(), TAGLINE.len());
+    let tw = TAGLINE.len();
     let theme = palette(app);
-    // The wave reaches a cell `SLIDE + (c + 2 * (rows - 1 - r)) / SPEED` frames in, the bottom row
-    // first as cells are twice as tall as wide, and the last cell settles `RAINBOW.len() * STEP`
-    // frames after that.
-    let end = SLIDE + (w + 2 * (rows - 1)).div_ceil(SPEED) + RAINBOW.len() * STEP;
     // From 1, as frame 0 would put the wordmark just off the screen.
     let mut t = 1;
-    while t <= end {
-        let (mut fits, mut landed, mut asks) = (true, false, false);
+    loop {
+        // `end`: the last frame, 0 with no room for a wordmark.
+        let (mut end, mut landed, mut asks) = (0, false, false);
         terminal.draw(|f| {
             let a = f.area();
             let at = splash(app, a).map(|s| s.0);
             asks = at.is_some();
-            let Some((x, y, under)) = at.or_else(|| logo_at(a, 0)) else {
-                fits = false;
+            let Some((x, y, under, logo)) = at.or_else(|| LOGOS.into_iter().find_map(|l| logo_at(l, a, 0))) else {
                 return;
             };
+            let (w, rows) = (logo[0].chars().count(), logo.len());
+            // The wave reaches a cell `SLIDE + (c + 2 * (rows - 1 - r)) / SPEED` frames in, the
+            // bottom row first as cells are twice as tall as wide, and the last cell settles
+            // `RAINBOW.len() * STEP` frames after that.
+            end = SLIDE + (w + 2 * (rows - 1)).div_ceil(SPEED) + RAINBOW.len() * STEP;
             // Ease out: from the bottom edge, fast at first and slowing into place.
             let left = 1.0 - (t.min(SLIDE) as f32 / SLIDE as f32);
             let off = (f32::from(a.bottom() - y) * left * left * left).round() as u16;
@@ -366,7 +375,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
             // so 4 columns ahead of the front there.
             let typed = if t > SLIDE { ((t - SLIDE) * SPEED + 4).saturating_sub((w - tw) / 2).min(tw) } else { 0 };
             let buf = f.buffer_mut();
-            wordmark(buf, a, (x, y + off, under), typed, |c, r| {
+            wordmark(buf, a, (x, y + off, under, logo), typed, |c, r| {
                 match t.checked_sub(SLIDE + (c + 2 * (rows - 1 - r)) / SPEED) {
                     None => fg(MUTED),
                     Some(k) => fg(RAINBOW.get(k / STEP).copied().unwrap_or(ACCENT)).add_modifier(BOLD),
@@ -374,7 +383,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
             });
             recolor(buf, theme, app.term_bg);
         })?;
-        if !fits {
+        if end == 0 {
             return Ok(());
         }
         if landed {
@@ -385,7 +394,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         // Past the deadline the wait is zero, so what is still queued is read and a key behind
         // a burst of pointer moves is not left for the table. The whole wordmark is held before
         // the table takes its place; the first start's question shows under it at once.
-        let until = Instant::now() + Duration::from_millis(if t == end && !asks { 1100 } else { 25 });
+        let until = Instant::now() + Duration::from_millis(if t >= end && !asks { 1100 } else { 25 });
         loop {
             if !event::poll(until.saturating_duration_since(Instant::now()))? {
                 break;
@@ -394,9 +403,11 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                 return Ok(());
             }
         }
+        if t >= end {
+            return Ok(());
+        }
         t += 1;
     }
-    Ok(())
 }
 
 fn spawn_refresh() -> Refresh {
@@ -3240,9 +3251,14 @@ mod tests {
 
     #[test]
     fn the_logo_rows_line_up() {
-        let w = LOGO[0].chars().count();
-        assert!(LOGO.iter().all(|r| r.chars().count() == w), "centring and the band assume one width");
-        assert!(TAGLINE.is_ascii() && TAGLINE.len() <= w, "the intro slices it by byte and centres it in that width");
+        for logo in LOGOS {
+            let w = logo[0].chars().count();
+            assert!(logo.iter().all(|r| r.chars().count() == w), "centring and the band assume one width");
+            assert!(
+                TAGLINE.is_ascii() && TAGLINE.len() <= w,
+                "the intro slices it by byte and centres it in that width"
+            );
+        }
     }
 
     #[test]
@@ -3269,6 +3285,10 @@ mod tests {
         assert_eq!(row(&lines, "o open a model's page · x run it in a harness"), tries.map(|y| y + 1));
         assert_eq!(row(&lines, "R get recommendations · ? all keys"), tries.map(|y| y + 2));
         assert!(try_lines().iter().all(|l| l.width() <= LOGO[0].chars().count()), "as wide as the wordmark at most");
+        let narrow = screen(&mut a, 60, 30);
+        let small = row(&narrow, SMALL[1]);
+        assert!(small.is_some() && small < row(&narrow, KEY_TITLE), "the small wordmark in a narrow window");
+        assert_eq!(row(&narrow, "Model"), None, "and no table there either");
         let short = screen(&mut a, 120, 24);
         assert!(row(&short, TAGLINE).is_some() && row(&short, "next screen").is_none(), "the question alone");
         // The key is typed in the box, hidden, and not in the status bar.
@@ -3290,8 +3310,9 @@ mod tests {
         assert_eq!(a.mouse(Mouse::Link), Some(Effect::Open(data::AA_KEY_URL.into())));
         assert!(matches!(a.input, Input::Key { .. }), "the prompt stays for the key");
         // Too small for both: over the table, as a rejected key is asked for later.
-        let lines = screen(&mut a, 120, 12);
+        let lines = screen(&mut a, 120, 9);
         assert!(row(&lines, "Model").is_some() && row(&lines, TAGLINE).is_none());
+        assert!(row(&screen(&mut a, 120, 14), SMALL[1]).is_some(), "the small wordmark where the big one is too tall");
         // The key could not be saved: the table, where the status bar says so.
         a.input = Input::None;
         assert_eq!(row(&screen(&mut a, 120, 30), TAGLINE), None);
