@@ -32,8 +32,8 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 
 One table shows the columns of both sources. The ones of the source not in use show when both
 are cached, which takes an Artificial Analysis key, and were fetched within a day of each other.
-In the TUI AAII shows without a key too, empty, and its description says it needs one, which
-also adds Tok/s and TTFT.
+In the TUI AAII, Tok/s and TTFT show without that data too, empty, and their descriptions say
+they need a key, or a refresh with one. A sort or a bound on an empty one is refused.
 ECI and AAII keep their places, and the table starts sorted by the one of the source in use.
 The task scores, Value and the recommendations stay with that source. In the TUI,
 `|` picks the columns to show.

@@ -158,7 +158,8 @@ const ARENA: &str = "arena";
 /// index, the other source's and Arena's score, the three overall scores side by side, the task
 /// scores, Value and what a task cost and took when Epoch lists it, then speed when Artificial
 /// Analysis measures it. What the source in use does
-/// not measure is the other one's, when its data is there too (`absent`).
+/// not measure is the other one's, when its data is there too, and Artificial Analysis's show
+/// empty without it (`absent`).
 pub const COLS: [Col; 17] = [
     Col {
         ranked: false,
@@ -311,10 +312,23 @@ pub fn unmeasured(col: usize) -> bool {
     numeric(col).is_some_and(|c| c.from() != crate::data::source() && !crate::data::lent())
 }
 
-/// Whether the TUI leaves the column at cursor index `col` out as `unmeasured`. AAII stays,
-/// empty, to say it takes a key (`base_col_about`).
+/// Whether the TUI leaves the column at cursor index `col` out as `unmeasured`: Epoch's, as
+/// Artificial Analysis's stay, empty, to say they take a key (`base_col_about`).
 fn absent(col: usize) -> bool {
-    col != AAII && unmeasured(col)
+    unmeasured(col) && crate::data::source() == Source::Aa
+}
+
+/// Why the column at cursor index `col` shows empty, when it does as `unmeasured`: said after
+/// what it is (`base_col_about`), and after its name to a sort or a bound on it.
+fn empty_why(col: usize) -> Option<String> {
+    if !unmeasured(col) || absent(col) {
+        return None;
+    }
+    if crate::data::aa_key().is_some() {
+        return Some("has no data yet, r refreshes".into());
+    }
+    let whose = if col == AAII { "its".into() } else { format!("{}'s", Source::Aa.label()) };
+    Some(format!("needs {whose} API key, K adds it"))
 }
 
 /// The benchmark source the column at cursor index `col` has its values from, when it has them
@@ -401,11 +415,11 @@ pub fn base_col_about(col: usize) -> String {
             COLS[PRICE - TEXT].about,
             crate::data::cached() * 100.0
         ),
-        AAII if unmeasured(col) && crate::data::aa_key().is_none() => {
-            format!("{}, needs its API key, K adds it, with Tok/s and TTFT", Source::Aa.index().1)
-        }
         _ => {
             let about = numeric(col).map_or("", Col::about).to_string();
+            if let Some(why) = empty_why(col) {
+                return format!("{about}, {why}");
+            }
             // A task's column is of the source in use, beside both sources' indexes.
             if TASK_COLS.contains(&col) { of_source(&about) } else { about }
         }
@@ -3025,6 +3039,11 @@ impl App {
                     self.col = starts.iter().rev().copied().find(|&g| g < self.col).unwrap_or(starts[starts.len() - 1]);
                 }
             }
+            // Nothing to sort by or to bound in a column that shows empty.
+            KeyCode::Char('s' | '>' | '<') if table && empty_why(self.col).is_some() => {
+                let why = empty_why(self.col).unwrap_or_default();
+                self.refuse(format!("{} {why}", base_col_name(self.col)));
+            }
             KeyCode::Char('s') if table => {
                 if self.sort_col == self.col {
                     self.descending = !self.descending;
@@ -3702,11 +3721,24 @@ mod tests {
         let col = |id: &str| TEXT + COLS.iter().position(|c| c.id == id).unwrap();
         let (tps, other, price) = (col("tps"), col(OTHER), col("price"));
         let mut a = app();
-        assert!(hidden(tps) && unmeasured(other), "Epoch alone has no speed, nor another index");
-        assert!(
-            !hidden(other) && base_col_about(other).ends_with("needs its API key, K adds it, with Tok/s and TTFT"),
-            "AAII says so"
-        );
+        assert!(unmeasured(tps) && unmeasured(other), "Epoch alone has no speed, nor another index");
+        // They show all the same, empty, and say what fills them.
+        assert!(!hidden(tps) && !hidden(other));
+        assert!(base_col_about(other).ends_with("Index, needs its API key, K adds it"), "AAII says so");
+        assert!(base_col_about(tps).ends_with("needs Artificial Analysis's API key, K adds it"), "and Tok/s");
+        // Nothing to sort by or to bound there, which a key on it says.
+        a.col = tps;
+        let before = (a.sort_col, a.rows.len());
+        for key in ["s", ">", "<"] {
+            press(&mut a, key);
+            assert!(matches!(a.input, Input::None) && a.refused, "{key}");
+            assert_eq!(a.status, "Tok/s needs Artificial Analysis's API key, K adds it");
+        }
+        assert_eq!((a.sort_col, a.rows.len()), before);
+        // With a key the data is only not there yet.
+        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[1] = Some("k".into()));
+        assert!(base_col_about(tps).ends_with("(median), has no data yet, r refreshes"));
+        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[1] = None);
         // With Artificial Analysis's data too, its columns show, the index under its name.
         let mut data = std::mem::take(&mut a.data);
         data.lent = true;
@@ -4841,7 +4873,7 @@ mod tests {
         ctrl(&mut a, 'u');
         assert_eq!(a.current().unwrap().key, "gpt55");
         let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
-        assert!(shown < NCOLS, "Epoch has no speed columns");
+        assert_eq!(shown, NCOLS, "Epoch has no speed columns, which show empty");
         press(&mut a, &format!("{shown}l"));
         assert_eq!(a.col, ECI, "counted column moves wrap around, over the shown ones");
         crate::data::set_source(Source::Aa);

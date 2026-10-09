@@ -3340,11 +3340,11 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         data.models[0].via = crate::data::vias().map(String::from).collect();
         a.set_data(data);
-        let (_, lines) = render(&mut a, 207, 5);
+        let (_, lines) = render(&mut a, 222, 5);
         let via = lines[0].find("Via").unwrap();
         assert!(lines[2].trim_end().ends_with("│ oc pi omp cc cx gem cp oll llm"), "one line, short: {lines:?}");
         // A click finds the harness under it, as `draw` puts the frame around the table.
-        let (area, x) = (Rect::new(0, 0, 209, 10), lines[0][..via].chars().count() as u16 + 1);
+        let (area, x) = (Rect::new(0, 0, 224, 10), lines[0][..via].chars().count() as u16 + 1);
         let click = |column| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
@@ -3355,14 +3355,14 @@ mod tests {
         assert_eq!(hit(&a, area, click(x + 12)), Some(Mouse::Row(0)), "the gap before it is none");
         // A search by the harness's name underlines its short one, whole.
         a.query = "codex".into();
-        let (buf, _) = render(&mut a, 200, 5);
+        let (buf, _) = render(&mut a, 215, 5);
         let on = |x: u16| buf[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         let x = x - 1 + 13;
         assert!(on(x) && on(x + 1) && !on(x - 1) && !on(x + 2), "cx alone");
         // And so does one by the short name itself.
         a.query = "cx".into();
         a.rebuild();
-        let (buf, _) = render(&mut a, 200, 5);
+        let (buf, _) = render(&mut a, 215, 5);
         let on = |x: u16| buf[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         assert!(a.rows.len() == 1 && on(x) && on(x + 1) && !on(x + 3), "cx finds codex");
         a.query.clear();
@@ -3596,7 +3596,7 @@ mod tests {
         a.set_data(data);
         a.key(KeyCode::Char('a').into());
         a.key(KeyCode::Char('G').into()); // off the cursor, which has a fill of its own
-        let (buf, lines) = render(&mut a, 188, 5);
+        let (buf, lines) = render(&mut a, 203, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap() as u16;
         let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
         assert_eq!(at("opus"), MUTED, "{lines:?}");
@@ -3608,30 +3608,30 @@ mod tests {
         a.store.marked.push("opus".into());
         a.store.toggle_favorite("coding", "opus");
         a.store.toggle_excluded("opus");
-        let (buf, lines) = render(&mut a, 188, 5);
+        let (buf, lines) = render(&mut a, 203, 5);
         assert!(lines[opus as usize].contains('★') && lines[opus as usize].contains('✗'), "{lines:?}");
-        assert!((0..188).all(|x| buf[(x, opus)].bg == MARK && buf[(x, opus)].fg == Color::Black), "{lines:?}");
+        assert!((0..203).all(|x| buf[(x, opus)].bg == MARK && buf[(x, opus)].fg == Color::Black), "{lines:?}");
         assert!(buf[(cell(&lines[opus as usize], "opus"), opus)].modifier.contains(BOLD));
         assert!(lines[opus as usize].contains("not available"), "{lines:?}");
         // A search hit on the fill has the yellow behind it, still black.
         a.query = "opus".into();
-        let (buf, lines) = render(&mut a, 188, 5);
+        let (buf, lines) = render(&mut a, 203, 5);
         let hit = &buf[(cell(&lines[opus as usize], "opus"), opus)];
         assert_eq!((hit.fg, hit.bg), (Color::Black, MATCH), "{lines:?}");
         // A theme's fill is faint (`recolor`), so there the row keeps its colours on it.
         a.store.theme = "nord".into();
-        let (buf, lines) = render(&mut a, 188, 5);
+        let (buf, lines) = render(&mut a, 203, 5);
         let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
-        assert!((0..188).all(|x| buf[(x, opus)].bg == MARK), "{lines:?}");
+        assert!((0..203).all(|x| buf[(x, opus)].bg == MARK), "{lines:?}");
         assert_eq!([at("✓"), at("★"), at("✗"), at("opus")], [MARK, STAR, BAD, MATCH], "{lines:?}");
         a.query.clear();
-        let (buf, lines) = render(&mut a, 188, 5);
+        let (buf, lines) = render(&mut a, 203, 5);
         let at = |pat: &str| buf[(cell(&lines[opus as usize], pat), opus)].fg;
         assert_eq!([at("opus"), at("anthropic")], [MUTED, MUTED], "muted as off the fill: {lines:?}");
         a.store.theme.clear();
         // And so with the terminal's own colours, once it told its background.
         a.term_bg = Some(0);
-        let (buf, lines) = render(&mut a, 188, 5);
+        let (buf, lines) = render(&mut a, 203, 5);
         assert_eq!(buf[(cell(&lines[opus as usize], "★"), opus)].fg, STAR, "{lines:?}");
         a.term_bg = None;
         // In compare its column is muted.
@@ -3642,7 +3642,7 @@ mod tests {
         assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
         // Back in the available view it shows only for being marked, and says so.
         a.key(KeyCode::Char('A').into());
-        let (_, lines) = render(&mut a, 188, 5);
+        let (_, lines) = render(&mut a, 203, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         assert!(lines[opus].contains("not available"), "{lines:?}");
         assert!(lines[4].starts_with(" NORMAL  1 available + 1 not available"), "{}", lines[4]);
@@ -3700,14 +3700,14 @@ mod tests {
         a.store.set_note("opus", "good at refactors");
         a.query = "refac".into();
         a.rebuild();
-        let (buf, lines) = render(&mut a, 200, 4);
+        let (buf, lines) = render(&mut a, 215, 4);
         assert_eq!((a.rows.len(), words(&lines[2])[4]), (1, "opus"), "notes are searched");
         let x = cell(&lines[2], "refactors");
         let under = |x: u16| buf[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         assert!((x..x + 5).all(under) && !under(x + 5), "refac of the note");
         a.query = "openc".into();
         a.rebuild();
-        let (buf, lines) = render(&mut a, 200, 4);
+        let (buf, lines) = render(&mut a, 215, 4);
         assert_eq!(a.rows.len(), 2, "Via is searched");
         let x = cell(&lines[2], "│ oc") + 2;
         assert!(buf[(x, 2)].modifier.contains(Modifier::UNDERLINED), "openc is the Via column's oc");
@@ -3716,9 +3716,9 @@ mod tests {
     #[test]
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
-        let (buf, lines) = render(&mut a, 214, 6);
+        let (buf, lines) = render(&mut a, 229, 6);
         let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI AAII Arena ▾ Coding ▾ Agentic ▾ \
-                      Reason ▾ Value │ $task Tok/task │ Via ▾ Notes";
+                      Reason ▾ Value │ $task Tok/task Tok/s TTFT │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);
@@ -3976,7 +3976,7 @@ mod tests {
     fn clicks_land_on_rows_headers_and_dropdown_entries() {
         use ratatui::crossterm::event::KeyModifiers;
         let mut a = app();
-        let (w, h) = (189, 12);
+        let (w, h) = (204, 12);
         let area = Rect::new(0, 0, w, h);
         // `draw` puts the tabs on rows 0 and 1 and under them the frame, which `click` counts
         // from: the header on its row 1, its rule on row 2 and the first model on row 3, one cell in.
@@ -4254,15 +4254,15 @@ mod tests {
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
-        let (_, lines) = render(&mut a, 54, 4);
+        let (_, lines) = render(&mut a, 51, 4);
         assert_eq!(
             words(&lines[0])[2..],
-            ["‹│", "$task", "Tok/task", "│", "Via", "▾"],
+            ["‹│", "Tok/s", "TTFT", "│", "Via", "▾"],
             "scrolls back only as far as needed"
         );
         a.key(KeyCode::Char('l').into());
-        let (_, lines) = render(&mut a, 54, 4);
-        assert_eq!(words(&lines[0])[2..], ["‹│", "$task", "Tok/task", "│", "Via", "▾"], "{}", lines[0]);
+        let (_, lines) = render(&mut a, 51, 4);
+        assert_eq!(words(&lines[0])[2..], ["‹│", "Tok/s", "TTFT", "│", "Via", "▾"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 48, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");
