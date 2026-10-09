@@ -97,8 +97,8 @@ struct ModelOut<'a> {
     eci: Option<f64>,
     /// Where `eci`, `tasks` and `benchmarks` come from: "epoch" or "aa"
     source: &'static str,
-    /// Task -> its score on the source's scale: ECI points (epoch) or the task's benchmark
-    /// score, 0..100 (aa); overall and vision are `eci`, value a 0..100 percentile
+    /// Task -> the score of its benchmark with the source, 0..100; overall and vision are
+    /// `eci`, value a 0..100 percentile
     tasks: BTreeMap<&'static str, f64>,
     /// The other source's overall index, when its data is cached too: AAII with "epoch", ECI with "aa"
     #[serde(skip_serializing_if = "Option::is_none")]

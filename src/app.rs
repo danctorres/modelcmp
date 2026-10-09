@@ -37,7 +37,7 @@ pub struct Col {
 
 impl Col {
     /// Its name and meaning; an index column's are its source's, and the task columns' meanings
-    /// the benchmark source's, each a single benchmark with Artificial Analysis.
+    /// the benchmark source's, each the benchmark it is.
     fn text(&self) -> (&'static str, &'static str) {
         let about = match (self.id, crate::data::source()) {
             ("eci", _) => return Source::Epoch.index(),
@@ -45,6 +45,9 @@ impl Col {
             ("coding", Source::Aa) => "mean of Terminal-Bench 4.0 and SciCode (0-100)",
             ("agentic", Source::Aa) => "Terminal-Bench 4.0 score (0-100)",
             ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
+            ("coding", Source::Epoch) => "WeirdML score (0-100)",
+            ("agentic", Source::Epoch) => "APEX-Agents score (0-100)",
+            ("reasoning", Source::Epoch) => "LMCA score (0-100)",
             _ => self.about,
         };
         (self.name, about)
@@ -80,14 +83,14 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
 }
 
 /// The benchmarks the dropdown of the task column `id` lists, after the entry for the task's
-/// score: "all" with Epoch, which fits them into one, the task's own field with Artificial
-/// Analysis, which may have no other about the task: the dropdown then names that one. The
-/// other source's about the task come last, with its data at hand too.
+/// score, the task's own benchmark, which may be the source's only one about the task: the
+/// dropdown then names that one. The other source's about the task come last, with its data
+/// at hand too.
 fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
     let task = crate::fit::task(id)?;
     let (own, more) = task.sourced();
     let all: Vec<_> = more.iter().copied().chain(task.lent()).collect();
-    (own.is_some() || !all.is_empty()).then_some((own.unwrap_or("all"), all))
+    Some((own?, all))
 }
 
 /// A benchmark's entry in a task column's dropdown: its name and the source that runs it.
@@ -196,9 +199,9 @@ pub const COLS: [Col; 17] = [
         show: signed,
         ..col("Arena", ARENA, "net improvement in real agent sessions, %, measured by arena.ai", |m| m.arena)
     },
-    col("Coding", "coding", "capability on coding benchmarks, ECI points", |m| task_score(m, "coding")),
-    col("Agentic", "agentic", "capability on agentic benchmarks, ECI points", |m| task_score(m, "agentic")),
-    col("Reason", "reasoning", "capability on reasoning benchmarks, ECI points", |m| task_score(m, "reasoning")),
+    col("Coding", "coding", "", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "", |m| task_score(m, "agentic")),
+    col("Reason", "reasoning", "", |m| task_score(m, "reasoning")),
     Col { price: true, ..col("Value", "value", "coding per dollar, ranked 0-100", |m| m.fit.get("value").copied()) },
     Col {
         only: Some(Source::Epoch),
@@ -379,12 +382,7 @@ pub fn base_col_about(col: usize) -> String {
             crate::data::cached() * 100.0
         ),
         _ => {
-            let c = numeric(col);
-            // Epoch fits a task's benchmarks into one score, so the column names them.
-            let about = match c.and_then(|c| crate::fit::task(c.id)).map(Task::sourced) {
-                Some((None, b)) if !b.is_empty() => format!("fitted from {}, ECI points", named(b)),
-                _ => c.map_or("", Col::about).into(),
-            };
+            let about = numeric(col).map_or("", Col::about).to_string();
             // A task's column is of the source in use, beside both sources' indexes.
             if TASK_COLS.contains(&col) { of_source(&about) } else { about }
         }
@@ -394,15 +392,6 @@ pub fn base_col_about(col: usize) -> String {
 /// `about` after the source in use, whose scores it tells of.
 fn of_source(about: &str) -> String {
     format!("{}, {about}", crate::data::source().label())
-}
-
-/// "A, B and C", or the first two and how many more.
-fn named(b: &[&str]) -> String {
-    match b {
-        [one] => one.to_string(),
-        [most @ .., last] if b.len() <= 3 => format!("{} and {last}", most.join(", ")),
-        _ => format!("{}, {} and {} more", b[0], b[1], b.len() - 2),
-    }
 }
 
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
@@ -437,7 +426,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("s", "sort by the column, again reverses"),
             ("/", "filter models, compare rows, this help or a list"),
-            ("> <", "minimum / maximum for the column, e.g. > 155 enter"),
+            ("> <", "minimum / maximum for the column, e.g. > 60 enter"),
             ("d", "dropdown on a header with ▾, space enter toggle"),
             ("|", "columns to show, space enter toggle"),
             ("a A", "all models, including ones you have no access to / yours only"),
@@ -1959,7 +1948,7 @@ impl App {
         self.first_start = false;
         // A pick is one of the other source's benchmarks.
         self.drop_benches(false);
-        // And a bound on a task is on the other source's scale: 155 ECI points are no score.
+        // And a bound on a task is on the other source's benchmark.
         self.bounds.retain(|b| !TASK_COLS.contains(&b.0));
         let was = index_col();
         crate::data::set_source(src);
@@ -4065,11 +4054,15 @@ mod tests {
         let mut a = app();
         for (key, s) in [("gpt55", 0.4), ("mini", 0.7)] {
             let m = a.data.models.iter_mut().find(|m| m.key == key).unwrap();
-            m.scores.insert("DeepSWE".into(), s);
+            m.scores.insert("FrontierCode".into(), s);
         }
         a.col = ECI + 3;
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("all · Epoch AI", 2), ("DeepSWE · Epoch AI", 2)], "each with the models it scored");
+        assert_eq!(
+            menu(&a)[..2],
+            [("WeirdML · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
+            "each with the models it scored"
+        );
         // The entry already shown changes nothing: a bound typed for the column stays.
         a.bounds.push((a.col, 1.0, f64::MAX));
         press(&mut a, " ");
@@ -4078,7 +4071,7 @@ mod tests {
         press(&mut a, "j ");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "s");
-        assert_eq!((a.col_name(a.col), keys(&a)), ("DeepSWE", vec!["mini", "gpt55", "opus5"]), "unscored last");
+        assert_eq!((a.col_name(a.col), keys(&a)), ("FrontierCode", vec!["mini", "gpt55", "opus5"]), "unscored last");
         assert_eq!(a.val(a.rows[0], a.col), Some(70.0));
         press(&mut a, "c");
         assert_eq!((a.col_name(a.col), keys(&a)[0]), ("Coding", "gpt55"), "c is back to the task's score");
@@ -4086,12 +4079,12 @@ mod tests {
         // already keeps it, and counts what the table shows.
         a.bounds.push((a.col, 1e9, f64::MAX));
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("all · Epoch AI", 0), ("DeepSWE · Epoch AI", 2)]);
+        assert_eq!(menu(&a)[..2], [("WeirdML · Epoch AI", 0), ("FrontierCode · Epoch AI", 2)]);
         // A task's line is drawn from its score: choosing one shows it again, and no other is picked.
         press(&mut a, "j ");
         assert_eq!(
             menu(&a)[..2],
-            [("all · Epoch AI", 2), ("DeepSWE · Epoch AI", 2)],
+            [("WeirdML · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
             "the open list counts again, the bound gone"
         );
         code(&mut a, KeyCode::Esc);
@@ -4141,7 +4134,11 @@ mod tests {
         a.col = ECI + 3;
         press(&mut a, "d");
         let names: Vec<&str> = menu(&a).iter().map(|e| e.0).collect();
-        assert_eq!(names[..2], ["all · Epoch AI", "DeepSWE · Epoch AI"], "its own first, each named with its source");
+        assert_eq!(
+            names[..2],
+            ["WeirdML · Epoch AI", "FrontierCode · Epoch AI"],
+            "its own first, each named with its source"
+        );
         assert_eq!(menu(&a).last(), Some(&("scicode · Artificial Analysis", 1)));
         press(&mut a, "G ");
         code(&mut a, KeyCode::Esc);
@@ -4619,11 +4616,8 @@ mod tests {
         assert!(COLS[ECI - TEXT..].iter().all(sourced));
         assert_eq!(of(ARENA), None, "neither source's");
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
-        assert_eq!(about("coding"), "Epoch AI, fitted from DeepSWE, FrontierCode and 3 more, ECI points");
-        assert_eq!(
-            about("agentic"),
-            "Epoch AI, fitted from APEX-Agents, Remote Labor Index and OSWorld 2.0, ECI points"
-        );
+        assert_eq!(about("coding"), "Epoch AI, WeirdML score (0-100)");
+        assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100)");
         assert_eq!(about("value"), "coding per dollar, ranked 0-100", "no benchmarks of its own");
         crate::data::set_source(Source::Aa);
         assert_eq!(

@@ -699,8 +699,6 @@ pub fn detail_rows(
 ) -> Vec<(Option<&'static str>, String)> {
     let yes = |b: bool| if b { "yes" } else { "no" };
     let source = crate::data::source();
-    // With Artificial Analysis a task's score is one benchmark, so none are listed under it.
-    let benches = if source == crate::data::Source::Aa { "" } else { ", benchmarks at best effort" };
     let mut v = vec![
         format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.devs().collect::<Vec<_>>().join(", "))),
@@ -763,7 +761,7 @@ pub fn detail_rows(
                 .collect::<Vec<_>>()
                 .join(" · ")
         ),
-        format!("  task fit ({}, value a percentile{benches}):", source.scale()),
+        "  task fit (scores 0-100, value a percentile):".into(),
     ]);
     // The benchmarks listed under a task, so the rest come after: one a task's score here does
     // not come from, as the fields a column's dropdown adds with Artificial Analysis, or the
@@ -774,7 +772,6 @@ pub fn detail_rows(
         if let Some(s) = fit::fit(m, t) {
             fits.push((v.len(), t.name));
             v.push(format!("    {:<13}{:>4.0}  {}", t.name, fit::shown(m, t, s), t.about));
-            v.extend(task_benches(m, t));
             used.extend(used_benches(t));
         }
     }
@@ -821,19 +818,9 @@ pub fn detail_rows(
     rows
 }
 
-/// The benchmarks a task's score comes from, with the source in use.
+/// The benchmark a task's score is, with the source in use.
 pub fn used_benches(t: &fit::Task) -> Vec<&'static str> {
-    let (own, all) = t.sourced();
-    own.map_or(all.to_vec(), |b| vec![b])
-}
-
-/// Under a task's fit in the details: the model's score on each benchmark the task's score
-/// comes from, the ones it was tested on. None for a task with no benchmarks of its own, whose
-/// `about` says what ranks it, nor when the score is one benchmark, the same number again.
-fn task_benches(m: &Model, t: &fit::Task) -> Vec<String> {
-    let (own, all) = t.sourced();
-    let all = if own.is_some() { &[] } else { all };
-    all.iter().filter_map(|b| Some(format!("      {:<34}{:>5.1}%", b, m.scores.get(*b)? * 100.0))).collect()
+    t.sourced().0.into_iter().collect()
 }
 
 #[derive(Default)]
@@ -1022,19 +1009,17 @@ mod tests {
     }
 
     #[test]
-    fn details_say_the_benchmarks_a_task_score_comes_from() {
-        let coding = fit::task("coding").unwrap();
-        let mut m = Model::default();
-        assert!(task_benches(&m, fit::task("value").unwrap()).is_empty(), "no benchmarks of its own");
-        m.scores = [("DeepSWE", 0.5), ("HLE", 0.25), ("scicode", 0.1)].map(|(b, s)| (b.to_string(), s)).into();
+    fn details_list_the_benchmarks_no_task_score_is() {
+        let scores = [("WeirdML", 0.5), ("DeepSWE", 0.4), ("scicode", 0.1)].map(|(b, s)| (b.to_string(), s)).into();
+        let mut m = Model { scores, ..Default::default() };
         m.fit.insert("coding".into(), 50.0);
-        assert_eq!(task_benches(&m, coding), [format!("      {:<34} 50.0%", "DeepSWE")], "not another task's");
-        // Each under its task; one no task uses comes after them.
+        m.shown.insert("coding".into(), 50.0);
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
-        assert_eq!(at("      DeepSWE"), at("    coding") + 1);
+        assert!(lines[at("    coding")].contains("  50  "), "{}", lines[at("    coding")]);
+        assert_eq!(at("    DeepSWE"), at("  other benchmarks") + 1, "not the task's score");
         assert_eq!(at("    scicode"), at("  other benchmarks") + 2);
-        assert_eq!(at("    HLE"), at("  other benchmarks") + 1, "reasoning has no fit here, but the score shows");
+        assert!(!lines.iter().any(|l| l.starts_with("    WeirdML")), "the task's score, the same number again");
     }
 
     #[test]

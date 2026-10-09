@@ -45,7 +45,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// score for a model without an ECI scored on few benchmarks. 16: `Model::hf`.
 /// 18: `Model::task_cost`. 19: `Model::task_tokens`. 20: context and max output are the
 /// ones most offers give, where they were the most any gave. 21: `Model::arena`.
-const FORMAT: u32 = 21;
+/// 22: Epoch's task scores are one benchmark's, in percent, where they were fitted in ECI points.
+const FORMAT: u32 = 22;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -106,14 +107,6 @@ impl Source {
         match self {
             Source::Epoch => ("ECI", "Epoch AI's overall capability index"),
             Source::Aa => ("AAII", "Artificial Analysis Intelligence Index"),
-        }
-    }
-
-    /// What the task scores are in (`fit::shown`).
-    pub fn scale(self) -> &'static str {
-        match self {
-            Source::Epoch => "ECI points",
-            Source::Aa => "scores 0-100",
         }
     }
 
@@ -712,8 +705,7 @@ pub struct Model {
     pub scores: BTreeMap<String, f64>,
     /// Task name -> 0..100 percentile (see fit.rs), which ranks it.
     pub fit: BTreeMap<String, f64>,
-    /// Task name -> the value it shows: capability in ECI points (Epoch), or the task's
-    /// benchmark score, 0..100 (Artificial Analysis). See `fit::shown`.
+    /// Task name -> the value it shows: the task's benchmark score, 0..100. See `fit::shown`.
     #[serde(default)]
     pub shown: BTreeMap<String, f64>,
     /// Task name -> months of progress behind the source's best (`fit::add_lag`), which the
@@ -2653,8 +2645,6 @@ struct Scores {
     /// group -> its best score on `COST_BENCH`, and what a task cost there and the output tokens
     /// it took, when the run says, Epoch's only.
     cost: HashMap<String, (f64, Option<f64>, Option<f64>)>,
-    /// Benchmark -> Epoch's fit of it.
-    benches: HashMap<String, crate::fit::Bench>,
     /// group -> task -> percentile, and the value it shows.
     fit: crate::fit::Fit,
     /// group -> its page on artificialanalysis.ai.
@@ -2664,7 +2654,19 @@ struct Scores {
     /// group -> each of its reasoning settings, which Artificial Analysis lists apart.
     settings: HashMap<String, Vec<AaEntry>>,
     /// What a setting's scores are ranked among: the groups'.
-    pools: crate::fit::AaPools,
+    pools: crate::fit::Pools,
+}
+
+impl Scores {
+    /// Rank each group's scores among them all (`fit::scored`).
+    fn rank(&mut self) {
+        self.pools = crate::fit::pools(self.groups.values().map(|(_, i, s)| (*i, s)));
+        for (key, (_, i, s)) in &self.groups {
+            let (fit, shown) = crate::fit::scored(self.source, *i, s, &self.pools);
+            self.fit.0.insert(key.clone(), fit);
+            self.fit.1.insert(key.clone(), shown);
+        }
+    }
 }
 
 /// One entry of Artificial Analysis's API: a model at one reasoning setting.
@@ -2921,8 +2923,6 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
 
     let task_benches = crate::fit::task_benches();
     let mut unscored: HashMap<String, BTreeSet<String>> = HashMap::new();
-    // Benchmark -> (floor, ceiling).
-    let mut range: HashMap<&str, (f64, f64)> = HashMap::new();
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
     for b in &benches {
         let (file, score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
@@ -2935,9 +2935,6 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         col(b, "scale")?;
         let scale = num("scale", 1.0);
         let task = task_benches.contains(&bench);
-        if task {
-            range.insert(bench, (num("random_baseline", 0.0), num("score_ceiling", 1.0)));
-        }
         let Some(rows) = csv_rows(&mut zip, file) else { continue };
         for r in &rows {
             // A row without a version is no model's: together they would be one that outscores most.
@@ -2978,18 +2975,6 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             ep.org.entry(norm(&g)).or_insert_with(|| o.clone());
         }
         ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new())).1 = Some(eci);
-    }
-    // Without it tasks go unscored, as without eci_scores.csv models go without an ECI.
-    for r in csv_rows(&mut zip, "epoch_capabilities_index/edi_scores.csv").unwrap_or_default() {
-        let num = |c: &str| r.get(c).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
-        let (Some(name), Some(edi), Some(slope)) = (r.get("benchmark_name"), num("edi"), num("estimated_slope_scaled"))
-        else {
-            continue;
-        };
-        let Some(&(floor, ceiling)) = range.get(name.as_str()) else { continue };
-        if slope > 0.0 && ceiling > floor {
-            ep.benches.insert(name.clone(), crate::fit::Bench { edi, slope, floor, ceiling });
-        }
     }
     let mut newest: HashMap<String, (bool, bool, bool, &str)> = HashMap::new();
     for (k, (name, eci, scores)) in &ep.groups {
@@ -3043,9 +3028,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     if ep.groups.values().all(|(_, eci, scores)| eci.is_none() && scores.is_empty()) {
         return Err("epoch zip: no benchmark data found".into());
     }
-    // Unscored groups would sit in every pool at the mean, skewing everyone's percentile.
-    let scored = ep.groups.iter().filter(|(_, (_, eci, s))| eci.is_some() || !s.is_empty());
-    ep.fit = crate::fit::percentiles(scored.map(|(k, (_, eci, s))| (k.as_str(), *eci, s)), &ep.benches);
+    ep.rank();
     Ok(ep)
 }
 
@@ -3110,12 +3093,7 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
     if sc.groups.is_empty() {
         return Err("artificial analysis: no benchmark data found".into());
     }
-    sc.pools = crate::fit::aa_pools(sc.groups.values().map(|(_, i, s)| (*i, s)));
-    for (key, (_, i, s)) in &sc.groups {
-        let (fit, shown) = crate::fit::aa_fit(*i, s, &sc.pools);
-        sc.fit.0.insert(key.clone(), fit);
-        sc.fit.1.insert(key.clone(), shown);
-    }
+    sc.rank();
     Ok(sc)
 }
 
@@ -3343,7 +3321,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
                     aa_fold(off).filter(|_| !m.reasoning)
                 };
                 if let Some(own) = ep.settings.get(k).and_then(|all| aa_named(&m.name, all).or_else(|| plain(all))) {
-                    fit = crate::fit::aa_fit(own.index, &own.scores, &ep.pools);
+                    fit = crate::fit::scored(Source::Aa, own.index, &own.scores, &ep.pools);
                     (m.tps, m.ttft) = own.speed;
                     (eci, scores) = (own.index, own.scores);
                     if !own.slug.is_empty() {

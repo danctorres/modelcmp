@@ -64,14 +64,15 @@ ECI and AAII keep their places, and the table starts sorted by the one of the so
 
 ### Task columns
 
-With Epoch AI, the default, a task column is the model's capability on the task's benchmarks,
-in ECI points, fitted from its ECI and its scores. A model with few scores stays near its ECI.
+A task column is a benchmark score, 0-100, blank for a model not tested on it.
 
-- Coding: DeepSWE, FrontierCode, FrontierSWE, WeirdML, MirrorCode
-- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0
-- Reason: GPQA diamond, HLE, ARC-AGI-2, ARC-AGI, SimpleBench, Mystery Game Puzzles, Chess Puzzles, LMCA, DTBench
+With Epoch AI, the default, it is one widely run benchmark about the task:
 
-With Artificial Analysis (`B`, `--source aa`), a task column is a benchmark score, 0-100.
+- Coding: WeirdML
+- Agentic: APEX-Agents
+- Reason: LMCA
+
+With Artificial Analysis (`B`, `--source aa`):
 
 - Coding: the mean of Terminal-Bench 4.0 and SciCode
 - Agentic: Terminal-Bench 4.0
@@ -111,19 +112,11 @@ What a refresh downloads:
 Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
 
 - ECI is Epoch's Capabilities Index as Epoch publishes it. modelcmp does not compute it.
-- A benchmark score is the best one Epoch lists for any version of the model, taken as a share
-  of the way from guessing (Epoch's random baseline) to the benchmark's ceiling.
-- Coding, Agentic and Reason are computed by modelcmp, in ECI points. Each starts at the
-  model's ECI and moves toward what its scores on the task's benchmarks say, using the
-  difficulty and slope Epoch publishes for each benchmark. One score moves it a little, many
-  that agree move it more. A model without an ECI starts from a fit to all its scores, and
-  has task scores only when it was run on at least four of the benchmarks listed above.
-- A task score stays close to the ECI. On 2026-10-05 half of them were within 0.3 points of
-  their model's ECI and nine in ten within 1 point. Epoch fits all its benchmarks with one
-  capability per model, the ECI, and most models were run on a single coding or agentic
-  benchmark. So a task column reorders models of similar ECI and does not set a model far
-  from where its ECI puts it.
-- Only benchmarks Epoch still runs on new models count toward a task.
+- A benchmark score is the best one Epoch lists for any version of the model.
+- Coding, Agentic and Reason are one benchmark's score as published, 0-100. modelcmp does not
+  compute them.
+- A task's other benchmarks are in its column's dropdown (`d`), only those Epoch still runs on
+  new models.
 - `$task` and `Tok/task` are the mean cost and the mean output tokens of a task that Epoch
   lists for the model's best DeepSWE run, as published. modelcmp does not compute them.
 
@@ -134,8 +127,7 @@ Artificial Analysis (`--source aa`, its API with your key):
   two, computed by modelcmp. Tok/s and TTFT are its measurements.
 - A model's numbers are those of one of its reasoning settings, chosen as
   [Task columns](#task-columns) says.
-- It scores more models than Epoch AI does, most of all on Agentic, and its task scores can
-  differ from the AAII, where Epoch's stay close to the ECI.
+- It scores more models than Epoch AI does, most of all on Agentic.
 - Its API lists no cost of a task, so `$task` and `Tok/task` are hidden with it.
 
 Arena (its Agent leaderboard, no key needed):
@@ -163,7 +155,7 @@ modelcmp list --task coding                    # best model per price level, che
 modelcmp list --task coding --tier mid         # just one, the tier's pick
 modelcmp list --task coding --tier mid --via opencode --id    # only its provider/model, for opencode -m $(...)
 modelcmp list --task coding --tier mid --cmd   # the command that opens a harness on it
-modelcmp list --min coding=155 --sort price    # good enough, cheapest first
+modelcmp list --min coding=60 --sort price    # good enough, cheapest first
 modelcmp list --sort cost --max cost=5         # by what a coding task cost, $5 at most
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp list --dev china                      # every model of a developer from there
@@ -440,7 +432,7 @@ Each model carries these fields:
 | `url` | its page, the first of `pages` below, null when no site has one |
 | `eci` | the overall index of `source` |
 | `source` | `epoch` or `aa` |
-| `tasks` | each task's table column: ECI points with `epoch`, the benchmark's 0-100 score with `aa`, overall and vision the `eci`, value a 0-100 percentile |
+| `tasks` | each task's table column: the 0-100 score of its benchmark with `source`, overall and vision the `eci`, value a 0-100 percentile |
 | `other_index` | the other source's index, AAII with `epoch` and ECI with `aa`, when both are cached |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `task_cost_usd` | `$task`, from Epoch AI, when the model has one |

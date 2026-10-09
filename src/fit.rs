@@ -1,25 +1,11 @@
 //! Task fit: which model is good for what.
 //!
-//! Epoch fits `score ≈ sigmoid(slope × (ECI − EDI))` per benchmark, on scores rescaled so that
-//! guessing is 0. A model's capability on a task is the one that best explains its scores on the
-//! task's benchmarks, starting from its ECI: a few scores move it a little, many scores that
-//! agree move it more. It is ranked as a percentile (0..100) among every Epoch model, the same
-//! models for every task, and shown in ECI points.
-//! Models tested on different benchmarks stay comparable, and a 0 or 100% only says "at most"
-//! or "at least".
+//! A task's score is one benchmark's, a widely run one of the source about the task, or a
+//! mean of two of them (`AA_CODING`). It is ranked as a percentile (0..100) among the models
+//! scored on it, and shown as that score, in percent.
 
 use crate::data::Model;
 use std::collections::{BTreeMap, HashMap};
-
-/// Scores sit about 0.5 (logit) around Epoch's fit, so one score weighs as 1 / 0.5² / ¼ = 16
-/// coin flips at 50%.
-const WEIGHT: f64 = 16.0;
-/// How far a task's capability strays from ECI: 1 to 2.5 points in Epoch's data (2026-09).
-// ponytail: one spread for every task, fit it per task if one shows much more than the others.
-const TASK_SD: f64 = 2.0;
-
-/// The scores a model without an ECI needs for its tasks' to show: what Epoch asks for an ECI.
-const MIN_SCORES: usize = 4;
 
 /// Months over which the source's best score is taken to have risen steadily (`add_lag`).
 const WINDOW: f64 = 12.0;
@@ -39,6 +25,8 @@ pub struct Task {
     pub about: &'static str,
     /// When a model high on this task is the right pick.
     pub when: &'static str,
+    /// Epoch's benchmarks about the task, still run on new models: the first is the task's
+    /// score, shown as is, and the column's dropdown lists the others.
     pub benches: &'static [&'static str],
     /// The same for Artificial Analysis: one of its API's `evaluations` fields, shown as is,
     /// or `AA_CODING`.
@@ -50,13 +38,18 @@ pub struct Task {
 }
 
 impl Task {
-    /// With the source in use: the one benchmark the task's score is, when it is one (Artificial
-    /// Analysis), and the others about the task; Epoch fits all of its into one score.
-    pub fn sourced(&self) -> (Option<&'static str>, &'static [&'static str]) {
-        match crate::data::source() {
-            crate::data::Source::Aa => (self.aa, self.aa_more),
-            _ => (None, self.benches),
+    /// With `src`: the benchmark the task's score is, and the others about the task.
+    pub fn of(&self, src: crate::data::Source) -> (Option<&'static str>, &'static [&'static str]) {
+        match (src, self.benches.split_first()) {
+            (crate::data::Source::Aa, _) => (self.aa, self.aa_more),
+            (_, Some((own, more))) => (Some(*own), more),
+            (_, None) => (None, &[]),
         }
+    }
+
+    /// `of` the source in use.
+    pub fn sourced(&self) -> (Option<&'static str>, &'static [&'static str]) {
+        self.of(crate::data::source())
     }
 
     /// The other source's benchmarks about the task, with its data at hand too (`Data::borrow`):
@@ -104,7 +97,7 @@ pub const TASKS: &[Task] = &[
         need: Need::None,
         aa: Some(AA_CODING),
         aa_more: &["terminalbench_v4_0", "scicode"],
-        benches: &["DeepSWE", "FrontierCode", "FrontierSWE", "WeirdML", "MirrorCode"],
+        benches: &["WeirdML", "FrontierCode", "DeepSWE", "FrontierSWE", "MirrorCode"],
     },
     Task {
         name: "agentic",
@@ -123,6 +116,7 @@ pub const TASKS: &[Task] = &[
         aa: Some("hle"),
         aa_more: &["lcr"],
         benches: &[
+            "LMCA",
             "GPQA diamond",
             "HLE",
             "ARC-AGI-2",
@@ -130,7 +124,6 @@ pub const TASKS: &[Task] = &[
             "SimpleBench",
             "Mystery Game Puzzles",
             "Chess Puzzles",
-            "LMCA",
             "DTBench",
         ],
     },
@@ -182,8 +175,7 @@ pub fn task_names() -> impl Iterator<Item = &'static str> {
 const ECI_TASKS: [&str; 2] = ["overall", "vision"];
 
 /// The value a task shows for a model ranked `s`, in its table column and frontier: the
-/// source's overall index, a task's capability in ECI points (Epoch) or its benchmark's score
-/// (Artificial Analysis); "value" alone stays a percentile.
+/// source's overall index or the task's benchmark score, 0..100; "value" alone stays a percentile.
 pub fn shown(m: &Model, t: &Task, s: f64) -> f64 {
     // A favorite the task cannot score (`view::task_frontier`) shows no score.
     if s.is_nan() {
@@ -202,124 +194,34 @@ fn pct_rank(x: f64, all: &[f64]) -> f64 {
     100.0 * (below + equal / 2.0) / all.len() as f64
 }
 
-/// Epoch's fit of one benchmark.
-#[derive(Clone, Copy, Debug)]
-pub struct Bench {
-    /// Epoch Difficulty Index: the capability that scores 50%.
-    pub edi: f64,
-    /// How sharply the benchmark separates models: always > 0.
-    pub slope: f64,
-    /// Score from guessing alone.
-    pub floor: f64,
-    /// Best possible score: always > `floor`.
-    pub ceiling: f64,
-}
-
-/// Most likely capability given `(bench, raw score)` pairs and a normal prior `(mean, sd)`.
-fn capability(obs: &[(Bench, f64)], mean: f64, sd: f64) -> f64 {
-    let prior = 1.0 / (sd * sd);
-    let mut c = mean;
-    // Newton's method: the log-likelihood is concave, so it converges in a few steps.
-    for _ in 0..50 {
-        let (mut grad, mut curv) = (prior * (mean - c), prior);
-        for (b, s) in obs {
-            let y = ((s - b.floor) / (b.ceiling - b.floor)).clamp(0.0, 1.0);
-            let p = 1.0 / (1.0 + (-b.slope * (c - b.edi)).exp());
-            grad += WEIGHT * b.slope * (y - p);
-            curv += WEIGHT * b.slope * b.slope * p * (1.0 - p);
-        }
-        let step = (grad / curv).clamp(-10.0, 10.0);
-        c += step;
-        if step.abs() < 1e-6 {
-            break;
-        }
-    }
-    c
-}
-
-/// Per Epoch group `(key, eci, bench -> score)` and bench -> fit: each task's percentile and capability.
-pub fn percentiles<'a>(
-    groups: impl Iterator<Item = (&'a str, Option<f64>, &'a BTreeMap<String, f64>)>,
-    benches: &HashMap<String, Bench>,
-) -> Fit {
-    let groups: Vec<_> = groups.collect();
-    let ecis: Vec<f64> = groups.iter().filter_map(|g| g.1).collect();
-    let n = ecis.len().max(1) as f64;
-    let mean = ecis.iter().sum::<f64>() / n;
-    let sd = (ecis.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / n).sqrt().max(1.0);
-    let obs = |names: &[&str], scores: &BTreeMap<String, f64>| -> Vec<(Bench, f64)> {
-        names.iter().filter_map(|b| Some((*benches.get(*b)?, *scores.get(*b)?))).collect()
-    };
-    let all = task_benches();
-    // (overall, task -> (capability, scored)). A task without scores leaves the capability at
-    // the overall one, so every model sits in every task's pool and all columns rank the same models.
-    let caps: Vec<(f64, Vec<(f64, bool)>)> = groups
-        .iter()
-        .map(|(_, eci, scores)| {
-            // A model Epoch gave no ECI starts from one fit to all its scores.
-            let known = obs(&all, scores);
-            let center = eci.unwrap_or_else(|| capability(&known, mean, sd));
-            // From a score or two that start is some 5 points off, and so is any task's.
-            let centered = eci.is_some() || known.len() >= MIN_SCORES;
-            let tasks = TASKS
-                .iter()
-                .map(|t| {
-                    let o = obs(t.benches, scores);
-                    (capability(&o, center, TASK_SD), !o.is_empty() && centered)
-                })
-                .collect();
-            (center, tasks)
-        })
-        .collect();
-    let centers: Vec<f64> = caps.iter().map(|c| c.0).collect();
-    let pools: Vec<Vec<f64>> = (0..TASKS.len()).map(|i| caps.iter().map(|c| c.1[i].0).collect()).collect();
-    let (mut out, mut shown) = (HashMap::new(), HashMap::new());
-    for ((key, eci, _), (center, tasks)) in groups.iter().zip(&caps) {
-        let (mut fit, mut show) = (BTreeMap::new(), BTreeMap::new());
-        if eci.is_some() {
-            let p = pct_rank(*center, &centers);
-            for t in ECI_TASKS {
-                fit.insert(t.to_string(), p);
-            }
-        }
-        for (i, t) in TASKS.iter().enumerate() {
-            if let (c, true) = tasks[i] {
-                fit.insert(t.name.to_string(), pct_rank(c, &pools[i]));
-                show.insert(t.name.to_string(), c);
-            }
-        }
-        out.insert(key.to_string(), fit);
-        shown.insert(key.to_string(), show);
-    }
-    (out, shown)
-}
-
-/// What Artificial Analysis's models scored, each `(index, field -> score)`: the index, and
-/// every field a task uses. One model's scores are ranked among them (`aa_fit`).
+/// What a source's models scored, each `(index, benchmark -> score)`: the index, and every
+/// benchmark a task uses. One model's scores are ranked among them (`scored`).
 #[derive(Default, Debug)]
-pub struct AaPools {
+pub struct Pools {
     index: Vec<f64>,
-    fields: HashMap<&'static str, Vec<f64>>,
+    benches: HashMap<&'static str, Vec<f64>>,
 }
 
-pub fn aa_pools<'a>(groups: impl Iterator<Item = (Option<f64>, &'a BTreeMap<String, f64>)>) -> AaPools {
+pub fn pools<'a>(groups: impl Iterator<Item = (Option<f64>, &'a BTreeMap<String, f64>)>) -> Pools {
     let groups: Vec<_> = groups.collect();
-    AaPools {
+    Pools {
         index: groups.iter().filter_map(|g| g.0).collect(),
-        fields: aa_fields()
+        benches: task_benches()
             .into_iter()
-            .map(|f| (f, groups.iter().filter_map(|g| g.1.get(f).copied()).collect()))
+            .chain(aa_fields())
+            .map(|b| (b, groups.iter().filter_map(|g| g.1.get(b).copied()).collect()))
             .collect(),
     }
 }
 
-/// An Artificial Analysis model's fit, `index` and `field -> score`: each task's percentile among
-/// the models scored on its field, and that score as 0..100; overall and vision the index's, as
-/// with ECI. Epoch's fit needs Epoch's benchmark difficulties, so not here.
-pub fn aa_fit(
+/// A model's fit with `src`, from its `index` and `benchmark -> score`: each task's percentile
+/// among the models scored on its benchmark, and that score as 0..100; overall and vision the
+/// index's.
+pub fn scored(
+    src: crate::data::Source,
     index: Option<f64>,
     scores: &BTreeMap<String, f64>,
-    pools: &AaPools,
+    pools: &Pools,
 ) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
     let (mut fit, mut show) = (BTreeMap::new(), BTreeMap::new());
     if let Some(i) = index {
@@ -328,8 +230,8 @@ pub fn aa_fit(
         }
     }
     for t in TASKS {
-        if let Some(f) = t.aa
-            && let (Some(&x), Some(pool)) = (scores.get(f), pools.fields.get(f))
+        if let Some(b) = t.of(src).0
+            && let (Some(&x), Some(pool)) = (scores.get(b), pools.benches.get(b))
         {
             fit.insert(t.name.to_string(), pct_rank(x, pool));
             show.insert(t.name.to_string(), x * 100.0);
@@ -353,7 +255,7 @@ pub fn months(date: &str) -> Option<f64> {
 /// Each task's `Model::lag`: how far the model is behind the source's best on it, in months of
 /// progress, a month being a twelfth of what the best score rose over the last `WINDOW`
 /// months. `now` is in seconds since 1970. One scale for every source and task, which a share
-/// of the best score is not (ECI points have no zero) and a gap in points is not either (each
+/// of the best score is not (an index has no zero) and a gap in points is not either (each
 /// benchmark moves at its own pace); a percentile among every model ever scored counts a
 /// model at half the best score as near the top. A task scored for less than `WINDOW` months,
 /// or whose best has not risen in them, has no lag, and each of its tiers picks the best; nor
@@ -421,23 +323,17 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
 
-    fn bench(edi: f64, slope: f64, floor: f64) -> Bench {
-        Bench { edi, slope, floor, ceiling: 1.0 }
-    }
-
-    fn benches(pairs: &[(&str, Bench)]) -> HashMap<String, Bench> {
-        pairs.iter().map(|(b, f)| (b.to_string(), *f)).collect()
-    }
-
     #[test]
     fn ranks_by_task() {
-        let a = scores(&[("APEX-Agents", 0.9), ("DeepSWE", 0.2)]);
-        let b = scores(&[("APEX-Agents", 0.5), ("DeepSWE", 0.7)]);
-        let e = benches(&[("APEX-Agents", bench(140.0, 0.1, 0.0)), ("DeepSWE", bench(140.0, 0.1, 0.0))]);
-        let groups = [("a", Some(145.0), &a), ("b", Some(145.0), &b)];
-        let (p, _) = percentiles(groups.iter().copied(), &e);
-        assert!(p["a"]["agentic"] > p["b"]["agentic"]);
-        assert!(p["b"]["coding"] > p["a"]["coding"]);
+        use crate::data::Source::{Aa, Epoch};
+        let a = scores(&[("APEX-Agents", 0.9), ("WeirdML", 0.2), ("DeepSWE", 0.9)]);
+        let b = scores(&[("APEX-Agents", 0.5), ("WeirdML", 0.7)]);
+        let p = pools([(Some(145.0), &a), (None, &b)].into_iter());
+        let ((pa, shown_a), (pb, _)) = (scored(Epoch, Some(145.0), &a, &p), scored(Epoch, None, &b, &p));
+        assert!(pa["agentic"] > pb["agentic"]);
+        assert!(pb["coding"] > pa["coding"], "DeepSWE is not the task's score");
+        assert_eq!(shown_a["coding"], 20.0, "shown as the score, 0..100");
+        assert!(!pa.contains_key("reasoning"), "no LMCA, no reasoning score");
 
         let mk = |k: &str, fit: &BTreeMap<String, f64>, tools: bool| Model {
             key: k.into(),
@@ -445,70 +341,23 @@ mod tests {
             tool_call: tools,
             ..Default::default()
         };
-        let models = [mk("a", &p["a"], true), mk("b", &p["b"], false)];
+        let models = [mk("a", &pa, true), mk("b", &pb, false)];
         let r = rank(models.iter(), task("coding").unwrap());
         assert_eq!(r[0].0.key, "b");
         // agentic needs tool calling; b lacks it
         assert!(fit(&models[1], task("agentic").unwrap()).is_none());
-    }
 
-    #[test]
-    fn one_score_moves_little() {
-        let hard = bench(150.0, 0.2, 0.0);
-        // 99% far above its ECI converts to 173 on its own; with the ECI it stays well below.
-        let one = capability(&[(hard, 0.99)], 130.0, TASK_SD);
-        assert!(one > 130.0 && one < 150.0, "{one}");
-        // Many agreeing scores move it further than one.
-        assert!(capability(&[(hard, 0.99); 8], 130.0, TASK_SD) > one + 5.0);
-        // A 0 where 0 is expected says nothing new, instead of pinning the model at a clamp.
-        let zero = capability(&[(hard, 0.0)], 130.0, TASK_SD);
-        assert!((zero - 130.0).abs() < 1.0, "{zero}");
-    }
-
-    #[test]
-    fn guessing_counts_as_zero() {
-        let mc = capability(&[(bench(140.0, 0.1, 0.25), 0.25)], 140.0, TASK_SD);
-        let open = capability(&[(bench(140.0, 0.1, 0.0), 0.0)], 140.0, TASK_SD);
-        assert!((mc - open).abs() < 1e-9);
-        // A benchmark with no fit is skipped.
-        let s = scores(&[("DeepSWE", 0.5)]);
-        let (p, _) = percentiles([("a", None, &s)].into_iter(), &HashMap::new());
-        assert!(!p["a"].contains_key("coding"));
-    }
-
-    #[test]
-    fn tasks_rank_the_same_models() {
-        // a scores just as its ECI predicts; b and c have no coding scores but still count.
-        let a = scores(&[("DeepSWE", 0.5)]);
-        let none = scores(&[]);
-        let e = benches(&[("DeepSWE", bench(170.0, 0.1, 0.0))]);
-        let groups = [("a", Some(170.0), &a), ("b", Some(140.0), &none), ("c", Some(130.0), &none)];
-        let (p, shown) = percentiles(groups.iter().copied(), &e);
-        assert_eq!(p["a"]["coding"], p["a"]["overall"]);
-        assert!(!p["b"].contains_key("coding"));
-        assert!((shown["a"]["coding"] - 170.0).abs() < 0.01, "shown in ECI points: {}", shown["a"]["coding"]);
-        assert!(!shown["b"].contains_key("coding"));
-        // Without an ECI, a score alone is no task's; one among four is.
-        let names = ["DeepSWE", "HLE", "LMCA", "DTBench"];
-        let four = scores(&names.map(|b| (b, 0.5)));
-        let e = benches(&names.map(|b| (b, bench(170.0, 0.1, 0.0))));
-        let (p, _) = percentiles([("one", None, &a), ("four", None, &four)].into_iter(), &e);
-        assert!(!p["one"].contains_key("coding") && p["four"].contains_key("coding"));
-    }
-
-    #[test]
-    fn aa_ranks_by_task() {
         let a = scores(&[(AA_CODING, 0.6), ("hle", 0.4)]);
         let b = scores(&[(AA_CODING, 0.4), ("hle", 0.3)]);
-        let pools = aa_pools([(Some(60.0), &a), (None, &b)].into_iter());
-        let ((pa, shown_a), (pb, shown_b)) = (aa_fit(Some(60.0), &a, &pools), aa_fit(None, &b, &pools));
+        let p = pools([(Some(60.0), &a), (None, &b)].into_iter());
+        let ((pa, shown_a), (pb, shown_b)) = (scored(Aa, Some(60.0), &a, &p), scored(Aa, None, &b, &p));
         assert!(pa["coding"] > pb["coding"]);
         assert!(pa["reasoning"] > pb["reasoning"]);
-        assert_eq!((shown_a["coding"], shown_b["reasoning"]), (60.0, 30.0), "shown as the score, 0..100");
+        assert_eq!((shown_a["coding"], shown_b["reasoning"]), (60.0, 30.0));
         assert!(pa.contains_key("overall") && !pb.contains_key("overall"), "no index, no overall");
         assert!(!pa.contains_key("agentic"), "no agentic field, no agentic score");
         // A setting of a model is ranked among the models, though it is none of them.
-        let low = aa_fit(Some(10.0), &scores(&[("hle", 0.1)]), &pools).0;
+        let low = scored(Aa, Some(10.0), &scores(&[("hle", 0.1)]), &p).0;
         assert_eq!((low["overall"], low["reasoning"]), (0.0, 0.0), "below every model");
     }
 
