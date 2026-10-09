@@ -8,8 +8,8 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, Mouse,
-    NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, MINE, box_slot, choice_rows, group_starts, hidden,
+    App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
+    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, box_slot, choice_rows, group_starts, hidden,
     menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
