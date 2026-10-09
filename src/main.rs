@@ -277,7 +277,7 @@ fn main() {
 /// Epoch has no speed, Artificial Analysis no cost of a task: a bound on one would drop every
 /// model, a sort do nothing.
 fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
-    match cols.find(|&c| app::hidden(c + app::TEXT)) {
+    match cols.find(|&c| app::hidden(c + app::TEXT) || app::unmeasured(c + app::TEXT)) {
         Some(c) => {
             let (id, src) = (app::COLS[app::by_role(c)].id, app::COLS[c].from());
             Err(Exit::from(format!("{id} needs --source {}: only {} has it", src.id(), src.label())))

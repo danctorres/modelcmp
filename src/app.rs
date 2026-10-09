@@ -307,8 +307,14 @@ fn set_off(mask: u32) {
 
 /// Whether the column at cursor index `col` has nothing to show: one of the other source's,
 /// with none of its data.
-pub fn absent(col: usize) -> bool {
+pub fn unmeasured(col: usize) -> bool {
     numeric(col).is_some_and(|c| c.from() != crate::data::source() && !crate::data::lent())
+}
+
+/// Whether the TUI leaves the column at cursor index `col` out as `unmeasured`. AAII stays,
+/// empty, to say it takes a key (`base_col_about`).
+fn absent(col: usize) -> bool {
+    col != AAII && unmeasured(col)
 }
 
 /// The benchmark source the column at cursor index `col` has its values from, when it has them
@@ -395,6 +401,9 @@ pub fn base_col_about(col: usize) -> String {
             COLS[PRICE - TEXT].about,
             crate::data::cached() * 100.0
         ),
+        AAII if unmeasured(col) && crate::data::aa_key().is_none() => {
+            format!("{}, needs its API key, K adds it", Source::Aa.index().1)
+        }
         _ => {
             let about = numeric(col).map_or("", Col::about).to_string();
             // A task's column is of the source in use, beside both sources' indexes.
@@ -3693,7 +3702,8 @@ mod tests {
         let col = |id: &str| TEXT + COLS.iter().position(|c| c.id == id).unwrap();
         let (tps, other, price) = (col("tps"), col(OTHER), col("price"));
         let mut a = app();
-        assert!(hidden(tps) && hidden(other), "Epoch alone has no speed, nor another index");
+        assert!(hidden(tps) && unmeasured(other), "Epoch alone has no speed, nor another index");
+        assert!(!hidden(other) && base_col_about(other).ends_with("needs its API key, K adds it"), "AAII says so");
         // With Artificial Analysis's data too, its columns show, the index under its name.
         let mut data = std::mem::take(&mut a.data);
         data.lent = true;
@@ -4875,7 +4885,7 @@ mod tests {
     fn bounds_filter_and_replace() {
         let mut a = app();
         a.col = ECI;
-        press(&mut a, "all");
+        press(&mut a, "alll");
         assert_eq!(numeric(a.col).unwrap().name, "Coding");
         press(&mut a, ">50");
         assert!(matches!(a.input, Input::Bound { min: true, .. }));

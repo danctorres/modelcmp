@@ -32,6 +32,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 
 One table shows the columns of both sources. The ones of the source not in use show when both
 are cached, which takes an Artificial Analysis key, and were fetched within a day of each other.
+In the TUI AAII shows without a key too, empty, and its description says it needs one.
 ECI and AAII keep their places, and the table starts sorted by the one of the source in use.
 The task scores, Value and the recommendations stay with that source. In the TUI,
 `|` picks the columns to show.

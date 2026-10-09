@@ -1,6 +1,6 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
-use crate::app::{COLS, Col, TEXT, hidden, launch_cmd, model_id, on_price, shown};
+use crate::app::{COLS, Col, TEXT, hidden, launch_cmd, model_id, on_price, shown, unmeasured};
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
@@ -187,7 +187,8 @@ fn print_json<T: Serialize>(v: &T) -> Result {
 /// The TUI's columns, so both show the same thing: Model, Dev, every numeric column the
 /// source measures, Via.
 fn table(models: &[&Model], store: &Store, any: bool) {
-    let cols: Vec<(usize, &Col)> = COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT)).collect();
+    let cols: Vec<(usize, &Col)> =
+        COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT) && !unmeasured(i + TEXT)).collect();
     let cell =
         |m: &Model, &(i, c): &(usize, &Col)| (c.get)(m).map_or("-".into(), |v| shown(i, v, on_price(i) && m.listed()));
     let cells: Vec<Vec<String>> = models.iter().map(|m| cols.iter().map(|c| cell(m, c)).collect()).collect();
