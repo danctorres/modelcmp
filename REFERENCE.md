@@ -148,8 +148,9 @@ Arena (its Agent leaderboard, no key needed):
   percent. It can be negative, and higher is better. modelcmp does not compute it.
 - Arena lists a model once per reasoning setting, and the column has the best of them.
 - It shows with either source, and counts toward no task score and no recommendation.
-- A refresh that cannot reach it keeps the scores of the last one. The column is empty once
-  Arena's newest leaderboard is more than two months old.
+- A refresh that cannot reach it keeps the scores of the last one, and with none to keep it
+  leaves the column empty, and the first start or command an hour later tries again. The
+  column is empty once Arena's newest leaderboard is more than two months old.
 
 With either source:
 

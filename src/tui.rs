@@ -1469,7 +1469,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         let room = usize::from(body.width)
             .saturating_sub(2 + version.width() + source.chars().count() + no_key.chars().count());
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
-        let (state, color) = match (app.refreshing, app.refresh_failed, app.data.stale()) {
+        let (state, color) = match (app.refreshing, app.refresh_failed, stale(app)) {
             (true, ..) if refreshing(&app.progress).chars().count() > room => {
                 (refreshing(app.progress.split(',').next().unwrap_or_default()), Color::Yellow)
             }

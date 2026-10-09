@@ -31,6 +31,9 @@ const ARENA_PAGE: &str = "https://arena.ai/leaderboard/agent";
 /// modelcmp's newest release, fetched with the data so a new version is told once a day at most.
 const RELEASE_URL: &str = "https://api.github.com/repos/danctorres/modelcmp/releases/latest";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+/// How old a cache without Arena's scores may be when their download did not come
+/// (`Data::arena_missed`): tried again long before `MAX_AGE`.
+const ARENA_RETRY: Duration = Duration::from_secs(3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
@@ -914,6 +917,10 @@ pub struct Data {
     /// The day Arena published the leaderboard `Model::arena` is of, "2026-10-02"; empty with none.
     #[serde(default)]
     pub arena_date: String,
+    /// huggingface.co did not send the leaderboard and no kept scores stood in: the Arena column
+    /// is empty, and the cache is stale after `ARENA_RETRY`.
+    #[serde(default)]
+    pub arena_missed: bool,
     pub models: Vec<Model>,
     /// What went wrong in a refresh that still gave data, for the caller to show.
     #[serde(skip)]
@@ -1006,7 +1013,12 @@ impl Data {
 
     pub fn stale(&self) -> bool {
         // Dated ahead of the clock, it would never grow old.
-        self.age() > MAX_AGE || self.fetched > now() || self.format != FORMAT || self.benches != source().benches()
+        let unranked = self.arena_missed && self.age() > ARENA_RETRY;
+        self.age() > MAX_AGE
+            || unranked
+            || self.fetched > now()
+            || self.format != FORMAT
+            || self.benches != source().benches()
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness. A model ollama
@@ -1537,7 +1549,10 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let arena = ranked.or_else(|| Arena::cached(&cache)).unwrap_or_default();
     let unranked = match (unranked, arena.current(now())) {
         (Some(e), true) => Some(format!("{e}: its scores are kept from the last refresh")),
-        (Some(e), false) => Some(format!("{e}: the Arena column is empty")),
+        (Some(e), false) => {
+            data.arena_missed = true;
+            Some(format!("{e}: the Arena column is empty"))
+        }
         (None, false) => Some(format!(
             "Arena's agent leaderboard is from {}, too old to show: the Arena column is empty",
             arena.date
@@ -1554,7 +1569,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         epoch_listed(&mut o.models, &epoch);
         hf_listed(&mut o.models, &openrouter);
         arena.score(&mut o.models);
-        o.arena_date.clone_from(&arena.date);
+        (o.arena_date, o.arena_missed) = (arena.date.clone(), data.arena_missed);
     }
     // Only the update notice hangs on it, so without it the refresh still succeeds.
     data.latest = release
@@ -3397,6 +3412,15 @@ mod tests {
         assert_eq!(Arena::cached(cache.replace(&FORMAT.to_string(), "1").as_bytes()), None, "not of another format");
         let day = |d: u64| (56 * 365 + 14 + 273 + d) * 86400; // 2026-10-01 and d days
         assert!(kept.current(day(7)) && !kept.current(day(120)) && !Arena::default().current(day(7)));
+        // A cache that missed them is tried again within the hour, not the day.
+        let aged = |mins: u64, arena_missed| Data {
+            format: FORMAT,
+            fetched: now() - mins * 60,
+            benches: source().benches().into_iter().map(String::from).collect(),
+            arena_missed,
+            ..Default::default()
+        };
+        assert!(aged(120, true).stale() && !aged(10, true).stale() && !aged(120, false).stale());
     }
 
     #[test]
