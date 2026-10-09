@@ -1447,8 +1447,12 @@ fn draw(app: &mut App, f: &mut Frame) {
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         };
         let source = format!(" models.dev + {} · ", data::source().label());
+        // Epoch AI with no key to choose the other source by: `K` takes one.
+        let keyless = data::source() == data::Source::Epoch && data::aa_key().is_none();
+        let no_key = if keyless { format!("no {} key · ", data::Source::Aa.label()) } else { String::new() };
         // Where the count and what it waits for would run over the version, the count goes alone.
-        let room = usize::from(body.width).saturating_sub(2 + version.width() + source.chars().count());
+        let room = usize::from(body.width)
+            .saturating_sub(2 + version.width() + source.chars().count() + no_key.chars().count());
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
         let (state, color) = match (app.refreshing, app.refresh_failed, app.data.stale()) {
             (true, ..) if refreshing(&app.progress).chars().count() > room => {
@@ -1470,7 +1474,11 @@ fn draw(app: &mut App, f: &mut Frame) {
             .title_bottom(version)
             .title_bottom(
                 Line::from_iter(
-                    named.then(|| Span::styled(source, fg(MUTED))).into_iter().chain([Span::styled(state, fg(color))]),
+                    named
+                        .then(|| [Span::styled(source, fg(MUTED)), Span::styled(no_key, fg(Color::Yellow))])
+                        .into_iter()
+                        .flatten()
+                        .chain([Span::styled(state, fg(color))]),
                 )
                 .right_aligned(),
             );
@@ -4610,7 +4618,14 @@ mod tests {
         a.view = View::Table;
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(bottom.contains("models.dev + Epoch AI"), "{bottom}");
+        assert!(bottom.contains("models.dev + Epoch AI · no Artificial Analysis key · data "), "{bottom}");
+        let x = bottom[..bottom.find("no Art").unwrap()].chars().count() as u16;
+        assert_eq!(term.backend().buffer()[(x, 8)].fg, Color::Yellow, "the missing key stands out");
+        // With a key, Epoch AI is `--source`'s choice.
+        data::save_aa_key("k").unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
+        assert!(bottom.contains("models.dev + Epoch AI · data "), "{bottom}");
         assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
         // The right border marks columns off to the right, the left one rows below, then above.
