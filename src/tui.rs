@@ -285,7 +285,7 @@ fn try_lines() -> [Line<'static>; 3] {
     [
         Line::from("on the next screen, try").style(fg(MUTED)),
         key_line("o open a model's page · x run it in a harness"),
-        key_line("R get recommendations · ? all keys"),
+        key_line("f favorite a model · R get recommendations · ? all keys"),
     ]
 }
 
@@ -1540,7 +1540,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Help => Some(("keys".to_string(), help(&app.overlay_query))),
         View::Recommend => {
             let lines;
-            (lines, block, pin) = recommend(app, (area.width as usize).saturating_sub(4).min(130), &mut spots);
+            (lines, block, pin) = recommend(app, (area.width as usize).saturating_sub(4), &mut spots);
             Some(("recommend".to_string(), lines))
         }
         View::Detail(_) => {
@@ -2832,6 +2832,8 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
     let mut block = None;
     let label = |s: &'static str| vec![Span::styled(s, fg(MUTED))];
     let words = |s: &str| s.split(' ').map(|w| Line::from(w.to_string())).collect();
+    // The grid takes the whole width, so no name is cut that has room, the text a readable one.
+    let text = width.min(130);
     let space = Span::raw(" ");
     // The models it ranks, a tab of the table's each: the one on has the filled dot, bold in the
     // colour its tab is on in, and one with nothing to show is grey.
@@ -2845,23 +2847,23 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         let text = format!("{} {}", if on { "●" } else { "○" }, TABS[i].0);
         Line::from(cursor(app.among == Some(i), vec![Span::styled(text, style)]))
     });
-    let (mut v, at) = wrapped_at(label("among:"), tabs.collect(), &Span::styled("·", fg(MUTED)), width);
+    let (mut v, at) = wrapped_at(label("among:"), tabs.collect(), &Span::styled("·", fg(MUTED)), text);
     spots.extend(at.into_iter().enumerate().map(|(i, (l, x))| Spot { lines: l..l + 1, x, at: Stop::Among(i) }));
     if app.filtered_too() {
         let note = Span::styled(" (filtered)", fg(MUTED));
         // On a line of its own under the tabs when the last has no room for it.
-        if v.last().unwrap().width() + note.width() > width {
+        if v.last().unwrap().width() + note.width() > text {
             v.push(Line::from(" ".repeat("among:".len())));
         }
         v.last_mut().unwrap().push_span(note);
     }
     let among = v.len();
-    v.extend(wrapped(vec![], words(TIER_LEGEND), &space, width).into_iter().map(|l| l.style(fg(MUTED))));
+    v.extend(wrapped(vec![], words(TIER_LEGEND), &space, text).into_iter().map(|l| l.style(fg(MUTED))));
     let keyless = data::source() == data::Source::Epoch && data::aa_key().is_none();
     let mut warn: Vec<Line> = words(UNRATED);
     warn.extend(if keyless { words(MORE_RATED) } else { vec![] });
     let warning = vec![Span::styled("warning: ", fg(Color::Yellow))];
-    v.extend(wrapped(warning, warn, &space, width).into_iter().map(|l| l.style(fg(MUTED))));
+    v.extend(wrapped(warning, warn, &space, text).into_iter().map(|l| l.style(fg(MUTED))));
     v.push(Line::default());
     let own = app.store.custom_tasks();
     let about = |t| app.store.about(t).unwrap_or(CUSTOM_ABOUT);
@@ -2928,8 +2930,8 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
     if let Some((i, sel)) = cur.filter(|c| c.0 < tasks.len()) {
         let t = tasks[i];
         let name = vec![Span::styled(t.0.to_string(), fg(task_color(t.0)).add_modifier(BOLD)), space.clone()];
-        under.extend(wrapped(name, words(t.1), &space, width));
-        under.extend(wrapped(label("  use for: "), words(t.2), &space, width));
+        under.extend(wrapped(name, words(t.1), &space, text));
+        under.extend(wrapped(label("  use for: "), words(t.2), &space, text));
         if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
             // The one pick is `high`'s, as in its box.
             let (tier, c) = if app.one_pick(i) { ("pick", LAST) } else { (TIERS[c].0, c) };
@@ -3284,7 +3286,7 @@ mod tests {
         let tries = row(&lines, "on the next screen, try");
         assert_eq!(tries, Some(26), "keys to try, at the bottom");
         assert_eq!(row(&lines, "o open a model's page · x run it in a harness"), tries.map(|y| y + 1));
-        assert_eq!(row(&lines, "R get recommendations · ? all keys"), tries.map(|y| y + 2));
+        assert_eq!(row(&lines, "f favorite a model · R get recommendations · ? all keys"), tries.map(|y| y + 2));
         assert!(try_lines().iter().all(|l| l.width() <= LOGO[0].chars().count()), "as wide as the wordmark at most");
         let narrow = screen(&mut a, 60, 30);
         let small = row(&narrow, SMALL[1]);
