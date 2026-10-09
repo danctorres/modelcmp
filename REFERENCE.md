@@ -27,7 +27,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Tok/task | output tokens per coding task, [measured](#task) by Epoch AI |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
-| Via | the harnesses that have the model |
+| Via | the harnesses that have the model, three to a line |
 | Notes | your note on it |
 
 One table shows the columns of both sources. The ones of the source not in use show when both

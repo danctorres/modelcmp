@@ -1138,6 +1138,9 @@ pub struct App {
     pub overlay_query: String,
     /// Rows visible in the body, set by the renderer; drives page movement.
     pub page: u16,
+    /// The row on each line of the table's body, set by the renderer: a row with many
+    /// harnesses takes several, so a click finds its row here.
+    pub lines: Vec<usize>,
     /// First of the columns right of Model shown, 0 being Dev, when they do not all fit; the renderer keeps
     /// the selected one in view.
     pub hscroll: usize,
@@ -1219,6 +1222,7 @@ impl App {
             panel: None,
             overlay_query: String::new(),
             page: 20,
+            lines: vec![],
             hscroll: 0,
             count: 0,
             g_pending: None,

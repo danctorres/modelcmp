@@ -795,7 +795,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             return None;
         }
         let y = m.row.clamp(inner.y + head, inner.bottom() - 1);
-        return Some(Mouse::Extend(app.table.offset() + (y - inner.y - head) as usize));
+        return Some(Mouse::Extend(row_at(app, (y - inner.y - head) as usize)));
     }
     if !inner.contains(pos) {
         return None;
@@ -805,17 +805,22 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         return None;
     }
     if m.row > inner.y {
-        let n = app.table.offset() + (m.row - inner.y - head) as usize;
+        let line = (m.row - inner.y - head) as usize;
+        let n = row_at(app, line);
+        // The line of the row itself, a tall one's first being 0.
+        let line = app.lines.iter().take(line).rev().take_while(|&&k| k == n).count();
         // The checkbox right of the row number toggles the mark, the ☆ after it picks the
-        // tasks, and the ✗ box after that excludes the model.
+        // tasks, and the ✗ box after that excludes the model: on the row's first line, which
+        // has them.
         let (num_w, x) = (l.name_x - 7, m.column - inner.x);
+        let at = |from: u16| line == 0 && (num_w + from..num_w + from + 2).contains(&x);
         return Some(if mark {
             Mouse::Mark(n)
-        } else if (num_w + 1..num_w + 3).contains(&x) {
+        } else if at(1) {
             Mouse::Box(n)
-        } else if (num_w + 3..num_w + 5).contains(&x) {
+        } else if at(3) {
             Mouse::Star(n)
-        } else if (num_w + 5..num_w + 7).contains(&x) {
+        } else if at(5) {
             Mouse::Exclude(n)
         } else if pick {
             Mouse::Pick(n)
@@ -823,7 +828,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             // A cell opens what it shows, on a double click (`double`): Via the harness under
             // the pointer, and Notes the note to write.
             match col_at(&l, x) {
-                Some((VIA, vx, _)) => harness_at(app, n, x - vx).map_or(Mouse::Row(n), |j| Mouse::Harness(n, j)),
+                Some((VIA, vx, _)) => harness_at(app, n, line, x - vx).map_or(Mouse::Row(n), |j| Mouse::Harness(n, j)),
                 Some((col, ..)) => Mouse::Cell(n, col),
                 _ => Mouse::Row(n),
             }
@@ -858,15 +863,25 @@ fn col_at(l: &Layout, x: u16) -> Option<(usize, u16, u16)> {
     }
 }
 
-/// Which of row `n`'s harnesses is `x` cells into its Via, as `draw` lays it out: the names
-/// joined by ", ".
-fn harness_at(app: &App, n: usize, x: u16) -> Option<usize> {
+/// The row on line `i` of the table's body as last drawn (`App::lines`), counting on past the
+/// last row for a line under it, which is no row.
+fn row_at(app: &App, i: usize) -> usize {
+    match (app.lines.get(i), app.lines.last()) {
+        (Some(&n), _) => n,
+        (None, Some(&last)) => last + 1 + i - app.lines.len(),
+        _ => app.table.offset() + i,
+    }
+}
+
+/// Which of row `n`'s harnesses is `x` cells into line `line` of its Via, as `draw` lays it
+/// out: the names joined by ", ", `VIA_LINE` to a line.
+fn harness_at(app: &App, n: usize, line: usize, x: u16) -> Option<usize> {
     let m = app.data.models.get(*app.rows.get(n)?).filter(|m| app.accessible(m))?;
     let mut end = 0;
-    m.via.iter().position(|h| {
+    m.via.iter().enumerate().skip(line * VIA_LINE).take(VIA_LINE).find_map(|(j, h)| {
         let start = end;
         end += h.len() as u16 + 2;
-        (start..end - 2).contains(&x)
+        (start..end - 2).contains(&x).then_some(j)
     })
 }
 
@@ -1720,16 +1735,17 @@ fn layout(width: u16, app: &App) -> Layout {
     let dev_w = ms.iter().map(|m| m.developer.chars().count()).max().unwrap_or(0).clamp(6, 12) as u16;
     // A shown model you have no access to says so in Via.
     let out = app.rows.iter().any(|&r| !app.accessible(&ms[r]));
-    // As drawn: joined by ", ".
-    let listed = |m: &Model| m.via.iter().map(|v| v.len() + 2).sum::<usize>().saturating_sub(2);
+    // As drawn: joined by ", ", `VIA_LINE` to a line, each line but the last ending in a ",".
+    let line = |c: &[String]| c.iter().map(|v| v.len() + 2).sum::<usize>() - 2;
+    let last = |m: &Model| m.via.chunks(VIA_LINE).last().map_or(0, line);
+    let listed = |m: &Model| last(m).max(m.via.chunks(VIA_LINE).rev().skip(1).map(|c| line(c) + 1).max().unwrap_or(0));
     // A shown one `x` can download says that after them, or alone when out of reach.
     let got = app.rows.iter().filter_map(|&r| {
-        let before = Some(listed(&ms[r])).filter(|&w| w > 0 && app.accessible(&ms[r])).map_or(0, |w| w + 1);
+        let before = Some(last(&ms[r])).filter(|&w| w > 0 && app.accessible(&ms[r])).map_or(0, |w| w + 1);
         Some(before + app.download(&ms[r])?.chars().count())
     });
     let via_w =
-        ms.iter().map(listed).chain(got).chain(out.then_some(OUT_OF_REACH.len())).max().unwrap_or(0).clamp(6, 24)
-            as u16;
+        ms.iter().map(listed).chain(got).chain(out.then_some(OUT_OF_REACH.len())).max().unwrap_or(0).max(6) as u16;
     // As wide as drawn: a CJK character or an emoji takes two cells.
     let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(|s| Span::raw(s).width()).max().unwrap_or(0);
     let notes_w = notes_w.clamp(6, 40) as u16;
@@ -1814,6 +1830,17 @@ fn head(app: &App) -> u16 {
     2 + u16::from(app.no_access())
 }
 
+/// Harnesses on a line of Via: a model with more has them on the lines under it.
+const VIA_LINE: usize = 3;
+
+/// Lines row `k` takes: one, or with Via shown (`via`) as many as its harnesses need.
+fn tall(app: &App, via: bool, k: usize) -> usize {
+    match app.rows.get(k).map(|&r| &app.data.models[r]) {
+        Some(m) if via && app.accessible(m) => m.via.len().div_ceil(VIA_LINE).max(1),
+        _ => 1,
+    }
+}
+
 /// Header plus as many rows as fit in `area`, scrolled so the selection stays in view. Says
 /// whether columns are cut off on the right and rows above and below, for the caller's border.
 fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
@@ -1887,15 +1914,33 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let height = usize::from(area.height.saturating_sub(head));
     let sel = app.table.selected().unwrap_or(0).min(app.rows.len().saturating_sub(1));
     // Keep the selection in view, and never leave rows blank below while some are hidden above.
-    let top = app.table.offset().clamp(sel.saturating_sub(height.saturating_sub(1)), sel);
-    let top = top.min(app.rows.len().saturating_sub(height));
+    // The first row that fits with every row down to `end`.
+    let fits = |end: usize| {
+        let (mut k, mut used) = (end, tall(app, via.is_some(), end));
+        while k > 0 && used + tall(app, via.is_some(), k - 1) <= height {
+            k -= 1;
+            used += tall(app, via.is_some(), k);
+        }
+        k
+    };
+    let top = app.table.offset().clamp(fits(sel), sel).min(fits(app.rows.len().saturating_sub(1)));
     *app.table.offset_mut() = top;
+    let (mut line, mut lines) = (0, std::mem::take(&mut app.lines));
+    lines.clear();
     let ext = app.ext;
     // A glyph with the gap after it, short of the frame's border on a table too narrow for both.
     let gap = |x: u16| usize::from(area.right().saturating_sub(x)).min(2);
     let faint = palette(app).is_some() || app.term_bg.is_some();
-    for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
-        let y = area.y + head + (k - top) as u16;
+    for (k, &r) in app.rows.iter().enumerate().skip(top) {
+        if line >= height {
+            break;
+        }
+        let y = area.y + head + line as u16;
+        // The lines it takes, cut at the frame.
+        let h = tall(app, via.is_some(), k).min(height - line);
+        lines.extend(std::iter::repeat_n(k, h));
+        line += h;
+        let h = h as u16;
         let m = &app.data.models[r];
         // The cursor, or the visual range, is a faint fill through the frame's border, which
         // becomes its two bars; the row keeps its colours on it.
@@ -1922,9 +1967,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         let tint = |c: Color| if solid { base } else { fg(c) };
         let text = if dim { tint(MUTED) } else { base };
         let soft = |c: Color| if dim { text } else { tint(c) };
-        buf.set_style(Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
+        buf.set_style(Rect { y, height: h, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
         if on && area.x > 0 {
-            cursor_ends(buf, area.x - 1, area.right(), y);
+            (y..y + h).for_each(|y| cursor_ends(buf, area.x - 1, area.right(), y));
         }
         buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
         // Off, a mark is its own glyph in grey, as the ☆ is the ★'s, so it says what a click on
@@ -1978,21 +2023,30 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         }
         if let Some((x, w)) = via {
             let (start, end) = (area.x + x, area.x + x + w);
-            let (mut x, get) = (start, app.download(m));
+            let (mut x, mut vy, get) = (start, y, app.download(m));
             if reach {
-                for (j, h) in m.via.iter().enumerate() {
+                for (j, name) in m.via.iter().enumerate() {
+                    // The next line starts under the first, the "," left on the one above.
+                    let wrap = j > 0 && j % VIA_LINE == 0;
                     if j > 0 {
-                        x = buf.set_stringn(x, y, ", ", end.saturating_sub(x) as usize, text).0;
+                        let sep = if wrap { "," } else { ", " };
+                        x = buf.set_stringn(x, vy, sep, end.saturating_sub(x) as usize, text).0;
                     }
-                    x = buf.set_stringn(x, y, h, end.saturating_sub(x) as usize, soft(dev_color(h))).0;
+                    if wrap {
+                        (x, vy) = (start, vy + 1);
+                    }
+                    if vy >= y + h {
+                        break;
+                    }
+                    x = buf.set_stringn(x, vy, name, end.saturating_sub(x) as usize, soft(dev_color(name))).0;
                 }
             } else if get.is_none() {
                 buf.set_stringn(x, y, OUT_OF_REACH, w as usize, tint(MUTED).add_modifier(Modifier::ITALIC));
             }
             // The download `x` offers, after the harnesses or alone.
-            if let Some(get) = get {
+            if let Some(get) = get.filter(|_| vy < y + h) {
                 x += u16::from(x > start);
-                buf.set_stringn(x, y, get, end.saturating_sub(x) as usize, text);
+                buf.set_stringn(x, vy, get, end.saturating_sub(x) as usize, text);
             }
         }
         let note = app.store.note(&m.key).unwrap_or("");
@@ -2004,29 +2058,41 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         } else {
             buf.set_stringn(ex_x, y, included, 1, tint(MUTED));
         }
-        for &x in &seps {
+        for (&x, y) in seps.iter().flat_map(|x| (y..y + h).map(move |y| (x, y))) {
             buf.set_stringn(area.x + x, y, "│", 1, tint(MUTED));
         }
         // What the search matched, underlined in bold; Notes may be scrolled off. On a solid
         // fill the yellow is behind the hit, as yellow text would not read there.
         // ponytail: a char is taken as one cell; wide chars would shift the underline.
-        // Via is drawn as its harnesses joined by ", ", so the hits line up; out of reach, it is not.
+        // Via is drawn as its harnesses joined by ", ", so the hits line up, each line taking
+        // its part of them; out of reach, it is not.
         if !app.query.is_empty()
             && let Some(hits) = hits(&app.query, [&m.name, &m.developer, &m.via.join(", "), note], app.typos)
         {
             let style = if solid { base.bg(MATCH) } else { tint(MATCH) }.add_modifier(BOLD | Modifier::UNDERLINED);
             let [via, note] = [via.filter(|_| reach), notes].map(|c| c.map(|(x, w)| (area.x + x, w as usize)));
-            for (field, ranges) in [Some((name_x, nw)), Some((dev_x, dw)), via, note].into_iter().zip(hits) {
+            let mut lit = |x: u16, y: u16, w: usize, r: Range<usize>| {
+                let r = r.start.min(w)..r.end.min(w);
+                buf.set_style(Rect::new(x + r.start as u16, y, r.len() as u16, 1), style);
+            };
+            for (field, ranges) in [Some((name_x, nw)), Some((dev_x, dw)), None, note].into_iter().zip(&hits) {
                 let Some((x, w)) = field else { continue };
-                for r in ranges.into_iter().map(|r| r.start.min(w)..r.end.min(w)) {
-                    buf.set_style(Rect::new(x + r.start as u16, y, r.len() as u16, 1), style);
+                ranges.iter().for_each(|r| lit(x, y, w, r.clone()));
+            }
+            if let Some((x, w)) = via {
+                let mut from = 0;
+                for (c, y) in m.via.chunks(VIA_LINE).zip(y..y + h) {
+                    let to = from + c.iter().map(|v| v.len() + 2).sum::<usize>();
+                    hits[2]
+                        .iter()
+                        .for_each(|r| lit(x, y, w, r.start.clamp(from, to) - from..r.end.clamp(from, to) - from));
+                    from = to;
                 }
             }
         }
     }
     if let Some((x, w)) = cur {
-        let drawn = app.rows.len().saturating_sub(top).min(height) as u16;
-        buf.set_style(Rect::new(x, area.y + head, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
+        buf.set_style(Rect::new(x, area.y + head, w, line as u16).intersection(area), Style::new().add_modifier(BOLD));
     }
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
     let bench = if let Input::Menu { col, .. } = &app.input { app.col_bench(*col) } else { None };
@@ -2041,7 +2107,11 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         };
         dropdown(buf, area, menu_x(area, &l, *col), *col, items, list, picked);
     }
-    (more, top > 0, top + height < app.rows.len())
+    // Rows that fit: a line a tall row took is one fewer.
+    let last = lines.last().map_or(top, |&k| k + 1);
+    app.page = (height + last - top - line) as u16;
+    app.lines = lines;
+    (more, top > 0, last < app.rows.len())
 }
 
 /// Screen column where the dropdown of `col` opens: under its header, or Dev's when scrolled off.
@@ -3314,13 +3384,47 @@ mod tests {
     }
 
     #[test]
-    fn via_fits_every_harness_of_a_model() {
+    fn via_stacks_the_harnesses_past_three() {
         let mut a = app();
         let mut data = std::mem::take(&mut a.data);
-        data.models[0].via = vec!["claude".into(), "opencode".into(), "pi".into()];
+        data.models[0].via = crate::data::vias().map(String::from).collect();
         a.set_data(data);
+        let (_, lines) = render(&mut a, 200, 8);
+        let via = lines[0].find("Via").unwrap();
+        let stacked = ["opencode, pi, omp,", "claude, codex, gemini,", "copilot, ollama, llama-cli"];
+        for (l, want) in lines[2..5].iter().zip(stacked) {
+            assert!(l.trim_end().ends_with(&format!("│ {want}")), "{lines:?}");
+        }
+        assert!(lines[5].contains("flash") && lines[3].trim_start().starts_with('│'), "the next row: {lines:?}");
+        assert_eq!((a.lines.as_slice(), a.page), (&[0, 0, 0, 1][..], 3), "two of the five lines are opus's");
+        // A click finds the row and the harness on its line, as `draw` puts the frame around the table.
+        let (area, x) = (Rect::new(0, 0, 202, 13), lines[0][..via].chars().count() as u16 + 1);
+        // Rows from the frame, under the two of the tabs.
+        let click = |column, row: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row: row + 2,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(hit(&a, area, click(x + 8, 4)), Some(Mouse::Harness(0, 4)), "codex, on opus's second line");
+        assert_eq!(hit(&a, area, click(x, 6)), Some(Mouse::Harness(1, 0)), "flash, under opus's three lines");
+        assert_eq!(hit(&a, area, click(x, 7)), Some(Mouse::Row(2)), "under the last row: none");
+        assert_eq!(hit(&a, area, click(3, 3)), Some(Mouse::Box(0)), "the checkbox");
+        assert_eq!(hit(&a, area, click(3, 4)), Some(Mouse::Row(0)), "under it there is none to toggle");
+        // A search hit is underlined on the line that has it.
+        a.query = "codex".into();
+        let (buf, _) = render(&mut a, 200, 8);
+        let on = |x: u16, y| buf[(x + 7, y)].modifier.contains(Modifier::UNDERLINED);
+        assert!(on(x, 3) && on(x + 4, 3) && !on(x - 1, 3) && !on(x + 5, 3) && !on(x, 2), "codex alone");
+        a.query.clear();
+        // The cursor's row stays in view where a tall one leaves no room for both.
+        a.table.select(Some(1));
         let (_, lines) = render(&mut a, 200, 5);
-        assert!(lines.iter().any(|l| l.contains("claude, opencode, pi")), "{lines:?}");
+        assert!(lines[2].contains("flash") && a.lines == [1], "{lines:?}");
+        // With Via scrolled off, a row is one line.
+        a.table.select(Some(0));
+        let (_, lines) = render(&mut a, 60, 8);
+        assert!(!lines[0].contains("Via") && a.lines == [0, 1], "{lines:?}");
     }
 
     fn render(app: &mut App, width: u16, height: u16) -> (Buffer, Vec<String>) {
