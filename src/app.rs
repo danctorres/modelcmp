@@ -87,6 +87,9 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
 /// dropdown then names that one. The other source's about the task come last, with its data
 /// at hand too.
 fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    if id == ARENA {
+        return Some(("Agent", crate::data::ARENA_MORE.iter().map(|s| s.0).collect()));
+    }
     let task = crate::fit::task(id)?;
     let (own, more) = task.sourced();
     let all: Vec<_> = more.iter().copied().chain(task.lent()).collect();
@@ -95,7 +98,12 @@ fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
 
 /// A benchmark's entry in a task column's dropdown: its name and the source that runs it.
 pub fn bench_label(b: &str) -> String {
-    format!("{b} · {}", crate::fit::bench_source(b).label())
+    format!("{b} · {}", if arena_bench(b) { "Arena" } else { crate::fit::bench_source(b).label() })
+}
+
+/// Whether `b` is in the Arena column's dropdown: its score or one of its signals.
+fn arena_bench(b: &str) -> bool {
+    b == "Agent" || crate::data::ARENA_MORE.iter().any(|s| s.0 == b)
 }
 
 fn positive(x: f64) -> Option<f64> {
@@ -360,8 +368,11 @@ pub fn base_col_name(col: usize) -> &'static str {
 
 /// Whether the header of the column at cursor index `col` opens a dropdown with `d`.
 pub fn has_menu(col: usize) -> bool {
-    col == 1 || col == PRICE || col == VIA || TASK_COLS.contains(&col)
+    col == 1 || col == PRICE || col == VIA || col == ARENA_COL || TASK_COLS.contains(&col)
 }
+
+/// Arena, whose dropdown lists its signals, with either source.
+const ARENA_COL: usize = AAII + 1;
 
 /// Coding, Agentic and Reason: the columns `col_benches` has benchmarks for, with either
 /// source. Asked of every header on every frame, so not looked up.
@@ -1292,7 +1303,7 @@ impl App {
         let pick = self.bench[c];
         for (v, m) in self.vals.iter_mut().zip(&self.data.models) {
             v[c] = match pick {
-                Some(b) => m.bench(b).map(|s| s * 100.0),
+                Some(b) => m.picked(b),
                 None => (COLS[c].get)(m),
             };
         }
@@ -1335,7 +1346,9 @@ impl App {
     /// The benchmark source the column at cursor index `col` shows the values of: a picked
     /// benchmark's, else `base_col_source`.
     pub fn col_source(&self, col: usize) -> Option<Source> {
-        self.col_bench(col).map(crate::fit::bench_source).or_else(|| base_col_source(col))
+        // Arena's signals are of neither, as Arena is.
+        let base = base_col_source(col);
+        self.col_bench(col).filter(|_| base.is_some()).map(crate::fit::bench_source).or(base)
     }
 
     /// Header of the column at cursor index `col`: a task column's picked benchmark, else `col_name`.
@@ -1346,6 +1359,9 @@ impl App {
     /// What the column at cursor index `col` means.
     pub fn col_about(&self, col: usize) -> String {
         match self.col_bench(col) {
+            Some(b) if arena_bench(b) => {
+                "net improvement on this signal alone in real agent sessions, %, measured by arena.ai".into()
+            }
             Some(b) => format!("{}, score on this benchmark alone, 0-100", crate::fit::bench_source(b).label()),
             None => base_col_about(col),
         }
@@ -2473,7 +2489,7 @@ impl App {
     /// Open the dropdown of the column under the cursor, on the entry in effect.
     fn open_menu(&mut self) {
         // A task's line is drawn from its score, so its columns show that.
-        if self.task.is_some() && col_benches(self.col).is_some() {
+        if self.task.is_some() && TASK_COLS.contains(&self.col) {
             return self.refuse("a task shows its own scores: c leaves the task");
         }
         let (items, picked) = self.menu_items(self.col);
@@ -2490,7 +2506,7 @@ impl App {
         let first = scored.map_or(ms.len(), |c| ms.iter().filter(|(_, m)| (c.get)(m).is_some()).count());
         let (mut items, picked) = if let Some((_, benches)) = &benches {
             // How many models each benchmark scored.
-            let count = |b: &str| ms.iter().filter(|(_, m)| m.bench(b).is_some()).count();
+            let count = |b: &str| ms.iter().filter(|(_, m)| m.picked(b).is_some()).count();
             let picked = self.col_bench(col).and_then(|b| benches.iter().position(|x| *x == b));
             (benches.iter().map(|&b| (bench_label(b), count(b))).collect(), picked)
         } else if col == 1 || col == VIA {
@@ -4203,7 +4219,7 @@ mod tests {
         a.col = ECI + 3;
         press(&mut a, "d");
         assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "Coding"));
-        assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()));
+        assert!((0..NCOLS).all(|c| (TASK_COLS.contains(&c) || c == ARENA_COL) == col_benches(c).is_some()));
         // Leaving the task took its sort along.
         press(&mut a, "cs");
         // Another source has other benchmarks: the pick goes, and a bound typed for it.
@@ -4215,7 +4231,10 @@ mod tests {
         a.switch(Source::Aa);
         assert_eq!((a.col_name(a.col), a.bounds.iter().map(|b| b.0).collect::<Vec<_>>()), ("Coding", vec![ECI, PRICE]));
         a.bounds.clear();
-        assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()), "with either source");
+        assert!(
+            (0..NCOLS).all(|c| (TASK_COLS.contains(&c) || c == ARENA_COL) == col_benches(c).is_some()),
+            "with either source"
+        );
         // Artificial Analysis lists the task's own benchmark, then its others about the task.
         let m = a.data.models.iter_mut().find(|m| m.key == "mini").unwrap();
         m.scores.insert("scicode".into(), 0.3);
@@ -4230,6 +4249,28 @@ mod tests {
         a.col = ECI + 4;
         press(&mut a, "d");
         assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0 · Artificial Analysis"]);
+    }
+
+    /// Arena's dropdown lists its signals, in percent as its score, with a task picked too.
+    #[test]
+    fn the_arena_column_shows_the_signal_picked_in_its_dropdown() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        let m = data.models.iter_mut().find(|m| m.key == "mini").unwrap();
+        (m.arena, m.arena_more) = (Some(8.7), [("Steerability".to_string(), -1.2)].into());
+        a.set_data(data);
+        a.task = crate::fit::task("coding");
+        a.col = ARENA_COL;
+        press(&mut a, "d");
+        assert_eq!(menu(&a)[..2], [("Agent · Arena", 1), ("Task outcome · Arena", 0)]);
+        assert_eq!(menu(&a)[3], ("Steerability · Arena", 1));
+        press(&mut a, "3j ");
+        code(&mut a, KeyCode::Esc);
+        let mini = a.data.models.iter().position(|m| m.key == "mini").unwrap();
+        assert_eq!((a.col_name(a.col), a.val(mini, a.col), a.col_source(a.col)), ("Steerability", Some(-1.2), None));
+        assert_eq!(shown(a.col - TEXT, -1.2, true), "-1.2");
+        press(&mut a, "d ");
+        assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Arena", Some(8.7)), "the picked one again drops it");
     }
 
     /// With both sources' data a task's dropdown lists the other's benchmarks too, named as its.

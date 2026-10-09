@@ -147,6 +147,9 @@ Arena (its Agent leaderboard, no key needed):
 - Arena is the score arena.ai publishes, its net improvement in real agent sessions, in
   percent. It can be negative, and higher is better. modelcmp does not compute it.
 - Arena lists a model once per reasoning setting, and the column has the best of them.
+- The column's dropdown (`d`) has the signals the score is made of, each as Arena publishes
+  it, in percent: task outcome, tool hallucination, steerability, bash recovery and praise.
+  One that a refresh could not get is empty until the next.
 - It shows with either source, and counts toward no task score and no recommendation.
 - A refresh that cannot reach it keeps the scores of the last one, and with none to keep it
   leaves the column empty, and the first start or command an hour later tries again. The

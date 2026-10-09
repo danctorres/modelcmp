@@ -25,7 +25,25 @@ const AA_API_URL: &str = "https://artificialanalysis.ai/api/v2/data/llms/models"
 /// (CC-BY): no key needed (`Arena`).
 // ponytail: one page of 100 rows, twice what the leaderboard has, and a warning past that
 // (`Arena::cut`). Page with `offset` then.
-const ARENA_URL: &str = "https://datasets-server.huggingface.co/rows?dataset=lmarena-ai/leaderboard-dataset&config=agent&split=latest&offset=0&length=100";
+macro_rules! arena_url {
+    ($config:literal) => {
+        concat!(
+            "https://datasets-server.huggingface.co/rows?dataset=lmarena-ai/leaderboard-dataset&config=",
+            $config,
+            "&split=latest&offset=0&length=100"
+        )
+    };
+}
+const ARENA_URL: &str = arena_url!("agent");
+/// The signals Arena's agent score is made of, each a leaderboard of its own with the same rows:
+/// its name in the Arena column's dropdown, and where it is (`Model::arena_more`).
+pub const ARENA_MORE: [(&str, &str); 5] = [
+    ("Task outcome", arena_url!("agent_task_outcome_explicit")),
+    ("Tool hallucination", arena_url!("agent_tool_hallucination")),
+    ("Steerability", arena_url!("agent_steerability")),
+    ("Bash recovery", arena_url!("agent_bash_recovery_steps")),
+    ("Praise", arena_url!("agent_praise_complaint")),
+];
 /// The leaderboard itself, which `o` and a click on a model's Arena score open (`arena_page`).
 const ARENA_PAGE: &str = "https://arena.ai/leaderboard/agent";
 /// modelcmp's newest release, fetched with the data so a new version is told once a day at most.
@@ -49,7 +67,8 @@ const ARENA_RETRY: Duration = Duration::from_secs(3600);
 /// 18: `Model::task_cost`. 19: `Model::task_tokens`. 20: context and max output are the
 /// ones most offers give, where they were the most any gave. 21: `Model::arena`.
 /// 22: Epoch's task scores are one benchmark's, in percent, where they were fitted in ECI points.
-const FORMAT: u32 = 22;
+/// 23: `Model::arena_more`.
+const FORMAT: u32 = 23;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -732,6 +751,9 @@ pub struct Model {
     /// in real agent sessions, the best of its reasoning settings (`Arena`).
     #[serde(default)]
     pub arena: Option<f64>,
+    /// Its score on each of `ARENA_MORE` that ranks it, by name, in percent as `arena`.
+    #[serde(default)]
+    pub arena_more: BTreeMap<String, f64>,
     /// The other source's overall index, with its data at hand too (`Data::borrow`).
     #[serde(skip)]
     pub other_index: Option<f64>,
@@ -755,6 +777,12 @@ impl Model {
     pub fn bench(&self, b: &str) -> Option<f64> {
         let of = if crate::fit::bench_source(b) == source() { &self.scores } else { &self.other_scores };
         of.get(b).copied()
+    }
+
+    /// What a column that picked `b` in its dropdown shows: `bench` in percent, or one of
+    /// `arena_more` as it is.
+    pub fn picked(&self, b: &str) -> Option<f64> {
+        self.arena_more.get(b).copied().or_else(|| self.bench(b).map(|s| s * 100.0))
     }
 
     /// The offer you'd actually use: cheapest available paid one, else a free one of yours,
@@ -1506,7 +1534,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let res = download(src, key.as_deref(), steps);
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
-    let (mut data, mut other, [aa, epoch, openrouter, arena], release) = match res {
+    let (mut data, mut other, [aa, epoch, openrouter, arena], more, release) = match res {
         Ok(d) => d,
         Err(e) => {
             let _ = harness.join();
@@ -1561,7 +1589,14 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
             .cut
             .then(|| "Arena's agent leaderboard has more rows than were read: some models have no Arena score".into()),
     };
-    let arena = if arena.current(now()) { arena } else { Arena::default() };
+    let mut arena = if arena.current(now()) { arena } else { Arena::default() };
+    // A leaderboard kept from the last refresh has its signals too.
+    // ponytail: with the leaderboard new, a signal that did not come, or is of another day, is
+    // empty until the next refresh, with no warning. Keep that one from the cache if it shows.
+    for ((name, _), rows) in ARENA_MORE.into_iter().zip(more) {
+        let signal = rows.ok().and_then(|r| Arena::parse(&r)).filter(|s| s.date == arena.date);
+        arena.more.extend(signal.map(|s| (name, s.scores)));
+    }
     arena.score(&mut data.models);
     data.arena_date.clone_from(&arena.date);
     if let Some((_, Ok(o))) = &mut other {
@@ -1638,10 +1673,15 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
 }
 
 /// What `download` gives: the merged data, the other source's when it was asked for, then
-/// Artificial Analysis's and Epoch's sitemaps, OpenRouter's models, Arena's agent leaderboard
-/// and modelcmp's newest release, which a refresh can do without.
-type Downloaded =
-    (Data, Option<(Source, Result<Data, Failure>)>, [Result<Vec<u8>, Failure>; 4], Result<Vec<u8>, Failure>);
+/// Artificial Analysis's and Epoch's sitemaps, OpenRouter's models, Arena's agent leaderboard,
+/// its signals (`ARENA_MORE`) and modelcmp's newest release, which a refresh can do without.
+type Downloaded = (
+    Data,
+    Option<(Source, Result<Data, Failure>)>,
+    [Result<Vec<u8>, Failure>; 4],
+    [Result<Vec<u8>, Failure>; 5],
+    Result<Vec<u8>, Failure>,
+);
 
 /// How long the downloads a refresh can do without are waited for once it has the others.
 const GRACE: Duration = Duration::from_secs(10);
@@ -1651,8 +1691,21 @@ const GRACE: Duration = Duration::from_secs(10);
 /// their own: none is waited for once the refresh cannot finish, and the links and the newest
 /// release no longer than `GRACE` once it can.
 fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded, Failure> {
-    const URLS: [&str; 8] =
-        [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, EPOCH_PAGES_URL, OPENROUTER_URL, RELEASE_URL, ARENA_URL];
+    const URLS: [&str; 13] = [
+        MODELS_URL,
+        EPOCH_URL,
+        AA_API_URL,
+        AA_URL,
+        EPOCH_PAGES_URL,
+        OPENROUTER_URL,
+        RELEASE_URL,
+        ARENA_URL,
+        ARENA_MORE[0].1,
+        ARENA_MORE[1].1,
+        ARENA_MORE[2].1,
+        ARENA_MORE[3].1,
+        ARENA_MORE[4].1,
+    ];
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
     let (tx, rx) = std::sync::mpsc::channel();
     let mut sites = vec![];
@@ -1676,7 +1729,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         });
     }
     drop(tx);
-    let mut got: [Result<Vec<u8>, Failure>; 8] = URLS.map(|url| Err(format!("{url}: no reply").into()));
+    let mut got: [Result<Vec<u8>, Failure>; 13] = URLS.map(|url| Err(format!("{url}: no reply").into()));
     // Once the first three that were asked for are in, the rest get `GRACE` and no more. The
     // other source's scores are among them, though not needed: they fill its cache, and Epoch's
     // names decide which key a merged row keeps, which your favorites and notes hang on.
@@ -1700,7 +1753,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     }
     // A download not waited for is awaited no more, before the merge and not after it.
     sites.into_iter().for_each(|site| answered(steps, site));
-    let [models, epoch, api, aa, epoch_pages, openrouter, release, arena] = got;
+    let [models, epoch, api, aa, epoch_pages, openrouter, release, arena, more @ ..] = got;
     let models = models?;
     let ep = epoch.and_then(|z| Ok(parse_epoch(&z)?));
     let by_epoch = || -> Result<Data, Failure> {
@@ -1726,7 +1779,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         Source::Epoch => (by_epoch()?, key.map(|_| (Source::Aa, by_aa()))),
         Source::Aa => (by_aa()?, Some((Source::Epoch, by_epoch()))),
     };
-    Ok((data, other, [aa, epoch_pages, openrouter, arena], release))
+    Ok((data, other, [aa, epoch_pages, openrouter, arena], more, release))
 }
 
 /// Said after why Artificial Analysis's key did nothing: what is shown instead.
@@ -1873,6 +1926,8 @@ struct Arena {
     date: String,
     scores: HashMap<String, f64>,
     cut: bool,
+    /// Each of `ARENA_MORE` that came with it, by name: its scores, as `scores`.
+    more: BTreeMap<&'static str, HashMap<String, f64>>,
 }
 
 impl Arena {
@@ -1926,10 +1981,17 @@ impl Arena {
             key: String,
             #[serde(default)]
             arena: Option<f64>,
+            #[serde(default)]
+            arena_more: BTreeMap<String, f64>,
         }
         let kept = serde_json::from_slice::<Kept>(cache).ok().filter(|d| d.format == FORMAT)?;
+        let mut more: BTreeMap<_, HashMap<_, _>> = BTreeMap::new();
+        for (name, _) in ARENA_MORE {
+            let scored = kept.models.iter().filter_map(|m| Some((m.key.clone(), *m.arena_more.get(name)?)));
+            more.insert(name, scored.collect());
+        }
         let scores: HashMap<_, _> = kept.models.into_iter().filter_map(|m| Some((m.key, m.arena?))).collect();
-        (!scores.is_empty()).then_some(Arena { date: kept.arena_date, scores, cut: false })
+        (!scores.is_empty()).then_some(Arena { date: kept.arena_date, scores, more, cut: false })
     }
 
     /// Whether it was published within `ARENA_MAX_AGE` of `now`, in seconds since 1970.
@@ -1942,6 +2004,7 @@ impl Arena {
     fn score(&self, models: &mut [Model]) {
         for m in models {
             m.arena = self.scores.get(&m.key).copied();
+            m.arena_more = self.more.iter().filter_map(|(n, s)| Some((n.to_string(), *s.get(&m.key)?))).collect();
         }
     }
 }
@@ -3399,15 +3462,22 @@ mod tests {
         let got = ms.each_ref().map(|m| m.arena);
         assert_eq!(got, [Some(8.7), Some(-1.2), Some(2.0), None, Some(0.0)], "the best setting, in percent");
         assert!(ms[4].arena.unwrap().is_sign_positive(), "and no -0.0");
+        // A signal goes to the models it ranks, by its name.
+        let mut signals = Arena { more: [("Steerability", arena.scores.clone())].into(), ..Default::default() };
+        signals.more.insert("Praise", Default::default());
+        signals.score(&mut ms);
+        assert_eq!((ms[0].arena, ms[0].picked("Steerability"), ms[0].picked("Praise")), (None, Some(8.7), None));
+        arena.score(&mut ms);
         assert_eq!((arena.date.as_str(), arena.cut), ("2026-10-02", false), "a row with nulls is left out, not all");
         assert!(Arena::parse(rows.replace("7,", "8,").as_bytes()).unwrap().cut, "more rows than were read");
         assert_eq!(Arena::parse(b"<html>"), None);
         // Kept from the cache when it did not come, until Arena has published none for too long.
         let cache = format!(
             r#"{{"format": {FORMAT}, "fetched": 0, "arena_date": "2026-10-02",
-            "models": [{{"key": "claudeopus5", "arena": 8.7}}, {{"key": "gpt6"}}]}}"#
+            "models": [{{"key": "claudeopus5", "arena": 8.7, "arena_more": {{"Praise": 3.1}}}}, {{"key": "gpt6"}}]}}"#
         );
         let kept = Arena::cached(cache.as_bytes()).unwrap();
+        assert_eq!((kept.more["Praise"]["claudeopus5"], kept.more["Steerability"].len()), (3.1, 0), "its signals too");
         assert_eq!((kept.date.as_str(), kept.scores.len(), kept.scores["claudeopus5"]), ("2026-10-02", 1, 8.7));
         assert_eq!(Arena::cached(cache.replace(&FORMAT.to_string(), "1").as_bytes()), None, "not of another format");
         let day = |d: u64| (56 * 365 + 14 + 273 + d) * 86400; // 2026-10-01 and d days
