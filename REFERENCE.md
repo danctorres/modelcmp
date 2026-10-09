@@ -411,6 +411,9 @@ help shows the path. Each refresh also
 asks GitHub for the latest release, to say when a new version is out, and `UU` in the TUI
 upgrades to it.
 
+Both are safe to delete: the cache is downloaded again on the next run, and removing `user.json`
+resets your selection, favorites, exclusions, notes and settings.
+
 ## Data age
 
 The TUI's bottom border always shows the refresh state: `⟳ refreshing 7/9, waiting for opencode` (the downloads
