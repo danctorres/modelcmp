@@ -402,7 +402,7 @@ pub fn base_col_about(col: usize) -> String {
             crate::data::cached() * 100.0
         ),
         AAII if unmeasured(col) && crate::data::aa_key().is_none() => {
-            format!("{}, needs its API key, K adds it", Source::Aa.index().1)
+            format!("{}, needs its API key, K adds it, with Tok/s and TTFT", Source::Aa.index().1)
         }
         _ => {
             let about = numeric(col).map_or("", Col::about).to_string();
@@ -3703,7 +3703,10 @@ mod tests {
         let (tps, other, price) = (col("tps"), col(OTHER), col("price"));
         let mut a = app();
         assert!(hidden(tps) && unmeasured(other), "Epoch alone has no speed, nor another index");
-        assert!(!hidden(other) && base_col_about(other).ends_with("needs its API key, K adds it"), "AAII says so");
+        assert!(
+            !hidden(other) && base_col_about(other).ends_with("needs its API key, K adds it, with Tok/s and TTFT"),
+            "AAII says so"
+        );
         // With Artificial Analysis's data too, its columns show, the index under its name.
         let mut data = std::mem::take(&mut a.data);
         data.lent = true;
