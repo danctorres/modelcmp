@@ -1842,15 +1842,34 @@ fn fetch_within(url: &str, key: Option<&str>, limit: Duration) -> Result<Vec<u8>
     })
 }
 
-/// `fetch_within`, with the site's own error for one that reads its status.
+/// How many times a download is asked for: a site that fails once often answers the next time.
+const TRIES: u32 = 3;
+
+/// Whether asking again can help: not for an answer that says the request itself is wrong.
+fn passing(e: &ureq::Error) -> bool {
+    !matches!(e, ureq::Error::StatusCode(c) if (400..500).contains(c) && !matches!(c, 408 | 429))
+}
+
+/// `fetch_within`, with the site's own error for one that reads its status. A failure that can
+/// pass is tried again, up to `TRIES` times and all within `limit`.
 fn request(url: &str, key: Option<&str>, limit: Duration) -> Result<Vec<u8>, ureq::Error> {
     // One for every download, so a second request to a site goes over the first's connection.
     static AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| agent(Duration::from_secs(60)));
-    let mut req = AGENT.get(url).config().timeout_global(Some(limit)).build();
-    if let Some(k) = key {
-        req = req.header("x-api-key", k);
+    let end = Instant::now() + limit;
+    let mut tried = 0;
+    loop {
+        tried += 1;
+        let left = end.saturating_duration_since(Instant::now());
+        let mut req = AGENT.get(url).config().timeout_global(Some(left)).build();
+        if let Some(k) = key {
+            req = req.header("x-api-key", k);
+        }
+        let pause = Duration::from_millis(500 * u64::from(tried));
+        match req.call().and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec()) {
+            Err(e) if tried < TRIES && passing(&e) && Instant::now() + pause < end => std::thread::sleep(pause),
+            res => return res,
+        }
     }
-    req.call().and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec())
 }
 
 /// The sitemaps of model pages that Epoch's `index` names: one, and more once Epoch splits it.
@@ -3445,6 +3464,23 @@ mod tests {
     use super::*;
 
     /// A row has what the other source measures and its index, by its key, or neither.
+    #[test]
+    fn a_download_that_fails_once_is_asked_for_again() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", server.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (stream, reply) in server.incoming().zip(["503 Busy", "200 OK", "404 Not Found", "200 OK"]) {
+                let mut stream = stream.unwrap();
+                let _ = stream.read(&mut [0; 1024]);
+                let _ = write!(stream, "HTTP/1.1 {reply}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            }
+        });
+        let s5 = Duration::from_secs(5);
+        assert_eq!(request(&url, None, s5).unwrap(), b"ok", "a 503 is tried again");
+        assert!(matches!(request(&url, None, s5), Err(ureq::Error::StatusCode(404))), "a 404 is not");
+    }
+
     #[test]
     fn arena_scores_go_to_the_model_at_its_best_setting() {
         let row = |key: &str| Model { key: key.into(), arena: Some(1.0), ..Default::default() };
