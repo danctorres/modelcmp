@@ -1242,6 +1242,9 @@ const CURSOR: Color = ACCENT;
 const FILL: Style = Style::new().bg(CURSOR);
 /// The bars at the cursor's two ends.
 const EDGE: Style = Style::new().fg(ACCENT).bg(CURSOR).add_modifier(BOLD);
+/// The `‹` `›` `▲` `▼` for what is scrolled off: a solid cell, as a pill, found at a glance. Yellow, as the
+/// notices in the status bar: the accent is the headers' and the cursor's, and is lost among them.
+const MORE: Style = Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(BOLD);
 /// The share of the mark colour in a marked row's fill with the terminal's own colours, in
 /// percent, the rest being its background: faint, as the row's colours are read on it. A theme
 /// has its own (`Palette::wash`).
@@ -1435,16 +1438,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
             .title_bottom(version)
             .title_bottom(
-                // The source in the headers' colour.
                 Line::from_iter(
-                    [
-                        Span::styled(" models.dev + ", fg(MUTED)),
-                        Span::styled(data::source().label(), fg(ACCENT)),
-                        Span::styled(" · ", fg(MUTED)),
-                    ]
-                    .into_iter()
-                    .filter(|_| named)
-                    .chain([Span::styled(state, fg(color))]),
+                    named.then(|| Span::styled(source, fg(MUTED))).into_iter().chain([Span::styled(state, fg(color))]),
                 )
                 .right_aligned(),
             );
@@ -1473,7 +1468,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         let (right, above, below) = table(buf, inner, app);
         if right && inner.height > 0 {
             // Columns cut off on the right: `l` scrolls to them.
-            buf.set_stringn(body.right() - 1, inner.y, "›", 1, fg(ACCENT).add_modifier(BOLD));
+            buf.set_stringn(body.right() - 1, inner.y, "›", 1, MORE);
         }
         if inner.height > 1 {
             // The rule under the header runs into the frame.
@@ -1687,7 +1682,8 @@ fn layout(width: u16, app: &App) -> Layout {
     // As wide as drawn: a CJK character or an emoji takes two cells.
     let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(|s| Span::raw(s).width()).max().unwrap_or(0);
     let notes_w = notes_w.clamp(6, 40) as u16;
-    let longest = ms.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as u16;
+    // Of the models listed, not of all: one long name filtered out leaves no gap before Dev.
+    let longest = app.rows.iter().map(|&r| ms[r].name.chars().count()).max().unwrap_or(0) as u16;
     // Row numbers as wide as the last one, a space, then the checkbox, the ☆ and the ✗ box,
     // each with a spare cell: some terminals draw them two cells wide, and the
     // spare keeps that off the neighbour.
@@ -1701,9 +1697,10 @@ fn layout(width: u16, app: &App) -> Layout {
     let sep = |k: usize| u16::from(starts.contains(&(k + 2)));
     // A column left out takes no room at all.
     let ws: Vec<u16> = ws.into_iter().enumerate().map(|(k, w)| if hidden(k + 2) { 0 } else { w }).collect();
-    let span = |k: usize| if ws[k] == 0 { 0 } else { ws[k] + GAP + sep(k) };
-    let fixed: u16 = (0..ws.len()).map(span).sum::<u16>() + dev_w + GAP;
-    let name_w = width.saturating_sub(name_x + fixed).clamp(NAME_MIN, longest.max(NAME_MIN));
+    // Model is not cut to make room for every column: those right of Dev scroll, and `›` says
+    // so. Only for one, the widest number, so a long name never leaves the table with none.
+    let keep = ws[..COLS.len()].iter().max().map_or(0, |w| w + GAP + 1);
+    let name_w = longest.min(width.saturating_sub(name_x + GAP + dev_w + GAP + keep)).max(NAME_MIN);
     let mut x = name_x + name_w + GAP + dev_w + GAP;
     let room = width.saturating_sub(x) + GAP;
     let first = match app.col.checked_sub(2) {
@@ -1735,10 +1732,9 @@ fn layout(width: u16, app: &App) -> Layout {
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
         let part = if started { sep(k) == 1 } else { k > 0 };
         x += u16::from(part);
-        // The first shown column is cut to the room left rather than dropped: it may be the
-        // one under the cursor, wider than all the room right of Dev. Via and Notes only: a
-        // number cut short reads as another number.
-        let w = if started || k < COLS.len() { w } else { w.min(width.saturating_sub(x)) };
+        // Via and Notes are cut to the room left rather than dropped, so none of it is blank.
+        // Not a number: cut short it reads as another number.
+        let w = if k < COLS.len() { w } else { w.min(width.saturating_sub(x)) };
         started = true;
         if w == 0 || x + w > width {
             more = true;
@@ -1795,7 +1791,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
     if first > 0 && dev_x + dev_w < area.right() {
         // Columns scrolled off to the left.
-        buf.set_stringn(dev_x + dev_w, y, "‹", 1, fg(ACCENT).add_modifier(BOLD));
+        buf.set_stringn(dev_x + dev_w, y, "‹", 1, MORE);
     }
     for &(i, x, w) in &cols {
         let text = format!("{}{}{}", arrow(i + 2), col_head(app, i + 2), if app.menu(i + 2) { " ▾" } else { "" });
@@ -2101,13 +2097,10 @@ fn cursor(on: bool, spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
 }
 
 /// `▲` and `▼` on the left border column `x`, at the first and last content row, for rows
-/// scrolled off above or below. Every scrolling list uses these, as `‹` `›` mark columns. On a
-/// marked row's solid fill, which runs through the border, the accent would not read, so the
-/// mark is black as the rest of that row.
+/// scrolled off above or below. Every scrolling list uses these, as `‹` `›` mark columns.
 fn vmarks(buf: &mut Buffer, x: u16, top: u16, bottom: u16, above: bool, below: bool) {
     let mut put = |y: u16, glyph: &str| {
-        let solid = buf.cell((x, y)).is_some_and(|c| c.fg == Color::Black);
-        buf.set_stringn(x, y, glyph, 1, fg(if solid { Color::Black } else { ACCENT }).add_modifier(BOLD));
+        buf.set_stringn(x, y, glyph, 1, MORE);
     };
     if above {
         put(top, "▲");
@@ -3052,7 +3045,7 @@ fn compare(
     }
     let top = out.len();
     // The model row carries `‹` and `›` for models scrolled off, as the table's header does.
-    let edge = fg(ACCENT).add_modifier(BOLD);
+    let edge = MORE;
     let (mut width, mut section) = (0usize, "");
     for (k, r) in rows.into_iter().enumerate() {
         // A rule naming each topic above its first shown row, as wide as the model row.
@@ -3999,9 +3992,10 @@ mod tests {
                 let y = rows.iter().position(|l| l.contains(on)).unwrap();
                 wide[(rows[y][..rows[y].find(pat).unwrap()].chars().count() as u16, y as u16)].fg
             };
-            for pat in ["Price", "ECI", "AAII", "Coding", "Value", src.label()] {
+            for pat in ["Price", "ECI", "AAII", "Coding", "Value"] {
                 assert_eq!(cell(pat), ACCENT, "{pat}");
             }
+            assert_eq!(cell(src.label()), MUTED, "the source is the border's grey, as models.dev beside it");
         }
         data::set_source(data::Source::Epoch);
         data::set_lent(false);
@@ -4063,6 +4057,22 @@ mod tests {
     }
 
     #[test]
+    fn a_long_name_leaves_room_for_a_column() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        data.models.push(model(&"n".repeat(47), "openai", Some(100.0), 0.5));
+        a.set_data(data);
+        assert_eq!(layout(200, &a).name_w, 47, "whole where there is room");
+        for col in 2..NCOLS {
+            a.col = col;
+            for w in 60..200 {
+                let l = layout(w, &a);
+                assert!(l.cols.len() + usize::from(l.via.is_some()) + usize::from(l.notes.is_some()) > 0, "{col} {w}");
+            }
+        }
+    }
+
+    #[test]
     fn narrow_table_drops_columns_and_hints_without_panicking() {
         let mut a = app();
         let (_, lines) = render(&mut a, 46, 4);
@@ -4072,14 +4082,14 @@ mod tests {
         assert_eq!(layout(400, &a).first, 0, "a window made wide again shows the columns scrolled off on the left");
         for w in 46..400 {
             let l = layout(w, &a);
-            assert!(l.name_w == NAME_MIN || !l.more, "names are cut only so every column fits: {w}");
+            assert_eq!(l.name_w, layout(400, &a).name_w, "names are whole at any width: {w}");
         }
         let l = layout(400, &a);
         assert_eq!(l.cols[0].1, l.name_x + l.name_w + GAP + l.dev_w + GAP, "Released a gap after Dev, as in a group");
         // Rows above or below the window are reported for the frame's ▲ ▼.
         for w in 46..400 {
             let l = layout(w, &a);
-            assert!(l.name_w == NAME_MIN || !l.more, "names are cut only so every column fits: {w}");
+            assert_eq!(l.name_w, layout(400, &a).name_w, "names are whole at any width: {w}");
         }
         let l = layout(400, &a);
         assert_eq!(l.cols[0].1, l.name_x + l.name_w + GAP + l.dev_w + GAP, "Released a gap after Dev, as in a group");
@@ -4394,8 +4404,8 @@ mod tests {
         let buf = term.backend().buffer();
         let text: String = (0..9).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(text.contains(&format!(" of {} ", THEMES.len())), "the hint is not one of the themes counted: {text}");
-        let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.bg == CURSOR);
-        assert_eq!(below.map(|c| c.fg), Some(ACCENT), "themes below the cursor");
+        let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.bg == Color::Yellow);
+        assert_eq!(below.map(|c| c.fg), Some(Color::Black), "themes below the cursor");
         let tabs: String = (0..2).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(tabs.contains("yours") && !tabs.contains('╮'), "a list too tall leaves the tabs in view: {tabs}");
         for _ in 9..THEMES.len() {
@@ -4541,12 +4551,12 @@ mod tests {
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         assert_eq!([edge(&term, 0, 5), edge(&term, 0, 7)], ["▲", "▌"]);
-        assert_eq!(term.backend().buffer()[(0, 5)].fg, ACCENT);
-        // On a marked row's fill the ▲ is black as the row, where the accent would not read.
+        assert_eq!(term.backend().buffer()[(0, 5)].bg, Color::Yellow);
+        // On a marked row's fill the ▲ keeps its own.
         a.store.marked = a.data.models.iter().map(|m| m.key.clone()).collect();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let top = &term.backend().buffer()[(0, 5)];
-        assert_eq!((top.symbol(), top.fg, top.bg), ("▲", Color::Black, MARK));
+        assert_eq!((top.symbol(), top.fg, top.bg), ("▲", Color::Black, Color::Yellow));
         a.store.marked.clear();
         // A tall overlay stops above the status bar, which shows its keys.
         a.key(KeyCode::Char('?').into());
