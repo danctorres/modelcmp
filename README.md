@@ -22,14 +22,13 @@ Frontier models can cost ten times as much as smaller ones, and many tasks do no
 runs, reasoning, ...), recommends the best model at each price. It reads the harnesses you have
 installed, shows which one has each model, and starts it on the model you pick.
 
-- **You** get a TUI to filter, sort and compare models, and see its recommendations for each task.
-  You can set your favorite for a task, exclude models you cannot use, write notes, start a
+- **You** get a TUI to filter, sort, compare and see recommended models for each task.
+  You can set your favorite model for a task, exclude models you cannot use, write notes, start a
   harness or download and run a local model.
-- **Your agent** gets a CLI that gives it your favorite for the task, or the recommended model
-  for each of four tiers, free to best. In a multi-agent setup, an orchestrator in one
-  harness (e.g. `Opus 5.5` in `Claude Code`) can find a cheaper model in another (e.g.
-  `DeepSeek V4 Pro` in `pi`), or a local one (e.g. `Qwen3.8 Flash Next` in `llama.cpp`), and
-  hand it a subtask.
+- **Your agent** gets a CLI to find the favorite or recommended model for a task,
+  for each price tier. In a multi-agent setup, the CLI allows an orchestrator in one
+  harness (e.g. `Opus 5.5` in `Claude Code`) to find and hand a subtask to a cheaper model in another harness (e.g.
+  `DeepSeek V4 Pro` in `pi`), or even to local one (e.g. `Qwen3.8 Flash Next` in `llama.cpp`).
 
 ![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
 
@@ -45,9 +44,6 @@ It works with:
 - **Harnesses not tested yet:** `Gemini CLI`
 - **Local runners:** `ollama`, `llama.cpp`
 
-By default it lists only the models you can already use through them. To see every model,
-press `a` in the TUI or pass `--all` to `modelcmp list`.
-
 ## Install
 
 ```sh
@@ -56,9 +52,10 @@ brew install danctorres/tap/modelcmp
 cargo install --locked --git https://github.com/danctorres/modelcmp
 ```
 
-It runs on Linux and macOS, and the
-[releases](https://github.com/danctorres/modelcmp/releases) page has binaries. To
-build from source, with Rust 1.89 or later:
+Linux and macOS are supported.
+The binaries are provided on the [releases](https://github.com/danctorres/modelcmp/releases) page.
+
+Building from source requires Rust 1.89 or later:
 
 ```sh
 git clone https://github.com/danctorres/modelcmp
@@ -71,7 +68,7 @@ The TUI says when a newer version is out, and `UU` upgrades to it.
 ## Usage
 
 ```sh
-modelcmp                                   # the TUI
+modelcmp                                   # start the TUI
 modelcmp recommend                         # best model per price for each task
 modelcmp list --task coding                # best model per price for coding, cheapest first
 modelcmp compare sonnet-5 gpt-5            # side by side, with a verdict
@@ -91,7 +88,7 @@ keys and `qq` quits.
 <p align="center"><i>The model recommended for each task and tier.</i></p>
 
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
-and `mid` the best up to $2 and up to $5 per 1M tokens, and `high` the best one. A favorite you set
+the best up to $2 and `mid` up to $5 per 1M tokens, and `high` the best one. A favorite you set
 beats that pick.
 
 To get a local model, press `a` in the TUI to list every model, then `x` on one and pick its
@@ -102,20 +99,14 @@ To get a local model, press `a` in the TUI to list every model, then `x` on one 
 ```sh
 npx skills add danctorres/modelcmp -g                        # install the skill for your agent
 modelcmp pick                                                # what the skill runs: every task and tier, with the command to run
-opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)   # or start a harness on a pick yourself
 ```
 
 The [skill](skills/modelcmp/SKILL.md) makes your agent run `modelcmp pick` before it names a
-model for a subtask. It works in `Claude Code`, `opencode`, `Codex` and any other agent the
-[skills CLI](https://skills.sh) supports, and `npx skills update` updates it. For an agent
-without skills, paste the skill's text into `AGENTS.md`.
+model for a subtask.
 
 ![An agent using the modelcmp skill to pick a free model for the unit tests and the best one for a race condition](https://github.com/user-attachments/assets/d2c5349e-0cc6-475c-b978-9897ca203bdf)
 
 <p align="center"><i>An agent uses the modelcmp skill to pick a free model for the unit tests and the best one for a race condition.</i></p>
-
-For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list --id` or
-`--cmd` prints only the model's id or the command that starts it.
 
 ## Data
 
@@ -128,20 +119,16 @@ For scripts, `list`, `show`, `compare` and `recommend` take `--json`, and `list 
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models rank in real agent sessions,
   the Arena column, and it needs no API key.
 
-The TUI asks for the Artificial Analysis key on its first start, which `esc` skips. With a key
-that works the benchmarks are Artificial Analysis's, else Epoch AI's.
-With both, one table shows the columns of each, and `|` picks the ones to show.
+When the TUI is first started, it prompts the user for an Artificial Analysis API key.
+If a key is provided, the recommended models are based on Artificial Analysis benchmarks, else Epoch AI is used.
+Artificial Analysis provides more information (including performance metrics) and covers more models than Epoch AI.
 Data is cached for 24 hours.
-
-Benchmarks are proxies: a score says how a model did on that test, not how it will do in your
-harness.
 
 ## More
 
 - [KEYS.md](KEYS.md): every key and mouse action in the TUI.
-- [REFERENCE.md](REFERENCE.md): the columns, how each score is obtained, every command,
-  favorites and tasks of your own, local models, and the JSON for scripts.
-- `modelcmp --help`: every flag.
+- [REFERENCE.md](REFERENCE.md): detailed information about the TUI and CLI.
+- `modelcmp --help`: available options.
 
 ## License
 
