@@ -46,7 +46,8 @@ pub const ARENA_MORE: [(&str, &str); 5] = [
 ];
 /// The leaderboard itself, which `o` and a click on a model's Arena score open (`arena_page`).
 const ARENA_PAGE: &str = "https://arena.ai/leaderboard/agent";
-/// modelcmp's newest release, fetched with the data so a new version is told once a day at most.
+/// modelcmp's newest release, fetched with the data, and alone by a start of the TUI that
+/// fetches none (`newest_release`), so a new version is told at the next start.
 const RELEASE_URL: &str = "https://api.github.com/repos/danctorres/modelcmp/releases/latest";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// How old a cache without Arena's scores may be when their download did not come
@@ -1015,8 +1016,15 @@ impl Data {
 
     /// The newest release when it is newer than this build.
     pub fn update(&self) -> Option<&str> {
-        let v = |s: &str| s.split('.').map(|n| n.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
-        (v(&self.latest) > v(env!("CARGO_PKG_VERSION"))).then_some(self.latest.as_str())
+        (version(&self.latest) > version(env!("CARGO_PKG_VERSION"))).then_some(self.latest.as_str())
+    }
+
+    /// Keeps `known` as the newest release where it is the newer: a cache's is as old as its
+    /// refresh.
+    pub fn keep_latest(&mut self, known: &str) {
+        if version(known) > version(&self.latest) {
+            self.latest = known.into();
+        }
     }
 
     /// Gives each row of `src`'s data what only the other source measures, and its index, from
@@ -1037,6 +1045,12 @@ impl Data {
             }
             m.other_scores = l.map(|l| l.scores).unwrap_or_default();
         }
+    }
+
+    /// Whether it was fetched on another day than today, by the local clock. The TUI's first
+    /// start of a day refreshes behind the table, where a command would wait for the download.
+    pub fn of_another_day(&self) -> bool {
+        local_day(self.fetched) != local_day(now())
     }
 
     pub fn stale(&self) -> bool {
@@ -1139,6 +1153,26 @@ impl Data {
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The day `secs` since 1970 falls in by the local clock, as its year and its day of the year.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn local_day(secs: u64) -> (i32, i32) {
+    let t = libc::time_t::try_from(secs).unwrap_or(0);
+    // SAFETY: a `tm` of zeroes is a valid one, and `localtime_r` keeps neither pointer.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    (tm.tm_year, tm.tm_yday)
+}
+
+// ponytail: UTC's day where there is no `localtime_r`; ask Windows for its zone if it matters.
+#[cfg(not(unix))]
+fn local_day(secs: u64) -> (i32, i32) {
+    (0, (secs / 86400) as i32)
 }
 
 /// One per source, so a switch back needs no download: data.json for Epoch, data-aa.json.
@@ -1572,11 +1606,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let unnamed = (!hf_listed(&mut data.models, &openrouter))
         .then(|| "openrouter.ai did not list its models: links to huggingface.co may be missing".to_string());
     // Only the update notice hangs on it, so without it the refresh still succeeds.
-    data.latest = release
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
-        .unwrap_or_default();
+    data.latest = release.ok().and_then(|b| release_tag(&b)).unwrap_or_default();
     let mut listed: BTreeMap<_, _> = answers.try_iter().collect();
     let awaited: Vec<_> = asked.iter().map(|h| h.0).filter(|h| !listed.contains_key(*h)).collect();
     // Built only for who shows it: a command waits for the whole of it anyway.
@@ -1862,6 +1892,22 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
 /// What every download goes through, given up at `limit`.
 fn agent(limit: Duration) -> ureq::Agent {
     ureq::Agent::config_builder().timeout_global(Some(limit)).build().into()
+}
+
+/// "0.10.1" as its numbers, which compare as versions do.
+fn version(s: &str) -> Vec<u64> {
+    s.split('.').map(|n| n.parse().unwrap_or(0)).collect()
+}
+
+/// The version GitHub's answer names as the newest release, "0.2.0".
+fn release_tag(body: &[u8]) -> Option<String> {
+    let release = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    Some(release["tag_name"].as_str()?.trim_start_matches('v').to_string())
+}
+
+/// modelcmp's newest release, asked for alone: `None` when GitHub does not say.
+pub fn newest_release() -> Option<String> {
+    release_tag(&fetch_within(RELEASE_URL, None, Duration::from_secs(10)).ok()?)
 }
 
 /// `url`'s body; `key` goes in Artificial Analysis's `x-api-key` header.
@@ -3577,6 +3623,8 @@ mod tests {
             ..Default::default()
         };
         assert!(aged(120, true).stale() && !aged(10, true).stale() && !aged(120, false).stale());
+        // Not stale yet, yesterday's is still refreshed by the TUI's first start of today.
+        assert!(aged(48 * 60, false).of_another_day() && !aged(0, false).of_another_day());
     }
 
     #[test]
@@ -4796,6 +4844,18 @@ mod tests {
         assert_eq!(ep.cost["foo2sep2025"].1, Some(4.0), "the cost of its best run, the cheaper of two that tie");
         assert_eq!(ep.cost["foo2sep2025"].2, Some(4000.0), "and that run's output tokens");
         assert_eq!(ep.cost["bar3sep2025"].1, None, "its best run lists no cost: not a lower run's");
+    }
+
+    #[test]
+    fn release_tag_is_the_version_without_its_v() {
+        assert_eq!(release_tag(br#"{"tag_name": "v0.2.0"}"#).as_deref(), Some("0.2.0"));
+        assert_eq!(release_tag(br#"{"message": "API rate limit exceeded"}"#), None);
+        // What a start learnt outlives a switch to a cache that is older.
+        let mut d = Data { latest: "0.9.0".into(), ..Default::default() };
+        d.keep_latest("0.10.0");
+        d.keep_latest("");
+        d.keep_latest("0.2.0");
+        assert_eq!(d.latest, "0.10.0");
     }
 
     #[test]

@@ -81,8 +81,8 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
         app.input = Input::key(false, false);
         // The key is not answered yet: the default's download starts under the intro, for a skipped
         // key to take up, unless the CLI has left a cache that will do.
-        pre = (force || data::load_cache().is_none_or(|d| d.stale())).then(spawn_refresh);
-    } else if (force || app.data.stale()) && app.refresh().is_some() {
+        pre = (force || data::load_cache().is_none_or(|d| d.stale() || d.of_another_day())).then(spawn_refresh);
+    } else if (force || app.data.stale() || app.data.of_another_day()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
     // After the refresh starts, which clears the status: it is your marks and notes that are at
@@ -450,6 +450,13 @@ fn event_loop(
             let _ = tx.send((key, answer));
         });
     };
+    // The newest release, asked for by a start that refreshes nothing: a refresh asks for it too,
+    // but only once a day.
+    let mut newest = (rx.is_none() && pre.is_none()).then(|| {
+        let (tx, newest) = mpsc::channel();
+        std::thread::spawn(move || data::newest_release().map(|v| tx.send(v)));
+        newest
+    });
     // The last press on a cell, which a second one makes a double click (`double`), and the
     // screen row of the last press on a table row, which a drag extends from (`dragged`).
     let (mut click, mut press) = (None, None);
@@ -475,6 +482,13 @@ fn event_loop(
             }
             None => {}
         }
+        match newest.as_ref().map(Receiver::try_recv) {
+            Some(Ok(v)) => {
+                (app.data.latest, newest, dirty) = (v, None, true);
+            }
+            Some(Err(TryRecvError::Disconnected)) => newest = None,
+            _ => {}
+        }
         // One write for the answers that came together, not one each.
         let mut sized = false;
         while let Ok((key, answer)) = size_rx.try_recv() {
@@ -499,19 +513,19 @@ fn event_loop(
         if dirty {
             paint(terminal, app)?;
         }
-        // Block on input; wake every 200ms while a refresh is in flight, else once a minute to
-        // repaint the data age in the frame.
+        // Block on input; wake every 200ms while a refresh or the newest release is awaited, else
+        // once a minute to repaint the data age in the frame.
         // A size awaited is looked for often, as `x`'s list is open for it, and the ones still to
         // ask for, of the local rows on screen, are asked once the cursor has rested, not for
         // each row it passes.
         let rest = app.size_wanted();
-        let timeout = match (sizing > 0, rest, rx.is_some()) {
+        let timeout = match (sizing > 0, rest, rx.is_some() || newest.is_some()) {
             (true, ..) => Duration::from_millis(30),
             (_, true, _) => Duration::from_millis(150),
             (.., true) => Duration::from_millis(200),
             _ => Duration::from_secs(60),
         };
-        dirty = rx.is_none() && sizing == 0 && !rest;
+        dirty = rx.is_none() && newest.is_none() && sizing == 0 && !rest;
         let fire = rest && sizing == 0;
         // Handle every queued event before the next draw, so a held key never falls behind.
         let mut wait = timeout;

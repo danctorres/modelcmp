@@ -415,11 +415,11 @@ the TUI, `x` on a model and `download and run` does the same, with each runner y
 ## Files
 
 The data is downloaded on first run, which a command says on stderr as it can take half a minute, and cached for 24 hours under `~/.cache/modelcmp/` on Linux
-(`~/Library/Caches/modelcmp/` on macOS). A download that fails is asked for up to three times, unless the
+(`~/Library/Caches/modelcmp/` on macOS). The TUI's first start of a day refreshes it too, behind the table. A download that fails is asked for up to three times, unless the
 site says the request itself is wrong. Your selection, favorites, exclusions, notes and settings live in
 `~/.config/modelcmp/user.json` (`~/Library/Application Support/modelcmp/` on macOS), and the `?`
-help shows the path. Each refresh also
-asks GitHub for the latest release, to say when a new version is out, and `UU` in the TUI
+help shows the path. Each refresh and each start
+of the TUI also asks GitHub for the latest release, to say when a new version is out, and `UU` in the TUI
 upgrades to it.
 
 Both are safe to delete: the cache is downloaded again on the next run, and removing `user.json`

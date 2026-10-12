@@ -2043,7 +2043,10 @@ impl App {
     /// table is empty rather than showing the other source's scores under this one's name.
     pub fn switched(&mut self, cached: Option<Data>) -> bool {
         let fetch = std::mem::take(&mut self.unchecked) || cached.as_ref().is_none_or(Data::stale);
-        self.set_data(cached.unwrap_or_default());
+        let mut cached = cached.unwrap_or_default();
+        // A start may have learnt of a newer release than the cache's refresh did.
+        cached.keep_latest(&self.data.latest);
+        self.set_data(cached);
         (self.refreshing, self.refresh_failed) = (fetch, false);
         fetch
     }
