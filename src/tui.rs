@@ -3812,9 +3812,11 @@ mod tests {
         a.col = ECI + 3;
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 7 && lines[5].contains("d dropdown"), "{lines:?}");
+        assert!(a.col_about(a.col).ends_with("blank = not tested, d for other benchmarks"), "what its dropdown is for");
         a.task = fit::task("agentic");
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 4 && !lines[5].contains("d dropdown"), "{lines:?}");
+        assert!(a.col_about(a.col).ends_with("blank = not tested"), "no dropdown, no hint");
     }
 
     #[test]

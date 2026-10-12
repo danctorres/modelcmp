@@ -426,9 +426,12 @@ pub fn base_col_about(col: usize) -> String {
     }
 }
 
-/// `about` after the source in use, whose scores it tells of.
+/// Why a task column's cell is empty, in its description.
+const UNTESTED: &str = "blank = not tested";
+
+/// `about` after the source in use, whose scores it tells of, and what an empty cell means.
 fn of_source(about: &str) -> String {
-    format!("{}, {about}", crate::data::source().label())
+    format!("{}, {about}, {UNTESTED}", crate::data::source().label())
 }
 
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
@@ -1381,13 +1384,17 @@ impl App {
 
     /// What the column at cursor index `col` means.
     pub fn col_about(&self, col: usize) -> String {
-        match self.col_bench(col) {
+        let about = match self.col_bench(col) {
             Some(b) if arena_bench(b) => {
                 "net improvement on this signal alone in real agent sessions, %, measured by arena.ai".into()
             }
-            Some(b) => format!("{}, score on this benchmark alone, 0-100", crate::fit::bench_source(b).label()),
+            Some(b) => {
+                format!("{}, score on this benchmark alone, 0-100, {UNTESTED}", crate::fit::bench_source(b).label())
+            }
             None => base_col_about(col),
-        }
+        };
+        // The ▾ says there is a dropdown, not that a task's swaps the benchmark.
+        if TASK_COLS.contains(&col) && self.menu(col) { format!("{about}, d for other benchmarks") } else { about }
     }
 
     /// Recompute everything that depends on `data::cached()`: Value and the column values.
@@ -4811,13 +4818,13 @@ mod tests {
         assert!(COLS[ECI - TEXT..].iter().all(sourced));
         assert_eq!(of(ARENA), None, "neither source's");
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
-        assert_eq!(about("coding"), "Epoch AI, WeirdML score (0-100)");
-        assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100)");
+        assert_eq!(about("coding"), "Epoch AI, WeirdML score (0-100), blank = not tested");
+        assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100), blank = not tested");
         assert_eq!(about("value"), "Coding score per dollar of Price, ranked 0-100", "no benchmarks of its own");
         crate::data::set_source(Source::Aa);
         assert_eq!(
             about("agentic"),
-            "Artificial Analysis, Terminal-Bench 4.0 score (0-100)",
+            "Artificial Analysis, Terminal-Bench 4.0 score (0-100), blank = not tested",
             "the one benchmark it is"
         );
     }
