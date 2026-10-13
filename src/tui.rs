@@ -74,6 +74,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // the intro and the table (`--refresh` too), so nothing waits for it and a failure shows in
     // the frame.
     let mut app = App::new((!ask).then(data::load_cache).flatten().unwrap_or_default(), store);
+    app.dir = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
     app.term_bg = term_bg;
     let (mut rx, mut pre) = (None, None);
     if ask {
@@ -624,17 +625,8 @@ fn event_loop(
                         data::clear_gone(&mut gone);
                         rx = Some(spawn_refresh());
                     }
-                    Some(Effect::Launch(cmd)) => {
-                        let line = cmd.join(" ");
-                        app.report(match new_terminal(&cmd) {
-                            Ok(()) => Ok(format!("opened {line} in a new terminal")),
-                            Err(e) => {
-                                let hint =
-                                    if e.kind() == std::io::ErrorKind::NotFound { "; set $TERMINAL" } else { "" };
-                                Err(format!("could not open a terminal for {line}: {e}{hint}"))
-                            }
-                        });
-                    }
+                    Some(Effect::Launch(cmd)) => launch(app, &cmd, None),
+                    Some(Effect::LaunchIn(dir, cmd)) => launch(app, &cmd, Some(&dir)),
                     // Off the loop: the list is open and takes the size when it comes.
                     Some(Effect::Size(key, base)) => {
                         sizing += 1;
@@ -939,21 +931,35 @@ fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Mouse {
     if again { m } else { single }
 }
 
-/// Start `cmd` in a new terminal window here, without waiting: Windows Terminal under WSL,
-/// else `$TERMINAL -e`, else x-terminal-emulator.
-fn new_terminal(cmd: &[String]) -> std::io::Result<()> {
+/// Open `cmd` in a new terminal, in `dir` when one was written, and say how it went.
+fn launch(app: &mut App, cmd: &[String], dir: Option<&str>) {
+    let line = cmd.join(" ");
+    let at = dir.map(|d| format!(", in {d}")).unwrap_or_default();
+    app.report(match new_terminal(cmd, dir) {
+        Ok(()) => Ok(format!("opened {line} in a new terminal{at}")),
+        Err(e) => {
+            let hint = if e.kind() == std::io::ErrorKind::NotFound { "; set $TERMINAL" } else { "" };
+            Err(format!("could not open a terminal for {line}: {e}{hint}"))
+        }
+    });
+}
+
+/// Start `cmd` in a new terminal window in `dir`, else here, without waiting: Windows Terminal
+/// under WSL, else `$TERMINAL -e`, else x-terminal-emulator.
+fn new_terminal(cmd: &[String], dir: Option<&str>) -> std::io::Result<()> {
     // Windows Terminal splits its command line on `;` wherever it stands, and the ids come from
     // downloaded data: one holding a `;` would start a second command there. No real id has one.
-    if cmd.iter().any(|a| a.contains(';')) {
+    // A folder is refused where it is written (`App::edit_key`), and here once more under WSL.
+    if cmd.iter().any(|a| a.contains(';')) || dir.is_some_and(data::splits) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "a model id holding ';' is refused"));
     }
-    let mut term = if let Some(session) = data::wsl_session(cmd) {
+    let mut term = if let Some(session) = data::wsl_session(cmd, dir) {
         let mut c = Command::new("wt.exe");
         c.arg("new-tab").args(session);
         c
     } else {
         let mut c = Command::new(std::env::var("TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".into()));
-        c.arg("-e").args(cmd);
+        c.arg("-e").args(cmd).current_dir(dir.unwrap_or("."));
         c
     };
     let mut child = term.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
@@ -2510,6 +2516,7 @@ fn edit_prefix(e: &Edit) -> String {
         What::New => " + ".into(),
         What::Rename(_) => " ".into(),
         What::About(task) => format!(" {task}  "),
+        What::Dir(cmd, ..) => format!(" {} in ", cmd[0]),
     }
 }
 
@@ -2519,6 +2526,7 @@ fn edit_line(e: &Edit, color: Color, room: usize) -> Line<'static> {
     let prefix = edit_prefix(e);
     let empty = match e.what {
         What::About(_) => "what it is about",
+        What::Dir(..) => "a folder",
         What::New | What::Rename(_) => "its name",
     };
     let text = match e.text.is_empty() {
@@ -2632,13 +2640,18 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `f`'s grid has lines of its own, `fav_lines`.
-fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line<'static>> {
+fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let rows = choice_rows(items, query);
     let mut lines: Vec<Line> = rows
         .iter()
-        .map(|&k| {
+        .enumerate()
+        .map(|(n, &k)| {
             let (label, effect) = &items[k];
+            // A harness whose folder is being written, in the harness's colour.
+            if let Some(e) = list.edit.as_ref().filter(|_| n == list.sel) {
+                return edit_line(e, dev_color(label.split(' ').next().unwrap_or_default()), room);
+            }
             // What has a colour in the table keeps it here: a harness. A site, a theme and a
             // source have none, so they take the text's and not one their name gives.
             let color = match effect {
@@ -2682,9 +2695,63 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List) -> Vec<Line
         Kind::Via => " ↓ ↑ move · / search · enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · enter opens · esc close",
     };
-    lines.push(key_line(hint));
+    // A folder being written takes every key: what enter did not take says why, and tab what
+    // the folder could be. As wide as the hint it stands for.
+    let width = hint.chars().count();
+    // The folders tab found, as a shell lists them: on as many lines as they take, a few at
+    // most, the ones around the folder tab is on, which stands out.
+    if let Some(Edit { what: What::Dir(_, more, on), err: None, .. }) = &list.edit
+        && !more.is_empty()
+    {
+        const MOST: usize = 6;
+        // A name in the cells a line has, by what it takes on screen: a wide one takes two a letter.
+        let fit = |name: &str| {
+            let mut name = truncate(name, width - 1);
+            while Span::raw(&name).width() >= width {
+                name = truncate(&name, name.chars().count() - 1);
+            }
+            name
+        };
+        // Each line's folders, and the cells they take.
+        let mut rows: Vec<(Vec<usize>, usize)> = vec![];
+        for (i, name) in more.iter().enumerate() {
+            let w = Span::raw(fit(name)).width();
+            match rows.last_mut() {
+                Some((row, used)) if *used + 2 + w < width => {
+                    row.push(i);
+                    *used += 2 + w;
+                }
+                _ => rows.push((vec![i], 1 + w)),
+            }
+        }
+        let at = on.and_then(|i| rows.iter().position(|(row, _)| row.contains(&i))).unwrap_or(0);
+        let cut = rows.len() > MOST;
+        let shown = if cut { MOST - 1 } else { rows.len() };
+        let from = at.saturating_sub(shown - 1);
+        let rest = more.len() - rows[from..from + shown].iter().map(|(row, _)| row.len()).sum::<usize>();
+        for (row, used) in &rows[from..from + shown] {
+            let mut spans = vec![Span::raw(" ")];
+            for (k, &i) in row.iter().enumerate() {
+                let style = if *on == Some(i) { Style::new().add_modifier(BOLD) } else { fg(MUTED) };
+                spans.push(Span::raw(if k > 0 { "  " } else { "" }));
+                spans.push(Span::styled(fit(&more[i]), style));
+            }
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(*used))));
+            lines.push(Line::from(spans));
+        }
+        if cut {
+            lines.push(Line::from(format!("{:<width$}", format!(" … {rest} more"))).style(fg(MUTED)));
+        }
+        return lines;
+    }
+    lines.push(match &list.edit {
+        Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
+        Some(_) => key_line(&format!("{:<width$}", " tab complete · enter opens · esc back")),
+        None => key_line(hint),
+    });
     lines
 }
+
 /// The first line in view of a list `shown` lines tall with the cursor on `sel`: where it was,
 /// `top`, moved only as far as it takes to show the cursor, as the table scrolls.
 fn list_top(top: usize, sel: usize, shown: usize) -> usize {
@@ -2700,7 +2767,7 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
     let within = Rect { y: area.y + tabs, height: area.height - 1 - tabs, ..area };
     let lines = match kind {
         Kind::Fav => fav_lines(app, items, list, edit_room(within)),
-        _ => choice_lines(*kind, items, list),
+        _ => choice_lines(*kind, items, list, edit_room(within)),
     };
     Some((within, lines))
 }
@@ -4410,7 +4477,7 @@ mod tests {
     #[test]
     fn a_launch_refuses_an_id_windows_terminal_would_split() {
         let cmd = ["opencode", "--model", "p/x;new-tab"].map(String::from);
-        let e = new_terminal(&cmd).unwrap_err();
+        let e = new_terminal(&cmd, None).unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "refused before anything is spawned: {e}");
     }
 
@@ -4825,7 +4892,7 @@ mod tests {
     #[test]
     fn a_list_colours_what_the_table_does() {
         let fgs = |kind, label: &str, effect| {
-            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default());
+            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), 80);
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
         assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
@@ -4845,10 +4912,10 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"));
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &search("gr"));
+        let lines = choice_lines(Kind::Theme, &items, &search("gr"), 80);
         let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.

@@ -1218,21 +1218,66 @@ fn exec_line(cmd: &[String]) -> String {
     format!("exec {}", quoted.join(" "))
 }
 
-/// `cmd` as a new WSL session starts it, under WSL with `wsl.exe` on `PATH`: bare, so a login
+/// Whether Windows Terminal, which opens the new tab under WSL, would split its command line at
+/// `text`: it does on `;` wherever it stands.
+pub fn splits(text: &str) -> bool {
+    text.contains(';') && std::env::var_os("WSL_DISTRO_NAME").is_some()
+}
+
+/// `path` with a leading `~` as your home folder, as a shell reads it.
+pub fn expand(path: &str) -> PathBuf {
+    match (path.strip_prefix('~'), dirs::home_dir()) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ => path.into(),
+    }
+}
+
+/// `path` with its last part completed as a shell completes a folder: to the one folder that
+/// starts with it, a `/` after it, else as far as the ones that do agree, which come with it.
+/// A hidden folder is one only for a part starting with `.`.
+pub fn complete(path: &str) -> (String, Vec<String>) {
+    if path == "~" {
+        return ("~/".into(), vec![]);
+    }
+    let (parent, start) = path.split_at(path.rfind('/').map_or(0, |i| i + 1));
+    let dir = if parent.is_empty() { ".".into() } else { expand(parent) };
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        // By name first: asking what each entry is can be slow, as on a Windows drive under WSL.
+        .filter_map(|e| Some((e.file_name().into_string().ok()?, e)))
+        .filter(|(n, _)| n.starts_with(start) && (start.starts_with('.') || !n.starts_with('.')))
+        .filter(|(_, e)| e.path().is_dir())
+        .map(|(n, _)| n)
+        .collect();
+    names.sort();
+    let (Some(first), Some(last)) = (names.first(), names.last()) else { return (path.into(), names) };
+    // Sorted, so what the first and the last share they all do.
+    let same: usize = first.chars().zip(last.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a.len_utf8()).sum();
+    let slash = if names.len() == 1 { "/" } else { "" };
+    let done = format!("{parent}{}{slash}", &first[..same]);
+    (done, if names.len() > 1 { names } else { vec![] })
+}
+
+/// `cmd` as a new WSL session starts it in `dir`, else here, under WSL with `wsl.exe` on `PATH`: bare, so a login
 /// shell sets up PATH and keys as for a typed command. A harness is asked for its models the way
 /// it is launched, as a key exported by hand in this shell, which opencode would list a provider
 /// for, is not in the new tab.
-pub fn wsl_session(cmd: &[String]) -> Option<Vec<String>> {
+pub fn wsl_session(cmd: &[String], dir: Option<&str>) -> Option<Vec<String>> {
     let distro = std::env::var("WSL_DISTRO_NAME").ok().filter(|_| installed("wsl.exe"))?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
+    let cwd = match dir {
+        Some(d) => d.to_string(),
+        None => std::env::current_dir().ok()?.to_string_lossy().into_owned(),
+    };
     Some(["wsl.exe", "-d", &distro, "--cd", &cwd, "-e", &shell, "-lic", &exec_line(cmd)].map(String::from).to_vec())
 }
 
 /// What `bin` prints for `args`, asked in a new session under WSL (`wsl_session`), else here.
 fn listing(bin: &str, args: &[&str], stop: &AtomicBool) -> Option<String> {
     let cmd: Vec<String> = std::iter::once(bin).chain(args.iter().copied()).map(String::from).collect();
-    let argv = wsl_session(&cmd).unwrap_or(cmd);
+    let argv = wsl_session(&cmd, None).unwrap_or(cmd);
     let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
     run(&argv[0], &args, Duration::from_secs(30), stop)
 }
@@ -3543,6 +3588,22 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_completes_a_folder_as_a_shell_does() {
+        let dir = std::env::temp_dir().join(format!("modelcmp-complete-{}", std::process::id()));
+        for d in ["alpha", "alps", "beta", ".hid"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("bfile"), "").unwrap();
+        let at = |part: &str| format!("{}/{part}", dir.display());
+        assert_eq!(complete(&at("b")), (at("beta/"), vec![]), "the one folder, no file");
+        assert_eq!(complete(&at("a")), (at("alp"), vec!["alpha".to_string(), "alps".into()]), "as far as they agree");
+        assert_eq!(complete(&at("z")), (at("z"), vec![]), "none: as it was");
+        assert_eq!(complete(&at(".")).0, at(".hid/"), "a hidden one when asked for");
+        assert_eq!(complete(&at("")).1.len(), 3, "and not otherwise");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Arena's downloads are had when asked for after their time is up, and the others left out.
     #[test]

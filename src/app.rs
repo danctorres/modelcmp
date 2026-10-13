@@ -632,7 +632,7 @@ pub enum Kind {
     Fav,
     /// `o`: the site to open the model on.
     Open,
-    /// `x`: the harness to open on the model.
+    /// `x`: the harness to open on the model, then the folder to open it in, written on its entry.
     Launch,
     /// `v` in `f`'s grid: the harness a task's favorite runs on; picking one goes back to that list.
     Via,
@@ -663,8 +663,8 @@ pub struct List {
     pub col: usize,
 }
 
-/// An entry of `f`'s grid written where it is, the list staying open: a task of your own being
-/// named, renamed or described.
+/// An entry of a list written where it is, the list staying open: in `f`'s grid a task of your
+/// own being named, renamed or described, in `x`'s list the folder to open the harness in.
 #[derive(PartialEq, Debug)]
 pub struct Edit {
     pub what: What,
@@ -684,6 +684,9 @@ pub enum What {
     Rename(String),
     /// What this task is about.
     About(String),
+    /// The folder to open this command in, on a harness of `x`'s list, the folders tab could
+    /// not choose between, and the one of them tab is on, which the text ends with.
+    Dir(Vec<String>, Vec<String>, Option<usize>),
 }
 
 impl Edit {
@@ -816,9 +819,9 @@ fn step(i: usize, n: isize, len: usize) -> usize {
 }
 
 /// Readline-style editing of a prompt with the cursor at byte `cur`: ← → ^b ^f move by a
-/// character, alt-b alt-f ^← ^→ by a word, home end ^a ^e to the ends; backspace and delete drop a
-/// character, ^w and alt-d a word, ^u and ^k the line before / after the cursor. `accept` says
-/// which characters are typed. True when the key was one of these.
+/// character, alt-b alt-f ^← ^→ by a word, home end ^a ^e to the ends; backspace, delete and ^d
+/// drop a character, ^w, alt-backspace and alt-d a word, ^u and ^k the line before / after the
+/// cursor. `accept` says which characters are typed. True when the key was one of these.
 pub fn edit(
     text: &mut String,
     cur: &mut usize,
@@ -826,18 +829,30 @@ pub fn edit(
     mods: KeyModifiers,
     accept: impl Fn(char) -> bool,
 ) -> bool {
+    edit_by(text, cur, code, mods, accept, char::is_whitespace)
+}
+
+/// `edit` with words ending where `sep` says, not at a blank alone: a path's at `/`.
+fn edit_by(
+    text: &mut String,
+    cur: &mut usize,
+    code: KeyCode,
+    mods: KeyModifiers,
+    accept: impl Fn(char) -> bool,
+    sep: impl Fn(char) -> bool + Copy,
+) -> bool {
     let (ctrl, alt) = (mods.contains(KeyModifiers::CONTROL), mods.contains(KeyModifiers::ALT));
     let prev = text[..*cur].chars().next_back().map_or(0, |c| *cur - c.len_utf8());
     let next = text[*cur..].chars().next().map_or(*cur, |c| *cur + c.len_utf8());
     // Start of the word before the cursor, and end of the word after it.
     let word_start = {
-        let end = text[..*cur].trim_end().len();
-        text[..end].char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8())
+        let end = text[..*cur].trim_end_matches(sep).len();
+        text[..end].char_indices().rfind(|(_, c)| sep(*c)).map_or(0, |(i, c)| i + c.len_utf8())
     };
     let word_end = {
         let rest = &text[*cur..];
-        let start = rest.len() - rest.trim_start().len();
-        *cur + start + rest[start..].find(char::is_whitespace).unwrap_or(rest.len() - start)
+        let start = rest.len() - rest.trim_start_matches(sep).len();
+        *cur + start + rest[start..].find(sep).unwrap_or(rest.len() - start)
     };
     let to = match code {
         KeyCode::Left if ctrl || alt => word_start,
@@ -859,12 +874,17 @@ pub fn edit(
                 ('k', true) => (*cur, Some(*cur..text.len())),
                 ('w', true) => (word_start, Some(word_start..*cur)),
                 ('d', false) => (*cur, Some(*cur..word_end)),
+                ('d', true) => (*cur, Some(*cur..next)),
                 _ => return false,
             };
             if let Some(range) = cut {
                 text.replace_range(range, "");
             }
             to
+        }
+        KeyCode::Backspace if alt => {
+            text.replace_range(word_start..*cur, "");
+            word_start
         }
         KeyCode::Backspace => {
             text.replace_range(prev..*cur, "");
@@ -896,6 +916,8 @@ pub enum Effect {
     Refresh,
     /// Run this command in a new terminal window.
     Launch(Vec<String>),
+    /// Run it in this folder, the one written on the harness picked with `x`.
+    LaunchIn(String, Vec<String>),
     /// Ask Hugging Face the size of the download of the model `key`, whose repo there is the
     /// second; `App::sized` takes the answer.
     Size(String, String),
@@ -1125,6 +1147,8 @@ pub struct App {
     /// What is known of each model's download, by key (`Download`).
     downloads: std::collections::HashMap<String, Download>,
     tools: Tools,
+    /// The folder modelcmp runs in, where `x` offers to open a harness; the shell's to fill.
+    pub dir: String,
     /// Task whose price frontier the table shows, picked in the recommend overlay.
     pub task: Option<&'static Task>,
     /// Cursor in the recommend overlay: the task, and on its row 0 for its name, else the tier
@@ -1231,6 +1255,7 @@ impl App {
             via: vec![],
             downloads: Default::default(),
             tools: tools(),
+            dir: String::new(),
             task: None,
             task_cur: 0,
             task_sel: 0,
@@ -2379,16 +2404,75 @@ impl App {
         }
     }
 
-    /// Whether an entry of `f`'s grid is being written, when every key is its text's.
+    /// Whether an entry of a list is being written, when every key is its text's.
     fn editing(&self) -> bool {
         self.open_list().is_some_and(|l| l.edit.is_some())
     }
 
-    /// Keys while an entry of `f`'s grid is written in place.
+    /// Keys while an entry of `f`'s grid, or the folder on a harness of `x`'s list, is written in place.
     fn edit_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
         let Input::Choose { items, list, .. } = &mut self.input else { return None };
         match code {
             KeyCode::Esc => list.edit = None,
+            KeyCode::Enter if matches!(list.edit, Some(Edit { what: What::Dir(..), .. })) => {
+                let e = list.edit.as_mut()?;
+                // On a folder tab is on, enter takes it, as in a shell: the next one opens.
+                if let What::Dir(_, more, on @ Some(_)) = &mut e.what {
+                    (*on, _) = (None, more.clear());
+                    return None;
+                }
+                let What::Dir(cmd, ..) = &e.what else { return None };
+                // No path is this folder, the one the entry started from.
+                let text = if e.text.trim().is_empty() { self.dir.as_str() } else { e.text.as_str() };
+                let dir = std::fs::canonicalize(crate::data::expand(text)).ok().filter(|p| p.is_dir());
+                let Some(dir) = dir.map(|d| d.to_string_lossy().into_owned()) else {
+                    e.err = Some(format!("{text} is not a folder"));
+                    return None;
+                };
+                // Said here, the path still there to change, and not once the list is gone.
+                if crate::data::splits(&dir) {
+                    e.err = Some("Windows Terminal cannot open a folder with ; in its name".into());
+                    return None;
+                }
+                let launch = Effect::LaunchIn(dir, cmd.clone());
+                self.input = Input::None;
+                return Some(launch);
+            }
+            // As a shell: the folder's name as far as it goes, and the ones it could be.
+            // Tab is on the first of them at once and then goes through them, back tab the other
+            // way, past the last to the first.
+            KeyCode::Tab | KeyCode::BackTab => {
+                let e = list.edit.as_mut()?;
+                if let What::Dir(_, more, on) = &mut e.what {
+                    if more.is_empty() {
+                        (e.text, *more) = crate::data::complete(&e.text);
+                    }
+                    if !more.is_empty() {
+                        // What the folder's name stands after: the one tab was on goes, else the
+                        // part they all start with.
+                        let base = match *on {
+                            Some(i) => e.text.len() - more[i].len() - 1,
+                            None => e.text.rfind('/').map_or(0, |i| i + 1),
+                        };
+                        let (n, back) = (more.len(), code == KeyCode::BackTab);
+                        let next = match *on {
+                            Some(i) => (i + if back { n - 1 } else { 1 }) % n,
+                            None => {
+                                if back {
+                                    n - 1
+                                } else {
+                                    0
+                                }
+                            }
+                        };
+                        e.text.truncate(base);
+                        e.text.push_str(&more[next]);
+                        e.text.push('/');
+                        *on = Some(next);
+                    }
+                    (e.cur, e.err) = (e.text.len(), None);
+                }
+            }
             KeyCode::Enter => {
                 // The model the list is for, which its last entry holds.
                 let Some((_, Effect::NewTask(key))) = items.last() else { return None };
@@ -2398,6 +2482,13 @@ impl App {
             _ => {
                 let e = list.edit.as_mut()?;
                 e.err = None;
+                // A path's words end at `/`, so ^w cuts one folder and not the path, and what
+                // tab found was for the text as it was.
+                if let What::Dir(_, more, on) = &mut e.what {
+                    (*on, _) = (None, more.clear());
+                    edit_by(&mut e.text, &mut e.cur, code, mods, |_| true, |c| c == '/' || c.is_whitespace());
+                    return None;
+                }
                 // `:` sets a tier apart, so no name has one.
                 let about = matches!(e.what, What::About(_));
                 edit(&mut e.text, &mut e.cur, code, mods, |c| about || c != ':');
@@ -2439,6 +2530,8 @@ impl App {
                 self.relist(key, &box_slot(&name, col), None);
                 Some(Effect::Save)
             }
+            // Enter on a folder never gets here: `edit_key` opens the harness in it.
+            What::Dir(..) => None,
             What::About(task) => {
                 let was = self.store.about(&task).unwrap_or("").to_string();
                 self.store.set_about(&task, &e.text);
@@ -3619,6 +3712,15 @@ impl App {
                         }
                     }
                     KeyCode::Enter => {
+                        // A harness asks the folder to open it in, on its entry, starting
+                        // from this one; a download is no harness.
+                        if let Some((_, e @ Effect::Launch(cmd))) = items.get(at?)
+                            && !self.dir.is_empty()
+                            && got(e).is_none()
+                        {
+                            list.write(at?, Edit::new(What::Dir(cmd.clone(), vec![], None), self.dir.clone()));
+                            return None;
+                        }
                         let (_, effect) = items.swap_remove(at?);
                         self.input = Input::None;
                         match effect {
@@ -4601,6 +4703,68 @@ mod tests {
         press(&mut a, "G");
         assert_eq!(press(&mut a, "x"), None, "one harness: still listed, as o's one site");
         assert_eq!(code(&mut a, KeyCode::Enter), cmd("claude", "opus5"));
+        a.dir = std::env::temp_dir().to_string_lossy().into_owned();
+        press(&mut a, "x");
+        assert_eq!(code(&mut a, KeyCode::Enter), None, "the folder is asked on the harness, the list open");
+        let text = |a: &App| a.open_list().and_then(|l| l.edit.as_ref().map(|e| (e.text.clone(), e.err.is_some())));
+        assert_eq!(text(&a), Some((a.dir.clone(), false)), "starting from this one");
+        press(&mut a, "/no/such/");
+        a.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(text(&a).map(|t| t.0), Some(format!("{}/no/", a.dir)), "ctrl-w cuts one folder");
+        // The word keys stop at `/` too, and ^d and alt-backspace cut as in a shell.
+        let keys = |a: &mut App, keys: &[(KeyCode, KeyModifiers)]| {
+            for &(k, m) in keys {
+                a.key(KeyEvent::new(k, m));
+            }
+            a.open_list().and_then(|l| l.edit.as_ref().map(|e| e.text[a.dir.len()..].to_string()))
+        };
+        let (alt, ctrl) = (KeyModifiers::ALT, KeyModifiers::CONTROL);
+        assert_eq!(keys(&mut a, &[(KeyCode::Char('b'), alt), (KeyCode::Char('d'), ctrl)]).as_deref(), Some("/o/"));
+        assert_eq!(keys(&mut a, &[(KeyCode::Char('f'), alt), (KeyCode::Backspace, alt)]).as_deref(), Some("//"));
+        press(&mut a, "x");
+        assert_eq!(keys(&mut a, &[(KeyCode::Left, ctrl), (KeyCode::Char('d'), alt)]).as_deref(), Some("//"), "x cut");
+        press(&mut a, "no-such");
+        a.key(KeyEvent::new(KeyCode::Char('u'), ctrl));
+        a.key(KeyEvent::new(KeyCode::Char('k'), ctrl));
+        let here = std::fs::canonicalize(&a.dir).unwrap().to_string_lossy().into_owned();
+        assert!(
+            matches!(code(&mut a, KeyCode::Enter), Some(Effect::LaunchIn(d, _)) if d == here),
+            "no path is this folder"
+        );
+        press(&mut a, "x");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "/no-such");
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!(text(&a).map(|t| t.1), Some(true), "no folder: said, the text still there");
+        code(&mut a, KeyCode::Esc);
+        assert!(text(&a).is_none() && a.input != Input::None, "esc leaves the entry alone");
+        code(&mut a, KeyCode::Enter);
+        let there = std::fs::canonicalize(&a.dir).unwrap().to_string_lossy().into_owned();
+        let run = vec!["claude".into(), "--model".into(), "opus5".into()];
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::LaunchIn(there, run)));
+        // Tab goes as far as the folders agree, then through them, and back tab the other way.
+        let dir = std::env::temp_dir().join(format!("modelcmp-tab-{}", std::process::id()));
+        for d in ["aa", "ab"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        a.dir = dir.to_string_lossy().into_owned();
+        press(&mut a, "x");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "/");
+        let mut tab = |k| {
+            code(&mut a, k);
+            a.open_list().and_then(|l| Some(l.edit.as_ref()?.text.rsplit_once("/a")?.1.to_string()))
+        };
+        let got: Vec<_> = [KeyCode::Tab, KeyCode::Tab, KeyCode::Tab, KeyCode::Tab, KeyCode::BackTab]
+            .into_iter()
+            .map(|k| tab(k).unwrap_or_default())
+            .collect();
+        assert_eq!(got, ["a/", "b/", "a/", "b/", "a/"], "on the first at once");
+        assert_eq!(code(&mut a, KeyCode::Enter), None, "enter takes the folder tab is on");
+        assert!(a.open_list().is_some_and(|l| l.edit.is_some()), "and the next one opens");
+        assert!(matches!(code(&mut a, KeyCode::Enter), Some(Effect::LaunchIn(d, _)) if d.ends_with("/aa")));
+        std::fs::remove_dir_all(dir).unwrap();
+        a.dir.clear();
         press(&mut a, "a");
         let llama = a.rows.iter().position(|&r| a.data.models[r].key == "llama4").unwrap();
         a.select(llama);
