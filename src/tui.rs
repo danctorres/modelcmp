@@ -1025,13 +1025,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if (PRICE..ECI).contains(&app.col) || !cached {
                 view.push(if cached { "% no cache" } else { app.cache_hint });
             }
-            if !app.query.is_empty()
-                || !app.bounds.is_empty()
-                || !app.dev.is_empty()
-                || !app.via.is_empty()
-                || app.task.is_some()
-                || app.only.is_some()
-            {
+            if !app.query.is_empty() || app.filtered_too() || app.task.is_some() || app.only.is_some() {
                 view.push("c clear");
             }
             if app.any_marked() {
@@ -2069,6 +2063,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
     let bench = if let Input::Menu { col, .. } = &app.input { app.col_bench(*col) } else { None };
     let bench: Vec<String> = bench.into_iter().map(crate::app::bench_label).collect();
+    let not = if let Input::Menu { col, .. } = &app.input { app.left_out(*col) } else { vec![] };
     if let Input::Menu { col, items, list } = &mut app.input {
         let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
         let picked = match *col {
@@ -2077,7 +2072,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             PRICE => &level,
             _ => &bench,
         };
-        dropdown(buf, area, menu_x(area, &l, *col), *col, items, list, picked);
+        dropdown(buf, area, menu_x(area, &l, *col), *col, items, list, picked, &not);
     }
     (more, top > 0, top + height < app.rows.len())
 }
@@ -2115,7 +2110,8 @@ fn menu_box(area: Rect, x: u16, col: usize, items: &[(String, usize)], rows: usi
 /// The list under a header opened with `d`, each entry with how many models it would show,
 /// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
 /// listed; the width fits every entry so the box keeps still while typing. `picked` entries
-/// show `✓`, the rest `☐`.
+/// show `✓`, the ones left out (`not`) `✗`, the rest `☐`.
+#[allow(clippy::too_many_arguments)]
 fn dropdown(
     buf: &mut Buffer,
     area: Rect,
@@ -2124,6 +2120,7 @@ fn dropdown(
     items: &[(String, usize)],
     list: &mut List,
     picked: &[String],
+    not: &[String],
 ) {
     let (query, sel, top) = (list.query.as_str(), list.sel, &mut list.top);
     let rows = &menu_rows(items, query);
@@ -2158,9 +2155,10 @@ fn dropdown(
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
         // entry does not read as an empty box in the entry's colour; "any" is ticked while
         // nothing is picked, as it is then what applies.
-        let on = if i == 0 { picked.is_empty() } else { picked.contains(label) };
+        let on = if i == 0 { picked.is_empty() && not.is_empty() } else { picked.contains(label) };
         let (mark, style) = match i {
             _ if on => ("✓ ", fg(MARK).add_modifier(BOLD)),
+            _ if not.contains(label) => ("✗ ", fg(BAD).add_modifier(BOLD)),
             _ => ("☐ ", fg(color)),
         };
         let x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
@@ -2283,6 +2281,14 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     if !app.via.is_empty() {
         parts.push(part(format!("Via={}", app.via.join(",")), Color::Yellow));
     }
+    for col in [1, PRICE, VIA] {
+        let not = app.left_out(col).join(",");
+        if !not.is_empty() {
+            // Leaving out a level's "up to" is asking for more than it: `Price>$2`, but `Price≠free`.
+            let not = not.strip_prefix('≤').map_or(format!("≠{not}"), |above| format!(">{above}"));
+            parts.push(part(format!("{}{not}", crate::app::base_col_name(col)), Color::Yellow));
+        }
+    }
     for &(col, lo, hi) in &app.bounds {
         let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
         // The level label would repeat what the number says.
@@ -2398,6 +2404,9 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         };
         let toggles = matches!(app.input, Input::Menu { .. }) || app.choosing_favs() || app.choosing_cols();
         let hint = match (menu, typing) {
+            (true, false) if matches!(app.input, Input::Menu { col: 1 | PRICE | VIA, .. }) => {
+                "↓ ↑ move  / search  space enter toggle  e leave out  esc close"
+            }
             (true, false) => "↓ ↑ move  / search  space enter toggle  esc close",
             (true, true) if toggles => "↓ ↑ move  enter toggle  esc clear",
             (true, true) => "↓ ↑ move  enter pick  esc clear",
