@@ -9,8 +9,8 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
-    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, box_slot, choice_rows, group_starts, hidden,
-    menu_rows, on_price, shown,
+    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, box_slot, choice_rows, group_starts,
+    hidden, menu_rows, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -771,7 +771,11 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             let col = x.saturating_sub(fav_name_w(items) + 2) / BOX_W;
             return (col < BOXES).then_some(Mouse::Tick(row, col));
         }
-        return (k < len).then_some(Mouse::Item(k));
+        // The ✗ after the ✓, on an entry of Dev, Price or Via that has one, leaves it out.
+        let ex = (inner.x + 3..inner.x + 5).contains(&m.column)
+            && matches!(&app.input, Input::Menu { col: 1 | PRICE | VIA, items, list }
+                if menu_rows(items, &list.query).get(k).is_some_and(|&i| i != 0 && !VIA_KINDS.contains(&&*items[i].0)));
+        return (k < len).then_some(if ex { Mouse::Exclude(k) } else { Mouse::Item(k) });
     }
     // A click outside the open panel closes it, as one outside a list does, unless it is on a
     // hint or a tab.
@@ -2089,7 +2093,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             PRICE => &level,
             _ => &bench,
         };
-        dropdown(buf, area, menu_x(area, &l, *col), *col, items, list, picked, &not);
+        dropdown(buf, area, menu_x(area, &l, *col), *col, items, list, picked, &not, faint);
     }
     (more, top > 0, top + height < app.rows.len())
 }
@@ -2117,7 +2121,9 @@ fn menu_box(area: Rect, x: u16, col: usize, items: &[(String, usize)], rows: usi
     // keeps still while typing.
     let n = items.len();
     let foot = if n + 2 > area.height.saturating_sub(1) as usize { position(n, 0, n).len() + 2 } else { 0 };
-    let w = ((label_w + n_w + 8).max(foot) as u16).min(area.width);
+    // The ✗ box after the ✓ one, where an entry can be left out.
+    let ex = if matches!(col, 1 | PRICE | VIA) { 2 } else { 0 };
+    let w = ((label_w + n_w + 8 + ex).max(foot) as u16).min(area.width);
     if h < 3 {
         return None;
     }
@@ -2127,7 +2133,8 @@ fn menu_box(area: Rect, x: u16, col: usize, items: &[(String, usize)], rows: usi
 /// The list under a header opened with `d`, each entry with how many models it would show,
 /// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
 /// listed; the width fits every entry so the box keeps still while typing. `picked` entries
-/// show `✓`, the ones left out (`not`) `✗`, the rest `☐`.
+/// show `✓`, the rest the mark a table row has when off, grey (`faint`) or a shape of its own.
+/// Where one can be left out its `✗` follows, as on a table row: red for the ones left out (`not`).
 #[allow(clippy::too_many_arguments)]
 fn dropdown(
     buf: &mut Buffer,
@@ -2138,6 +2145,7 @@ fn dropdown(
     list: &mut List,
     picked: &[String],
     not: &[String],
+    faint: bool,
 ) {
     let (query, sel, top) = (list.query.as_str(), list.sel, &mut list.top);
     let rows = &menu_rows(items, query);
@@ -2173,12 +2181,18 @@ fn dropdown(
         // entry does not read as an empty box in the entry's colour; "any" is ticked while
         // nothing is picked, as it is then what applies.
         let on = if i == 0 { picked.is_empty() && not.is_empty() } else { picked.contains(label) };
-        let (mark, style) = match i {
-            _ if on => ("✓ ", fg(MARK).add_modifier(BOLD)),
-            _ if not.contains(label) => ("✗ ", fg(BAD).add_modifier(BOLD)),
-            _ => ("☐ ", fg(color)),
-        };
-        let x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
+        let (unmarked, included) = if faint { ("✓ ", "✗") } else { ("☐ ", "·") };
+        let (mark, style) = if on { ("✓ ", fg(MARK).add_modifier(BOLD)) } else { (unmarked, fg(MUTED)) };
+        let mut x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
+        if matches!(col, 1 | PRICE | VIA) {
+            let (s, style) = match i {
+                _ if not.contains(label) => ("✗", fg(BAD).add_modifier(BOLD)),
+                _ if i == 0 || VIA_KINDS.contains(&label.as_str()) => (" ", fg(MUTED)),
+                _ => (included, fg(MUTED)),
+            };
+            buf.set_stringn(x, y, s, 1, style);
+            x += 2;
+        }
         let at = x;
         let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, fg(color)).0;
         if let Some(t) = tag(col, label) {
@@ -3518,8 +3532,8 @@ mod tests {
         a.col = VIA;
         a.key(KeyCode::Char('d').into());
         let (_, lines) = render(&mut a, 200, 14);
-        assert!(lines.iter().any(|l| l.contains("☐ opencode oc ")), "{lines:#?}");
-        assert!(lines.iter().any(|l| l.contains("☐ pi  ")), "pi is pi: {lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("☐ · opencode oc ")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("☐ · pi  ")), "pi is pi: {lines:#?}");
     }
 
     fn render(app: &mut App, width: u16, height: u16) -> (Buffer, Vec<String>) {
@@ -3949,11 +3963,36 @@ mod tests {
         let (buf, lines) = render(&mut a, 170, 8);
         let dev = cell(&lines[0], "Dev") as usize - 2;
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
-        assert!(from(&lines[1]).starts_with("╭────────────────╮"), "{}", lines[1]);
-        assert_eq!(&words(&lines[2])[5..9], ["▌", "✓", "any", "2"], "any is ticked while nothing is picked");
-        assert_eq!(&words(&lines[3])[5..9], ["│", "☐", "anthropic", "1"]);
+        assert!(from(&lines[1]).starts_with("╭──────────────────╮"), "{}", lines[1]);
+        assert_eq!(&words(&lines[2])[5..10], ["▌", "✓", "any", "2", "▐"], "any is ticked, and has no ✗ box");
+        assert_eq!(cell(&lines[2], "any"), cell(&lines[3], "anthropic"), "the names line up all the same");
+        assert_eq!(&words(&lines[3])[5..10], ["│", "☐", "·", "anthropic", "1"]);
+        let ex = dev as u16 + 4;
+        assert_eq!((buf[(ex, 3)].symbol(), buf[(ex, 3)].fg), ("·", MUTED), "grey until left out");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: ex + 1,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        // On the screen the table is inside the frame, under the tabs.
+        let area = Rect::new(0, 0, 172, 12);
+        assert_eq!(hit(&a, area, click), Some(Mouse::Exclude(1)), "a click on the ✗ box leaves the entry out");
+        assert_eq!(hit(&a, area, MouseEvent { column: ex - 1, ..click }), Some(Mouse::Item(1)), "elsewhere picks it");
+        assert_eq!(hit(&a, area, MouseEvent { row: 5, ..click }), Some(Mouse::Item(0)), "any has no ✗: picked too");
+        a.mouse(Mouse::Exclude(1));
+        let (out, _) = render(&mut a, 170, 8);
+        assert_eq!((out[(ex, 3)].symbol(), out[(ex, 3)].fg), ("✗", BAD), "red when left out");
+        a.mouse(Mouse::Exclude(1));
         assert_eq!(buf[(dev as u16 + 2, 2)].bg, CURSOR, "any is under the cursor");
-        assert_eq!((buf[(dev as u16 + 2, 2)].fg, buf[(dev as u16 + 2, 3)].fg), (MARK, dev_color("anthropic")));
+        assert_eq!((buf[(dev as u16 + 2, 2)].fg, buf[(dev as u16 + 2, 3)].fg), (MARK, MUTED), "off, the mark is grey");
+        assert_eq!(buf[(dev as u16 + 6, 3)].fg, dev_color("anthropic"), "the name keeps its colour");
+        // Where grey shows, off is the mark's own glyph, as on a row of the table.
+        a.term_bg = Some(0);
+        let (grey, _) = render(&mut a, 170, 8);
+        assert_eq!([2, 4].map(|x| grey[(dev as u16 + x, 3)].symbol()), ["✓", "✗"]);
+        assert_eq!([2, 4].map(|x| grey[(dev as u16 + x, 3)].fg), [MUTED, MUTED]);
+        a.term_bg = None;
         assert_eq!(buf[(dev as u16, 2)].bg, CURSOR, "the cursor runs through the border");
         assert_ne!(buf[(dev as u16, 3)].bg, CURSOR);
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
@@ -3963,7 +4002,7 @@ mod tests {
             a.key(KeyCode::Char(c).into());
         }
         let (_, lines) = render(&mut a, 170, 8);
-        assert_eq!(&words(&lines[3])[5..9], ["▌", "☐", "anthropic", "1"], "only matches are listed");
+        assert_eq!(&words(&lines[3])[5..10], ["▌", "☐", "·", "anthropic", "1"], "only matches are listed");
         assert!(from(&lines[4]).starts_with("╰"), "{}", lines[4]);
         assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
     }

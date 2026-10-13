@@ -524,7 +524,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
 const LOCAL: &str = "local";
 const NOT_LOCAL: &str = "not local";
 const DOWNLOAD: &str = "↓ download";
-const VIA_KINDS: [&str; 3] = [LOCAL, NOT_LOCAL, DOWNLOAD];
+pub const VIA_KINDS: [&str; 3] = [LOCAL, NOT_LOCAL, DOWNLOAD];
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
@@ -959,7 +959,8 @@ pub enum Mouse {
     Box(usize),
     /// A click on row `n`'s ☆: pick the tasks it is the favorite for, as `f` does.
     Star(usize),
-    /// A click on row `n`'s ✗ box: exclude it or take the exclusion off, that row alone.
+    /// A click on row `n`'s ✗ box: exclude it or take the exclusion off, that row alone. On entry
+    /// `n` of the open dropdown's: leave it out or take it back, as `e` does.
     Exclude(usize),
     /// Double click on harness `j` of row `n`'s Via: open it on the model, as `x` and picking it does.
     Harness(usize, usize),
@@ -2933,6 +2934,20 @@ impl App {
                         list.col = col.min(BOXES - 1);
                     }
                     self.input_key(KeyCode::Enter, KeyModifiers::NONE)
+                }
+                // The search being typed stays, as a click on the entry leaves it.
+                Mouse::Exclude(n) => {
+                    let Input::Menu { items, list, .. } = &mut self.input else { return None };
+                    if n >= menu_rows(items, &list.query).len() {
+                        return None;
+                    }
+                    list.sel = n;
+                    let typing = std::mem::take(&mut list.typing);
+                    let effect = self.input_key(KeyCode::Char('e'), KeyModifiers::NONE);
+                    if let Input::Menu { list, .. } = &mut self.input {
+                        list.typing = typing;
+                    }
+                    effect
                 }
                 Mouse::Cols(_) => None,
                 // A click on another tab leaves the theme list for it, as `tab` does.
@@ -6550,6 +6565,17 @@ mod tests {
         assert_eq!(a.dev, ["anthropic", "openai"]);
         a.mouse(Mouse::Item(1));
         assert_eq!(a.dev, ["openai"]);
+        a.mouse(Mouse::Exclude(1));
+        assert_eq!((a.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["mini", "gpt55"]));
+        press(&mut a, "/a");
+        a.mouse(Mouse::Exclude(1));
+        assert!(
+            a.dev_not.is_empty() && a.open_list().is_some_and(|l| l.typing),
+            "its ✗ again takes it back, searching too"
+        );
+        code(&mut a, KeyCode::Esc);
+        a.mouse(Mouse::Exclude(0));
+        assert_eq!(a.status, "any cannot be left out");
         a.mouse(Mouse::Row(0));
         assert_eq!((a.input == Input::None, a.dev.as_slice()), (true, &["openai".to_string()][..]));
         a.mouse(Mouse::Menu(PRICE));
