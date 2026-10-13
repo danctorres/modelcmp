@@ -1035,7 +1035,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if app.only == Some(FAV) {
                 view.push("D unfavorite all");
             }
-            if app.only == Some(EXCLUDED) {
+            if app.only == Some(EXCLUDED) && !app.store.excluded.is_empty() {
                 view.push("X unexclude all");
             }
             if stale(app) {

@@ -1796,6 +1796,8 @@ impl App {
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
         // A selected model shows even out of reach, so it can be compared, and `S` `F` `E` show
         // theirs whatever `a`: the same models from mine as from all.
+        // `E` shows the ones a dropdown leaves out, so there they are not hidden.
+        let e = self.only == Some(EXCLUDED);
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
             (self.only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
                 && hits(
@@ -1807,16 +1809,16 @@ impl App {
                 && match self.only {
                     Some(MARKED) => self.store.is_marked(&m.key),
                     Some(FAV) => self.is_fav(&m.key),
-                    Some(EXCLUDED) => self.store.is_excluded(&m.key),
+                    Some(EXCLUDED) => self.in_excluded(i, m),
                     _ => true,
                 }
                 && (skip == 1
                     || (self.dev.is_empty() || m.devs().any(|d| self.dev.iter().any(|x| x == d)))
-                        && !m.devs().any(|d| self.dev_not.iter().any(|x| x == d)))
-                && (skip == PRICE || self.price_not.is_none_or(|l| self.val(i, PRICE).is_none_or(|v| v > LEVELS[l])))
+                        && (e || !self.dev_out(m)))
+                && (skip == PRICE || e || !self.price_out(i))
                 && (skip == VIA
                     || (self.via.is_empty() || self.via.iter().any(|h| self.via_labels(m).contains(&h.as_str())))
-                        && !self.only_via_not(m))
+                        && (e || !self.only_via_not(m)))
                 && self
                     .bounds
                     .iter()
@@ -1833,7 +1835,7 @@ impl App {
         // the last, F) for every model rather than an empty table.
         // One out of reach shows in them too, as `filtered` keeps it.
         let fav = self.data.models.iter().any(|m| self.is_fav(&m.key));
-        let excluded = self.data.models.iter().any(|m| self.store.is_excluded(&m.key));
+        let excluded = self.data.models.iter().enumerate().any(|(i, m)| self.in_excluded(i, m));
         (self.fav_shown, self.excluded_shown) = (fav, excluded);
         self.only = self.only.filter(|&i| [self.any_marked(), fav, excluded][i - MARKED]);
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
@@ -2247,9 +2249,26 @@ impl App {
         }
     }
 
+    /// Whether a developer of `m` is left out (`dev_not`).
+    fn dev_out(&self, m: &Model) -> bool {
+        m.devs().any(|d| self.dev_not.iter().any(|x| x == d))
+    }
+
+    /// Whether model `i` costs no more than the price level left out (`price_not`).
+    fn price_out(&self, i: usize) -> bool {
+        self.price_not.is_some_and(|l| self.val(i, PRICE).is_some_and(|v| v <= LEVELS[l]))
+    }
+
+    /// Whether `E` shows model `i`: excluded with `e`, or one you could use that a dropdown leaves out.
+    fn in_excluded(&self, i: usize, m: &Model) -> bool {
+        self.store.is_excluded(&m.key)
+            || (self.in_reach(m) || self.store.is_marked(&m.key))
+                && (self.dev_out(m) || self.price_out(i) || self.only_via_not(m))
+    }
+
     /// Whether every harness that has `m` is left out (`via_not`).
     fn only_via_not(&self, m: &Model) -> bool {
-        let v = self.shown_via(m);
+        let v = if self.via_not.is_empty() { vec![] } else { self.shown_via(m) };
         !v.is_empty() && v.iter().all(|h| self.via_not.iter().any(|x| x == h))
     }
 
@@ -4609,6 +4628,13 @@ mod tests {
         assert_eq!((a.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["gpt55", "mini"]));
         press(&mut a, " ");
         assert_eq!((a.dev_not.len(), a.dev.len(), keys(&a)), (0, 1, vec!["opus5"]), "picked, it is not left out");
+        code(&mut a, KeyCode::Char('e'));
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "E");
+        assert_eq!((a.only, keys(&a)), (Some(EXCLUDED), vec!["opus5"]), "E shows the ones a dropdown leaves out");
+        press(&mut a, "Ec");
+        press(&mut a, "E");
+        assert_eq!(a.only, None, "c takes them back, so E has none to show");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "c");
         a.col = PRICE;
