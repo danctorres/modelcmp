@@ -1770,7 +1770,9 @@ fn layout(width: u16, app: &App) -> Layout {
     // A column left out takes no room at all.
     let ws: Vec<u16> = ws.into_iter().enumerate().map(|(k, w)| if hidden(k + 2) { 0 } else { w }).collect();
     // By cursor index less one: Dev, the numbers, Via and Notes.
-    let ws: Vec<u16> = std::iter::once(dev_w).chain(ws).collect();
+    let ws: Vec<u16> = std::iter::once(if hidden(1) { 0 } else { dev_w }).chain(ws).collect();
+    // The leftmost shown: Dev, or the next one when it is left out.
+    let lead = ws.iter().position(|&w| w > 0).unwrap_or(0);
     // A column starting a group has a `│` in its gap, one cell wider; so does the first shown
     // when scrolled, parting it from Model. Dev and Released, in Model's group, have neither.
     let starts = group_starts();
@@ -1791,8 +1793,8 @@ fn layout(width: u16, app: &App) -> Layout {
                 let (mut lo, mut used) = (s, ws[s] + GAP);
                 for k in (0..s).rev().filter(|&k| ws[k] > 0) {
                     let cost = ws[k] + GAP + sep(lo);
-                    // Plus the first's own `│`, unless it is Dev.
-                    if used + cost + u16::from(k > 0) > room {
+                    // Plus the first's own `│`, unless it is the leftmost.
+                    if used + cost + u16::from(k > lead) > room {
                         break;
                     }
                     (lo, used) = (k, used + cost);
@@ -1809,7 +1811,7 @@ fn layout(width: u16, app: &App) -> Layout {
     let (mut cols, mut tail, mut more, mut seps) = (Vec::with_capacity(COLS.len()), [None; 2], false, vec![]);
     let (mut started, mut dev_w) = (false, 0);
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
-        let part = if started { sep(k) == 1 } else { k > 0 };
+        let part = if started { sep(k) == 1 } else { k > lead };
         x += u16::from(part);
         // Dev, Via and Notes are cut to the room left rather than dropped, so none of it is
         // blank. Not a number: cut short it reads as another number.
@@ -1869,7 +1871,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
     buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
     buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
-    if first > 0 && name_x + name_w < area.right() {
+    if (0..first).any(|k| !hidden(k + 1)) && name_x + name_w < area.right() {
         // Columns scrolled off to the left, Dev the first.
         buf.set_stringn(name_x + name_w, y, "‹", 1, MORE);
     }
@@ -4353,6 +4355,18 @@ mod tests {
         }
         let l = layout(400, &a);
         assert_eq!(l.cols[0].1, l.name_x + l.name_w + GAP + l.dev_w + GAP, "Released a gap after Dev, as in a group");
+        // Dev left out in `|`: Released takes its place, with no `│` and nothing scrolled off.
+        let seps = l.seps.len();
+        a.store.hide.insert("dev".into());
+        a.set_cols();
+        let l = layout(400, &a);
+        assert_eq!((l.dev_w, l.cols[0].1, l.seps.len()), (0, l.name_x + l.name_w + GAP, seps));
+        let scrolled = a.hscroll;
+        let (_, wide) = render(&mut a, 400, 4);
+        assert_eq!(words(&wide[0])[..3], ["#", "Model", "Released"]);
+        a.store.hide.clear();
+        a.set_cols();
+        a.hscroll = scrolled;
         // Rows above or below the window are reported for the frame's ▲ ▼.
         for w in 46..400 {
             let l = layout(w, &a);

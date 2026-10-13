@@ -342,9 +342,10 @@ pub fn hidden(col: usize) -> bool {
     absent(col) || off() >> col & 1 == 1
 }
 
-/// The column at cursor index `col` as `Store::hide` names it. Model and Dev always show.
+/// The column at cursor index `col` as `Store::hide` names it. Model always shows.
 fn col_id(col: usize) -> &'static str {
     match col {
+        1 => "dev",
         VIA => "via",
         NOTES => "notes",
         _ => numeric(col).map_or("", |c| c.id),
@@ -2011,10 +2012,10 @@ impl App {
         self.refused = true;
     }
 
-    /// The `|` chooser: every column right of Dev that has something to show, ticked while shown,
+    /// The `|` chooser: every column right of Model that has something to show, ticked while shown,
     /// on the one under the cursor.
     fn ask_cols(&mut self) {
-        let cols = (TEXT..NCOLS).filter(|&c| !absent(c));
+        let cols = (1..NCOLS).filter(|&c| !absent(c));
         let items: Vec<_> =
             cols.map(|c| (format!("{:<8} {}", base_col_name(c), base_col_about(c)), Effect::Col(c))).collect();
         let sel = items.iter().position(|(_, e)| *e == Effect::Col(self.col)).unwrap_or(0);
@@ -2034,7 +2035,7 @@ impl App {
 
     /// Leave out the columns `Store::hide` names, as saved or as another modelcmp changed them.
     pub fn set_cols(&mut self) {
-        set_off((TEXT..NCOLS).filter(|&c| self.store.hide.contains(col_id(c))).fold(0, |m, c| m | 1 << c));
+        set_off((1..NCOLS).filter(|&c| self.store.hide.contains(col_id(c))).fold(0, |m, c| m | 1 << c));
         self.off_hidden();
     }
 
@@ -3937,7 +3938,7 @@ mod tests {
         assert!(hidden(price) && a.store.hide.contains("price") && a.choosing_cols(), "and the list stays open");
         assert_eq!((a.col, a.bounds.len()), (ECI, 0), "nor a bound on it");
         press(&mut a, "]");
-        assert!(matches!(&a.input, Input::Choose { list, .. } if list.sel == 2), "] to the next ticked one");
+        assert!(matches!(&a.input, Input::Choose { list, .. } if list.sel == 3), "] to the next ticked one");
         code(&mut a, KeyCode::Esc);
         a.col = PRICE - 1;
         press(&mut a, "l");
