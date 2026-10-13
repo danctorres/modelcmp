@@ -1889,13 +1889,28 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     for &x in &seps {
         buf.set_stringn(area.x + x, y, "│", 1, fg(MUTED));
     }
-    let cur = match app.col {
+    let span = |c: usize| match c {
         0 => Some((name_x, name_w)),
         1 => Some((dev_x, dev_w)),
         VIA => via.map(|(x, w)| (area.x + x, w)),
         NOTES => notes.map(|(x, w)| (area.x + x, w)),
         c => cols.iter().find(|&&(i, ..)| i + 2 == c).map(|&(_, x, w)| (area.x + x, w)),
     };
+    // A header whose dropdown narrows the table, by an entry picked or left out, has its ▾ in
+    // the yellow the status bar says the filter in.
+    let picked = |c: usize| match c {
+        1 => !app.dev.is_empty(),
+        VIA => !app.via.is_empty(),
+        _ => app.price_level().is_some(),
+    };
+    for (x, w) in [1, PRICE, VIA].into_iter().filter(|&c| picked(c) || !app.left_out(c).is_empty()).filter_map(span) {
+        for x in x..(x + w).min(area.right()) {
+            if buf[(x, y)].symbol() == "▾" {
+                buf[(x, y)].set_fg(Color::Yellow);
+            }
+        }
+    }
+    let cur = span(app.col);
     // A rule parts the header from the rows, crossing the group lines.
     if area.height > 1 {
         buf.set_stringn(area.x, y + 1, "─".repeat(area.width as usize), area.width as usize, fg(MUTED));
@@ -3909,6 +3924,19 @@ mod tests {
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 4 && !lines[5].contains("d dropdown"), "{lines:?}");
         assert!(a.col_about(a.col).ends_with("blank = not tested"), "no dropdown, no hint");
+        // An entry left out or picked turns its header's ▾ yellow, and that one alone.
+        let yellow = |a: &mut App| {
+            let (buf, lines) = render(a, 206, 6);
+            let on = |x: &u16| buf[(*x, 0)].symbol() == "▾" && buf[(*x, 0)].fg == Color::Yellow;
+            let at =
+                |h: &str| lines[0][..lines[0].find(h).unwrap()].chars().count() as u16 + h.chars().count() as u16 - 1;
+            ((0..206).filter(on).collect::<Vec<_>>(), at("Dev ▾"), at("Price ▾"), at("Via ▾"))
+        };
+        a.price_not = Some(0);
+        let (on, dev, price, via) = yellow(&mut a);
+        assert_eq!(on, [price], "left out");
+        (a.price_not, a.dev, a.via_not) = (None, vec!["OpenAI".into()], vec!["claude".into()]);
+        assert_eq!(yellow(&mut a).0, [dev, via], "picked on Dev, left out on Via");
     }
 
     #[test]
