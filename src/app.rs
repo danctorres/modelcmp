@@ -2210,10 +2210,12 @@ impl App {
     }
 
     /// The models whose download's size is still to ask for: the one under the cursor, and the
-    /// local ones among the table's rows on screen, so `x` has it by the time it is pressed.
+    /// local ones and the ones Via marks `↓` among the table's rows on screen, so Via shows it
+    /// and `x` has it by the time it is pressed.
     fn unsized_models(&self) -> impl Iterator<Item = &Model> {
         let (top, page) = (self.table.offset(), self.page as usize);
-        let seen = self.rows.iter().skip(top).take(page).map(|&i| &self.data.models[i]).filter(|m| self.local(m));
+        let rows = self.rows.iter().skip(top).take(page).map(|&i| &self.data.models[i]);
+        let seen = rows.filter(|m| self.local(m) || getters(m, &self.tools).next().is_some());
         let new = |m: &&Model| m.hf_repo().is_some() && !self.downloads.contains_key(&m.key);
         self.current().into_iter().chain(seen).filter(new)
     }
@@ -2236,24 +2238,29 @@ impl App {
         models.into_iter().filter(new).collect()
     }
 
-    /// Hugging Face's answer on the download of the model `key`, which `x` goes by from now
-    /// on. Its open list says it too, on the entry, which stays where it is under the cursor.
-    pub fn sized(&mut self, key: &str, answer: Download) {
-        self.downloads.insert(key.into(), answer);
-        // Via sorts by it, and a model with no copy leaves the ones picked by `DOWNLOAD`.
-        let picked = answer == Download::Gone && self.store.via_pick.iter().any(|v| v == DOWNLOAD);
-        if picked || self.sort_col == VIA && matches!(answer, Download::Size(_)) {
-            self.rebuild();
-        }
-        let said = match answer {
-            Download::Size(b) => format!(" ({})", crate::data::gb(b)),
-            Download::Gone => " (no GGUF copy)".into(),
-            _ => return,
-        };
-        if let Input::Choose { kind: Kind::Launch, items, .. } = &mut self.input {
-            for (label, _) in items.iter_mut().filter(|i| got(&i.1) == Some(key)) {
-                label.push_str(&said);
+    /// Hugging Face's answers on the downloads of models, by key, which `x` goes by from now
+    /// on. Its open list says them too, on the entries, which stay where they are under the cursor.
+    pub fn sized<'a>(&mut self, answers: impl IntoIterator<Item = (&'a str, Download)>) {
+        let mut again = false;
+        for (key, answer) in answers {
+            self.downloads.insert(key.into(), answer);
+            // Via sorts by it, and a model with no copy leaves the ones picked by `DOWNLOAD`.
+            let picked = answer == Download::Gone && self.store.via_pick.iter().any(|v| v == DOWNLOAD);
+            again |= picked || self.sort_col == VIA && matches!(answer, Download::Size(_));
+            let said = match answer {
+                Download::Size(b) => format!(" ({})", crate::data::gb(b)),
+                Download::Gone => " (no GGUF copy)".into(),
+                _ => continue,
+            };
+            if let Input::Choose { kind: Kind::Launch, items, .. } = &mut self.input {
+                for (label, _) in items.iter_mut().filter(|i| got(&i.1) == Some(key)) {
+                    label.push_str(&said);
+                }
             }
+        }
+        // Once for the answers that came together, not once each.
+        if again {
+            self.rebuild();
         }
     }
 
@@ -4984,7 +4991,7 @@ mod tests {
         press(&mut a, "a");
         pick(&mut a, "download");
         assert_eq!(keys(&a), ["llama4"], "it has a repo to download");
-        a.sized("llama4", Download::Gone);
+        a.sized([("llama4", Download::Gone)]);
         assert!(keys(&a).is_empty(), "Hugging Face has no GGUF copy of it after all");
     }
 
@@ -4995,8 +5002,8 @@ mod tests {
         let run = Effect::Launch(vec!["codex".into(), "--model".into(), "mini".into()]);
         let items = vec![("codex".to_string(), run), ("get".into(), get("mini")), ("other".into(), get("llama4"))];
         a.input = Input::choose("open in which harness?", Kind::Launch, items, 0);
-        a.sized("mini", Download::Size(2_500_000_000));
-        a.sized("llama4", Download::Gone);
+        a.sized([("mini", Download::Size(2_500_000_000))]);
+        a.sized([("llama4", Download::Gone)]);
         let Input::Choose { items, .. } = &a.input else { panic!("the list stays open") };
         let labels: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
         assert_eq!(labels, ["codex", "get (2.5 GB)", "other (no GGUF copy)"], "each on its model's download");
@@ -5007,14 +5014,19 @@ mod tests {
         let key = a.current().unwrap().key.clone();
         assert!(key != "mini" && key != "llama4", "{key}");
         a.data.models.iter_mut().for_each(|m| m.hf = Some(format!("o/{}", m.key)));
+        // With no runner here or to install, no row marks `↓`: the cursor's is asked alone.
+        a.tools = (vec![], vec![]);
         assert!(a.size_wanted());
-        a.sized(&key, Download::NoAnswer);
+        a.sized([(key.as_str(), Download::NoAnswer)]);
         assert!(!a.size_wanted(), "not while the cursor stays");
-        a.refreshed(Err("offline".to_string().into()), tools());
+        a.refreshed(Err("offline".to_string().into()), (vec![], vec![]));
         assert!(a.size_wanted() && a.sizes().len() == 1, "a refresh asks again, the sizes staying");
         assert_eq!(a.downloads["llama4"], Download::Gone, "and the lack of a copy");
         // The local rows on screen are asked with it, each once.
         let other = a.rows.iter().map(|&i| a.data.models[i].key.clone()).find(|k| *k != key && k != "mini").unwrap();
+        // And the ones Via marks `↓`, local or not.
+        a.tools = (vec![crate::data::LLAMA], vec![]);
+        assert!(a.unsized_models().any(|m| m.key == other && !a.local(m)), "a ↓ on screen gets its size");
         a.data.models.iter_mut().for_each(|m| m.via.push(crate::data::OLLAMA.into()));
         // Of one ollama has too, with no download to offer: its details say the size.
         a.tools = (vec![crate::data::OLLAMA], vec![]);
@@ -6615,9 +6627,9 @@ mod tests {
         // The ones that read alike by the size of their download, one with none last either way.
         a.data.models.iter_mut().for_each(|m| m.hf = Some(format!("o/{}", m.key)));
         a.tools = (vec![crate::data::OLLAMA], vec![]);
-        a.sized("mini", Download::Size(1));
+        a.sized([("mini", Download::Size(1))]);
         assert_eq!(keys(&a), ["opus5", "mini", "gpt55", "llama4"], "a size coming in sorts again");
-        a.sized("gpt55", Download::Size(2));
+        a.sized([("gpt55", Download::Size(2))]);
         assert_eq!(keys(&a), ["opus5", "mini", "gpt55", "llama4"], "the smaller first");
         a.descending = true;
         a.rebuild();

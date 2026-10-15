@@ -490,18 +490,19 @@ fn event_loop(
             Some(Err(TryRecvError::Disconnected)) => newest = None,
             _ => {}
         }
-        // One write for the answers that came together, not one each.
+        // One write and one rebuild for the answers that came together, not one each.
+        let answers: Vec<(String, Download)> = size_rx.try_iter().collect();
+        sizing -= answers.len();
         let mut sized = false;
-        while let Ok((key, answer)) = size_rx.try_recv() {
-            sizing -= 1;
-            app.sized(&key, answer);
-            dirty |= answer != Download::NoAnswer;
+        for (key, answer) in &answers {
+            dirty |= *answer != Download::NoAnswer;
             match answer {
                 Download::Size(_) => sized = true,
-                Download::Gone => data::save_gone(&mut gone, &key),
+                Download::Gone => data::save_gone(&mut gone, key),
                 _ => {}
             }
         }
+        app.sized(answers.iter().map(|(k, a)| (k.as_str(), *a)));
         if sized {
             data::save_sizes(&app.sizes());
         }
@@ -517,8 +518,8 @@ fn event_loop(
         // Block on input; wake every 200ms while a refresh or the newest release is awaited, else
         // once a minute to repaint the data age in the frame.
         // A size awaited is looked for often, as `x`'s list is open for it, and the ones still to
-        // ask for, of the local rows on screen, are asked once the cursor has rested, not for
-        // each row it passes.
+        // ask for, of the local rows on screen and the ones Via marks `↓`, are asked once the
+        // cursor has rested, not for each row it passes.
         let rest = app.size_wanted();
         let timeout = match (sizing > 0, rest, rx.is_some() || newest.is_some()) {
             (true, ..) => Duration::from_millis(30),
