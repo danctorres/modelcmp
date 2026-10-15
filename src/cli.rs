@@ -298,13 +298,13 @@ fn flagged(store: &Store, o: &ListOpts) -> Store {
     s
 }
 
-/// Says on stderr what of the TUI's filters excludes models, as its status bar says it, so an
+/// Says on stderr what of the TUI's filters hides models, as its status bar says it, so an
 /// agent finding fewer models than it expects knows why, and the `flags` that replace them.
 fn say_filters(store: &Store, flags: &str) {
     let on: Vec<String> = crate::view::picks_said(store).into_iter().chain(crate::view::bounds_said(store)).collect();
     if !on.is_empty() {
         let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace their own, ") };
-        eprintln!("note: the TUI's filters exclude models: {} ({flags}XX in the TUI takes them back)", on.join(" "));
+        eprintln!("note: the TUI's filters hide models: {} ({flags}XX in the TUI takes them back)", on.join(" "));
     }
 }
 
@@ -813,7 +813,7 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     store.save()?;
     match left_out_by(m, store, data.any_available()) {
         // Taken back in the TUI alone: the dropdown's entry, which excludes more than this model.
-        Some(by) if rm => println!("{} is still excluded in the TUI: {by}", m.name),
+        Some(by) if rm => println!("{} is still hidden by the TUI's filters: {by}", m.name),
         _ => println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name),
     }
     Ok(())

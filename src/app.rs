@@ -495,7 +495,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("u", "deselect every model"),
             ("D", "unfavorite every model, asks first"),
             ("X", "unexclude every model, asks first"),
-            ("S F E", "selected / favorite / excluded only"),
+            ("S F E", "selected / favorite / excluded or hidden only"),
         ],
     ),
     (
@@ -556,6 +556,13 @@ pub const RECOMMEND: usize = 5;
 const COMPARE: usize = 6;
 const THEME: usize = 7;
 pub const HELP_TAB: usize = 8;
+
+/// What hides a model from the table (`App::failing`): the entries picked in the dropdown of
+/// column 1 (Dev), `PRICE` or `VIA`, or the bound at that index of `App::bounds`.
+enum Fail {
+    Pick(usize),
+    Bound(usize),
+}
 
 /// Where esc leaves details for: the table, or the overlay they were opened from at its scroll.
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -1813,31 +1820,41 @@ impl App {
                     Some(EXCLUDED) => self.in_excluded(i, m),
                     _ => true,
                 }
-                && (e || self.passes(i, m, skip))
+                && (e || self.failing(i, m, skip).is_none())
                 && (skip == 1 || e || !view::dev_out(m, &self.store))
                 && (skip == PRICE || e || !view::price_out(self.val(i, PRICE), &self.store))
                 && (skip == VIA || e || !view::via_out(m, &self.store, self.any_available))
         })
     }
 
-    /// Whether model `i` passes the picks of the Dev, Price and Via dropdowns and the bounds, the
+    /// What of the picks of the Dev, Price and Via dropdowns and the bounds model `i` fails, the
     /// ones on column `skip` aside but Price's minimum, as `filtered` has them. The picks are
     /// the CLI's (`view::picked`), the Price level by the price shown.
-    fn passes(&self, i: usize, m: &Model, skip: usize) -> bool {
+    fn failing(&self, i: usize, m: &Model, skip: usize) -> Option<Fail> {
         let any = self.any_available;
         // Asked only when Via has a pick, as it may be `DOWNLOAD`.
         let download = !self.store.via_pick.is_empty() && self.download(m).is_some();
         let hide = &self.store.hide;
-        (skip == 1 || view::picked(m, any, &self.store.dev_pick, &[], None, None))
-            && (skip == PRICE
-                || !bound_applies(PRICE, hide)
-                || self.store.price_pick.is_none_or(|l| self.val(i, PRICE).is_some_and(|v| v <= LEVELS[l])))
-            && (skip == VIA || view::picked(m, any, &[], &self.store.via_pick, None, Some(download)))
-            && self
-                .bounds
-                .iter()
-                .filter(|b| (b.0 != skip || skip == PRICE && b.1.is_finite()) && bound_applies(b.0, hide))
-                .all(|&(c, lo, hi)| self.val(i, c).is_some_and(|v| v >= lo && v <= hi))
+        if skip != 1 && !view::picked(m, any, &self.store.dev_pick, &[], None, None) {
+            return Some(Fail::Pick(1));
+        }
+        if skip != PRICE
+            && bound_applies(PRICE, hide)
+            && self.store.price_pick.is_some_and(|l| !self.val(i, PRICE).is_some_and(|v| v <= LEVELS[l]))
+        {
+            return Some(Fail::Pick(PRICE));
+        }
+        if skip != VIA && !view::picked(m, any, &[], &self.store.via_pick, None, Some(download)) {
+            return Some(Fail::Pick(VIA));
+        }
+        self.bounds
+            .iter()
+            .position(|&(c, lo, hi)| {
+                (c != skip || skip == PRICE && lo.is_finite())
+                    && bound_applies(c, hide)
+                    && !self.val(i, c).is_some_and(|v| v >= lo && v <= hi)
+            })
+            .map(Fail::Bound)
     }
 
     /// Whether a bound on column `col` is kept for the CLI: not one typed for a benchmark picked
@@ -2330,7 +2347,31 @@ impl App {
     fn in_excluded(&self, i: usize, m: &Model) -> bool {
         self.store.is_excluded(&m.key)
             || (self.in_reach(m) || self.store.is_marked(&m.key))
-                && (view::excluded(m, &self.store, self.any_available) || !self.passes(i, m, usize::MAX))
+                && (view::excluded(m, &self.store, self.any_available) || self.failing(i, m, usize::MAX).is_some())
+    }
+
+    /// Why `E` shows the model under the cursor with a grey `✗`: the filter that hides it, as
+    /// `view::left_out_by` says it, or a pick or bound of the TUI's own, as `↓ download picked in
+    /// Via` or `DeepSWE≥60`. None off `E`, and for a model excluded with `e`, its red `✗` saying so.
+    pub fn hidden_by(&self) -> Option<String> {
+        if self.view != View::Table || self.only != Some(EXCLUDED) {
+            return None;
+        }
+        let &i = self.rows.get(self.selected())?;
+        let m = &self.data.models[i];
+        if self.store.is_excluded(&m.key) {
+            return None;
+        }
+        let picks = |l: &[String]| l.join(", ");
+        view::left_out_by(m, &self.store, self.any_available).or_else(|| match self.failing(i, m, usize::MAX)? {
+            Fail::Pick(PRICE) => Some(format!("{} picked in Price", level_label(self.store.price_pick?))),
+            Fail::Pick(VIA) => Some(format!("{} picked in Via", picks(&self.store.via_pick))),
+            Fail::Pick(_) => Some(format!("{} picked in Dev", picks(&self.store.dev_pick))),
+            Fail::Bound(b) => {
+                let (c, lo, hi) = self.bounds[b];
+                Some(view::bound_said(self.col_name(c), c, lo, hi))
+            }
+        })
     }
 
     /// Via as the table shows it: the harnesses, or `OUT_OF_REACH` for one you have no access to.
@@ -4774,8 +4815,22 @@ mod tests {
         a.rebuild();
         press(&mut a, "E");
         assert_eq!(sorted(&a), ["gpt55", "mini"], "the models of the developers not picked");
+        let on = |a: &mut App, key: &str| {
+            let row = a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
+            a.select(row);
+            a.hidden_by()
+        };
+        assert_eq!(on(&mut a, "mini").as_deref(), Some("anthropic picked in Dev"), "the status bar says why");
         press(&mut a, "E");
         a.store.dev_pick.clear();
+        // A pick of `↓ download`, which only the TUI knows, says so too.
+        a.store.via_pick = vec![DOWNLOAD.into()];
+        a.rebuild();
+        press(&mut a, "E");
+        let said = format!("{DOWNLOAD} picked in Via");
+        assert_eq!(on(&mut a, "mini"), Some(said), "none here can be downloaded");
+        press(&mut a, "E");
+        a.store.via_pick.clear();
         let coding = TEXT + COLS.iter().position(|c| c.id == "coding").unwrap();
         a.input = Input::Bound { col: coding, min: true, text: "70".into(), cur: 2 };
         code(&mut a, KeyCode::Enter);
@@ -4783,6 +4838,10 @@ mod tests {
         assert_eq!(a.store.bounds, [Bound { col: "coding".into(), min: Some(70.0), max: None }]);
         press(&mut a, "E");
         assert!(a.only == Some(EXCLUDED) && keys(&a).contains(&"mini"), "mini scores 60");
+        assert_eq!(on(&mut a, "mini").as_deref(), Some("Coding≥70"));
+        a.store.toggle_excluded("mini");
+        assert_eq!(on(&mut a, "mini"), None, "excluded with e, its ✗ red says so");
+        a.store.toggle_excluded("mini");
         assert_eq!(press(&mut a, "XX"), Some(Effect::Save));
         assert!(a.bounds.is_empty() && a.take_bounds_changed() && a.store.bounds.is_empty(), "XX takes it back");
         assert_eq!((a.only, keys(&a).len()), (None, 3), "and E, with nothing left to show");

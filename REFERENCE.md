@@ -272,19 +272,19 @@ excluded models out.
 
 Excluded counts the models the TUI's filters hide, which it keeps across restarts and only it
 takes back, with `XX` or `c`: an entry left out of its Dev, Price or Via dropdown, the entries
-picked in one, which exclude the models of the others, and a bound typed with `>` or `<`.
+picked in one, which hide the models of the others, and a bound typed with `>` or `<`.
 `exclude --rm` on such a model says which one it is, as `Coding≥60`, and the commands that
 leave them out say them on stderr. `--dev`, `--via`, `--min` and `--max` each replace their
 own: `--dev` the Dev pick, `--max price` the Price level and `--min coding` a `>` on Coding.
 `--via ollama` or `--via llama-cli` on a task keeps a model's local copy off the ranking, which
 the TUI's pick of it does not. A bound or the Price level on a column hidden with `|`, or with no
-values from the source in use, excludes none and is kept for when the column is back.
+values from the source in use, hides none and is kept for when the column is back.
 
 `recommend` gives the same picks as the TUI's `R` with no search and the `mine` tab, which the
 TUI does not keep. A pick of `↓ download` in Via is passed over, as only the TUI knows what can
 be downloaded, and so is a bound on a task column showing one of its benchmarks. Prices are at
 the cache share of each, the TUI's set with `%` or `--cache`, so with different ones a Price level
-or bound can exclude different models.
+or bound can hide different models.
 
 ### Tiers
 
@@ -467,7 +467,7 @@ Each model carries these fields:
 | `available` | a harness of yours has it |
 | `via` | the harnesses that have it |
 | `selected` | on your shortlist |
-| `excluded` | you excluded it, or an entry left out of the TUI's Dev, Price or Via dropdown hides it |
+| `excluded` | you excluded it, or one of the TUI's filters hides it |
 | `note` | your note on it, null when it has none |
 | `favorite_for` | the tasks it is the user's favorite for, and `task:tier` for a tier's |
 | `price` | the offer you'd pay, as below |

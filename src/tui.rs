@@ -1653,8 +1653,12 @@ fn draw(app: &mut App, f: &mut Frame) {
         Input::Unfavorite => Some(("D", "unfavorite every model?".to_string())),
         Input::Unexclude => Some((
             "X",
-            if app.filters_exclude() { "unexclude every model, the filters' too?" } else { "unexclude every model?" }
-                .to_string(),
+            if app.filters_exclude() {
+                "unexclude every model, the hidden ones too?"
+            } else {
+                "unexclude every model?"
+            }
+            .to_string(),
         )),
         _ => None,
     };
@@ -2314,6 +2318,10 @@ fn parts(app: &App) -> Vec<Line<'static>> {
             });
             parts.push(Line::from(spans.collect::<Vec<_>>()));
         }
+    }
+    // Why `E` shows a model with a grey ✗: the filter that hides it, which the row does not say.
+    if let Some(by) = app.hidden_by() {
+        parts.push(part(format!("hidden: {by}"), MUTED));
     }
     if !app.query.is_empty() {
         parts.push(part(format!("/{}", app.query), Color::Yellow));
