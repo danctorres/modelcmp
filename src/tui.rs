@@ -3009,55 +3009,74 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         .collect();
     let picks: Vec<_> = (0..tasks.len()).map(|i| app.tier_picks(i)).collect();
     let (tasks, picks) = (&tasks, &picks);
-    let cells = |i: usize, room| (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], room));
-    // The names' column, then a box per tier: as wide as the widest entry, or as `width` leaves
-    // each, where a name is cut to fit.
+    let cells = |i: usize| (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], true));
     let w = tasks.iter().map(|t| Span::raw(t.0).width()).max().unwrap_or(0).min(20);
-    let mut grid: Vec<Vec<_>> = (0..tasks.len()).map(|i| cells(i, Some(usize::MAX)).collect()).collect();
-    let widest = grid.iter().flatten().map(|e| e.iter().map(Span::width).sum::<usize>()).max().unwrap_or(0);
-    let room = (width.saturating_sub(w + 2) / TIERS.len()).saturating_sub(2).clamp(3, widest.max(4));
-    // Made again, cut, only where the width leaves a box less than its entry takes.
-    if widest > room {
-        grid = (0..tasks.len()).map(|i| cells(i, Some(room)).collect()).collect();
-    }
-    let head: String = TIERS.iter().map(|t| format!(" {:<room$} ", t.0)).collect();
+    // One pick is the row's only box, under the tier its price is: `high`'s, the last, as
+    // `free` may have none. Every stop past the name is on it. A price nobody lists is under
+    // `high`, which takes any, and no pick at all is a `-` under the first.
+    let ones: Vec<Option<usize>> = (0..tasks.len())
+        .map(|i| {
+            app.one_pick(i).then(|| {
+                let tier = |c| TIERS.iter().position(|t| c <= t.1);
+                picks[i][LAST].map_or(0, |(m, _)| m.cost().and_then(tier).unwrap_or(LAST))
+            })
+        })
+        .collect();
+    let grid: Vec<Vec<_>> = (0..tasks.len())
+        .map(|i| {
+            let mut row: Vec<_> = cells(i).collect();
+            if let Some(at) = ones[i] {
+                let pick = row.pop().unwrap_or_default();
+                row = vec![vec![]; TIERS.len()];
+                row[at] = pick;
+            }
+            row
+        })
+        .collect();
+    // The names' column, then a box per tier as wide as its widest entry, the widest boxes
+    // narrowed alike to what `width` leaves, where an entry wraps to more lines, so no name is cut.
+    let need: Vec<usize> = (0..TIERS.len())
+        .map(|c| grid.iter().map(|r| r[c].iter().map(Span::width).sum()).fold(TIERS[c].0.len(), usize::max))
+        .collect();
+    let left = width.saturating_sub(w + 2 + 2 * TIERS.len());
+    let fits = |cap: usize| need.iter().map(|&n| n.min(cap)).sum::<usize>() <= left;
+    let cap = (4..=need.iter().copied().max().unwrap_or(4)).rev().find(|&cap| fits(cap)).unwrap_or(4);
+    let room: Vec<usize> = need.iter().map(|&n| n.min(cap)).collect();
+    let head: String = TIERS.iter().zip(&room).map(|(t, r)| format!(" {:<r$} ", t.0)).collect();
     v.push(Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED)));
     let cur = app.among.is_none().then_some((app.task_cur, app.task_sel));
     for (i, (t, row)) in tasks.iter().zip(grid).enumerate() {
         let y = v.len();
         let name = truncate(t.0, w);
         let pad = w.saturating_sub(Span::raw(name.as_str()).width());
-        let mut spans = cursor(cur == Some((i, 0)), vec![Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD))]);
-        spans.push(Span::raw(" ".repeat(pad)));
-        // One pick is the row's only box, under the tier its price is: `high`'s, the last, as
-        // `free` may have none. Every stop past the name is on it. A price nobody lists is under
-        // `high`, which takes any, and no pick at all is a `-` under the first.
-        let one = app.one_pick(i).then(|| {
-            let tier = |c| TIERS.iter().position(|t| c <= t.1);
-            picks[i][LAST].map_or(0, |(m, _)| m.cost().and_then(tier).unwrap_or(LAST))
-        });
-        let mut row = row;
-        if let Some(at) = one {
-            let pick = row.pop().unwrap_or_default();
-            row = vec![vec![]; TIERS.len()];
-            row[at] = pick;
-        }
-        for (c, mut cell) in row.into_iter().enumerate() {
-            // Padded to the box, so the cursor's fill is as wide on every one.
-            cell.push(Span::raw(" ".repeat(room.saturating_sub(cell.iter().map(Span::width).sum()))));
-            let x = w + 2 + c * (room + 2);
+        let mut first = cursor(cur == Some((i, 0)), vec![Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD))]);
+        first.push(Span::raw(" ".repeat(pad)));
+        let one = ones[i];
+        let row: Vec<_> = row.into_iter().zip(&room).map(|(cell, &r)| wrap_spans(cell, r)).collect();
+        // As many lines as its longest box takes, the name on the first.
+        let h = row.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        let mut lines: Vec<_> = (0..h).map(|_| vec![Span::raw(" ".repeat(w + 2))]).collect();
+        lines[0] = first;
+        for (c, cell) in row.into_iter().enumerate() {
+            let (x, room) = (w + 2 + room[..c].iter().map(|r| r + 2).sum::<usize>(), room[c]);
             if one.is_none_or(|at| at == c) {
                 let stop = if one.is_some() { 1 } else { c + 1 };
-                spots.push(Spot { lines: y..y + 1, x: x..x + room + 2, at: Stop::Recommend(i, stop) });
+                spots.push(Spot { lines: y..y + h, x: x..x + room + 2, at: Stop::Recommend(i, stop) });
             }
             let on = |(row, sel): (usize, usize)| row == i && one.map_or(sel == c + 1, |at| at == c && sel > 0);
-            spans.extend(cursor(cur.is_some_and(on), cell));
+            let mut cell = cell.into_iter();
+            for line in &mut lines {
+                let mut piece = cell.next().unwrap_or_default();
+                // Padded to the box, so the cursor's fill is as wide on every one.
+                piece.push(Span::raw(" ".repeat(room.saturating_sub(piece.iter().map(Span::width).sum()))));
+                line.extend(cursor(cur.is_some_and(on), piece));
+            }
         }
-        spots.push(Spot { lines: y..y + 1, x: 0..width, at: Stop::Recommend(i, 0) });
+        spots.push(Spot { lines: y..y + h, x: 0..width, at: Stop::Recommend(i, 0) });
         if cur.is_some_and(|c| c.0 == i) {
-            block = Some(y..y + 1);
+            block = Some(y..y + h);
         }
-        v.push(Line::from(spans));
+        v.extend(lines.into_iter().map(Line::from));
     }
     let pin = v.len();
     v.push(Line::default());
@@ -3070,9 +3089,14 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
             // The one pick is `high`'s, as in its box.
             let (tier, c) = if app.one_pick(i) { ("pick", LAST) } else { (TIERS[c].0, c) };
-            let mut line = vec![Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED))];
-            line.extend(entry(app, t.0, c, picks[i][c], None));
-            under.push(Line::from(line));
+            // Wrapped to the panel as the boxes are, so the name and what it says are whole.
+            let head = Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED));
+            let indent = head.width();
+            let lines = wrap_spans(entry(app, t.0, c, picks[i][c], false), text.saturating_sub(indent));
+            for (k, piece) in lines.into_iter().enumerate() {
+                let lead = if k == 0 { head.clone() } else { Span::raw(" ".repeat(indent)) };
+                under.push(Line::from([vec![lead], piece].concat()));
+            }
         }
     }
     // Three lines whatever the cursor is on, so the box keeps its height as it moves.
@@ -3128,13 +3152,12 @@ fn wrapped_at(
 /// What tier `col` of `task` picks, for its box of recommend's grid: `name $price (score)` in
 /// its price level's colour as in the Price column, with no score on a task of your own, after
 /// a ★ in the task's colour when it is your favorite for the tier; grey when that favorite is
-/// not one recommended, or is out of reach as its row in the table, and `-` with no model. With
-/// `room` the name is cut from its start to fit it; without, the entry is whole and says why it
-/// is grey.
-fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, room: Option<usize>) -> Vec<Span<'static>> {
+/// not one recommended, or is out of reach as its row in the table, and `-` with no model. Out of
+/// its `boxed` grid the entry says why it is grey.
+fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, boxed: bool) -> Vec<Span<'static>> {
     let built_in = fit::task(task);
     let Some((m, s)) = pick else {
-        let none = if room.is_some() {
+        let none = if boxed {
             "-"
         } else if built_in.is_some() {
             "no data"
@@ -3152,22 +3175,13 @@ fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, room: O
         Some(t) => priced(m, fit::shown(m, t, s), false, false)[m.name.len()..].to_string(),
         None => format!(" {}", crate::view::price(m)),
     };
-    let n = m.name.chars().count();
-    let text = match room.map(|r| r.saturating_sub(if fav { 2 } else { 0 })) {
-        Some(r) if n + rest.chars().count() > r => match r.saturating_sub(rest.chars().count()) {
-            // No room for a name: what fits of the whole, so the box keeps its width.
-            0 | 1 => truncate(&format!("{}{rest}", m.name), r.max(1)),
-            // The end of a name tells it from the others, as in `Claude Opus 5.5`, so the cut keeps that.
-            k => format!("…{}{rest}", m.name.chars().skip(n + 1 - k).collect::<String>().trim_start()),
-        },
-        _ => format!("{}{rest}", m.name),
-    };
-    let mut spans = Vec::with_capacity(4);
+    let mut spans = Vec::with_capacity(5);
     if fav {
         spans.push(Span::styled("★ ", fg(task_color(task)).add_modifier(BOLD)));
     }
-    spans.push(Span::styled(text, fg(price)));
-    if room.is_none() {
+    // The name and its price apart, for a box too narrow for both to wrap between them.
+    spans.extend([Span::styled(m.name.clone(), fg(price)), Span::styled(rest, fg(price))]);
+    if !boxed {
         if off {
             // Both read as a list: "not recommended, not available".
             let said = if out.is_some() { " not recommended," } else { " not recommended" };
@@ -3176,6 +3190,75 @@ fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, room: O
         spans.extend(out);
     }
     spans
+}
+
+/// `spans` in lines of at most `width` cells: broken before a span that starts with a space, as
+/// a price after its name, then between words, and a word longer than a line where it reaches the
+/// end, so nothing is cut. Each piece keeps its span's style.
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    type Cells = Vec<(char, Style)>;
+    if spans.iter().map(Span::width).sum::<usize>() <= width {
+        return vec![spans];
+    }
+    let mut parts: Vec<Cells> = vec![];
+    for s in &spans {
+        if parts.is_empty() || s.content.starts_with(' ') {
+            parts.push(vec![]);
+        }
+        parts.last_mut().unwrap().extend(s.content.chars().map(|c| (c, s.style)));
+    }
+    // In cells, as the boxes are measured: a wide character takes two.
+    let cell = |c: char| Span::raw(&*c.encode_utf8(&mut [0; 4])).width();
+    let cells = |s: &[(char, Style)]| s.iter().map(|&(c, _)| cell(c)).sum::<usize>();
+    let mut lines: Vec<Cells> = vec![vec![]];
+    // On the line after a space, else on a new line, else not at all.
+    let put = |lines: &mut Vec<Cells>, piece: &[(char, Style)]| {
+        let w = cells(lines.last().unwrap());
+        if w + usize::from(w > 0) + cells(piece) <= width {
+            let line = lines.last_mut().unwrap();
+            line.extend((w > 0).then_some((' ', Style::new())));
+            line.extend_from_slice(piece);
+        } else if cells(piece) <= width {
+            lines.push(piece.to_vec());
+        } else {
+            return false;
+        }
+        true
+    };
+    for part in &parts {
+        let start = part.iter().position(|c| c.0 != ' ').unwrap_or(part.len());
+        let end = part.iter().rposition(|c| c.0 != ' ').map_or(start, |e| e + 1);
+        if put(&mut lines, &part[start..end]) {
+            continue;
+        }
+        for word in part[start..end].split(|c| c.0 == ' ').filter(|w| !w.is_empty()) {
+            if put(&mut lines, word) {
+                continue;
+            }
+            if !lines.last().unwrap().is_empty() {
+                lines.push(vec![]);
+            }
+            for &c in word {
+                let line = lines.last().unwrap();
+                if !line.is_empty() && cells(line) + cell(c.0) > width {
+                    lines.push(vec![]);
+                }
+                lines.last_mut().unwrap().push(c);
+            }
+        }
+    }
+    // Back to spans, a run of one style each.
+    let spans_of = |line: Cells| {
+        let mut v: Vec<Span<'static>> = vec![];
+        for (c, style) in line {
+            match v.last_mut() {
+                Some(s) if s.style == style => s.content.to_mut().push(c),
+                _ => v.push(Span::styled(c.to_string(), style)),
+            }
+        }
+        v
+    };
+    lines.into_iter().map(spans_of).collect()
 }
 
 /// What follows a recommend entry out of reach: "not available", as its Via in the table.
@@ -4389,7 +4472,7 @@ mod tests {
         let name = spans.iter().find(|s| s.content == "coding").unwrap();
         assert_eq!(name.style.fg, Some(task_color("coding")));
         let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
-        assert!(spans[star + 1].content.starts_with("opus "), "★ then the name: {:?}", spans[star + 1]);
+        assert!(spans[star + 1].content == "opus", "★ then the name: {:?}", spans[star + 1]);
         assert_eq!(spans[star + 1].style.fg, Some(LEVEL[level(5.0)]), "the name keeps its price level");
         // A favorite off the frontier, flash dearer than opus and scoring less, is grey and says so.
         let mut data = std::mem::take(&mut a.data);
@@ -4403,9 +4486,9 @@ mod tests {
         let lines = recommend(&a, 200, &mut vec![]).0;
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let star = spans.iter().rposition(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
-        assert!(spans[star + 1].content.starts_with("flash "));
+        assert_eq!(spans[star + 1].content, "flash");
         assert_eq!(spans[star + 1].style.fg, Some(MUTED));
-        assert_eq!(spans[star + 2].content, " not recommended");
+        assert_eq!(spans[star + 3].content, " not recommended");
     }
 
     #[test]
@@ -5122,7 +5205,7 @@ mod tests {
         );
         let narrow = recommend(&b, 60, &mut vec![]).0;
         assert_eq!(narrow[1].to_string(), "       (filtered)", "it wraps where the tabs fill the line");
-        // On a tier, the cursor is on its box, as wide as every other, and not on the name.
+        // On a tier, the cursor is on its box, as wide as its widest entry, and not on the name.
         (b.among, b.query) = (None, String::new());
         let all = recommend(&b, 200, &mut vec![]).0;
         let bars: Vec<&str> = all
@@ -5131,7 +5214,7 @@ mod tests {
             .filter(|s| s.style.bg == Some(CURSOR))
             .map(|s| &*s.content)
             .collect();
-        assert_eq!(bars, ["▌", "opus $5.0 (150)", "  ", "▐"], "mid of overall, padded to the widest entry");
+        assert_eq!(bars.concat(), "▌opus $5.0 (150)▐", "mid of overall");
         let row = all.iter().map(ToString::to_string).find(|l| l.starts_with(" overall")).unwrap();
         let picks: Vec<&str> = row.split_whitespace().filter(|w| w.ends_with(['s', 'h'])).collect();
         assert_eq!(picks, ["flash", "▌opus", "opus"], "what each tier picks: low, mid and high");
@@ -5159,9 +5242,26 @@ mod tests {
         assert!(under.contains(&b.current().unwrap().name), "{under}");
         (b.task_cur, b.task_sel) = was;
         assert!(all.iter().any(|l| l.to_string() == "  mid:     opus $5.0 (150)"), "under the grid, the box's model");
-        // A name is cut from its start to the room its box has, the price and score kept.
-        let cut: String = entry(&b, "overall", 2, b.tier_picks(0)[2], Some(14)).iter().map(|s| &*s.content).collect();
-        assert_eq!(cut, "…us $5.0 (150)");
+        // An entry wider than its box wraps between the name and its price, else between words, and a word
+        // wider than it where it ends: nothing is cut.
+        let text = |l: &Vec<Span>| l.iter().map(|s| &*s.content).collect::<String>();
+        let wrap =
+            |w| wrap_spans(entry(&b, "overall", 2, b.tier_picks(0)[2], true), w).iter().map(text).collect::<Vec<_>>();
+        assert_eq!(
+            (wrap(15), wrap(12), wrap(9)),
+            (
+                vec!["opus $5.0 (150)".to_string()],
+                vec!["opus".into(), "$5.0 (150)".into()],
+                vec!["opus $5.0".into(), "(150)".into()]
+            )
+        );
+        assert_eq!(wrap(3), ["opu", "s", "$5.", "0", "(15", "0)"]);
+        // In a narrow grid the row takes more lines, every name whole.
+        let narrow: Vec<String> = recommend(&b, 40, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        assert!(
+            narrow.iter().filter(|l| l.contains("opus")).count() > 1 && !narrow.concat().contains('…'),
+            "{narrow:#?}"
+        );
         // Among all, a model out of reach is grey, and says so under the grid; one of yours keeps its price's colour.
         let mut data = std::mem::take(&mut b.data);
         data.models[0].available = false;
@@ -5169,15 +5269,18 @@ mod tests {
         b.all = true;
         b.rebuild();
         let all = recommend(&b, 200, &mut vec![]).0;
-        let of = |n: &str| all.iter().flat_map(|l| l.spans.iter()).find(|s| s.content.starts_with(n)).unwrap().style;
-        assert!(
-            of("opus ").fg == Some(MUTED) && of("flash ").fg != Some(MUTED),
-            "{:?} {:?}",
-            of("opus "),
-            of("flash ")
-        );
+        let of = |n: &str| all.iter().flat_map(|l| l.spans.iter()).find(|s| s.content == n).unwrap().style;
+        assert!(of("opus").fg == Some(MUTED) && of("flash").fg != Some(MUTED), "{:?} {:?}", of("opus"), of("flash"));
         let said = |n: &str| all.iter().any(|l| l.to_string().contains(&format!("{n} not available")));
         assert!(said("(150)") && !said("(120)"), "opus says so, flash does not");
+        // In a narrow panel the line under the grid wraps too, its name and what it says whole.
+        let under: Vec<String> = recommend(&b, 30, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        let at = under.iter().position(|l| l.starts_with("  mid:")).unwrap();
+        assert_eq!(under[at..at + 2], ["  mid:     opus $5.0 (150)", "           not available"], "{under:#?}");
+        assert!(under[at..].iter().all(|l| Span::raw(l.as_str()).width() <= 30), "{under:#?}");
+        // A wide character takes two cells of the box.
+        let wide: Vec<String> = wrap_spans(vec![Span::raw("通义千问 Max")], 5).iter().map(text).collect();
+        assert_eq!(wide, ["通义", "千问", "Max"]);
         // A task of your own is the last row, in a colour of its own, every tier with the model you gave it; under
         // the grid, what you wrote it is about and that it is picked over a built-in task.
         a.store.toggle_favorite("debugging", "opus");
