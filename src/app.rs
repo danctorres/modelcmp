@@ -5,8 +5,8 @@ use crate::data::{Data, FELL_BACK, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::Store;
 use crate::view::{
-    LEVELS, NO_ACCESS, NO_SELECTED, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach, level_label, money,
-    score, shown_via, signed, task_line, task_score, tier_pick,
+    self, LEVELS, NO_ACCESS, NO_SELECTED, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach, level_label,
+    money, score, shown_via, signed, task_line, task_score, tier_pick,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -473,7 +473,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("a m", "all models, including ones you have no access to / mine only"),
             ("tab", "next tab, shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
-            ("c", "clear filters, bounds, task, S, F and E, and the selection stays"),
+            ("c", "clear filters, bounds, task, S, F, E and the dropdowns' entries left out, the selection stays"),
         ],
     ),
     (
@@ -1146,12 +1146,6 @@ pub struct App {
     pub dev: Vec<String>,
     /// Harnesses picked from the Via dropdown, and of `VIA_KINDS`; empty is any.
     pub via: Vec<String>,
-    /// Harnesses left out with `e` in the Via dropdown: a model only they have is not shown.
-    pub via_not: Vec<String>,
-    /// Developers and countries left out with `e` in the Dev dropdown: their models are not shown.
-    pub dev_not: Vec<String>,
-    /// The price level left out with `e` in the Price dropdown: models at or under it are not shown.
-    pub price_not: Option<usize>,
     /// What is known of each model's download, by key (`Download`).
     downloads: std::collections::HashMap<String, Download>,
     tools: Tools,
@@ -1261,9 +1255,6 @@ impl App {
             bounds: vec![],
             dev: vec![],
             via: vec![],
-            via_not: vec![],
-            dev_not: vec![],
-            price_not: None,
             downloads: Default::default(),
             tools: tools(),
             dir: String::new(),
@@ -1810,16 +1801,16 @@ impl App {
                 && match self.only {
                     Some(MARKED) => self.store.is_marked(&m.key),
                     Some(FAV) => self.is_fav(&m.key),
-                    Some(EXCLUDED) => self.in_excluded(i, m),
+                    Some(EXCLUDED) => self.in_excluded(m),
                     _ => true,
                 }
                 && (skip == 1
                     || (self.dev.is_empty() || m.devs().any(|d| self.dev.iter().any(|x| x == d)))
-                        && (e || !self.dev_out(m)))
-                && (skip == PRICE || e || !self.price_out(i))
+                        && (e || !view::dev_out(m, &self.store)))
+                && (skip == PRICE || e || !view::price_out(self.val(i, PRICE), &self.store))
                 && (skip == VIA
                     || (self.via.is_empty() || self.via.iter().any(|h| self.via_labels(m).contains(&h.as_str())))
-                        && (e || !self.only_via_not(m)))
+                        && (e || !view::via_out(m, &self.store, self.any_available)))
                 && self
                     .bounds
                     .iter()
@@ -1836,7 +1827,7 @@ impl App {
         // the last, F) for every model rather than an empty table.
         // One out of reach shows in them too, as `filtered` keeps it.
         let fav = self.data.models.iter().any(|m| self.is_fav(&m.key));
-        let excluded = self.data.models.iter().enumerate().any(|(i, m)| self.in_excluded(i, m));
+        let excluded = self.data.models.iter().any(|m| self.in_excluded(m));
         (self.fav_shown, self.excluded_shown) = (fav, excluded);
         self.only = self.only.filter(|&i| [self.any_marked(), fav, excluded][i - MARKED]);
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
@@ -2243,9 +2234,9 @@ impl App {
     /// The entries of `col`'s dropdown left out with `e`, as it names them.
     pub fn left_out(&self, col: usize) -> Vec<String> {
         match col {
-            1 => self.dev_not.clone(),
-            VIA => self.via_not.clone(),
-            PRICE => self.price_not.map(level_label).into_iter().collect(),
+            1 => self.store.dev_not.clone(),
+            VIA => self.store.via_not.clone(),
+            PRICE => self.store.price_not.map(level_label).into_iter().collect(),
             _ => vec![],
         }
     }
@@ -2257,30 +2248,13 @@ impl App {
 
     /// Takes back every entry of the Dev, Price and Via dropdowns left out.
     fn clear_left_out(&mut self) {
-        (self.dev_not, self.via_not, self.price_not) = (vec![], vec![], None);
+        (self.store.dev_not, self.store.via_not, self.store.price_not) = (vec![], vec![], None);
     }
 
-    /// Whether a developer of `m` is left out (`dev_not`).
-    fn dev_out(&self, m: &Model) -> bool {
-        m.devs().any(|d| self.dev_not.iter().any(|x| x == d))
-    }
-
-    /// Whether model `i` costs no more than the price level left out (`price_not`).
-    fn price_out(&self, i: usize) -> bool {
-        self.price_not.is_some_and(|l| self.val(i, PRICE).is_some_and(|v| v <= LEVELS[l]))
-    }
-
-    /// Whether `E` shows model `i`: excluded with `e`, or one you could use that a dropdown leaves out.
-    fn in_excluded(&self, i: usize, m: &Model) -> bool {
+    /// Whether `E` shows `m`: excluded with `e`, or one you could use that a dropdown leaves out.
+    fn in_excluded(&self, m: &Model) -> bool {
         self.store.is_excluded(&m.key)
-            || (self.in_reach(m) || self.store.is_marked(&m.key))
-                && (self.dev_out(m) || self.price_out(i) || self.only_via_not(m))
-    }
-
-    /// Whether every harness that has `m` is left out (`via_not`).
-    fn only_via_not(&self, m: &Model) -> bool {
-        let v = if self.via_not.is_empty() { vec![] } else { self.shown_via(m) };
-        !v.is_empty() && v.iter().all(|h| self.via_not.iter().any(|x| x == h))
+            || (self.in_reach(m) || self.store.is_marked(&m.key)) && view::excluded(m, &self.store, self.any_available)
     }
 
     /// Via as the table shows it: the harnesses, or `OUT_OF_REACH` for one you have no access to.
@@ -2350,7 +2324,7 @@ impl App {
 
     /// Whether `m` can be recommended: in reach and not excluded.
     fn usable(&self, m: &Model) -> bool {
-        self.in_reach(m) && !self.store.is_excluded(&m.key)
+        self.in_reach(m) && !view::excluded(m, &self.store, self.any_available)
     }
 
     /// Whether `key`, a favorite of the task, is on its line only for being a favorite.
@@ -3292,6 +3266,8 @@ impl App {
             }
             KeyCode::Char('X') if table => self.input = Input::Unexclude,
             KeyCode::Char('c') if table => {
+                // The dropdowns' entries left out too, which the store keeps for `recommend`.
+                let save = self.any_left_out();
                 self.query.clear();
                 self.bounds.clear();
                 self.dev.clear();
@@ -3304,6 +3280,9 @@ impl App {
                 }
                 self.only = None;
                 self.rebuild();
+                if save {
+                    return Some(Effect::Save);
+                }
             }
             KeyCode::Char('q') => self.ask_quit(),
             KeyCode::Char('U') if self.data.update().is_some() => self.input = Input::Upgrade,
@@ -3711,10 +3690,11 @@ impl App {
                     // The dropdown stays open.
                     KeyCode::Enter | KeyCode::Char(' ') if code == KeyCode::Enter || !list.typing => {
                         let i = at?;
+                        let lists = matches!(*col, 1 | PRICE | VIA);
                         if *col == PRICE {
                             // A level picked at or under the one left out would show nothing.
-                            if self.price_not.is_some_and(|n| i == 0 || i - 1 <= n) {
-                                self.price_not = None;
+                            if self.store.price_not.is_some_and(|n| i > 0 && i - 1 <= n) {
+                                self.store.price_not = None;
                             }
                             self.set_price_level(if self.price_level() == i.checked_sub(1) { 0 } else { i });
                         } else if col_benches(*col).is_some() {
@@ -3727,11 +3707,11 @@ impl App {
                             }
                         } else {
                             let (picked, not) = match *col {
-                                1 => (&mut self.dev, &mut self.dev_not),
-                                _ => (&mut self.via, &mut self.via_not),
+                                1 => (&mut self.dev, &mut self.store.dev_not),
+                                _ => (&mut self.via, &mut self.store.via_not),
                             };
-                            // A picked entry is no longer left out, and "any" drops those too.
-                            not.retain(|h| i != 0 && *h != items[i].0);
+                            // A picked entry is no longer left out. "any" drops the picks alone.
+                            not.retain(|h| *h != items[i].0);
                             match picked.iter().position(|d| *d == items[i].0) {
                                 _ if i == 0 => picked.clear(),
                                 Some(k) => drop(picked.remove(k)),
@@ -3739,6 +3719,10 @@ impl App {
                             }
                         }
                         self.rebuild();
+                        // It may take back an entry left out, which the store keeps for `recommend`.
+                        if lists {
+                            return Some(Effect::Save);
+                        }
                     }
                     // `e` leaves an entry out, as it excludes a model in the table, and again takes it back.
                     KeyCode::Char('e') if matches!(*col, 1 | PRICE | VIA) && list.idle() => {
@@ -3749,15 +3733,15 @@ impl App {
                             return None;
                         }
                         if col == PRICE {
-                            self.price_not = Some(i - 1).filter(|l| self.price_not != Some(*l));
+                            self.store.price_not = Some(i - 1).filter(|l| self.store.price_not != Some(*l));
                             // The level picked, when at or under it, would show nothing.
-                            if self.price_level().is_some_and(|p| self.price_not.is_some_and(|n| p <= n)) {
+                            if self.price_level().is_some_and(|p| self.store.price_not.is_some_and(|n| p <= n)) {
                                 self.set_price_level(0);
                             }
                         } else {
                             let (picked, not) = match col {
-                                1 => (&mut self.dev, &mut self.dev_not),
-                                _ => (&mut self.via, &mut self.via_not),
+                                1 => (&mut self.dev, &mut self.store.dev_not),
+                                _ => (&mut self.via, &mut self.store.via_not),
                             };
                             picked.retain(|v| *v != h);
                             match not.iter().position(|v| *v == h) {
@@ -3766,6 +3750,7 @@ impl App {
                             }
                         }
                         self.rebuild();
+                        return Some(Effect::Save);
                     }
                     _ if list.key(code, mods, at, |q| menu_rows(items, q).len(), true) => {}
                     KeyCode::Esc => self.input = Input::None,
@@ -4651,35 +4636,34 @@ mod tests {
         let mut a = app();
         a.col = 1;
         press(&mut a, "dje");
-        assert_eq!((a.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["gpt55", "mini"]));
+        assert_eq!((a.store.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["gpt55", "mini"]));
         press(&mut a, " ");
-        assert_eq!((a.dev_not.len(), a.dev.len(), keys(&a)), (0, 1, vec!["opus5"]), "picked, it is not left out");
+        assert_eq!((a.store.dev_not.len(), a.dev.len(), keys(&a)), (0, 1, vec!["opus5"]), "picked, it is not left out");
         code(&mut a, KeyCode::Char('e'));
         code(&mut a, KeyCode::Esc);
         press(&mut a, "E");
         assert_eq!((a.only, keys(&a)), (Some(EXCLUDED), vec!["opus5"]), "E shows the ones a dropdown leaves out");
-        press(&mut a, "Ec");
+        assert_eq!(press(&mut a, "Ec"), Some(Effect::Save), "c takes them back, and the store with it");
         press(&mut a, "E");
-        assert_eq!(a.only, None, "c takes them back, so E has none to show");
-        code(&mut a, KeyCode::Esc);
-        press(&mut a, "c");
+        assert_eq!((a.store.dev_not.len(), a.only), (0, None), "so E has none to show");
         a.col = PRICE;
         let all = keys(&a).len();
         // Entry 3 is the level up to $2: what it shows and what leaving it out shows are all there is.
         press(&mut a, "djjj ");
         let under: Vec<String> = keys(&a).iter().map(|k| k.to_string()).collect();
         press(&mut a, "e");
-        assert_eq!((a.price_not, a.price_level()), (Some(2), None), "the level picked would show nothing");
+        assert_eq!((a.store.price_not, a.price_level()), (Some(2), None), "the level picked would show nothing");
         assert!(!under.is_empty() && keys(&a).len() == all - under.len() && !keys(&a).contains(&under[0].as_str()));
         press(&mut a, "j ");
-        assert_eq!((a.price_not, a.price_level(), keys(&a).len() < all - under.len()), (Some(2), Some(3), true));
+        assert_eq!((a.store.price_not, a.price_level(), keys(&a).len() < all - under.len()), (Some(2), Some(3), true));
         press(&mut a, "k ");
-        assert_eq!((a.price_not, a.price_level()), (None, Some(2)), "picked, it is not left out");
+        assert_eq!((a.store.price_not, a.price_level()), (None, Some(2)), "picked, it is not left out");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "dkkke");
+        press(&mut a, "de");
         code(&mut a, KeyCode::Esc);
+        assert_eq!((a.store.price_not, keys(&a).len()), (Some(2), all - under.len()));
         press(&mut a, "c");
-        assert_eq!((a.price_not, keys(&a).len()), (None, all), "c clears it");
+        assert_eq!((a.store.price_not, keys(&a).len()), (None, all), "c clears it");
     }
 
     #[test]
@@ -4698,17 +4682,32 @@ mod tests {
         assert_eq!((a.via.len(), keys(&a).len()), (0, 3));
         // `e` leaves a harness out: only the models no other harness has go.
         press(&mut a, "dje");
-        assert_eq!((a.via_not.as_slice(), keys(&a).len()), (&["codex".to_string()][..], 3), "opencode has them too");
+        assert_eq!(
+            (a.store.via_not.as_slice(), keys(&a).len()),
+            (&["codex".to_string()][..], 3),
+            "opencode has them too"
+        );
         press(&mut a, "jje");
-        assert_eq!((a.via_not.len(), a.via.len(), keys(&a)), (2, 0, vec!["gpt55", "mini"]), "claude alone had opus5");
+        assert_eq!(
+            (a.store.via_not.len(), a.via.len(), keys(&a)),
+            (2, 0, vec!["gpt55", "mini"]),
+            "claude alone had opus5"
+        );
         press(&mut a, "e");
-        assert_eq!((a.via_not.len(), keys(&a).len()), (1, 3), "again takes it back");
+        assert_eq!((a.store.via_not.len(), keys(&a).len()), (1, 3), "again takes it back");
         press(&mut a, "e ");
-        assert_eq!((a.via_not.as_slice(), a.via.as_slice()), (&["codex".to_string()][..], &["claude".to_string()][..]));
+        assert_eq!(
+            (a.store.via_not.as_slice(), a.via.as_slice()),
+            (&["codex".to_string()][..], &["claude".to_string()][..])
+        );
         press(&mut a, "gge");
-        assert_eq!((a.via_not.len(), a.status.as_str()), (1, "any cannot be left out"));
+        assert_eq!((a.store.via_not.len(), a.status.as_str()), (1, "any cannot be left out"));
         press(&mut a, "gg ");
-        assert!(a.via_not.is_empty() && a.via.is_empty(), "any drops them");
+        assert_eq!(
+            (a.store.via_not.as_slice(), a.via.len()),
+            (&["codex".to_string()][..], 0),
+            "any drops the picks, not what is left out"
+        );
         code(&mut a, KeyCode::Esc);
         // A selected model you have no access to shows, and is picked, as its Via reads.
         a.store.toggle_marked("llama4");
@@ -5340,6 +5339,16 @@ mod tests {
         assert!(a.task.is_none());
         assert_eq!(a.rows.len(), 3);
         assert_eq!((a.sort_col, a.descending), default_sort(), "c restores the default sort");
+    }
+
+    /// A favorite whose developer the Dev dropdown leaves out is off its task's line, as `recommend` has it.
+    #[test]
+    fn a_favorite_a_dropdown_leaves_out_is_not_recommended() {
+        let mut a = app();
+        a.store.set_favorite("coding", "mini", None);
+        a.store.dev_not = vec!["openai".into()];
+        a.rebuild();
+        assert!(a.task_frontier(fit::task("coding").unwrap()).is_empty());
     }
 
     #[test]
@@ -6577,11 +6586,11 @@ mod tests {
         a.mouse(Mouse::Item(1));
         assert_eq!(a.dev, ["openai"]);
         a.mouse(Mouse::Exclude(1));
-        assert_eq!((a.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["mini", "gpt55"]));
+        assert_eq!((a.store.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["mini", "gpt55"]));
         press(&mut a, "/a");
         a.mouse(Mouse::Exclude(1));
         assert!(
-            a.dev_not.is_empty() && a.open_list().is_some_and(|l| l.typing),
+            a.store.dev_not.is_empty() && a.open_list().is_some_and(|l| l.typing),
             "its ✗ again takes it back, searching too"
         );
         code(&mut a, KeyCode::Esc);
@@ -6707,10 +6716,10 @@ mod tests {
         assert_eq!((press(&mut a, "q"), a.store.excluded.len()), (None, 2), "any other key cancels");
         assert_eq!(press(&mut a, "XX"), Some(Effect::Save));
         assert!(a.store.excluded.is_empty() && a.only.is_none(), "and E is left");
-        a.price_not = Some(0);
+        a.store.price_not = Some(0);
         a.rebuild();
         assert_eq!((press(&mut a, "X"), &a.input), (None, &Input::None), "no model free: E and X have none");
-        (a.dev_not, a.via_not, a.price_not) =
+        (a.store.dev_not, a.store.via_not, a.store.price_not) =
             (vec!["anthropic".into()], vec!["codex".into(), "opencode".into()], Some(2));
         a.rebuild();
         press(&mut a, "E");

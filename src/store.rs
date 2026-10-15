@@ -26,6 +26,17 @@ pub struct Store {
     pub marked: Vec<String>,
     /// Models you have but cannot use; recommendations skip them.
     pub excluded: BTreeSet<String>,
+    /// Developers and countries left out with `e` in the TUI's Dev dropdown: their models are
+    /// excluded too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dev_not: Vec<String>,
+    /// Harnesses left out with `e` in the Via dropdown: a model only they have is excluded too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via_not: Vec<String>,
+    /// The price level (`view::LEVELS`) left out with `e` in the Price dropdown: models at or
+    /// under it are excluded too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_not: Option<usize>,
     pub notes: BTreeMap<String, String>,
     /// `slot` -> your favorite model for it: the task's, or one `--tier`'s of it, which `--tier`
     /// picks over the task's and both over the computed one. A key that is no built-in task
@@ -228,6 +239,8 @@ impl Store {
         // the file is closed; no longer than that.
         let tasks: Vec<String> = s.custom_tasks().into_iter().map(String::from).collect();
         s.about.retain(|t, _| tasks.contains(t));
+        // A price level left by a hand edit that is none would hide nothing, yet show as left out.
+        s.price_not = s.price_not.filter(|&l| l < crate::view::LEVELS.len());
         s.mtime = mtime(&path);
         s.path = path;
         s
@@ -437,6 +450,18 @@ mod tests {
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("modelcmp-test-{}-{name}", std::process::id())).join("user.json")
+    }
+
+    /// A price level that is none, left by a hand edit, is dropped: it would hide nothing.
+    #[test]
+    fn a_price_level_that_is_none_is_dropped() {
+        let p = tmp("price-not");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        for (json, kept) in [(&br#"{"price_not": 7}"#[..], None), (br#"{"price_not": 2}"#, Some(2))] {
+            std::fs::write(&p, json).unwrap();
+            assert_eq!(Store::load_from(p.clone()).price_not, kept);
+        }
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 
     #[cfg(unix)]

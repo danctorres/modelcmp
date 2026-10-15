@@ -268,7 +268,8 @@ A column of the source not in use needs both sources cached, as in the [table](#
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
 excluded models marked `✗` and your selection `✓`. `--task` and `recommend` leave excluded
-models out.
+models out. Excluded counts the models an entry left out of the TUI's Dev, Price or Via dropdown
+hides, which only the TUI takes back: `exclude --rm` on one says which entry it is.
 
 ### Tiers
 
@@ -451,7 +452,7 @@ Each model carries these fields:
 | `available` | a harness of yours has it |
 | `via` | the harnesses that have it |
 | `selected` | on your shortlist |
-| `excluded` | you excluded it |
+| `excluded` | you excluded it, or an entry left out of the TUI's Dev, Price or Via dropdown hides it |
 | `note` | your note on it, null when it has none |
 | `favorite_for` | the tasks it is the user's favorite for, and `task:tier` for a tier's |
 | `price` | the offer you'd pay, as below |

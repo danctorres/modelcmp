@@ -696,6 +696,39 @@ pub fn via(m: &Model, any: bool, get: Option<&str>) -> String {
     or_dash(&said).into()
 }
 
+/// Whether `m` is excluded: with `e`, or by an entry left out of the TUI's Dev, Price or Via
+/// dropdown. Recommendations skip it.
+pub fn excluded(m: &Model, store: &Store, any: bool) -> bool {
+    store.is_excluded(&m.key) || left_out_by(m, store, any).is_some()
+}
+
+/// The entry left out of the TUI's Dev, Price or Via dropdown that excludes `m`, as `OpenAI in Dev`.
+pub fn left_out_by(m: &Model, store: &Store, any: bool) -> Option<String> {
+    if let Some(d) = m.devs().find(|d| store.dev_not.iter().any(|x| x == d)) {
+        return Some(format!("{d} in Dev"));
+    }
+    if price_out(m.cost(), store) {
+        return Some(format!("{} in Price", level_label(store.price_not?)));
+    }
+    via_out(m, store, any).then(|| format!("{} in Via", shown_via(m, any).join(", ")))
+}
+
+/// Whether a developer of `m` is left out (`Store::dev_not`).
+pub fn dev_out(m: &Model, store: &Store) -> bool {
+    m.devs().any(|d| store.dev_not.iter().any(|x| x == d))
+}
+
+/// Whether a `price` is at or under the level left out (`Store::price_not`).
+pub fn price_out(price: Option<f64>, store: &Store) -> bool {
+    store.price_not.is_some_and(|l| price.is_some_and(|v| v <= LEVELS[l]))
+}
+
+/// Whether every harness that has `m` is left out (`Store::via_not`).
+pub fn via_out(m: &Model, store: &Store, any: bool) -> bool {
+    let v = if store.via_not.is_empty() { vec![] } else { shown_via(m, any) };
+    !v.is_empty() && v.iter().all(|h| store.via_not.iter().any(|x| x == h))
+}
+
 /// Models the user should see: the ones in reach, with `marked_only` only the selected ones.
 /// Unlike `S` in the TUI, it leaves out a selected model out of reach, as an agent cannot call it.
 pub fn visible<'a>(
@@ -729,7 +762,7 @@ pub fn detail_rows(
     let yes = |b: bool| if b { "yes" } else { "no" };
     let source = crate::data::source();
     let mut v = vec![
-        format!("{}{}", m.name, if store.is_excluded(&m.key) { " (excluded)" } else { "" }),
+        format!("{}{}", m.name, if excluded(m, store, any) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.devs().collect::<Vec<_>>().join(", "))),
         format!("  via:        {}", via(m, any, get)),
         // What you'd pay and to whom, `~` as in the table; the list price when it is not yours.

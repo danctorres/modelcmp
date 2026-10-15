@@ -3740,7 +3740,7 @@ mod tests {
             a.key(KeyCode::Char(tab).into());
         }
         a.store.excluded.clear();
-        a.dev_not = vec!["anthropic".into()];
+        a.store.dev_not = vec!["anthropic".into()];
         a.rebuild();
         assert!(hints(&a, 200).contains(&"X unexclude all"), "out of E too while a dropdown hides models");
         a.key(KeyCode::Char('E').into());
@@ -3957,10 +3957,10 @@ mod tests {
                 |h: &str| lines[0][..lines[0].find(h).unwrap()].chars().count() as u16 + h.chars().count() as u16 - 1;
             ((0..206).filter(on).collect::<Vec<_>>(), at("Dev ▾"), at("Price ▾"), at("Via ▾"))
         };
-        a.price_not = Some(0);
+        a.store.price_not = Some(0);
         let (on, dev, price, via) = yellow(&mut a);
         assert_eq!(on, [price], "left out");
-        (a.price_not, a.dev, a.via_not) = (None, vec!["OpenAI".into()], vec!["claude".into()]);
+        (a.store.price_not, a.dev, a.store.via_not) = (None, vec!["OpenAI".into()], vec!["claude".into()]);
         assert_eq!(yellow(&mut a).0, [dev, via], "picked on Dev, left out on Via");
     }
 

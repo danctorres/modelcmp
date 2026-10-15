@@ -6,7 +6,8 @@ use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, FRONTIER_LEGEND, TIERS, by_value, compare_rows, custom_line, custom_priced,
-    detail_lines, priced, shown_via, task_line, tier_pick, truncate, used_benches, verdict, via, visible,
+    detail_lines, excluded, left_out_by, priced, shown_via, task_line, tier_pick, truncate, used_benches, verdict, via,
+    visible,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,7 +125,7 @@ struct ModelOut<'a> {
     providers: Option<Vec<Price<'a>>>,
 }
 
-fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
+fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
     let links = m.links();
     ModelOut {
         key: &m.key,
@@ -133,7 +134,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, full: bool) -> ModelOut<'a> {
         available: m.available,
         via: &m.via,
         selected: s.is_marked(&m.key),
-        excluded: s.is_excluded(&m.key),
+        excluded: excluded(m, s, any),
         note: s.note(&m.key),
         favorite_for: s.favorite_for(&m.key),
         price: m.price().map(|o| {
@@ -206,7 +207,7 @@ fn table(models: &[&Model], store: &Store, any: bool) {
     };
     line("  ", "Model", "Dev", &mut cols.iter().map(|c| c.head()), "Via");
     for (m, row) in models.iter().zip(&cells) {
-        let mark = if store.is_excluded(&m.key) {
+        let mark = if excluded(m, store, any) {
             "✗ "
         } else if store.is_marked(&m.key) {
             "✓ "
@@ -295,13 +296,13 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
                 && (o.via.is_empty()
                     || shown_via(m, any).iter().any(|v| has(&o.via, v) && !(task && crate::data::runs_here(v))))
                 && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
-                && !(task && store.is_excluded(&m.key))
+                && !(task && excluded(m, store, any))
                 && !o.not.contains(&m.key)
         })
         .collect();
     // Your favorites stay on a task's line whatever the filters, as in the recommend panel.
     let pool = || {
-        let usable = |m: &&Model| !store.is_excluded(&m.key) && !o.not.contains(&m.key);
+        let usable = |m: &&Model| !excluded(m, store, any) && !o.not.contains(&m.key);
         visible(data, store, o.all, false).map(|(_, m)| m).filter(usable)
     };
     if let Some(c) = &o.custom {
@@ -355,7 +356,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         return Err(format!("{NO_HARNESS}, and --all lists every model").into());
     }
     if o.json {
-        return print_json(&models.iter().map(|m| out(m, store, false)).collect::<Vec<_>>());
+        return print_json(&models.iter().map(|m| out(m, store, any, false)).collect::<Vec<_>>());
     }
     if o.id || o.cmd {
         // All or none: a script must not start on the first of two commands.
@@ -607,7 +608,7 @@ fn command(
 pub fn show(data: &Data, store: &Store, q: &str, json: bool, all: bool) -> Result {
     let m = resolve(data, q)?;
     if json {
-        return print_json(&out(m, store, true));
+        return print_json(&out(m, store, data.any_available(), true));
     }
     let mut lines = detail_lines(m, store, data.any_available());
     // The providers end the lines, yours first: the others are prices you do not pay.
@@ -626,7 +627,7 @@ pub fn show(data: &Data, store: &Store, q: &str, json: bool, all: bool) -> Resul
 pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result {
     let models = qs.iter().map(|q| resolve(data, q)).collect::<Result<Vec<_>>>()?;
     if json {
-        return print_json(&models.iter().map(|m| out(m, store, true)).collect::<Vec<_>>());
+        return print_json(&models.iter().map(|m| out(m, store, data.any_available(), true)).collect::<Vec<_>>());
     }
     let rows = verdict(&models);
     let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
@@ -771,7 +772,11 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
         store.toggle_excluded(&m.key);
     }
     store.save()?;
-    println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name);
+    match left_out_by(m, store, data.any_available()) {
+        // Taken back in the TUI alone: the dropdown's entry, which excludes more than this model.
+        Some(by) if rm => println!("{} is still excluded, {by} is left out in the TUI", m.name),
+        _ => println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name),
+    }
     Ok(())
 }
 
@@ -957,7 +962,8 @@ fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> (Vec<(&'a Model, f64
 
 /// The models you have and can use: only they are recommended.
 fn usable<'a>(data: &'a Data, store: &'a Store) -> impl Iterator<Item = &'a Model> {
-    visible(data, store, false, false).map(|(_, m)| m).filter(|m| !store.is_excluded(&m.key))
+    let any = data.any_available();
+    visible(data, store, false, false).map(|(_, m)| m).filter(move |m| !excluded(m, store, any))
 }
 
 /// What a task has and each of its tiers: a favorite, or the harness it runs on.
@@ -1098,6 +1104,36 @@ mod tests {
             not: vec![],
         };
         assert!(list(&data, &store, &o).is_ok());
+    }
+
+    /// An entry left out of the TUI's Dev or Price dropdown leaves its models out of `recommend`.
+    #[test]
+    fn recommend_skips_what_the_tui_dropdowns_leave_out() {
+        let mut data =
+            Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
+        data.models[0].developer = "openai".into();
+        let t = TASKS.iter().find(|t| t.name == "coding").unwrap();
+        let line = |s: &Store| front(&data, s, t).0.iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
+        let mut store = Store::default();
+        assert_eq!(line(&store), ["mini", "gpt55"]);
+        store.dev_not = vec!["openai".into()];
+        assert_eq!(line(&store), ["mini"]);
+        (store.dev_not, store.price_not) = (vec![], Some(2));
+        assert_eq!(line(&store), ["gpt55"], "mini costs no more than $2");
+    }
+
+    /// A model a dropdown entry leaves out is excluded in `list --json` too, and says which entry.
+    #[test]
+    fn a_model_a_dropdown_leaves_out_shows_as_excluded() {
+        let mut m = model("gpt55", 90.0, 10.0);
+        m.developer = "OpenAI".into();
+        let mut store = Store::default();
+        let shown = |s: &Store| serde_json::to_value(out(&m, s, false, false)).unwrap()["excluded"].clone();
+        assert_eq!(shown(&store), false);
+        store.dev_not = vec!["OpenAI".into()];
+        assert_eq!((shown(&store), left_out_by(&m, &store, false)), (true.into(), Some("OpenAI in Dev".into())));
+        (store.dev_not, store.price_not) = (vec![], Some(4));
+        assert_eq!(left_out_by(&m, &store, false), Some("≤$15 in Price".into()));
     }
 
     /// A favorite is the tier's model whatever the filters, as in the recommend panel.
@@ -1251,7 +1287,7 @@ mod tests {
     fn model_json_keeps_its_fields() {
         let store = Store::default();
         let mut m = model("gpt55", 80.0, 2.0);
-        let short = serde_json::to_value(out(&m, &store, false)).unwrap();
+        let short = serde_json::to_value(out(&m, &store, false, false)).unwrap();
         let fields = [
             "available",
             "context",
@@ -1290,17 +1326,17 @@ mod tests {
                 "via"
             ]
         );
-        let full = serde_json::to_value(out(&m, &store, true)).unwrap();
+        let full = serde_json::to_value(out(&m, &store, false, true)).unwrap();
         let extra: Vec<_> = keys(&full).into_iter().filter(|k| !fields.contains(k)).collect();
         assert_eq!(extra, ["benchmarks", "pages", "providers"], "only show and compare add these");
         m.offers[0].unpriced = true;
-        let unpriced = serde_json::to_value(out(&m, &store, false)).unwrap();
+        let unpriced = serde_json::to_value(out(&m, &store, false, false)).unwrap();
         assert_eq!(unpriced["price"]["input_per_mtok"], Value::Null, "an unknown price is not free");
         assert_eq!(unpriced["price"]["listed"], false, "nobody lists one");
         // Yours lists none but another provider does: the id is yours, the prices the list ones.
         m.offers[0].available = true;
         m.offers.push(Offer { provider: "q".into(), input: 2.0, output: 2.0, ..Default::default() });
-        let price = &serde_json::to_value(out(&m, &store, true)).unwrap()["price"];
+        let price = &serde_json::to_value(out(&m, &store, false, true)).unwrap()["price"];
         assert_eq!(
             (&price["provider"], &price["input_per_mtok"], &price["listed"]),
             (&"p".into(), &2.0.into(), &true.into())
@@ -1352,7 +1388,7 @@ mod tests {
         for site in ["hf", "HF", "hugging"] {
             assert_eq!(page(&m, Some(site)).as_deref(), Ok("https://huggingface.co/openai/gpt-5.5"), "{site}");
         }
-        let json = serde_json::to_value(out(&m, &Store::default(), true)).unwrap();
+        let json = serde_json::to_value(out(&m, &Store::default(), false, true)).unwrap();
         assert_eq!((&json["url"], &json["pages"]["epoch.ai"]), (&Value::from(epoch), &Value::from(epoch)));
     }
 
