@@ -3812,7 +3812,8 @@ impl App {
                             list.write(at?, edit);
                         }
                     }
-                    KeyCode::Enter => {
+                    // Space picks as enter does, in every list. While searching, space is typed.
+                    KeyCode::Enter | KeyCode::Char(' ') if code == KeyCode::Enter || !list.typing => {
                         // A harness asks the folder to open it in, on its entry, starting
                         // from this one; a download is no harness.
                         if let Some((_, e @ Effect::Launch(cmd))) = items.get(at?)
@@ -6356,6 +6357,7 @@ mod tests {
         press(&mut a, "oG");
         let last = Some(Effect::Open("https://openrouter.ai/x/gpt55".into()));
         assert_eq!(code(&mut a, KeyCode::Enter), last, "openrouter.ai last");
+        assert_eq!(press(&mut a, "oG "), last, "space picks as enter does");
         a.data.models[0].openrouter = None;
         assert_eq!(press(&mut a, "o"), None, "one page: still listed");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));

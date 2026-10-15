@@ -2735,10 +2735,10 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, room: usize
         _ if typing => " ↓ ↑ move · enter pick · esc clear",
         Kind::Cols => " ↓ ↑ move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
-        Kind::Theme => " ↓ ↑ preview · / search · enter saves · esc t close",
-        Kind::Harness => " ↓ ↑ move · / search · enter picks · esc close",
-        Kind::Via => " ↓ ↑ move · / search · enter picks · esc back",
-        Kind::Open | Kind::Launch => " ↓ ↑ move · / search · enter opens · esc close",
+        Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
+        Kind::Harness => " ↓ ↑ move · / search · space enter picks · esc close",
+        Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
+        Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",
     };
     // A folder being written takes every key: what enter did not take says why, and tab what
     // the folder could be. As wide as the hint it stands for.
@@ -4778,7 +4778,10 @@ mod tests {
         let buf = term.backend().buffer();
         let text: String = (0..9).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(text.contains(THEMES[THEMES.len() - 1].0) && text.contains('▲'), "{text}");
-        assert!(text.contains("enter saves") && !text.contains('▼'), "at the last theme, the hint below it: {text}");
+        assert!(
+            text.contains("space enter saves") && !text.contains('▼'),
+            "at the last theme, the hint below it: {text}"
+        );
         // With one row to show, it is the cursor's and not the hint, so the cursor is off the border.
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 4)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
