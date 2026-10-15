@@ -5,7 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+/// A bound typed with `>` (`min`) or `<` (`max`) in the TUI, on the column `--min` and `--max`
+/// call `col`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Bound {
+    pub col: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Store {
     #[serde(skip)]
@@ -37,6 +48,19 @@ pub struct Store {
     /// under it are excluded too.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_not: Option<usize>,
+    /// Developers and countries picked in the TUI's Dev dropdown: the models of the others are
+    /// excluded, unless `--dev` is given.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dev_pick: Vec<String>,
+    /// Entries picked in the Via dropdown, as `dev_pick`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via_pick: Vec<String>,
+    /// The price level (`view::LEVELS`) picked in the Price dropdown, as `dev_pick`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_pick: Option<usize>,
+    /// The bounds typed with `>` and `<` in the TUI, as `dev_pick`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bounds: Vec<Bound>,
     pub notes: BTreeMap<String, String>,
     /// `slot` -> your favorite model for it: the task's, or one `--tier`'s of it, which `--tier`
     /// picks over the task's and both over the computed one. A key that is no built-in task
@@ -241,6 +265,7 @@ impl Store {
         s.about.retain(|t, _| tasks.contains(t));
         // A price level left by a hand edit that is none would hide nothing, yet show as left out.
         s.price_not = s.price_not.filter(|&l| l < crate::view::LEVELS.len());
+        s.price_pick = s.price_pick.filter(|&l| l < crate::view::LEVELS.len());
         s.mtime = mtime(&path);
         s.path = path;
         s

@@ -3,15 +3,15 @@
 
 use crate::data::{Data, FELL_BACK, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
-use crate::store::Store;
+use crate::store::{Bound, Store};
 use crate::view::{
     self, LEVELS, NO_ACCESS, NO_SELECTED, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach, level_label,
-    money, score, shown_via, signed, task_line, task_score, tier_pick,
+    money, score, shown_via, signed, task_line, task_score,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// A numeric column. The text columns (model name, developer) come first and are not listed here.
@@ -342,6 +342,12 @@ pub fn hidden(col: usize) -> bool {
     absent(col) || off() >> col & 1 == 1
 }
 
+/// Whether a bound or a pick on the column at cursor index `col` applies: not while it is
+/// hidden with `|` or has no values from the source in use, which keep it for when it is back.
+pub fn bound_applies(col: usize, hide: &BTreeSet<String>) -> bool {
+    !hide.contains(col_id(col)) && !unmeasured(col)
+}
+
 /// The column at cursor index `col` as `Store::hide` names it. Model always shows.
 fn col_id(col: usize) -> &'static str {
     match col {
@@ -473,7 +479,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("a m", "all models, including ones you have no access to / mine only"),
             ("tab", "next tab, shift+tab back"),
             ("%", "Price with none of the input cached, or back to --cache"),
-            ("c", "clear filters, bounds, task, S, F, E and the dropdowns' entries left out, the selection stays"),
+            ("c", "clear filters, bounds, task, S, F, E and the dropdowns' entries, the selection stays"),
         ],
     ),
     (
@@ -1151,10 +1157,8 @@ pub struct App {
     pub descending: bool,
     /// (column, min, max) filters set with `>` and `<`.
     pub bounds: Vec<(usize, f64, f64)>,
-    /// Developers and countries picked from the Dev dropdown; empty is any.
-    pub dev: Vec<String>,
-    /// Harnesses picked from the Via dropdown, and of `VIA_KINDS`; empty is any.
-    pub via: Vec<String>,
+    /// Whether `keep_bounds` changed the store's since `take_bounds_changed`.
+    bounds_changed: bool,
     /// What is known of each model's download, by key (`Download`).
     downloads: std::collections::HashMap<String, Download>,
     tools: Tools,
@@ -1262,8 +1266,7 @@ impl App {
             sort_col: default_sort().0,
             descending: default_sort().1,
             bounds: vec![],
-            dev: vec![],
-            via: vec![],
+            bounds_changed: false,
             downloads: Default::default(),
             tools: tools(),
             dir: String::new(),
@@ -1313,6 +1316,7 @@ impl App {
         app.cache_on = if start > 0.0 { start } else { crate::data::AGENT_CACHED };
         // ponytail: leaked once per App, which the TUI makes once; hints are &'static str.
         app.cache_hint = Box::leak(format!("% {:.0}% cached", app.cache_on * 100.0).into_boxed_str());
+        app.load_bounds();
         app.set_cols();
         app.set_data(data);
         app
@@ -1485,8 +1489,8 @@ impl App {
                 // The ticks the dropdown draws: "any" has one while nothing is picked.
                 let bench: Vec<String> = self.col_bench(*col).into_iter().map(bench_label).collect();
                 let picked = match *col {
-                    1 => &self.dev,
-                    VIA => &self.via,
+                    1 => &self.store.dev_pick,
+                    VIA => &self.store.via_pick,
                     _ => &bench,
                 };
                 let on = |i: usize| match i {
@@ -1556,12 +1560,8 @@ impl App {
     /// score for a tier to be near the best on (`fit::add_lag`), unless your favorites give its
     /// tiers models of their own.
     pub fn one_pick(&self, i: usize) -> bool {
-        if TASKS.get(i).is_none_or(|t| t.name != "value") {
-            return false;
-        }
-        // `free` with no free model is no pick of its own.
-        let picks = self.tier_picks(i).map(|p| p.map(|e| &e.0.key));
-        picks[1..].iter().all(|p| *p == picks[1]) && picks[0].is_none_or(|free| Some(free) == picks[1])
+        // The name first: the picks are for "value" alone.
+        TASKS.get(i).is_some_and(|t| t.name == "value" && view::one_pick(t.name, &self.tier_picks(i)))
     }
 
     /// What each tier of recommend's task `i` picks, as `--tier` does, with its score: your
@@ -1577,11 +1577,11 @@ impl App {
             // A task of your own has no ranking: its models are on its line only as favorites.
             None => {
                 let Some(&name) = self.store.custom_tasks().get(i - TASKS.len()) else { return [None; TIERS.len()] };
-                let line = self.custom_line(name);
-                (name, line.iter().map(|&m| (m, f64::NAN)).collect(), line.iter().map(|m| m.key.as_str()).collect())
+                let (front, off) = view::custom_front(&self.custom_line(name));
+                (name, front, off)
             }
         };
-        TIERS.map(|x| tier_pick(&front, &off, &self.store, name, x.0))
+        view::tier_picks(&front, &off, &self.store, name)
     }
 
     /// The built-in task under recommend's cursor, which runs over `TASKS` and then your own.
@@ -1797,7 +1797,7 @@ impl App {
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
         // A selected model shows even out of reach, so it can be compared, and `S` `F` `E` show
         // theirs whatever `a`: the same models from mine as from all.
-        // `E` shows the ones a dropdown leaves out, so there they are not hidden.
+        // `E` shows the ones the filters exclude, so there they are not hidden.
         let e = self.only == Some(EXCLUDED);
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
             (self.only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
@@ -1810,33 +1810,85 @@ impl App {
                 && match self.only {
                     Some(MARKED) => self.store.is_marked(&m.key),
                     Some(FAV) => self.is_fav(&m.key),
-                    Some(EXCLUDED) => self.in_excluded(m),
+                    Some(EXCLUDED) => self.in_excluded(i, m),
                     _ => true,
                 }
-                && (skip == 1
-                    || (self.dev.is_empty() || m.devs().any(|d| self.dev.iter().any(|x| x == d)))
-                        && (e || !view::dev_out(m, &self.store)))
+                && (e || self.passes(i, m, skip))
+                && (skip == 1 || e || !view::dev_out(m, &self.store))
                 && (skip == PRICE || e || !view::price_out(self.val(i, PRICE), &self.store))
-                && (skip == VIA
-                    || (self.via.is_empty() || self.via.iter().any(|h| self.via_labels(m).contains(&h.as_str())))
-                        && (e || !view::via_out(m, &self.store, self.any_available)))
-                && self
-                    .bounds
-                    .iter()
-                    .filter(|b| b.0 != skip || skip == PRICE && b.1.is_finite())
-                    .all(|&(c, lo, hi)| self.val(i, c).is_some_and(|v| v >= lo && v <= hi))
+                && (skip == VIA || e || !view::via_out(m, &self.store, self.any_available))
         })
+    }
+
+    /// Whether model `i` passes the picks of the Dev, Price and Via dropdowns and the bounds, the
+    /// ones on column `skip` aside but Price's minimum, as `filtered` has them. The picks are
+    /// the CLI's (`view::picked`), the Price level by the price shown.
+    fn passes(&self, i: usize, m: &Model, skip: usize) -> bool {
+        let any = self.any_available;
+        // Asked only when Via has a pick, as it may be `DOWNLOAD`.
+        let download = !self.store.via_pick.is_empty() && self.download(m).is_some();
+        let hide = &self.store.hide;
+        (skip == 1 || view::picked(m, any, &self.store.dev_pick, &[], None, None))
+            && (skip == PRICE
+                || !bound_applies(PRICE, hide)
+                || self.store.price_pick.is_none_or(|l| self.val(i, PRICE).is_some_and(|v| v <= LEVELS[l])))
+            && (skip == VIA || view::picked(m, any, &[], &self.store.via_pick, None, Some(download)))
+            && self
+                .bounds
+                .iter()
+                .filter(|b| (b.0 != skip || skip == PRICE && b.1.is_finite()) && bound_applies(b.0, hide))
+                .all(|&(c, lo, hi)| self.val(i, c).is_some_and(|v| v >= lo && v <= hi))
+    }
+
+    /// Whether a bound on column `col` is kept for the CLI: not one typed for a benchmark picked
+    /// on a task column, which lasts as the pick does.
+    fn kept_bound(bench: &[Option<&str>], col: usize) -> bool {
+        col.checked_sub(TEXT).is_some_and(|c| bench.get(c).is_some_and(Option::is_none))
+    }
+
+    /// The bounds into the store, which keeps them for the CLI as the dropdowns' picks, before
+    /// anything reads them there: `rebuild`. `take_bounds_changed` says when to save them.
+    fn keep_bounds(&mut self) {
+        let kept = self.bounds.iter().filter(|b| Self::kept_bound(&self.bench, b.0));
+        let bounds: Vec<Bound> = kept
+            .filter_map(|&(c, lo, hi)| {
+                let col = numeric(c)?.id.to_string();
+                Some(Bound { col, min: lo.is_finite().then_some(lo), max: hi.is_finite().then_some(hi) })
+            })
+            .collect();
+        self.bounds_changed |= bounds != self.store.bounds;
+        self.store.bounds = bounds;
+    }
+
+    /// Whether the bounds the store keeps changed since asked last, to be saved.
+    pub fn take_bounds_changed(&mut self) -> bool {
+        std::mem::take(&mut self.bounds_changed)
+    }
+
+    /// The bounds the store has, at a start or after it is reloaded, with the ones typed for a
+    /// picked benchmark.
+    pub fn load_bounds(&mut self) {
+        let bench = self.bench;
+        self.bounds.retain(|b| !Self::kept_bound(&bench, b.0));
+        let at = |b: &Bound| Some(TEXT + COLS.iter().position(|c| c.id == b.col)?);
+        let saved = self
+            .store
+            .bounds
+            .iter()
+            .filter_map(|b| Some((at(b)?, b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY))));
+        self.bounds.extend(saved.collect::<Vec<_>>());
     }
 
     /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
     pub fn rebuild(&mut self) {
+        self.keep_bounds();
         let marked = || self.data.models.iter().filter(|m| self.store.is_marked(&m.key));
         (self.marked_shown, self.marked_out) = (marked().count(), marked().filter(|m| !self.accessible(m)).count());
         // Unmarking the last marked model, or a refresh dropping it, leaves S (and unfavoriting
         // the last, F) for every model rather than an empty table.
         // One out of reach shows in them too, as `filtered` keeps it.
         let fav = self.data.models.iter().any(|m| self.is_fav(&m.key));
-        let excluded = self.data.models.iter().any(|m| self.in_excluded(m));
+        let excluded = self.data.models.iter().enumerate().any(|(i, m)| self.in_excluded(i, m));
         (self.fav_shown, self.excluded_shown) = (fav, excluded);
         self.only = self.only.filter(|&i| [self.any_marked(), fav, excluded][i - MARKED]);
         // The rows move, so the selection follows its models by key and drops the ones filtered out.
@@ -2042,7 +2094,8 @@ impl App {
         self.off_hidden();
     }
 
-    /// Off a column that is left out: the cursor, the sort and any bound on it.
+    /// Off a column that is left out: the cursor and the sort. A bound on it stays, and applies
+    /// again when it is back (`bound_applies`).
     fn off_hidden(&mut self) {
         if hidden(self.col) {
             self.col = Some(default_sort().0).filter(|&c| !hidden(c)).unwrap_or(0);
@@ -2050,7 +2103,6 @@ impl App {
         if hidden(self.sort_col) {
             (self.sort_col, self.descending) = default_sort();
         }
-        self.bounds.retain(|b| !hidden(b.0));
     }
 
     /// Use benchmarks from `src` from now on; the shell loads its data (`switched`). The first
@@ -2172,7 +2224,7 @@ impl App {
     pub fn sized(&mut self, key: &str, answer: Download) {
         self.downloads.insert(key.into(), answer);
         // Via sorts by it, and a model with no copy leaves the ones picked by `DOWNLOAD`.
-        let picked = answer == Download::Gone && self.via.iter().any(|v| v == DOWNLOAD);
+        let picked = answer == Download::Gone && self.store.via_pick.iter().any(|v| v == DOWNLOAD);
         if picked || self.sort_col == VIA && matches!(answer, Download::Size(_)) {
             self.rebuild();
         }
@@ -2255,15 +2307,30 @@ impl App {
         [1, PRICE, VIA].iter().any(|&c| !self.left_out(c).is_empty())
     }
 
-    /// Takes back every entry of the Dev, Price and Via dropdowns left out.
-    fn clear_left_out(&mut self) {
-        (self.store.dev_not, self.store.via_not, self.store.price_not) = (vec![], vec![], None);
+    /// Whether the filters exclude models but `e`: an entry of the Dev, Price or Via dropdown left
+    /// out or picked, or a bound.
+    pub fn filters_exclude(&self) -> bool {
+        self.any_left_out()
+            || !self.store.dev_pick.is_empty()
+            || !self.store.via_pick.is_empty()
+            || self.store.price_pick.is_some()
+            || !self.bounds.is_empty()
     }
 
-    /// Whether `E` shows `m`: excluded with `e`, or one you could use that a dropdown leaves out.
-    fn in_excluded(&self, m: &Model) -> bool {
+    /// Takes back every entry of the Dev, Price and Via dropdowns left out or picked, and the
+    /// bounds: what excludes models but `e`.
+    fn clear_left_out(&mut self) {
+        (self.store.dev_not, self.store.via_not, self.store.price_not) = (vec![], vec![], None);
+        (self.store.dev_pick, self.store.via_pick, self.store.price_pick) = (vec![], vec![], None);
+        self.bounds.clear();
+    }
+
+    /// Whether `E` shows model `i`: excluded with `e`, or one you could use that the filters
+    /// exclude, a pick or a bound as an entry left out of a dropdown.
+    fn in_excluded(&self, i: usize, m: &Model) -> bool {
         self.store.is_excluded(&m.key)
-            || (self.in_reach(m) || self.store.is_marked(&m.key)) && view::excluded(m, &self.store, self.any_available)
+            || (self.in_reach(m) || self.store.is_marked(&m.key))
+                && (view::excluded(m, &self.store, self.any_available) || !self.passes(i, m, usize::MAX))
     }
 
     /// Via as the table shows it: the harnesses, or `OUT_OF_REACH` for one you have no access to.
@@ -2300,11 +2367,7 @@ impl App {
 
     /// Whether a search, a dropdown or a bound narrows the models too.
     pub fn filtered_too(&self) -> bool {
-        !(self.query.trim().is_empty()
-            && self.bounds.is_empty()
-            && self.dev.is_empty()
-            && self.via.is_empty()
-            && !self.any_left_out())
+        !self.query.trim().is_empty() || self.filters_exclude()
     }
 
     /// Recommend ranks the models of tab `i`, picked on its `among` line: the table's tab too,
@@ -2703,7 +2766,7 @@ impl App {
             } else {
                 names.sort_by_key(|(h, n)| (VIA_KINDS.iter().position(|k| k == h), Reverse(*n)));
             }
-            let current = if col == 1 { &self.dev } else { &self.via };
+            let current = if col == 1 { &self.store.dev_pick } else { &self.store.via_pick };
             let picked = current.first().and_then(|d| names.iter().position(|(x, _)| x == d));
             (names, picked)
         } else {
@@ -3124,16 +3187,14 @@ impl App {
 
     /// Index in `LEVELS` of the Price maximum picked in its dropdown, if any.
     pub fn price_level(&self) -> Option<usize> {
-        let max = self.bounds.iter().find(|b| b.0 == PRICE && b.1.is_infinite())?.2;
-        LEVELS.iter().position(|&e| e == max)
+        self.store.price_pick
     }
 
-    /// A price level, entry `i` of the Price dropdown, replaces the Price maximum; "any" drops it.
+    /// A price level, entry `i` of the Price dropdown, replaces the Price maximum typed with `<`;
+    /// "any" drops it. The store keeps it for the CLI, as Dev's and Via's picks.
     fn set_price_level(&mut self, i: usize) {
         self.bounds.retain(|&(c, lo, _)| c != PRICE || lo.is_finite());
-        if i > 0 {
-            self.bounds.push((PRICE, f64::NEG_INFINITY, LEVELS[i - 1]));
-        }
+        self.store.price_pick = i.checked_sub(1);
     }
 
     /// Keys other than motions when no prompt or list is open.
@@ -3280,12 +3341,9 @@ impl App {
             }
             KeyCode::Char('X') if table => self.input = Input::Unexclude,
             KeyCode::Char('c') if table => {
-                // The dropdowns' entries left out too, which the store keeps for `recommend`.
-                let save = self.any_left_out();
+                // The dropdowns' entries picked and left out too, which the store keeps for the CLI.
+                let save = self.filters_exclude();
                 self.query.clear();
-                self.bounds.clear();
-                self.dev.clear();
-                self.via.clear();
                 self.clear_left_out();
                 self.drop_benches(true);
                 // The task set the sort; back to the default.
@@ -3681,9 +3739,14 @@ impl App {
                     match numeric(col).and_then(|c| (c.read)(&text, !min)) {
                         Some(v) => {
                             let (lo, hi) = if min { (v, f64::INFINITY) } else { (f64::NEG_INFINITY, v) };
-                            // A new bound on a column replaces the old one of the same kind.
+                            // A new bound on a column replaces the old one of the same kind, and a
+                            // maximum on Price the level picked in its dropdown.
                             self.bounds.retain(|&(c, l, _)| c != col || l.is_finite() != lo.is_finite());
                             self.bounds.push((col, lo, hi));
+                            if col == PRICE && !min && self.store.price_pick.take().is_some() {
+                                self.rebuild();
+                                return Some(Effect::Save);
+                            }
                         }
                         None if text.is_empty() => {}
                         None => self.report(Err(format!("{text} is not a value for {}", self.col_name(col)))),
@@ -3737,8 +3800,8 @@ impl App {
                             return None;
                         }
                         let (picked, not) = match col {
-                            1 => (&mut self.dev, &mut self.store.dev_not),
-                            _ => (&mut self.via, &mut self.store.via_not),
+                            1 => (&mut self.store.dev_pick, &mut self.store.dev_not),
+                            _ => (&mut self.store.via_pick, &mut self.store.via_not),
                         };
                         if names.is_empty() {
                             picked.clear();
@@ -3761,7 +3824,7 @@ impl App {
                             self.status = format!("{did} {} entries", names.len());
                         }
                         self.rebuild();
-                        // It may leave out or take back an entry, which the store keeps for `recommend`.
+                        // The picks and the entries left out, which the store keeps for the CLI.
                         return Some(Effect::Save);
                     }
                     KeyCode::Esc if list.visual.is_some() && !list.typing => list.visual = None,
@@ -3946,7 +4009,7 @@ impl App {
             Input::Unexclude => {
                 self.input = Input::None;
                 if code == KeyCode::Char('X') {
-                    // The dropdowns' entries left out too, as `E` shows their models.
+                    // What the filters exclude too, as `E` shows their models.
                     self.store.excluded.clear();
                     self.clear_left_out();
                     self.rebuild_in_place();
@@ -4022,7 +4085,7 @@ mod tests {
         press(&mut a, "|");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert!(hidden(price) && a.store.hide.contains("price") && a.choosing_cols(), "and the list stays open");
-        assert_eq!((a.col, a.bounds.len()), (ECI, 0), "nor a bound on it");
+        assert_eq!((a.col, a.bounds.len()), (ECI, 1), "a bound on it stays, for when it is back");
         press(&mut a, "]");
         assert!(matches!(&a.input, Input::Choose { list, .. } if list.sel == 3), "] to the next ticked one");
         code(&mut a, KeyCode::Esc);
@@ -4633,7 +4696,7 @@ mod tests {
         assert_eq!(keys(&a).len(), 3, "every model of a developer from there");
         // With a developer picked too, either one shows a model.
         press(&mut a, "j ");
-        assert_eq!((a.dev.len(), keys(&a).len()), (2, 3));
+        assert_eq!((a.store.dev_pick.len(), keys(&a).len()), (2, 3));
     }
 
     #[test]
@@ -4657,7 +4720,7 @@ mod tests {
             "enter toggles as space does: the dropdown stays open"
         );
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
+        assert_eq!((a.store.dev_pick.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
         press(&mut a, "lld");
         assert_eq!(menu(&a), [("any", 2), ("free", 0), ("≤$0.5", 0), ("≤$2", 1), ("≤$5", 1), ("≤$15", 2)]);
@@ -4677,6 +4740,11 @@ mod tests {
         // Space picks a level and keeps the dropdown open; again on it drops it.
         press(&mut a, "djjj ");
         assert_eq!((a.price_level(), keys(&a)), (Some(2), vec!["mini"]));
+        // Kept for the CLI and the next start.
+        let mut store = Store::default();
+        store.price_pick = a.store.price_pick;
+        let again = App::new(a.data.clone(), store);
+        assert_eq!(again.price_level(), Some(2));
         assert!(matches!(a.input, Input::Menu { list: List { sel: 3, .. }, .. }));
         press(&mut a, "j ");
         assert_eq!((a.price_level(), keys(&a).len()), (Some(3), 1), "another level replaces it");
@@ -4684,7 +4752,50 @@ mod tests {
         assert_eq!((a.price_level(), keys(&a).len()), (None, 2), "enter on the picked level drops it");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "c");
-        assert_eq!((a.dev.len(), keys(&a).len()), (0, 3));
+        assert_eq!((a.store.dev_pick.len(), keys(&a).len()), (0, 3));
+        // A maximum typed with `<` replaces the level, and is no pick kept for the CLI.
+        a.store.price_pick = Some(2);
+        a.input = Input::Bound { col: PRICE, min: false, text: "2".into(), cur: 1 };
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((a.store.price_pick, a.bounds.len()), (None, 1));
+    }
+
+    /// The models a pick or a bound hides are excluded too: `E` shows them, the store keeps the
+    /// bound for the CLI as it keeps the pick, and `XX` takes both back.
+    #[test]
+    fn a_pick_or_a_bound_excludes_what_it_hides() {
+        let mut a = app();
+        let sorted = |a: &App| {
+            let mut k: Vec<String> = keys(a).into_iter().map(String::from).collect();
+            k.sort();
+            k
+        };
+        a.store.dev_pick = vec!["anthropic".into()];
+        a.rebuild();
+        press(&mut a, "E");
+        assert_eq!(sorted(&a), ["gpt55", "mini"], "the models of the developers not picked");
+        press(&mut a, "E");
+        a.store.dev_pick.clear();
+        let coding = TEXT + COLS.iter().position(|c| c.id == "coding").unwrap();
+        a.input = Input::Bound { col: coding, min: true, text: "70".into(), cur: 2 };
+        code(&mut a, KeyCode::Enter);
+        assert!(a.take_bounds_changed() && !a.take_bounds_changed(), "kept once, to be saved");
+        assert_eq!(a.store.bounds, [Bound { col: "coding".into(), min: Some(70.0), max: None }]);
+        press(&mut a, "E");
+        assert!(a.only == Some(EXCLUDED) && keys(&a).contains(&"mini"), "mini scores 60");
+        assert_eq!(press(&mut a, "XX"), Some(Effect::Save));
+        assert!(a.bounds.is_empty() && a.take_bounds_changed() && a.store.bounds.is_empty(), "XX takes it back");
+        assert_eq!((a.only, keys(&a).len()), (None, 3), "and E, with nothing left to show");
+        // A reload of the store brings the bounds it has, as another TUI saved them.
+        a.store.bounds = vec![Bound { col: "price".into(), min: None, max: Some(2.0) }];
+        a.load_bounds();
+        a.rebuild();
+        assert_eq!((a.bounds.as_slice(), keys(&a).len()), (&[(PRICE, f64::NEG_INFINITY, 2.0)][..], 1));
+        // Price hidden with `|`: the bound stays for when it is back, applying to none meanwhile.
+        a.store.hide.insert("price".into());
+        a.set_cols();
+        a.rebuild();
+        assert_eq!((a.store.bounds.len(), keys(&a).len(), a.take_bounds_changed()), (1, 3, false));
     }
 
     #[test]
@@ -4694,7 +4805,11 @@ mod tests {
         press(&mut a, "dje");
         assert_eq!((a.store.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["gpt55", "mini"]));
         press(&mut a, " ");
-        assert_eq!((a.store.dev_not.len(), a.dev.len(), keys(&a)), (0, 1, vec!["opus5"]), "picked, it is not left out");
+        assert_eq!(
+            (a.store.dev_not.len(), a.store.dev_pick.len(), keys(&a)),
+            (0, 1, vec!["opus5"]),
+            "picked, it is not left out"
+        );
         code(&mut a, KeyCode::Char('e'));
         code(&mut a, KeyCode::Esc);
         press(&mut a, "E");
@@ -4733,9 +4848,9 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.via.as_slice(), keys(&a)), (&["claude".to_string()][..], vec!["opus5"]));
+        assert_eq!((a.store.via_pick.as_slice(), keys(&a)), (&["claude".to_string()][..], vec!["opus5"]));
         press(&mut a, "c");
-        assert_eq!((a.via.len(), keys(&a).len()), (0, 3));
+        assert_eq!((a.store.via_pick.len(), keys(&a).len()), (0, 3));
         // `e` leaves a harness out: only the models no other harness has go.
         press(&mut a, "dje");
         assert_eq!(
@@ -4745,7 +4860,7 @@ mod tests {
         );
         press(&mut a, "jje");
         assert_eq!(
-            (a.store.via_not.len(), a.via.len(), keys(&a)),
+            (a.store.via_not.len(), a.store.via_pick.len(), keys(&a)),
             (2, 0, vec!["gpt55", "mini"]),
             "claude alone had opus5"
         );
@@ -4753,14 +4868,14 @@ mod tests {
         assert_eq!((a.store.via_not.len(), keys(&a).len()), (1, 3), "again takes it back");
         press(&mut a, "e ");
         assert_eq!(
-            (a.store.via_not.as_slice(), a.via.as_slice()),
+            (a.store.via_not.as_slice(), a.store.via_pick.as_slice()),
             (&["codex".to_string()][..], &["claude".to_string()][..])
         );
         press(&mut a, "gge");
         assert_eq!((a.store.via_not.len(), a.status.as_str()), (1, "any cannot be left out"));
         press(&mut a, "gg ");
         assert_eq!(
-            (a.store.via_not.as_slice(), a.via.len()),
+            (a.store.via_not.as_slice(), a.store.via_pick.len()),
             (&["codex".to_string()][..], 0),
             "any drops the picks, not what is left out"
         );
@@ -4795,13 +4910,17 @@ mod tests {
         assert_eq!(menu(&a)[menu(&a).len() - 2..], [("local", 1), ("not local", 2)], "after the harnesses");
         code(&mut a, KeyCode::Esc);
         pick(&mut a, "local");
-        assert_eq!((a.via.as_slice(), keys(&a)), (&["local".to_string()][..], vec!["mini"]), "whoever else has it");
+        assert_eq!(
+            (a.store.via_pick.as_slice(), keys(&a)),
+            (&["local".to_string()][..], vec!["mini"]),
+            "whoever else has it"
+        );
         assert!(a.filtered_too(), "recommend says so");
         press(&mut a, "c");
         pick(&mut a, "not local");
-        assert_eq!((keys(&a).len(), a.via.len()), (2, 1), "the others");
+        assert_eq!((keys(&a).len(), a.store.via_pick.len()), (2, 1), "the others");
         press(&mut a, "c");
-        assert_eq!((keys(&a).len(), a.via.len()), (3, 0), "c clears it");
+        assert_eq!((keys(&a).len(), a.store.via_pick.len()), (3, 0), "c clears it");
         // With all, the ones ollama or llama.cpp can download have an entry of their own.
         press(&mut a, "a");
         pick(&mut a, "download");
@@ -5004,7 +5123,7 @@ mod tests {
             matches!(&a.input, Input::Menu { list: List { query, sel: 1, typing: true, .. }, .. } if query == "OPEN")
         );
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.dev, ["openai"], "enter toggles the first match");
+        assert_eq!(a.store.dev_pick, ["openai"], "enter toggles the first match");
         assert!(
             matches!(&a.input, Input::Menu { list: List { query, typing: true, .. }, .. } if query == "OPEN"),
             "and the search stays"
@@ -5021,7 +5140,7 @@ mod tests {
         press(&mut a, "/zzz");
         assert!(matches!(a.input, Input::Menu { list: List { sel: 0, .. }, .. }), "no match leaves only any");
         code(&mut a, KeyCode::Enter);
-        assert!(a.dev.is_empty(), "enter on any drops them all");
+        assert!(a.store.dev_pick.is_empty(), "enter on any drops them all");
     }
 
     #[test]
@@ -5109,10 +5228,10 @@ mod tests {
         let mut a = app();
         a.col = 1;
         press(&mut a, "djjm");
-        assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "m does nothing");
+        assert!(a.store.dev_pick.is_empty() && matches!(a.input, Input::Menu { .. }), "m does nothing");
         press(&mut a, " ");
         assert!(matches!(a.input, Input::Menu { .. }), "the dropdown stays open");
-        assert_eq!((a.dev.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
+        assert_eq!((a.store.dev_pick.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         press(&mut a, "k ");
         assert_eq!(keys(&a), ["gpt55", "mini", "opus5"], "both developers show");
         // ] [ go round the ticked entries, as in f's grid: anthropic at 1, openai at 2.
@@ -5121,22 +5240,25 @@ mod tests {
             assert!(matches!(a.input, Input::Menu { list: List { sel: s, .. }, .. } if s == sel), "] to {sel}");
         }
         press(&mut a, "j ");
-        assert_eq!((a.dev.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
+        assert_eq!((a.store.dev_pick.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["opus5"]));
         press(&mut a, "/open ");
-        assert_eq!(a.dev, ["anthropic"], "while searching, space is typed");
+        assert_eq!(a.store.dev_pick, ["anthropic"], "while searching, space is typed");
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
         press(&mut a, " ");
-        assert_eq!(a.dev, ["anthropic", "openai"], "esc ends the search on the match, space toggles it");
+        assert_eq!(a.store.dev_pick, ["anthropic", "openai"], "esc ends the search on the match, space toggles it");
         press(&mut a, "kk ");
-        assert!(a.dev.is_empty(), "space on any drops them all");
+        assert!(a.store.dev_pick.is_empty(), "space on any drops them all");
         press(&mut a, "]");
         assert_eq!(a.status, "no other ticked entry is shown", "any is the ticked one with nothing picked");
         press(&mut a, "j");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.dev, ["anthropic"], "enter toggles one");
+        assert_eq!(a.store.dev_pick, ["anthropic"], "enter toggles one");
         code(&mut a, KeyCode::Enter);
-        assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "again drops it, the dropdown open");
+        assert!(
+            a.store.dev_pick.is_empty() && matches!(a.input, Input::Menu { .. }),
+            "again drops it, the dropdown open"
+        );
     }
 
     #[test]
@@ -5150,20 +5272,24 @@ mod tests {
         assert_eq!(range(&a), Some(1..=2));
         press(&mut a, " ");
         assert_eq!(
-            (&a.dev, a.status.as_str(), range(&a)),
+            (&a.store.dev_pick, a.status.as_str(), range(&a)),
             (&vec![anthropic.clone(), openai.clone()], "picked 2 entries", None)
         );
         press(&mut a, "vk ");
-        assert_eq!((a.dev.len(), a.status.as_str()), (0, "dropped 2 entries"), "again on all picked drops them");
+        assert_eq!(
+            (a.store.dev_pick.len(), a.status.as_str()),
+            (0, "dropped 2 entries"),
+            "again on all picked drops them"
+        );
         press(&mut a, "kvGe");
         assert_eq!(a.store.dev_not, [anthropic.clone(), openai], "any in a range is skipped");
         press(&mut a, "vgge");
         assert_eq!((a.store.dev_not.len(), a.status.as_str()), (0, "took back 2 entries"));
         // Space on any alone still drops the picks, and e on it alone still refuses.
         press(&mut a, "j ");
-        assert_eq!(a.dev, ["anthropic"]);
+        assert_eq!(a.store.dev_pick, ["anthropic"]);
         press(&mut a, "gg ");
-        assert!(a.dev.is_empty());
+        assert!(a.store.dev_pick.is_empty());
         press(&mut a, "e");
         assert_eq!(a.status, "any cannot be left out");
         press(&mut a, "v");
@@ -6679,11 +6805,11 @@ mod tests {
         assert!(matches!(a.input, Input::Menu { .. }), "past the end is ignored");
         a.mouse(Mouse::Item(1));
         assert!(matches!(a.input, Input::Menu { .. }), "a click keeps a multi-choice dropdown open");
-        assert_eq!(a.dev, ["anthropic"]);
+        assert_eq!(a.store.dev_pick, ["anthropic"]);
         a.mouse(Mouse::Item(2));
-        assert_eq!(a.dev, ["anthropic", "openai"]);
+        assert_eq!(a.store.dev_pick, ["anthropic", "openai"]);
         a.mouse(Mouse::Item(1));
-        assert_eq!(a.dev, ["openai"]);
+        assert_eq!(a.store.dev_pick, ["openai"]);
         a.mouse(Mouse::Exclude(1));
         assert_eq!((a.store.dev_not.as_slice(), keys(&a)), (&["anthropic".to_string()][..], vec!["mini", "gpt55"]));
         press(&mut a, "/a");
@@ -6696,11 +6822,11 @@ mod tests {
         a.mouse(Mouse::Exclude(0));
         assert_eq!(a.status, "any cannot be left out");
         a.mouse(Mouse::Row(0));
-        assert_eq!((a.input == Input::None, a.dev.as_slice()), (true, &["openai".to_string()][..]));
+        assert_eq!((a.input == Input::None, a.store.dev_pick.as_slice()), (true, &["openai".to_string()][..]));
         a.mouse(Mouse::Menu(PRICE));
         a.mouse(Mouse::Item(2));
         assert!(matches!(a.input, Input::Menu { .. }), "a click picks a Price level and keeps the dropdown open");
-        assert_eq!(a.bounds, [(PRICE, f64::NEG_INFINITY, LEVELS[1])]);
+        assert_eq!((a.store.price_pick, a.bounds.len()), (Some(1), 0));
     }
 
     #[test]

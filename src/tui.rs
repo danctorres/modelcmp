@@ -17,7 +17,7 @@ use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, compare_rows, detail_rows, hits,
-    level, level_label, money, priced, short, truncate, verdict, via_names, via_text,
+    level, level_label, priced, short, truncate, verdict, via_names, via_text,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::Show;
@@ -551,6 +551,7 @@ fn event_loop(
                     if matches!(e.kind, MouseEventKind::Down(_)) {
                         lock = Some(crate::store::lock(&crate::store::path()));
                         if app.store.reload_if_changed() {
+                            app.load_bounds();
                             app.set_cols();
                             app.rebuild_in_place();
                             dirty = true;
@@ -579,6 +580,7 @@ fn event_loop(
             let _lock = lock.unwrap_or_else(|| {
                 let held = crate::store::lock(&crate::store::path());
                 if app.store.reload_if_changed() {
+                    app.load_bounds();
                     app.set_cols();
                     app.rebuild_in_place();
                 }
@@ -589,6 +591,13 @@ fn event_loop(
                 Some(Err(m)) => app.mouse(m),
                 None => None,
             };
+            // The bounds, wherever they changed, are kept for the CLI as the dropdowns' picks are.
+            if app.take_bounds_changed()
+                && effect != Some(Effect::Save)
+                && let Err(e) = app.store.save()
+            {
+                app.report(Err(format!("could not save: {e}")));
+            }
             {
                 match effect {
                     Some(Effect::Quit) => return Ok(None),
@@ -1039,8 +1048,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if app.only == Some(FAV) {
                 view.push("D unfavorite all");
             }
-            // Out of `E` too while a dropdown hides models, as `X` takes those back.
-            if app.only == Some(EXCLUDED) || app.any_left_out() && app.tab_has(EXCLUDED) {
+            // Out of `E` too while the filters exclude models, as `X` takes those back.
+            if app.only == Some(EXCLUDED) || app.filters_exclude() && app.tab_has(EXCLUDED) {
                 view.push("X unexclude all");
             }
             if stale(app) {
@@ -1644,7 +1653,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         Input::Unfavorite => Some(("D", "unfavorite every model?".to_string())),
         Input::Unexclude => Some((
             "X",
-            if app.any_left_out() { "unexclude every model, the dropdowns' too?" } else { "unexclude every model?" }
+            if app.filters_exclude() { "unexclude every model, the filters' too?" } else { "unexclude every model?" }
                 .to_string(),
         )),
         _ => None,
@@ -1908,8 +1917,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     // A header whose dropdown narrows the table, by an entry picked or left out, has its ▾ in
     // the yellow the status bar says the filter in.
     let picked = |c: usize| match c {
-        1 => !app.dev.is_empty(),
-        VIA => !app.via.is_empty(),
+        1 => !app.store.dev_pick.is_empty(),
+        VIA => !app.store.via_pick.is_empty(),
         _ => app.price_level().is_some(),
     };
     for (x, w) in [1, PRICE, VIA].into_iter().filter(|&c| picked(c) || !app.left_out(c).is_empty()).filter_map(span) {
@@ -2093,8 +2102,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     if let Input::Menu { col, items, list } = &mut app.input {
         let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
         let picked = match *col {
-            1 => &app.dev,
-            VIA => &app.via,
+            1 => &app.store.dev_pick,
+            VIA => &app.store.via_pick,
             PRICE => &level,
             _ => &bench,
         };
@@ -2312,29 +2321,13 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     if let Some(t) = app.task {
         parts.push(part(format!("best {} per price", t.name), Color::Yellow));
     }
-    if !app.dev.is_empty() {
-        parts.push(part(format!("Dev={}", app.dev.join(",")), Color::Yellow));
-    }
-    if !app.via.is_empty() {
-        parts.push(part(format!("Via={}", app.via.join(",")), Color::Yellow));
-    }
-    for col in [1, PRICE, VIA] {
-        let not = app.left_out(col).join(",");
-        if !not.is_empty() {
-            // Leaving out a level's "up to" is asking for more than it: `Price>$2`, but `Price≠free`.
-            let not = not.strip_prefix('≤').map_or(format!("≠{not}"), |above| format!(">{above}"));
-            parts.push(part(format!("{}{not}", crate::app::base_col_name(col)), Color::Yellow));
-        }
-    }
-    for &(col, lo, hi) in &app.bounds {
-        let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
-        // The level label would repeat what the number says.
-        let shown = match crate::app::numeric(col) {
-            _ if col == PRICE => money(v),
-            Some(c) => (c.show)(v),
-            None => v.to_string(),
-        };
-        parts.push(part(format!("{}{sign}{shown}", app.col_name(col)), Color::Yellow));
+    // What the filters exclude, as the CLI's note says it: the bounds the TUI's own, as one on a
+    // benchmark picked is.
+    let hide = &app.store.hide;
+    let bounds = app.bounds.iter().filter(|b| crate::app::bound_applies(b.0, hide));
+    let bounds = bounds.map(|&(col, lo, hi)| crate::view::bound_said(app.col_name(col), col, lo, hi));
+    for said in crate::view::picks_said(&app.store).into_iter().chain(bounds) {
+        parts.push(part(said, Color::Yellow));
     }
     if !app.status.is_empty() {
         parts.push(part(app.status.clone(), if app.failed { BAD } else { GOOD }));
@@ -3968,7 +3961,7 @@ mod tests {
         a.store.price_not = Some(0);
         let (on, dev, price, via) = yellow(&mut a);
         assert_eq!(on, [price], "left out");
-        (a.store.price_not, a.dev, a.store.via_not) = (None, vec!["OpenAI".into()], vec!["claude".into()]);
+        (a.store.price_not, a.store.dev_pick, a.store.via_not) = (None, vec!["OpenAI".into()], vec!["claude".into()]);
         assert_eq!(yellow(&mut a).0, [dev, via], "picked on Dev, left out on Via");
     }
 

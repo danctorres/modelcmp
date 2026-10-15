@@ -241,8 +241,8 @@ stored as `tool-dispatch`).
   you like.
 - `--task` lists them, cheapest first. With `--tier` it returns that tier's, else the task's,
   leaving out one you excluded or lost access to.
-- `recommend` lists it after the built-in tasks, with what you wrote it is about and each
-  model's tier, `(low)`.
+- `recommend` lists it after the built-in tasks, with what you wrote it is about and the model
+  of each tier.
 - It is the task to pick for work that fits it, even when a built-in task fits too: for a bug,
   your `debugging` over `coding`.
 - It is gone when its last model is cleared.
@@ -267,9 +267,24 @@ stored as `tool-dispatch`).
 A column of the source not in use needs both sources cached, as in the [table](#columns).
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
-excluded models marked `✗` and your selection `✓`. `--task` and `recommend` leave excluded
-models out. Excluded counts the models an entry left out of the TUI's Dev, Price or Via dropdown
-hides, which only the TUI takes back: `exclude --rm` on one says which entry it is.
+excluded models marked `✗` and your selection `✓`. `--task`, `pick` and `recommend` leave
+excluded models out.
+
+Excluded counts the models the TUI's filters hide, which it keeps across restarts and only it
+takes back, with `XX` or `c`: an entry left out of its Dev, Price or Via dropdown, the entries
+picked in one, which exclude the models of the others, and a bound typed with `>` or `<`.
+`exclude --rm` on such a model says which one it is, as `Coding≥60`, and the commands that
+leave them out say them on stderr. `--dev`, `--via`, `--min` and `--max` each replace their
+own: `--dev` the Dev pick, `--max price` the Price level and `--min coding` a `>` on Coding.
+`--via ollama` or `--via llama-cli` on a task keeps a model's local copy off the ranking, which
+the TUI's pick of it does not. A bound or the Price level on a column hidden with `|`, or with no
+values from the source in use, excludes none and is kept for when the column is back.
+
+`recommend` gives the same picks as the TUI's `R` with no search and the `mine` tab, which the
+TUI does not keep. A pick of `↓ download` in Via is passed over, as only the TUI knows what can
+be downloaded, and so is a bound on a task column showing one of its benchmarks. Prices are at
+the cache share of each, the TUI's set with `%` or `--cache`, so with different ones a Price level
+or bound can exclude different models.
 
 ### Tiers
 
@@ -488,14 +503,15 @@ Each model carries these fields:
 | `providers` | every provider's price |
 | `pages` | site to URL, for the sites that have a page for it |
 
-`recommend --json` has a list of tasks, each with its `when`, its `frontier`, the user's
-`favorite` and `tier_favorites`, and their harnesses as `via` and `tier_via`.
+`recommend --json` has a list of tasks, each with its `when`, its `frontier`, the `tiers` the
+TUI's `R` shows (the key each of `free`, `low`, `mid` and `high` picks, or one `pick` for a task
+with one), the user's `favorite` and `tier_favorites`, and their harnesses as `via` and `tier_via`.
 
 - A frontier entry carries its `context` in tokens, `via` (the harnesses that have the model,
   as in `list --json`), and the user's `note` when the model has one.
 - A favorite that is on the line only as the favorite has `"recommended": false`, and the text
   output marks it `not recommended`.
-- The text output prints each frontier entry as `name [key] $price (value)`, the value being
+- The text output prints each tier's pick as `name [key] $price (value)`, the value being
   the task's table column, the same as `tasks`.
 
 A task of your own follows the built-in ones with the same fields and `"custom": true`:

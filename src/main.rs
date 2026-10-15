@@ -48,10 +48,10 @@ enum Cmd {
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
         #[arg(short, long, value_parser = PossibleValuesParser::new(app::COLS.map(|c| c.id)))]
         sort: Option<String>,
-        /// Keep models at or above a value, e.g. --min coding=60. Columns as in --sort, ctx in thousands of tokens (or in tokens from 10000), release as a date (2026-06). Repeatable (`>` in the TUI)
+        /// Keep models at or above a value, e.g. --min coding=60. Columns as in --sort, ctx in thousands of tokens (or in tokens from 10000), release as a date (2026-06). Repeatable. It replaces a `>` on the column kept by the TUI
         #[arg(long, value_parser = |s: &str| bound(s, false))]
         min: Vec<(usize, f64)>,
-        /// Keep models at or below a value, e.g. --max price=2. A release up to the end of its month or year. Repeatable (`<` in the TUI)
+        /// Keep models at or below a value, e.g. --max price=2. A release up to the end of its month or year. Repeatable. It replaces a `<` on the column kept by the TUI
         #[arg(long, value_parser = |s: &str| bound(s, true))]
         max: Vec<(usize, f64)>,
         /// Include models you have no access to
@@ -60,10 +60,10 @@ enum Cmd {
         /// Selected only: your shortlist (`S` in the TUI)
         #[arg(short = 'm', long, alias = "marked")]
         selected: bool,
-        /// Only these developers or countries, e.g. --dev anthropic --dev china (the Dev dropdown, `d`, in the TUI)
+        /// Only these developers or countries, e.g. --dev anthropic --dev china. It replaces the TUI's Dev pick (`d`)
         #[arg(long)]
         dev: Vec<String>,
-        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli). Repeatable (the Via dropdown, `d`, in the TUI)
+        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli). Repeatable. It replaces the TUI's Via pick (`d`)
         #[arg(long)]
         via: Vec<String>,
         /// Max rows, 0 = no limit

@@ -2,7 +2,7 @@
 
 use crate::data::{Data, Model, Offer, norm};
 use crate::fit::{self, TASKS};
-use crate::store::{Store, slot};
+use crate::store::Store;
 use std::ops::Range;
 
 pub fn money(x: f64) -> String {
@@ -468,16 +468,6 @@ pub fn custom_line<'a>(pool: impl Iterator<Item = &'a Model>, store: &Store, tas
     v
 }
 
-/// An entry of that line: `★ name $price`, `★ name [key] $price` with `keyed`, then the tiers
-/// the model is for, `(low, mid)`, unless it is the task's, which every tier without one takes.
-pub fn custom_priced(m: &Model, store: &Store, task: &str, keyed: bool) -> String {
-    let is = |x: Option<&str>| store.favorite(&slot(task, x)) == Some(m.key.as_str());
-    let tiers: Vec<&str> = TIERS.iter().map(|t| t.0).filter(|x| is(Some(x))).collect();
-    let tiers = if is(None) || tiers.is_empty() { String::new() } else { format!(" ({})", tiers.join(", ")) };
-    let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
-    format!("★ {}{key} {}{tiers}", m.name, price(m))
-}
-
 /// Two values of a column in order, the highest first with `desc`: blanks last either way.
 pub fn by_value(x: Option<f64>, y: Option<f64>, desc: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering::{Equal, Greater, Less};
@@ -541,6 +531,30 @@ pub fn tier_pick<'m>(
     fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), tier).copied())
 }
 
+/// A task of your own's line as `tier_picks` takes it: no scores, and every model on it only
+/// for being a favorite.
+pub fn custom_front<'m>(line: &[&'m Model]) -> (Vec<(&'m Model, f64)>, Vec<&'m str>) {
+    (line.iter().map(|&m| (m, f64::NAN)).collect(), line.iter().map(|m| m.key.as_str()).collect())
+}
+
+/// What each tier of a task picks (`tier_pick`), as recommend's grid and `modelcmp recommend` show them.
+pub fn tier_picks<'m>(
+    front: &[(&'m Model, f64)],
+    off: &[&str],
+    store: &Store,
+    task: &str,
+) -> [Option<(&'m Model, f64)>; TIERS.len()] {
+    TIERS.map(|x| tier_pick(front, off, store, task, x.0))
+}
+
+/// Whether a task has one pick and not one per tier: "value", a rank with no score for a tier
+/// to be near the best on (`fit::add_lag`), unless your favorites give its tiers models of their own.
+pub fn one_pick(task: &str, picks: &[Option<(&Model, f64)>; TIERS.len()]) -> bool {
+    let key = |i: usize| picks[i].map(|e| e.0.key.as_str());
+    // `free` with no free model is no pick of its own.
+    task == "value" && (1..TIERS.len()).all(|i| key(i) == key(1)) && key(0).is_none_or(|free| Some(free) == key(1))
+}
+
 /// `$1.5`, or `free`.
 pub fn usd(x: f64) -> String {
     if x == 0.0 { "free".into() } else { format!("${}", money(x)) }
@@ -551,9 +565,9 @@ pub fn price(m: &Model) -> String {
     m.quoted().map_or("-".into(), |(o, listed)| format!("{}{}", if listed { "~" } else { "" }, usd(o.blended())))
 }
 
-/// What a frontier line of `modelcmp recommend` shows.
-pub const FRONTIER_LEGEND: &str = "best per price: the top model at each price level, cheapest first, as name [key] $/1M tokens (score on the task), \
-     plus ★ your favorite, marked not recommended when it is not one";
+/// What a tier's line of `modelcmp recommend` shows, as recommend's grid in the TUI picks them.
+pub const RECOMMEND_LEGEND: &str = "the best model for each task at each price: free, low up to $2, mid up to $5 and high any, \
+     or ★ your favorite, as name [key] $/1M tokens (score on the task), marked not recommended when the favorite is not one";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
 pub const CUSTOM_ABOUT: &str = "your own task";
@@ -696,21 +710,100 @@ pub fn via(m: &Model, any: bool, get: Option<&str>) -> String {
     or_dash(&said).into()
 }
 
-/// Whether `m` is excluded: with `e`, or by an entry left out of the TUI's Dev, Price or Via
-/// dropdown. Recommendations skip it.
+/// Whether `m` is excluded: with `e`, or by the TUI's filters (`left_out_by`). Recommendations
+/// skip it.
 pub fn excluded(m: &Model, store: &Store, any: bool) -> bool {
     store.is_excluded(&m.key) || left_out_by(m, store, any).is_some()
 }
 
-/// The entry left out of the TUI's Dev, Price or Via dropdown that excludes `m`, as `OpenAI in Dev`.
+/// What of the TUI's filters excludes `m`: an entry left out of its Dev, Price or Via dropdown,
+/// as `OpenAI left out in Dev`, the entries picked in one, as `≤$2 picked in Price`, or a bound
+/// typed with `>` or `<`, as `Coding≥60`.
 pub fn left_out_by(m: &Model, store: &Store, any: bool) -> Option<String> {
     if let Some(d) = m.devs().find(|d| store.dev_not.iter().any(|x| x == d)) {
-        return Some(format!("{d} in Dev"));
+        return Some(format!("{d} left out in Dev"));
     }
     if price_out(m.cost(), store) {
-        return Some(format!("{} in Price", level_label(store.price_not?)));
+        return Some(format!("{} left out in Price", level_label(store.price_not?)));
     }
-    via_out(m, store, any).then(|| format!("{} in Via", shown_via(m, any).join(", ")))
+    if via_out(m, store, any) {
+        return Some(format!("{} left out in Via", shown_via(m, any).join(", ")));
+    }
+    let picks = |l: &[String]| l.join(", ");
+    if !picked(m, any, &store.dev_pick, &[], None, None) {
+        return Some(format!("{} picked in Dev", picks(&store.dev_pick)));
+    }
+    let price = store.price_pick.filter(|_| crate::app::bound_applies(crate::app::PRICE, &store.hide));
+    if !picked(m, any, &[], &[], price, None) {
+        return Some(format!("{} picked in Price", level_label(store.price_pick?)));
+    }
+    if !picked(m, any, &[], &store.via_pick, None, None) {
+        return Some(format!("{} picked in Via", picks(&store.via_pick)));
+    }
+    let b = store.bounds.iter().find(|b| !in_bound(m, b, store))?;
+    let at = crate::app::COLS.iter().position(|c| c.id == b.col)?;
+    let col = crate::app::TEXT + at;
+    let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
+    Some(bound_said(crate::app::base_col_name(col), col, lo, hi))
+}
+
+/// Whether `m` is within a bound typed in the TUI: every model is in one that does not apply
+/// (`app::bound_applies`) or is on no column.
+fn in_bound(m: &Model, b: &crate::store::Bound, store: &Store) -> bool {
+    let Some(at) = crate::app::COLS.iter().position(|c| c.id == b.col) else { return true };
+    let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
+    !crate::app::bound_applies(crate::app::TEXT + at, &store.hide)
+        || (crate::app::COLS[at].get)(m).is_some_and(|v| v >= lo && v <= hi)
+}
+
+/// The bounds the store keeps that apply, as the status bar says them.
+pub fn bounds_said(store: &Store) -> impl Iterator<Item = String> {
+    store.bounds.iter().filter_map(|b| {
+        let col = crate::app::TEXT + crate::app::COLS.iter().position(|c| c.id == b.col)?;
+        let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
+        crate::app::bound_applies(col, &store.hide).then(|| bound_said(crate::app::base_col_name(col), col, lo, hi))
+    })
+}
+
+/// A bound as the status bar says it, `Coding≥60` or `Price≤2.0`, `name` the header of the
+/// column at cursor index `col`.
+pub fn bound_said(name: &str, col: usize, lo: f64, hi: f64) -> String {
+    let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
+    // The level label would repeat what the number says.
+    let shown = match crate::app::numeric(col) {
+        _ if col == crate::app::PRICE => money(v),
+        Some(c) => (c.show)(v),
+        None => v.to_string(),
+    };
+    format!("{name}{sign}{shown}")
+}
+
+/// The entries picked in the TUI's Dev, Price and Via dropdowns and left out of them, as its
+/// status bar says them: `Dev=OpenAI`, `Price≤$2`, `Via≠claude`.
+pub fn picks_said(store: &Store) -> Vec<String> {
+    let mut v = vec![];
+    let list = |l: &[String]| l.join(",");
+    if !store.dev_pick.is_empty() {
+        v.push(format!("Dev={}", list(&store.dev_pick)));
+    }
+    if let Some(l) = store.price_pick.filter(|_| crate::app::bound_applies(crate::app::PRICE, &store.hide)) {
+        let l = level_label(l);
+        v.push(if l.starts_with('≤') { format!("Price{l}") } else { format!("Price={l}") });
+    }
+    if !store.via_pick.is_empty() {
+        v.push(format!("Via={}", list(&store.via_pick)));
+    }
+    if !store.dev_not.is_empty() {
+        v.push(format!("Dev≠{}", list(&store.dev_not)));
+    }
+    if let Some(l) = store.price_not.map(level_label) {
+        // Leaving out a level's "up to" is asking for more than it: `Price>$2`, but `Price≠free`.
+        v.push(l.strip_prefix('≤').map_or(format!("Price≠{l}"), |above| format!("Price>{above}")));
+    }
+    if !store.via_not.is_empty() {
+        v.push(format!("Via≠{}", list(&store.via_not)));
+    }
+    v
 }
 
 /// Whether a developer of `m` is left out (`Store::dev_not`).
@@ -727,6 +820,30 @@ pub fn price_out(price: Option<f64>, store: &Store) -> bool {
 pub fn via_out(m: &Model, store: &Store, any: bool) -> bool {
     let v = if store.via_not.is_empty() { vec![] } else { shown_via(m, any) };
     !v.is_empty() && v.iter().all(|h| store.via_not.iter().any(|x| x == h))
+}
+
+/// Whether `m` is among the entries picked in the TUI's Dev, Price (a level of `LEVELS`) and Via
+/// dropdowns, each any when none is. `download` is whether `x` can download it, which only the
+/// TUI knows: with None a pick of it is passed over.
+pub fn picked(
+    m: &Model,
+    any: bool,
+    dev: &[String],
+    via: &[String],
+    price: Option<usize>,
+    download: Option<bool>,
+) -> bool {
+    let [local, not_local, dl] = crate::app::VIA_KINDS;
+    let known = |v: &&String| download.is_some() || *v != dl;
+    let has = |v: &str| match v {
+        _ if v == local => m.here(),
+        _ if v == not_local => !m.here(),
+        _ if v == dl => download == Some(true),
+        h => shown_via(m, any).contains(&h),
+    };
+    (dev.is_empty() || m.devs().any(|d| dev.iter().any(|x| x == d)))
+        && price.is_none_or(|l| m.cost().is_some_and(|v| v <= LEVELS[l]))
+        && (!via.iter().any(|v| known(&v)) || via.iter().filter(known).any(|v| has(v)))
 }
 
 /// Models the user should see: the ones in reach, with `marked_only` only the selected ones.
@@ -1049,6 +1166,19 @@ fn best(
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
+
+    /// The TUI's Via pick and the CLI's are one: a harness, local or not, and a download that
+    /// only the TUI knows of, which the CLI passes over.
+    #[test]
+    fn a_via_pick_is_the_same_in_the_tui_and_the_cli() {
+        let m = Model { via: vec!["claude".into()], ..Default::default() };
+        let via =
+            |v: &[&str], dl| picked(&m, false, &[], &v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None, dl);
+        assert!(via(&[], None) && via(&["claude"], None) && !via(&["pi"], None));
+        assert!(via(&["not local"], None) && !via(&["local"], None));
+        assert!(!via(&["↓ download"], Some(false)) && via(&["↓ download"], Some(true)), "the TUI knows");
+        assert!(via(&["↓ download"], None) && !via(&["↓ download", "pi"], None), "the CLI passes it over");
+    }
 
     #[test]
     fn details_show_the_price_then_pages_before_the_providers_by_name() {
