@@ -1039,7 +1039,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if app.only == Some(FAV) {
                 view.push("D unfavorite all");
             }
-            if app.only == Some(EXCLUDED) && !app.store.excluded.is_empty() {
+            // Out of `E` too while a dropdown hides models, as `X` takes those back.
+            if app.only == Some(EXCLUDED) || app.any_left_out() && app.tab_has(EXCLUDED) {
                 view.push("X unexclude all");
             }
             if stale(app) {
@@ -1641,7 +1642,11 @@ fn draw(app: &mut App, f: &mut Frame) {
         Input::Quit => Some(("q", "quit?".to_string())),
         Input::Upgrade => app.data.update().map(|new| ("U", format!("upgrade to v{new}?"))),
         Input::Unfavorite => Some(("D", "unfavorite every model?".to_string())),
-        Input::Unexclude => Some(("X", "unexclude every model?".to_string())),
+        Input::Unexclude => Some((
+            "X",
+            if app.any_left_out() { "unexclude every model, the dropdowns' too?" } else { "unexclude every model?" }
+                .to_string(),
+        )),
         _ => None,
     };
     if let Some((key, title)) = ask {
@@ -3734,6 +3739,12 @@ mod tests {
             assert!(hints(&a, 200).contains(&hint), "{hint}: a hint in {tab}");
             a.key(KeyCode::Char(tab).into());
         }
+        a.store.excluded.clear();
+        a.dev_not = vec!["anthropic".into()];
+        a.rebuild();
+        assert!(hints(&a, 200).contains(&"X unexclude all"), "out of E too while a dropdown hides models");
+        a.key(KeyCode::Char('E').into());
+        assert!(hints(&a, 200).contains(&"X unexclude all"), "for the ones a dropdown leaves out too");
     }
 
     #[test]

@@ -2250,6 +2250,16 @@ impl App {
         }
     }
 
+    /// Whether an entry of the Dev, Price or Via dropdown is left out.
+    pub fn any_left_out(&self) -> bool {
+        [1, PRICE, VIA].iter().any(|&c| !self.left_out(c).is_empty())
+    }
+
+    /// Takes back every entry of the Dev, Price and Via dropdowns left out.
+    fn clear_left_out(&mut self) {
+        (self.dev_not, self.via_not, self.price_not) = (vec![], vec![], None);
+    }
+
     /// Whether a developer of `m` is left out (`dev_not`).
     fn dev_out(&self, m: &Model) -> bool {
         m.devs().any(|d| self.dev_not.iter().any(|x| x == d))
@@ -2311,7 +2321,7 @@ impl App {
             && self.bounds.is_empty()
             && self.dev.is_empty()
             && self.via.is_empty()
-            && [1, PRICE, VIA].iter().all(|&c| self.left_out(c).is_empty()))
+            && !self.any_left_out())
     }
 
     /// Recommend ranks the models of tab `i`, picked on its `among` line: the table's tab too,
@@ -3276,7 +3286,8 @@ impl App {
                 self.refuse("no favorites: f favorites the one under the cursor");
             }
             KeyCode::Char('D') if table => self.input = Input::Unfavorite,
-            KeyCode::Char('X') if table && self.store.excluded.is_empty() => {
+            // `E`'s models, and keys excluded that are no longer listed.
+            KeyCode::Char('X') if table && self.store.excluded.is_empty() && !self.excluded_shown => {
                 self.refuse("no excluded models: e excludes the one under the cursor");
             }
             KeyCode::Char('X') if table => self.input = Input::Unexclude,
@@ -3285,9 +3296,7 @@ impl App {
                 self.bounds.clear();
                 self.dev.clear();
                 self.via.clear();
-                self.via_not.clear();
-                self.dev_not.clear();
-                self.price_not = None;
+                self.clear_left_out();
                 self.drop_benches(true);
                 // The task set the sort; back to the default.
                 if self.task.take().is_some() {
@@ -3896,7 +3905,9 @@ impl App {
             Input::Unexclude => {
                 self.input = Input::None;
                 if code == KeyCode::Char('X') {
+                    // The dropdowns' entries left out too, as `E` shows their models.
                     self.store.excluded.clear();
+                    self.clear_left_out();
                     self.rebuild_in_place();
                     self.status = "unexcluded every model".into();
                     return Some(Effect::Save);
@@ -6696,6 +6707,16 @@ mod tests {
         assert_eq!((press(&mut a, "q"), a.store.excluded.len()), (None, 2), "any other key cancels");
         assert_eq!(press(&mut a, "XX"), Some(Effect::Save));
         assert!(a.store.excluded.is_empty() && a.only.is_none(), "and E is left");
+        a.price_not = Some(0);
+        a.rebuild();
+        assert_eq!((press(&mut a, "X"), &a.input), (None, &Input::None), "no model free: E and X have none");
+        (a.dev_not, a.via_not, a.price_not) =
+            (vec!["anthropic".into()], vec!["codex".into(), "opencode".into()], Some(2));
+        a.rebuild();
+        press(&mut a, "E");
+        assert_eq!((press(&mut a, "X"), &a.input), (None, &Input::Unexclude), "X asks for the dropdowns' too");
+        assert_eq!(press(&mut a, "X"), Some(Effect::Save));
+        assert!(!a.any_left_out() && a.only.is_none(), "every entry left out is taken back, and E is left");
     }
 
     #[test]

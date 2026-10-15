@@ -57,7 +57,7 @@ Selected models (`✓`) are your shortlist, kept until you deselect them, across
 | `V` | highlight the selected models shown, as `v` highlights a range: `Ve` excludes them all, or unexcludes them when all are excluded, and `esc` cancels. A hint in the status bar while one is selected |
 | `u` | deselect every model. A hint in the status bar while one is selected |
 | `DD` | unfavorite every model, for every task and tier, tasks of your own included, which go with their models. The first `D` asks, and any other key cancels. A hint in the status bar in `F` |
-| `XX` | unexclude every model. The first `X` asks, and any other key cancels. A hint in the status bar in `E` |
+| `XX` | unexclude every model, the ones an entry left out of the Dev, Price or Via dropdown hides too. The first `X` asks, and any other key cancels. A hint in the status bar in `E`, and out of it while a dropdown entry left out hides models |
 | `S` | selected models only. `S` again or `esc`: every model |
 | `F` | favorite models only, the rows with a `★` (the picked task's favorite when a task is picked), the ones you have no access to too, from `mine` as from `all`. `F` again or `esc`: every model |
 | `E` | excluded models only, the rows with a red `✗`, the ones you have no access to too, from `mine` as from `all`, and the ones an entry left out of the Dev, Price or Via dropdown hides, their `✗` grey. `E` again or `esc`: every model |
