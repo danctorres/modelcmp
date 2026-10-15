@@ -2152,6 +2152,7 @@ fn dropdown(
     not: &[String],
     faint: bool,
 ) {
+    let range = list.range();
     let (query, sel, top) = (list.query.as_str(), list.sel, &mut list.top);
     let rows = &menu_rows(items, query);
     let Some((rect, (label_w, n_w))) = menu_box(area, x, col, items, rows.len()) else { return };
@@ -2179,7 +2180,7 @@ fn dropdown(
             _ => Color::Reset,
         };
         // The cursor runs through the box's border, as in the table.
-        if k == sel {
+        if k == sel || range.as_ref().is_some_and(|r| r.contains(&k)) {
             cursor_ends(buf, rect.x, rect.right() - 1, y);
         }
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
@@ -2353,6 +2354,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Note { .. }, _) => ("NOTE", Color::Blue),
         (Input::Key { .. }, _) => ("KEY", Color::Blue),
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
+        (Input::Menu { list, .. }, _) if list.visual.is_some() => ("HIGHLIGHT", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
         (Input::Upgrade, _) => ("UPGRADE", Color::Yellow),
@@ -2440,7 +2442,13 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         };
         let toggles = matches!(app.input, Input::Menu { .. }) || app.choosing_favs() || app.choosing_cols();
         let hint = match (menu, typing) {
-            (true, false) if matches!(app.input, Input::Menu { col: 1 | PRICE | VIA, .. }) => {
+            (true, false) if matches!(&app.input, Input::Menu { list, .. } if list.visual.is_some()) => {
+                "↓ ↑ extend  space enter toggle  e leave out  esc cancel"
+            }
+            (true, false) if matches!(app.input, Input::Menu { col: 1 | VIA, .. }) => {
+                "↓ ↑ move  / search  v range  space enter toggle  e leave out  esc close"
+            }
+            (true, false) if matches!(app.input, Input::Menu { col: PRICE, .. }) => {
                 "↓ ↑ move  / search  space enter toggle  e leave out  esc close"
             }
             (true, false) => "↓ ↑ move  / search  space enter toggle  esc close",

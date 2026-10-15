@@ -468,7 +468,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("s", "sort by the column, again reverses"),
             ("/", "filter models, compare rows, this help or a list"),
             ("> <", "minimum / maximum for the column, e.g. > 60 enter"),
-            ("d", "dropdown on a header with ▾, space enter toggle, e leave out"),
+            ("d", "dropdown on a header with ▾, space enter toggle, e leave out, v a range"),
             ("|", "columns to show, space enter toggle"),
             ("a m", "all models, including ones you have no access to / mine only"),
             ("tab", "next tab, shift+tab back"),
@@ -662,6 +662,8 @@ pub struct List {
     pub edit: Option<Edit>,
     /// The box under the cursor along a row of `f`'s grid: 0 the task's own, then its tiers'.
     pub col: usize,
+    /// Entry where `v` started a range in the Dev or Via dropdown; it runs to the cursor.
+    pub visual: Option<usize>,
 }
 
 /// An entry of a list written where it is, the list staying open: in `f`'s grid a task of your
@@ -702,6 +704,12 @@ impl List {
         List { sel, ..Default::default() }
     }
 
+    /// Entries of the range `v` started, among the ones matching `query`.
+    pub fn range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        let a = self.visual?;
+        Some(a.min(self.sel)..=a.max(self.sel))
+    }
+
     /// Whether its keys move and pick: nothing is being typed, a search or an entry.
     fn idle(&self) -> bool {
         !self.typing && self.edit.is_none()
@@ -739,7 +747,8 @@ impl List {
                     self.sel = if any { len(&self.query).min(2).saturating_sub(1) } else { 0 };
                 }
             }
-            KeyCode::Char('/') => self.typing = true,
+            // A search would change the entries under a range, so it ends it.
+            KeyCode::Char('/') => (self.typing, self.visual) = (true, None),
             _ => return false,
         }
         true
@@ -2907,6 +2916,11 @@ impl App {
             return None;
         }
         if list {
+            // A click is for its entry alone, as a plain click in the table drops the range, and
+            // one outside then closes the dropdown with its esc.
+            if let Input::Menu { list, .. } = &mut self.input {
+                list.visual = None;
+            }
             return match m {
                 Mouse::Item(n) | Mouse::Tick(n, _) => {
                     let (sel, len) = self.list()?;
@@ -3684,14 +3698,79 @@ impl App {
                 match code {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     KeyCode::Char('q') if list.idle() => self.ask_quit(),
+                    // `v` starts a range on Dev and Via, as in the table, and again cancels it.
+                    KeyCode::Char('v') if list.idle() => {
+                        if !matches!(*col, 1 | VIA) {
+                            self.refuse("v takes a range in the Dev and Via dropdowns");
+                            return None;
+                        }
+                        list.visual = match list.visual {
+                            Some(_) => None,
+                            None => Some(list.sel),
+                        };
+                    }
+                    // On Dev and Via, space or enter picks the entry under the cursor, or every
+                    // entry of the range `v` started, and `e` leaves them out, as space and `e`
+                    // act on models: all of them, or none when all already are, which takes them
+                    // back. A picked entry is no longer left out, and the other way round. "any"
+                    // drops the picks when it is alone, and the range ends. While searching,
+                    // space is typed. The dropdown stays open.
+                    KeyCode::Enter | KeyCode::Char(' ' | 'e')
+                        if matches!(*col, 1 | VIA) && (code == KeyCode::Enter || list.idle()) =>
+                    {
+                        let (col, leave) = (*col, code == KeyCode::Char('e'));
+                        let range = list.range().unwrap_or(list.sel..=list.sel);
+                        list.visual = None;
+                        let entries = rows.get(range).unwrap_or_default();
+                        let fixed =
+                            |i: usize| i == 0 || leave && col == VIA && VIA_KINDS.contains(&items[i].0.as_str());
+                        let names: Vec<String> =
+                            entries.iter().filter(|&&i| !fixed(i)).map(|&i| items[i].0.clone()).collect();
+                        let why = match entries {
+                            _ if !names.is_empty() => None,
+                            [0, ..] if !leave => None,
+                            [i] => Some(format!("{} cannot be left out", items[*i].0)),
+                            _ => Some("nothing in the range can be left out".to_string()),
+                        };
+                        if let Some(why) = why {
+                            self.refuse(why);
+                            return None;
+                        }
+                        let (picked, not) = match col {
+                            1 => (&mut self.dev, &mut self.store.dev_not),
+                            _ => (&mut self.via, &mut self.store.via_not),
+                        };
+                        if names.is_empty() {
+                            picked.clear();
+                        }
+                        let (on, off) = if leave { (not, picked) } else { (picked, not) };
+                        off.retain(|h| !names.contains(h));
+                        let all = !names.is_empty() && names.iter().all(|h| on.contains(h));
+                        if all {
+                            on.retain(|h| !names.contains(h));
+                        } else {
+                            on.extend(names.iter().filter(|h| !on.contains(h)).cloned().collect::<Vec<_>>());
+                        }
+                        if names.len() > 1 {
+                            let did = match (leave, all) {
+                                (false, false) => "picked",
+                                (false, true) => "dropped",
+                                (true, false) => "left out",
+                                (true, true) => "took back",
+                            };
+                            self.status = format!("{did} {} entries", names.len());
+                        }
+                        self.rebuild();
+                        // It may leave out or take back an entry, which the store keeps for `recommend`.
+                        return Some(Effect::Save);
+                    }
+                    KeyCode::Esc if list.visual.is_some() && !list.typing => list.visual = None,
                     // Enter does what space does; while searching, space is typed. On Price it
-                    // picks the level, or drops it when it is the picked one; on Dev and Via it
-                    // adds or drops the entry, as space marks a model, and on "any" drops all.
-                    // The dropdown stays open.
+                    // picks the level, or drops it when it is the picked one, and on a task's
+                    // column its benchmark. The dropdown stays open.
                     KeyCode::Enter | KeyCode::Char(' ') if code == KeyCode::Enter || !list.typing => {
-                        let i = at?;
-                        let lists = matches!(*col, 1 | PRICE | VIA);
-                        if *col == PRICE {
+                        let (i, price) = (at?, *col == PRICE);
+                        if price {
                             // A level picked at or under the one left out would show nothing.
                             if self.store.price_not.is_some_and(|n| i > 0 && i - 1 <= n) {
                                 self.store.price_not = None;
@@ -3705,49 +3784,25 @@ impl App {
                             if let Input::Menu { items, .. } = &mut self.input {
                                 *items = fresh;
                             }
-                        } else {
-                            let (picked, not) = match *col {
-                                1 => (&mut self.dev, &mut self.store.dev_not),
-                                _ => (&mut self.via, &mut self.store.via_not),
-                            };
-                            // A picked entry is no longer left out. "any" drops the picks alone.
-                            not.retain(|h| *h != items[i].0);
-                            match picked.iter().position(|d| *d == items[i].0) {
-                                _ if i == 0 => picked.clear(),
-                                Some(k) => drop(picked.remove(k)),
-                                None => picked.push(items[i].0.clone()),
-                            }
                         }
                         self.rebuild();
-                        // It may take back an entry left out, which the store keeps for `recommend`.
-                        if lists {
+                        // It may take back the level left out, which the store keeps for `recommend`.
+                        if price {
                             return Some(Effect::Save);
                         }
                     }
-                    // `e` leaves an entry out, as it excludes a model in the table, and again takes it back.
-                    KeyCode::Char('e') if matches!(*col, 1 | PRICE | VIA) && list.idle() => {
-                        let (col, i) = (*col, at?);
-                        let h = items[i].0.clone();
-                        if i == 0 || col == VIA && VIA_KINDS.contains(&h.as_str()) {
-                            self.refuse(format!("{h} cannot be left out"));
+                    // `e` leaves a price level out, as it excludes a model in the table, and again takes it back.
+                    KeyCode::Char('e') if *col == PRICE && list.idle() => {
+                        let i = at?;
+                        if i == 0 {
+                            let why = format!("{} cannot be left out", items[0].0);
+                            self.refuse(why);
                             return None;
                         }
-                        if col == PRICE {
-                            self.store.price_not = Some(i - 1).filter(|l| self.store.price_not != Some(*l));
-                            // The level picked, when at or under it, would show nothing.
-                            if self.price_level().is_some_and(|p| self.store.price_not.is_some_and(|n| p <= n)) {
-                                self.set_price_level(0);
-                            }
-                        } else {
-                            let (picked, not) = match col {
-                                1 => (&mut self.dev, &mut self.store.dev_not),
-                                _ => (&mut self.via, &mut self.store.via_not),
-                            };
-                            picked.retain(|v| *v != h);
-                            match not.iter().position(|v| *v == h) {
-                                Some(k) => drop(not.remove(k)),
-                                None => not.push(h),
-                            }
+                        self.store.price_not = Some(i - 1).filter(|l| self.store.price_not != Some(*l));
+                        // The level picked, when at or under it, would show nothing.
+                        if self.price_level().is_some_and(|p| self.store.price_not.is_some_and(|n| p <= n)) {
+                            self.set_price_level(0);
                         }
                         self.rebuild();
                         return Some(Effect::Save);
@@ -5082,6 +5137,48 @@ mod tests {
         assert_eq!(a.dev, ["anthropic"], "enter toggles one");
         code(&mut a, KeyCode::Enter);
         assert!(a.dev.is_empty() && matches!(a.input, Input::Menu { .. }), "again drops it, the dropdown open");
+    }
+
+    #[test]
+    fn v_ranges_over_dropdown_entries() {
+        let mut a = app();
+        let range = |a: &App| if let Input::Menu { list, .. } = &a.input { list.range() } else { None };
+        let (anthropic, openai) = ("anthropic".to_string(), "openai".to_string());
+        a.col = 1;
+        // The entries are any, anthropic and openai.
+        press(&mut a, "djvj");
+        assert_eq!(range(&a), Some(1..=2));
+        press(&mut a, " ");
+        assert_eq!(
+            (&a.dev, a.status.as_str(), range(&a)),
+            (&vec![anthropic.clone(), openai.clone()], "picked 2 entries", None)
+        );
+        press(&mut a, "vk ");
+        assert_eq!((a.dev.len(), a.status.as_str()), (0, "dropped 2 entries"), "again on all picked drops them");
+        press(&mut a, "kvGe");
+        assert_eq!(a.store.dev_not, [anthropic.clone(), openai], "any in a range is skipped");
+        press(&mut a, "vgge");
+        assert_eq!((a.store.dev_not.len(), a.status.as_str()), (0, "took back 2 entries"));
+        // Space on any alone still drops the picks, and e on it alone still refuses.
+        press(&mut a, "j ");
+        assert_eq!(a.dev, ["anthropic"]);
+        press(&mut a, "gg ");
+        assert!(a.dev.is_empty());
+        press(&mut a, "e");
+        assert_eq!(a.status, "any cannot be left out");
+        press(&mut a, "v");
+        code(&mut a, KeyCode::Esc);
+        assert!(matches!(&a.input, Input::Menu { list, .. } if list.visual.is_none()), "esc cancels the range only");
+        // A click on an entry's ✗ is for that entry alone, and one outside closes the dropdown.
+        press(&mut a, "vG");
+        a.mouse(Mouse::Exclude(1));
+        assert_eq!(a.store.dev_not, [anthropic]);
+        press(&mut a, "v");
+        a.mouse(Mouse::Outside);
+        assert_eq!(a.input, Input::None, "a click outside closes it with a range too");
+        press(&mut a, "lld");
+        press(&mut a, "v");
+        assert_eq!(a.status, "v takes a range in the Dev and Via dropdowns");
     }
 
     #[test]
