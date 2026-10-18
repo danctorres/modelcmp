@@ -472,7 +472,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Filter and sort",
         &[
             ("s", "sort by the column, again reverses"),
-            ("/", "filter models, compare rows, this help or a list"),
+            ("/", "filter models, find in a panel or a list"),
+            ("n N", "next / previous match found in a panel, ↓ ↑ while typing"),
             ("> <", "minimum / maximum for the column, e.g. > 60 enter"),
             ("d", "dropdown on a header with ▾, space enter toggle, e leave out, v a range"),
             ("|", "columns to show, space enter toggle"),
@@ -501,7 +502,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Model under the cursor",
         &[
-            ("n", "note for the model, agents read it"),
+            ("i", "note for the model, agents read it"),
             ("y Y", "copy the model name / id"),
             ("o", "open the model's page on a site"),
             ("x", "open a harness on the model in a new terminal"),
@@ -614,7 +615,7 @@ pub enum Input {
         cur: usize,
     },
     /// The dropdown under the Dev or $ header: each entry and how many models it would show,
-    /// "any" first. `list.sel` indexes the entries matching its query, see `menu_rows`.
+    /// "any" first.
     Menu {
         col: usize,
         items: Vec<(String, usize)>,
@@ -717,7 +718,7 @@ impl List {
         List { sel, ..Default::default() }
     }
 
-    /// Entries of the range `v` started, among the ones matching `query`.
+    /// Entries of the range `v` started.
     pub fn range(&self) -> Option<std::ops::RangeInclusive<usize>> {
         let a = self.visual?;
         Some(a.min(self.sel)..=a.max(self.sel))
@@ -728,36 +729,54 @@ impl List {
         !self.typing && self.edit.is_none()
     }
 
-    /// Write `edit` on entry `at`, among them all: a search is dropped, as it could hide it.
+    /// The entry enter picks: the cursor's, and none while a search matches nothing, as the
+    /// cursor is then on no match. `names` and `any` as for `key`.
+    fn picked(&self, names: &[&str], any: bool) -> Option<usize> {
+        (self.sel < names.len() && !self.no_match(names.iter().copied(), any)).then_some(self.sel)
+    }
+
+    /// Whether a search is typed that no entry matches, among `names` as for `key`.
+    pub fn no_match<'a>(&self, names: impl IntoIterator<Item = &'a str>, any: bool) -> bool {
+        !self.query.is_empty() && list_hits(names, &self.query, any).is_empty()
+    }
+
+    /// Write `edit` on entry `at`: a search is dropped, its keys being typed in the entry.
     fn write(&mut self, at: usize, edit: Edit) {
         *self = List { sel: at, top: self.top, col: self.col, edit: Some(edit), ..Default::default() };
     }
 
-    /// The keys a list takes whatever it lists: `/` starts a search, and while searching ↓ ↑
-    /// move, esc drops the search and the rest is typed. `at` is the entry under the cursor,
-    /// among them all, and `len` counts the entries a query leaves; with `any` the first always
-    /// stays, as a dropdown's "any". False when the key is none of these.
-    fn key(
-        &mut self,
-        code: KeyCode,
-        mods: KeyModifiers,
-        at: Option<usize>,
-        len: impl Fn(&str) -> usize,
-        any: bool,
-    ) -> bool {
+    /// The keys a list takes whatever it lists: `/` starts a search, which underlines what
+    /// matches and puts the cursor on the first, ↓ ↑ on the next / previous, as `n` `N` in a
+    /// panel: a list's search lasts while it is typed, enter picking. Esc drops it, the cursor
+    /// staying, and the rest is typed. `names` are
+    /// the entries'; with `any` the first is never a match, as a dropdown's "any". False when
+    /// the key is none of these.
+    fn key(&mut self, code: KeyCode, mods: KeyModifiers, names: &[&str], any: bool) -> bool {
+        let hits = |q: &str| list_hits(names.iter().copied(), q, any);
+        let next = |list: &mut Self, n: isize| {
+            let hits = hits(&list.query);
+            if let Some(r) = nth_hit(list.sel, names.len(), n, |i| hits.contains(i)) {
+                list.sel = r;
+            }
+        };
         match code {
-            KeyCode::Down if self.typing => self.sel = step(self.sel, 1, len(&self.query)),
-            KeyCode::Up if self.typing => self.sel = step(self.sel, -1, len(&self.query)),
-            // Esc while searching drops the search but keeps the entry under the cursor.
+            // With nothing typed yet a move as ever, as in a panel.
+            KeyCode::Down | KeyCode::Up if self.typing => {
+                let n = if code == KeyCode::Down { 1 } else { -1 };
+                if self.query.is_empty() { self.sel = step(self.sel, n, names.len()) } else { next(self, n) }
+            }
             KeyCode::Esc if self.typing => {
-                (self.sel, self.typing, self.cur) = (at.unwrap_or(0), false, 0);
+                (self.typing, self.cur) = (false, 0);
                 self.query.clear();
             }
             _ if self.typing => {
                 let was = self.query.clone();
                 // The first match, so that enter picks it; a move within the text keeps the cursor.
-                if edit(&mut self.query, &mut self.cur, code, mods, |_| true) && self.query != was {
-                    self.sel = if any { len(&self.query).min(2).saturating_sub(1) } else { 0 };
+                if edit(&mut self.query, &mut self.cur, code, mods, |_| true)
+                    && self.query != was
+                    && let Some(&first) = hits(&self.query).first()
+                {
+                    self.sel = first;
                 }
             }
             // A search would change the entries under a range, so it ends it.
@@ -786,10 +805,37 @@ impl Input {
     }
 }
 
-/// Indices of the dropdown entries whose name contains `query`, any case; "any" always stays.
-pub fn menu_rows(items: &[(String, usize)], query: &str) -> Vec<usize> {
-    let q = query.to_lowercase();
-    (0..items.len()).filter(|&i| i == 0 || items[i].0.to_lowercase().contains(&q)).collect()
+/// Where a panel was when `/` started its search: its match, scroll and recommend's cursor.
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+struct SearchFrom {
+    hit: isize,
+    scroll: u16,
+    among: Option<usize>,
+    task_cur: usize,
+    task_sel: usize,
+}
+
+/// The names of a list's entries, as `List::key` takes them.
+fn names<T>(items: &[(String, T)]) -> Vec<&str> {
+    items.iter().map(|e| e.0.as_str()).collect()
+}
+
+/// The entries of a list whose name has `query`, any case, past a dropdown's "any" with `any`:
+/// where a search moves the cursor, every entry staying.
+pub fn list_hits<'a>(names: impl IntoIterator<Item = &'a str>, query: &str, any: bool) -> Vec<usize> {
+    let hit = |(i, n): &(usize, &str)| !(any && *i == 0) && !found(n, query).is_empty();
+    names.into_iter().enumerate().filter(hit).map(|(i, _)| i).collect()
+}
+
+/// The char ranges where `q` occurs in `s`, any case: what a search of a panel or a list
+/// matched, the one test of it everywhere, what is underlined as what the cursor goes to.
+pub fn found(s: &str, q: &str) -> Vec<std::ops::Range<usize>> {
+    if q.is_empty() {
+        return vec![];
+    }
+    let low = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let (s, q): (Vec<char>, Vec<char>) = (s.chars().map(low).collect(), q.chars().map(low).collect());
+    (0..(s.len() + 1).saturating_sub(q.len())).filter(|&i| s[i..i + q.len()] == q[..]).map(|i| i..i + q.len()).collect()
 }
 
 /// The last entry of `f`'s grid: it asks the name of a task of your own.
@@ -807,13 +853,6 @@ pub fn box_slot(task: &str, col: usize) -> String {
 fn slot_box(slot: &str) -> (&str, usize) {
     let (task, tier) = slot.split_once(':').map_or((slot, None), |(t, x)| (t, Some(x)));
     (task, tier.and_then(|x| crate::view::TIERS.iter().position(|t| t.0 == x)).map_or(0, |i| i + 1))
-}
-
-/// Indices of the choice list entries whose label contains `query`, any case; empty when none
-/// match, which the overlay says.
-pub fn choice_rows(items: &[(String, Effect)], query: &str) -> Vec<usize> {
-    let q = query.to_lowercase();
-    (0..items.len()).filter(|&i| items[i].0.to_lowercase().contains(&q)).collect()
 }
 
 /// The `n`th index after `cur` that `hit` holds for among `len`, before it for a negative `n`:
@@ -1217,8 +1256,17 @@ pub struct App {
     pub spots: Vec<(ratatui::layout::Rect, Stop)>,
     /// The box of the open panel as last drawn, for a click outside it to close it.
     pub panel: Option<ratatui::layout::Rect>,
-    /// Filter on the rows of the compare or help overlay, typed with `/` in either.
+    /// Search of the open panel, compare, help, details or recommend, typed with `/` in any.
     pub overlay_query: String,
+    /// The search of the panel details were opened from and the match it was on, for esc to
+    /// bring back.
+    back_query: (String, isize),
+    /// Which match of a panel's search `n` `N` are on, and whether the renderer has yet to
+    /// scroll to it, as it alone knows which lines match. Recommend moves its own cursor.
+    pub hit: (isize, bool),
+    /// Where a panel was when `/` started its search, its match, scroll and recommend's
+    /// cursor, for esc to go back to.
+    search_from: SearchFrom,
     /// Rows visible in the body, set by the renderer; drives page movement.
     pub page: u16,
     /// First of the columns right of Model shown, 0 being Dev, when they do not all fit; the renderer keeps
@@ -1301,6 +1349,9 @@ impl App {
             spots: vec![],
             panel: None,
             overlay_query: String::new(),
+            back_query: (String::new(), 0),
+            hit: (0, false),
+            search_from: SearchFrom::default(),
             page: 20,
             hscroll: 0,
             count: 0,
@@ -1482,7 +1533,7 @@ impl App {
     /// below it, up for a negative `n`, as `jump` moves it in the table.
     fn jump_ticked(&mut self, n: isize) {
         let (ticked, what): (Vec<bool>, _) = match &self.input {
-            Input::Choose { items, list, .. } => {
+            Input::Choose { items, .. } => {
                 // A row with a box ticked.
                 let on = |i: usize| match &items[i].1 {
                     Effect::Fav(k, t) => (0..BOXES).any(|c| self.store.favorite(&box_slot(t, c)) == Some(k)),
@@ -1490,9 +1541,9 @@ impl App {
                     _ => false,
                 };
                 let what = if self.choosing_favs() { "task" } else { "column" };
-                (choice_rows(items, &list.query).into_iter().map(on).collect(), what)
+                ((0..items.len()).map(on).collect(), what)
             }
-            Input::Menu { col, items, list } => {
+            Input::Menu { col, items, .. } => {
                 // The ticks the dropdown draws: "any" has one while nothing is picked.
                 let bench: Vec<String> = self.col_bench(*col).into_iter().map(bench_label).collect();
                 let picked = match *col {
@@ -1506,7 +1557,7 @@ impl App {
                     0 => picked.is_empty(),
                     _ => picked.contains(&items[i].0),
                 };
-                (menu_rows(items, &list.query).into_iter().map(on).collect(), "entry")
+                ((0..items.len()).map(on).collect(), "entry")
             }
             _ => return,
         };
@@ -1521,14 +1572,14 @@ impl App {
         }
     }
 
-    /// What `/` edits: the compare and help overlays filter their own rows, the table its models.
+    /// What `/` edits: an open panel's own search, which underlines, else the table's, which filters.
     pub fn search_target(&mut self) -> &mut String {
         if self.overlay_search() { &mut self.overlay_query } else { &mut self.query }
     }
 
-    /// Whether `/` filters the open overlay's rows instead of the table's models.
+    /// Whether `/` searches the open panel instead of filtering the table's models.
     pub fn overlay_search(&self) -> bool {
-        matches!(self.view, View::Compare | View::Help)
+        matches!(self.view, View::Compare | View::Help | View::Detail(_) | View::Recommend)
     }
 
     /// The model under the cursor: the row in the table and details, the column in compare,
@@ -1777,12 +1828,10 @@ impl App {
     /// The theme under the cursor of the open `t` list, which the screen previews.
     pub fn theme_preview(&self) -> Option<&'static str> {
         match &self.input {
-            Input::Choose { items, list, .. } => {
-                match choice_rows(items, &list.query).get(list.sel).map(|&i| &items[i]) {
-                    Some((_, Effect::Theme(name))) => Some(name),
-                    _ => None,
-                }
-            }
+            Input::Choose { items, list, .. } => match items.get(list.sel) {
+                Some((_, Effect::Theme(name))) => Some(name),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -2720,8 +2769,8 @@ impl App {
     /// table's vim motions.
     fn list(&mut self) -> Option<(&mut usize, usize)> {
         match &mut self.input {
-            Input::Menu { items, list, .. } => Some((&mut list.sel, menu_rows(items, &list.query).len())),
-            Input::Choose { items, list, .. } => Some((&mut list.sel, choice_rows(items, &list.query).len())),
+            Input::Menu { items, list, .. } => Some((&mut list.sel, items.len())),
+            Input::Choose { items, list, .. } => Some((&mut list.sel, items.len())),
             _ => None,
         }
     }
@@ -2744,6 +2793,61 @@ impl App {
             }
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
+        }
+    }
+
+    /// `n` `N`: the cursor to the `n`th next match of the panel's search, the `n`th previous
+    /// for a negative `n`, round again past either end, and 0 to the first.
+    fn next_hit(&mut self, n: isize) {
+        if !self.overlay_search() {
+            return self.refuse("n N go to the next / previous match in a panel, the table's / leaves only them");
+        }
+        if self.overlay_query.is_empty() {
+            return self.refuse("n N go to the next / previous match: / searches first");
+        }
+        if self.view != View::Recommend {
+            self.hit = (if n == 0 { 0 } else { self.hit.0 + n }, true);
+            return;
+        }
+        // Recommend's are its tasks' names and the models in their boxes, row by row.
+        let has = |s: &str| !found(s, &self.overlay_query).is_empty();
+        let mut stops = vec![];
+        let names: Vec<&str> = TASKS.iter().map(|t| t.name).chain(self.store.custom_tasks()).collect();
+        for (t, name) in names.into_iter().enumerate() {
+            stops.extend(has(name).then_some((t, 0)));
+            let picks = self.tier_picks(t);
+            // A task with one pick has `high`'s in its one box, as `current` reads it.
+            let one = t < TASKS.len() && view::one_pick(name, &picks);
+            let boxes: Vec<_> = if one { vec![(1, picks[TIERS.len() - 1])] } else { (1..).zip(picks).collect() };
+            stops.extend(boxes.into_iter().filter(|(_, p)| p.is_some_and(|(m, _)| has(&m.name))).map(|(b, _)| (t, b)));
+        }
+        let Some(last) = stops.len().checked_sub(1) else {
+            return self.refuse(format!("no task or model matches {}", self.overlay_query));
+        };
+        // From the `among` line, before the first task, `n` goes to the first and `N` the last.
+        let cur = (self.among.is_none()).then_some((self.task_cur, self.task_sel));
+        let at = match (n, cur) {
+            (0, _) | (1.., None) => 0,
+            (..0, None) => last,
+            (1.., Some(c)) => stops.iter().position(|&s| s > c).unwrap_or(0),
+            (_, Some(c)) => stops.iter().rposition(|&s| s < c).unwrap_or(last),
+        };
+        let (t, b) = stops[at];
+        self.task_to(t);
+        self.task_sel = b;
+        self.status = format!("match {} of {}", at + 1, stops.len());
+    }
+
+    /// A click is on its entry: a list's search that matches nothing, under which enter picks
+    /// nothing, goes, so the click picks.
+    fn drop_dead_search(&mut self) {
+        let (list, names, any) = match &mut self.input {
+            Input::Menu { items, list, .. } => (list, names(items), true),
+            Input::Choose { items, list, .. } => (list, names(items), false),
+            _ => return,
+        };
+        if list.no_match(names, any) {
+            (list.query, list.cur) = (String::new(), 0);
         }
     }
 
@@ -2859,7 +2963,7 @@ impl App {
         if matches!(self.input, Input::None | Input::Quit | Input::Upgrade | Input::Unfavorite | Input::Unexclude)
             || self.open_list().is_some_and(List::idle)
         {
-            self.refuse("nothing to paste into: / searches, n writes a note");
+            self.refuse("nothing to paste into: / searches, i writes a note");
             return;
         }
         // No line breaks, which would be enter.
@@ -2868,8 +2972,11 @@ impl App {
         if let Input::Search { cur, .. } = &mut self.input {
             let at = std::mem::replace(cur, *cur + text.len());
             self.search_target().insert_str(at, &text);
+            // As typed: a panel to its first match.
             if !self.overlay_search() {
                 self.rebuild();
+            } else if !text.is_empty() {
+                self.next_hit(0);
             }
             return;
         }
@@ -2963,7 +3070,7 @@ impl App {
     /// The wheel scrolls whatever `j k` move and sideways moves the column cursor; a click
     /// selects a row, and a double click opens what its cell shows: the details from the name or
     /// the developer, a harness in Via, as `x` does, from a number the page it comes from, and
-    /// the note to write, as `n` does;
+    /// the note to write, as `i` does;
     /// a click on a header sorts by it, as `s` does, and on its ▾ opens the dropdown. A click on
     /// an entry does what enter does: in a dropdown and `f`'s tasks it toggles the entry and the
     /// list stays open until a click outside; in the other choice lists it picks the entry. In
@@ -2980,8 +3087,8 @@ impl App {
             return self.on_key(code.into());
         }
         // A prompt over the panel and the panel's filter take an esc of their own first. The
-        // details have no filter: the one of the compare they were opened from stays, as esc
-        // leaves it. An entry or a note being written is only left, its panel staying open.
+        // details' search is their own, the compare they were opened from getting its back as
+        // esc leaves them. An entry or a note being written is only left, its panel staying open.
         let writing = self.editing() || matches!(self.input, Input::Note { .. });
         if m == Mouse::Close && !writing {
             // The key prompt stays open: closing it would skip the key, for Epoch AI. Not `K`'s.
@@ -3042,15 +3149,18 @@ impl App {
                     if let (Mouse::Tick(_, col), Input::Choose { list, .. }) = (m, &mut self.input) {
                         list.col = col.min(BOXES - 1);
                     }
+                    self.drop_dead_search();
                     self.input_key(KeyCode::Enter, KeyModifiers::NONE)
                 }
                 // The search being typed stays, as a click on the entry leaves it.
                 Mouse::Exclude(n) => {
                     let Input::Menu { items, list, .. } = &mut self.input else { return None };
-                    if n >= menu_rows(items, &list.query).len() {
+                    if n >= items.len() {
                         return None;
                     }
                     list.sel = n;
+                    self.drop_dead_search();
+                    let Input::Menu { list, .. } = &mut self.input else { return None };
                     let typing = std::mem::take(&mut list.typing);
                     let effect = self.input_key(KeyCode::Char('e'), KeyModifiers::NONE);
                     if let Input::Menu { list, .. } = &mut self.input {
@@ -3172,7 +3282,7 @@ impl App {
                 self.select(n);
                 match col {
                     ..TEXT => return self.table_key(KeyCode::Enter, 1),
-                    NOTES => return self.table_key(KeyCode::Char('n'), 1),
+                    NOTES => return self.table_key(KeyCode::Char('i'), 1),
                     _ => {}
                 }
                 // An empty cell has nothing to open.
@@ -3286,7 +3396,7 @@ impl App {
                 self.among_by(0, -1);
                 return None;
             }
-            (KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y'), Some(_)) => {
+            (KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y'), Some(_)) => {
                 self.refuse("the cursor is on the models to rank: j goes to a task");
                 return None;
             }
@@ -3417,8 +3527,10 @@ impl App {
                     self.overlay_query.clear();
                 } else if let View::Detail(Back::Compare(scroll)) = self.view {
                     (self.view, self.scroll) = (View::Compare, scroll);
+                    (self.overlay_query, self.hit.0) = std::mem::take(&mut self.back_query);
                 } else if let View::Detail(Back::Recommend(scroll)) = self.view {
                     (self.view, self.scroll) = (View::Recommend, scroll);
+                    (self.overlay_query, self.hit.0) = std::mem::take(&mut self.back_query);
                 } else if !table {
                     self.view = View::Table;
                 } else if self.selecting() {
@@ -3446,9 +3558,10 @@ impl App {
                 // It opens on its `among` line, the models it ranks.
                 (self.task_sel, self.among) = (0, Some(self.among_on()));
                 self.scroll = 0;
+                self.overlay_query.clear();
             }
             // Enter on a task's name is below; on a tier with no model it has none to show either.
-            KeyCode::Char('e' | 'f' | 'n' | 'o' | 'x' | 'y' | 'Y' | ' ') | KeyCode::Enter
+            KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | ' ') | KeyCode::Enter
                 if self.view == View::Recommend && !row && (code != KeyCode::Enter || self.task_sel > 0) =>
             {
                 self.refuse(match (self.among, self.task_sel) {
@@ -3489,7 +3602,9 @@ impl App {
                     self.visual = Some(self.selected());
                 }
             }
-            KeyCode::Char('n') if row => {
+            // The next / previous match of a panel's search, as in vim, `3n` the third.
+            KeyCode::Char(c @ ('n' | 'N')) => (0..n).for_each(|_| self.next_hit(if c == 'n' { 1 } else { -1 })),
+            KeyCode::Char('i') if row => {
                 let m = self.current()?;
                 let text = self.store.note(&m.key).unwrap_or("").to_string();
                 self.input = Input::Note { key: m.key.clone(), cur: text.len(), text };
@@ -3642,15 +3757,15 @@ impl App {
                     View::Recommend => Back::Recommend(self.scroll),
                     _ => Back::Table,
                 });
+                self.back_query = (std::mem::take(&mut self.overlay_query), self.hit.0);
                 self.scroll = 0;
             }
             // A new search starts empty; esc brings the previous one back.
-            // Said, as every key that has nothing to act on here says why.
-            KeyCode::Char('/') if !(table || self.overlay_search()) => {
-                self.refuse("/ filters the table, compare and the lists")
-            }
-            KeyCode::Char('/') if table || self.overlay_search() => {
+            KeyCode::Char('/') => {
                 self.input = Input::Search { cur: 0, was: std::mem::take(self.search_target()) };
+                let (hit, scroll, among, task_cur, task_sel) =
+                    (self.hit.0, self.scroll, self.among, self.task_cur, self.task_sel);
+                self.search_from = SearchFrom { hit, scroll, among, task_cur, task_sel };
                 if table {
                     self.rebuild();
                 }
@@ -3680,9 +3795,9 @@ impl App {
         if self.editing() {
             return self.edit_key(code, mods);
         }
+        let overlay = self.overlay_search();
         match &mut self.input {
             Input::Search { cur, was } => {
-                let overlay = matches!(self.view, View::Compare | View::Help);
                 let query = if overlay { &mut self.overlay_query } else { &mut self.query };
                 let before = query.clone();
                 match code {
@@ -3690,9 +3805,23 @@ impl App {
                     KeyCode::Esc => {
                         *query = std::mem::take(was);
                         self.input = Input::None;
+                        // A panel goes back to where the search started, as in vim.
+                        if overlay {
+                            let SearchFrom { hit, scroll, among, task_cur, task_sel } = self.search_from;
+                            (self.hit, self.scroll, self.among) = ((hit, false), scroll, among);
+                            (self.task_cur, self.task_sel) = (task_cur, task_sel);
+                            return None;
+                        }
                     }
+                    // In a panel to the next / previous match, as `n` `N`, and with nothing typed
+                    // yet a move as ever. The table's search leaves only matches, so a move there is to one.
                     KeyCode::Down | KeyCode::Up => {
-                        self.move_by(if code == KeyCode::Down { 1 } else { -1 }, true);
+                        let n = if code == KeyCode::Down { 1 } else { -1 };
+                        if overlay && !self.overlay_query.is_empty() {
+                            self.next_hit(n)
+                        } else {
+                            self.move_by(n, true)
+                        }
                         return None;
                     }
                     _ if edit(query, cur, code, mods, |_| true) => {}
@@ -3701,6 +3830,10 @@ impl App {
                 // Not on a key that only moves in the text.
                 if !overlay && self.query != before {
                     self.rebuild();
+                }
+                // A panel keeps every line, so a new search goes to its first match.
+                if overlay && !self.overlay_query.is_empty() && self.overlay_query != before {
+                    self.next_hit(0);
                 }
             }
             Input::Key { text, cur, wrong, asked } => match code {
@@ -3804,8 +3937,8 @@ impl App {
                 _ => {}
             },
             Input::Menu { col, items, list } => {
-                let rows = menu_rows(items, &list.query);
-                let at = rows.get(list.sel).copied();
+                let names = names(items);
+                let at = list.picked(&names, true);
                 match code {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     KeyCode::Char('q') if list.idle() => self.ask_quit(),
@@ -3830,9 +3963,10 @@ impl App {
                         if matches!(*col, 1 | VIA) && (code == KeyCode::Enter || list.idle()) =>
                     {
                         let (col, leave) = (*col, code == KeyCode::Char('e'));
-                        let range = list.range().unwrap_or(list.sel..=list.sel);
+                        let range = list.range().or(at.map(|i| i..=i))?;
                         list.visual = None;
-                        let entries = rows.get(range).unwrap_or_default();
+                        let entries: Vec<usize> = range.filter(|&i| i < items.len()).collect();
+                        let entries = entries.as_slice();
                         let fixed =
                             |i: usize| i == 0 || leave && col == VIA && VIA_KINDS.contains(&items[i].0.as_str());
                         let names: Vec<String> =
@@ -3918,13 +4052,14 @@ impl App {
                         self.rebuild();
                         return Some(Effect::Save);
                     }
-                    _ if list.key(code, mods, at, |q| menu_rows(items, q).len(), true) => {}
+                    _ if list.key(code, mods, &names, true) => {}
                     KeyCode::Esc => self.input = Input::None,
                     _ => {}
                 }
             }
             Input::Choose { kind, items, list, .. } => {
-                let at = choice_rows(items, &list.query).get(list.sel).copied();
+                let names = names(items);
+                let at = list.picked(&names, false);
                 match code {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     KeyCode::Char('q') if list.idle() => self.ask_quit(),
@@ -4012,7 +4147,7 @@ impl App {
                             effect => return Some(effect),
                         }
                     }
-                    _ if list.key(code, mods, at, |q| choice_rows(items, q).len(), false) => {}
+                    _ if list.key(code, mods, &names, false) => {}
                     // Esc leaves the harnesses for f's grid they were opened from, on the same task.
                     KeyCode::Esc if *kind == Kind::Via => {
                         if let Some((_, Effect::Via(key, slot, _))) = items.first() {
@@ -4343,7 +4478,7 @@ mod tests {
         assert_eq!(a.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)), None);
         assert!(a.store.excluded.is_empty(), "^e is not e");
         let key = a.current().unwrap().key.clone();
-        press(&mut a, "nfast");
+        press(&mut a, "ifast");
         a.select(1);
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.note(&key), Some("fast"), "a note stays with the model it was opened on");
@@ -4353,7 +4488,10 @@ mod tests {
             assert_eq!(a.data.models[a.rows[0]].key, key, "models without a note sort last, {order}");
         }
         press(&mut a, "t/nor");
-        assert_eq!(a.mouse(Mouse::Item(0)), Some(Effect::Save), "a click picks in a list being searched");
+        let nord = a.open_list().unwrap().sel;
+        assert_eq!(a.mouse(Mouse::Item(nord)), Some(Effect::Save), "a click picks in a list being searched");
+        press(&mut a, "t/qqq");
+        assert_eq!(a.mouse(Mouse::Item(nord)), Some(Effect::Save), "and in one where nothing matches");
         assert_eq!(a.store.theme, "nord");
         press(&mut a, "t/nor");
         a.mouse(Mouse::Outside);
@@ -4383,43 +4521,74 @@ mod tests {
     }
 
     #[test]
+    fn a_list_search_that_matches_nothing() {
+        let mut a = app();
+        a.col = 1;
+        press(&mut a, "d/zzz");
+        a.mouse(Mouse::Item(1));
+        press(&mut a, "x");
+        let query = |a: &App| a.open_list().map(|l| l.query.clone());
+        assert_eq!(query(&a), Some("x".into()), "a click drops the search, and typing starts a new one");
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "t/");
+        let first = a.theme_preview();
+        code(&mut a, KeyCode::Down);
+        assert!(a.theme_preview() != first, "with nothing typed yet ↓ moves");
+    }
+
+    #[test]
     fn slash_searches_a_choice_list_and_the_help() {
         let mut a = app();
         press(&mut a, "t/nor");
-        assert_eq!(a.theme_preview(), Some("nord"), "/ keeps the matching themes, the cursor on the first");
+        assert_eq!(a.theme_preview(), Some("nord"), "/ puts the cursor on the first match");
+        press(&mut a, "n");
+        assert_eq!(a.theme_preview(), Some("nord"), "n is typed, and with no match the cursor stays");
+        for _ in 0..3 {
+            code(&mut a, KeyCode::Backspace);
+        }
+        let first = a.theme_preview();
+        code(&mut a, KeyCode::Down);
+        let next = a.theme_preview();
+        assert!(next != first && next.is_some_and(|t| t.contains('n')), "↓ to the next match, {next:?}");
+        code(&mut a, KeyCode::Up);
+        assert_eq!(a.theme_preview(), first, "↑ back");
+        let all = |a: &App| matches!(&a.input, Input::Choose { items, .. } if items.len() == THEMES.len());
+        assert!(all(&a), "every theme stays listed");
+        press(&mut a, "or");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.theme_preview(), Some("nord"), "esc drops the search, keeping the theme under the cursor");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.theme, "nord");
-        press(&mut a, "t/zzz");
-        assert_eq!(a.theme_preview(), None, "nothing matches, so enter picks nothing");
-        assert!(matches!(a.input, Input::Choose { kind: Kind::Theme, .. }), "and it is the theme list still");
-        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        press(&mut a, "t/qqq");
+        assert_eq!(a.theme_preview(), Some("nord"), "nothing matches, so the cursor stays");
+        assert_eq!(code(&mut a, KeyCode::Enter), None, "and enter picks nothing");
+        assert!(matches!(a.input, Input::Choose { .. }), "the list stays open");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         // f's tasks are searched by name, and a tick keeps the row under the cursor.
         press(&mut a, "f/now");
-        assert!(matches!(&a.input, Input::Choose { items, list, .. } if choice_rows(items, &list.query).is_empty()));
+        let none =
+            |items: &[(String, Effect)], q: &str| list_hits(items.iter().map(|e| e.0.as_str()), q, false).is_empty();
+        assert!(matches!(&a.input, Input::Choose { items, list, .. } if none(items, &list.query)));
         code(&mut a, KeyCode::Esc);
         press(&mut a, "/codi");
         let ticked = |a: &App| match &a.input {
-            Input::Choose { items, list, .. } => {
-                (choice_rows(items, &list.query).len(), a.store.favorite("coding").is_some())
-            }
-            _ => (0, false),
+            Input::Choose { items, list, .. } => (items[list.sel].0.clone(), a.store.favorite("coding").is_some()),
+            _ => (String::new(), false),
         };
-        assert_eq!(ticked(&a), (1, false));
+        assert_eq!(ticked(&a), ("coding".into(), false));
         code(&mut a, KeyCode::Enter);
-        assert_eq!(ticked(&a), (1, true), "ticked, and still under the cursor");
+        assert_eq!(ticked(&a), ("coding".into(), true), "ticked, and still under the cursor");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(ticked(&a), (1, false), "enter again unticks it");
+        assert_eq!(ticked(&a), ("coding".into(), false), "enter again unticks it");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         press(&mut a, "?/sort");
         assert_eq!((&a.view, a.overlay_query.as_str(), a.query.as_str()), (&View::Help, "sort", ""));
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
-        assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Help, ""), "esc clears the filter first");
+        assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Help, ""), "esc clears the search first");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table);
     }
@@ -5190,9 +5359,12 @@ mod tests {
         let mut a = app();
         a.col = 0;
         press(&mut a, "ld/OPEN");
-        assert!(
-            matches!(&a.input, Input::Menu { list: List { query, sel: 1, typing: true, .. }, .. } if query == "OPEN")
-        );
+        // The entry under the cursor, the search and whether it is being typed.
+        let on = |a: &App| match &a.input {
+            Input::Menu { items, list, .. } => (items[list.sel].0.clone(), list.query.clone(), list.typing),
+            _ => panic!("{:?}", a.input),
+        };
+        assert_eq!(on(&a), ("openai".into(), "OPEN".into(), true), "the cursor on the first match");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.store.dev_pick, ["openai"], "enter toggles the first match");
         assert!(
@@ -5204,12 +5376,13 @@ mod tests {
         press(&mut a, "d/anth");
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
-        assert!(
-            matches!(&a.input, Input::Menu { list: List { query, sel: 1, typing: false, .. }, .. } if query.is_empty()),
-            "esc drops the search, the cursor stays on anthropic"
-        );
+        assert_eq!(on(&a), ("anthropic".into(), String::new(), false), "esc drops the search, the cursor stays");
         press(&mut a, "/zzz");
-        assert!(matches!(a.input, Input::Menu { list: List { sel: 0, .. }, .. }), "no match leaves only any");
+        assert_eq!(on(&a).0, "anthropic", "no match leaves the cursor");
+        press(&mut a, "gg");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "gg");
+        assert_eq!(on(&a).0, "any");
         code(&mut a, KeyCode::Enter);
         assert!(a.store.dev_pick.is_empty(), "enter on any drops them all");
     }
@@ -5227,7 +5400,7 @@ mod tests {
     #[test]
     fn ctrl_w_deletes_a_word_in_every_prompt() {
         let mut a = app();
-        press(&mut a, "nfast enough  ");
+        press(&mut a, "ifast enough  ");
         ctrl(&mut a, 'w');
         assert_eq!(
             a.input,
@@ -5379,11 +5552,52 @@ mod tests {
     }
 
     #[test]
+    fn n_goes_from_match_to_match_in_recommend() {
+        let mut a = app();
+        press(&mut a, "n");
+        assert!(a.status.contains("the table's / leaves only them"), "{}", a.status);
+        press(&mut a, "R");
+        press(&mut a, "n");
+        assert!(a.status.contains("/ searches first"), "{}", a.status);
+        // A task's name, typed: the cursor goes to it from the `among` line.
+        let reasoning = TASKS.iter().position(|t| t.name == "reasoning").unwrap();
+        press(&mut a, "/reason");
+        assert_eq!((a.among, a.task_cur, a.task_sel), (None, reasoning, 0), "on the first match as it is typed");
+        code(&mut a, KeyCode::Enter);
+        // A model in a box: every stop `n` makes has it, and `N` goes back the way it came.
+        let name = (0..a.task_count()).find_map(|t| a.tier_picks(t).iter().flatten().next().map(|p| p.0.name.clone()));
+        let name = name.unwrap();
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, &format!("/{name}"));
+        code(&mut a, KeyCode::Enter);
+        let mut seen = vec![(a.task_cur, a.task_sel)];
+        let count: usize = a.status.rsplit(' ').next().unwrap().parse().unwrap();
+        assert!(a.status.starts_with("match 1 of ") && count > 1, "{}", a.status);
+        for _ in 1..count {
+            press(&mut a, "n");
+            assert_eq!(a.current().map(|m| m.name.clone()), Some(name.clone()));
+            seen.push((a.task_cur, a.task_sel));
+        }
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "row by row: {seen:?}");
+        press(&mut a, "n");
+        assert_eq!((a.task_cur, a.task_sel), seen[0], "round again after the last");
+        press(&mut a, "N");
+        assert_eq!((a.task_cur, a.task_sel), *seen.last().unwrap(), "N the previous, round to the last");
+        press(&mut a, "/qqq");
+        assert!(a.status.contains("no task or model matches qqq"), "{}", a.status);
+        // `i` is the note, on the model of the box.
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "i");
+        assert!(matches!(a.input, Input::Note { .. }));
+    }
+
+    #[test]
     fn row_keys_do_nothing_behind_help_and_compare() {
         let mut a = app();
         press(&mut a, "?");
         assert_eq!(press(&mut a, "y"), None);
-        press(&mut a, "n f ");
+        press(&mut a, "i f ");
         assert_eq!((&a.input, a.store.marked.len()), (&Input::None, 0));
     }
 
@@ -5585,7 +5799,7 @@ mod tests {
         let mut a = app();
         // A paste is text for what is being typed; in the table its letters are not keys.
         a.paste("f\nq");
-        assert_eq!((&a.input, a.status.as_str()), (&Input::None, "nothing to paste into: / searches, n writes a note"));
+        assert_eq!((&a.input, a.status.as_str()), (&Input::None, "nothing to paste into: / searches, i writes a note"));
         // Nor at the quit prompt, where the first letter would cancel and the rest run.
         press(&mut a, "q");
         a.paste("xe");
@@ -6313,6 +6527,15 @@ mod tests {
         assert_eq!((a.overlay_query.as_str(), a.query.as_str()), ("eci", ""), "/ in compare filters its rows");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.input, Input::None);
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.overlay_query.as_str(), a.back_query.0.as_str()), ("", "eci"), "details open unfiltered");
+        press(&mut a, "/price");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((&a.input, a.overlay_query.as_str(), a.query.as_str()), (&Input::None, "price", ""), "/ in details");
+        code(&mut a, KeyCode::Esc);
+        assert!(matches!(a.view, View::Detail(_)) && a.overlay_query.is_empty(), "esc clears the filter first");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Compare, "eci"), "compare's filter is back");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Compare, ""), "esc clears the filter first");
         assert_eq!(a.input, Input::None);
@@ -6639,7 +6862,7 @@ mod tests {
     #[test]
     fn notes_copy_open() {
         let mut a = app();
-        assert_eq!(press(&mut a, "nfast"), None);
+        assert_eq!(press(&mut a, "ifast"), None);
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.note("gpt55"), Some("fast"));
         assert_eq!(press(&mut a, "o"), None, "o asks which site");
@@ -6737,7 +6960,7 @@ mod tests {
         assert_eq!(a.scroll, 3);
         assert_eq!(a.mouse(Mouse::Row(0)), None, "clicks do nothing behind an overlay");
         assert_eq!(a.view, View::Detail(Back::Table));
-        press(&mut a, "n");
+        press(&mut a, "i");
         a.mouse(Mouse::Close);
         assert_eq!((&a.view, &a.input), (&View::Detail(Back::Table), &Input::None), "a note being written: only it");
         a.mouse(Mouse::Close);
@@ -6791,7 +7014,7 @@ mod tests {
         a.store.set_note(&key, "slow");
         a.mouse(Mouse::Row(0));
         assert_eq!(a.mouse(Mouse::Cell(2, NOTES)), None);
-        assert_eq!(a.input, Input::Note { key: key.clone(), text: "slow".into(), cur: 4 }, "a note: written, as n");
+        assert_eq!(a.input, Input::Note { key: key.clone(), text: "slow".into(), cur: 4 }, "a note: written, as i");
         assert_eq!(a.mouse(Mouse::Scroll(1)), None);
         assert!(matches!(a.input, Input::Note { .. }), "the wheel keeps it open");
         a.mouse(Mouse::Row(0));
@@ -7051,7 +7274,7 @@ mod tests {
         press(&mut a, "/speedy");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["mini"]);
-        press(&mut a, "n");
+        press(&mut a, "i");
         ctrl(&mut a, 'u');
         press(&mut a, "slow");
         code(&mut a, KeyCode::Enter);

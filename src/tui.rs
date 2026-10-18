@@ -9,8 +9,8 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
-    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, box_slot, choice_rows, group_starts,
-    hidden, menu_rows, on_price, shown,
+    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, box_slot, found, group_starts, hidden,
+    on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -747,12 +747,11 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let list = match &app.input {
         // Scrolled as last drawn.
         Input::Menu { col, items, list } => {
-            let rows = menu_rows(items, &list.query);
-            menu_box(inner, menu_x(inner, &l, *col), *col, items, rows.len()).map(|(b, _)| (b, list.top, rows.len()))
+            menu_box(inner, menu_x(inner, &l, *col), *col, items).map(|(b, _)| (b, list.top, items.len()))
         }
         Input::Choose { title, items, list, .. } => {
             let (within, lines) = chooser(app, area)?;
-            Some((overlay_rect(within, title, &lines), list.top, choice_rows(items, &list.query).len()))
+            Some((overlay_rect(within, title, &lines), list.top, items.len()))
         }
         _ => None,
     };
@@ -772,9 +771,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         let k = top + (m.row - inner.y) as usize;
         // f's grid: a box is ticked, the name ticks the task's own, and the tiers' heading and
         // what follows the boxes are nothing to click.
-        if let Input::Choose { kind: Kind::Fav, items, list, .. } = &app.input {
+        if let Input::Choose { kind: Kind::Fav, items, .. } = &app.input {
             let row = k.checked_sub(1).filter(|&r| r < len)?;
-            if !matches!(items[choice_rows(items, &list.query)[row]].1, Effect::Fav(..)) {
+            if !matches!(items[row].1, Effect::Fav(..)) {
                 return Some(Mouse::Item(row));
             }
             let x = usize::from(m.column.saturating_sub(rect.x + 2));
@@ -784,7 +783,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         // The ✗ after the ✓, on an entry of Dev, Price or Via that has one, leaves it out.
         let ex = (inner.x + 3..inner.x + 5).contains(&m.column)
             && matches!(&app.input, Input::Menu { col: 1 | PRICE | VIA, items, list }
-                if menu_rows(items, &list.query).get(k).is_some_and(|&i| i != 0 && !VIA_KINDS.contains(&&*items[i].0)));
+                if items.get(k).is_some_and(|(name, _)| k != 0 && !VIA_KINDS.contains(&name.as_str())));
         return (k < len).then_some(if ex { Mouse::Exclude(k) } else { Mouse::Item(k) });
     }
     // A click outside the open panel closes it, as one outside a list does, unless it is on a
@@ -1008,7 +1007,7 @@ const NAME_MIN: u16 = 16;
 const SEP: &str = "│";
 /// The actions on one model, in the one order every view shows them in.
 const ACTIONS: [&str; 8] =
-    ["enter details", "x launch", "o open", "y copy name", "space select", "f fav", "e exclude", "n note"];
+    ["enter details", "x launch", "o open", "y copy name", "space select", "f fav", "e exclude", "i note"];
 
 /// The last group of every overlay, the last hints a narrow terminal drops.
 const BACK: [&str; 2] = ["esc back", "q quit"];
@@ -1025,6 +1024,8 @@ fn actions(keys: &str) -> Vec<&'static str> {
 /// one cut off a terminal `width` wide is here instead; the rest of the keys are in `?`. `s` acts
 /// on the column picked with `← →`.
 fn hints(app: &App, width: u16) -> Vec<&'static str> {
+    // A panel's search, and once it has found something the keys to go from match to match.
+    let search = if app.overlay_query.is_empty() { vec!["/ search"] } else { vec!["/ search", "n N match"] };
     let groups: Vec<Vec<&'static str>> = match app.view {
         View::Table if app.selecting() => {
             vec![vec!["↓ ↑ G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
@@ -1066,19 +1067,17 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 back.push("esc back");
             }
             back.push("q quit");
-            vec![vec!["← → column"], view, actions("enter x o y space f e n"), back]
+            vec![vec!["← → column"], view, actions("enter x o y space f e i"), back]
         }
-        View::Detail(_) => vec![vec!["↓ ↑ scroll"], actions("x o y space f e n"), BACK.to_vec()],
+        View::Detail(_) => vec![vec!["↓ ↑ scroll"], search, actions("x o y space f e i"), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
-        View::Help => vec![vec!["↓ ↑ scroll"], vec!["/ search"], vec!["esc back", "q quit"]],
+        View::Help => vec![vec!["↓ ↑ scroll"], search, vec!["esc back", "q quit"]],
         View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
-        View::Compare => {
-            vec![vec!["↓ ↑ scroll", "← → 0 $ model"], vec!["/ rows"], actions("enter x o y f e n"), BACK.to_vec()]
-        }
+        View::Compare => vec![vec!["↓ ↑ scroll", "← → 0 $ model"], search, actions("enter x o y f e i"), BACK.to_vec()],
         // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
         // On the `among` line, the models it ranks.
         View::Recommend if app.among.is_some() => {
-            vec![vec!["↓ ↑ task", "← → 0 $ which models"], vec!["enter pick"], BACK.to_vec()]
+            vec![vec!["↓ ↑ task", "← → 0 $ which models"], [&["enter pick"], &search[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.current().is_none() => {
             // A tier with no model has nothing for enter either.
@@ -1087,9 +1086,11 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 (_, Some(_)) => vec!["enter your model"],
                 _ => vec!["enter best models first"],
             };
-            vec![vec!["↓ ↑ task", "← → 0 $ tier"], enter, BACK.to_vec()]
+            vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), BACK.to_vec()]
         }
-        View::Recommend => vec![vec!["↓ ↑ task", "← → 0 $ tier"], actions("enter x o y space f e n"), BACK.to_vec()],
+        View::Recommend => {
+            vec![vec!["↓ ↑ task", "← → 0 $ tier"], search, actions("enter x o y space f e i"), BACK.to_vec()]
+        }
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
@@ -1560,23 +1561,35 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
     }
     let buf = f.buffer_mut();
-    // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
-    let mut cursor = status(buf, bar, app, splash.is_some()).map(|x| (x, bar.y));
     // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
     let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
+    // The line of a panel's search `n` `N` are on, which has the cursor.
+    let mut hit_line = None;
     let lines = match app.view {
         View::Table => None,
-        View::Help => Some(("keys".to_string(), help(&app.overlay_query))),
+        View::Help => {
+            let (lines, hits) = lit_lines(help(), &app.overlay_query);
+            hit_line = to_hit(app, &hits);
+            Some(("keys".to_string(), lines))
+        }
         View::Recommend => {
             let lines;
             (lines, block, pin) = recommend(app, (area.width as usize).saturating_sub(4), &mut spots);
+            // Its cursor goes to a match, the task or model `n` `N` are on, and those alone are underlined.
             Some(("recommend".to_string(), lines))
         }
         View::Detail(_) => {
             let get = |m| (app.download(m), app.size(m));
-            app.current().map(|m| detail(m, &app.store, app.any_available(), get(m)))
+            let lines = app.current().map(|m| detail(m, &app.store, app.any_available(), get(m)));
+            lines.map(|(title, lines)| {
+                let (lines, hits) = lit_lines(lines, &app.overlay_query);
+                hit_line = to_hit(app, &hits);
+                (title, lines)
+            })
         }
         View::Compare if app.marked_shown < 2 => {
+            // Nothing to find, which a search is told.
+            hit_line = to_hit(app, &[]);
             let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
             let n = app.marked_shown;
             let lines = vec![
@@ -1595,7 +1608,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             Some(("compare".into(), lines))
         }
         View::Compare => {
-            let (lines, first) = compare(
+            let (lines, first, hits) = compare(
                 &app.marked_models(),
                 (app.any_available(), &|m| app.download(m)),
                 (app.compare_sel, app.compare_x),
@@ -1605,9 +1618,13 @@ fn draw(app: &mut App, f: &mut Frame) {
                 &mut spots,
             );
             app.compare_x = first;
+            hit_line = to_hit(app, &hits);
             Some(("compare".into(), lines))
         }
     };
+    // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
+    // After the panel's lines, as finding its search's match says so there.
+    let mut cursor = status(buf, bar, app, splash.is_some()).map(|x| (x, bar.y));
     app.spots.clear();
     app.panel = lines.as_ref().map(|(title, lines)| overlay_rect(body, title, lines));
     if let Some((title, lines)) = lines {
@@ -1629,7 +1646,13 @@ fn draw(app: &mut App, f: &mut Frame) {
             }
         }
         let under = pinned(lines.len(), body.height.saturating_sub(2) as usize, &pin);
-        let (text, ..) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, (0, 0, pin));
+        let (text, above, below) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, (0, 0, pin));
+        // The cursor runs through the box's border, as in a list, and the marks go over its bar.
+        if let Some(y) = hit_line.and_then(|l| l.checked_sub(app.scroll as usize)).filter(|&y| y < text.height as usize)
+        {
+            cursor_ends(buf, text.x - 2, text.right() + 1, text.y + y as u16);
+            vmarks(buf, text.x - 2, text.y, text.bottom() - 1, above, below);
+        }
         // Where each spot landed on screen, scrolled and cut to the box, for a click to find it.
         let top = app.scroll as usize;
         app.spots = spots
@@ -1687,13 +1710,14 @@ fn draw(app: &mut App, f: &mut Frame) {
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
         let rect = overlay_rect(within, title, &lines);
-        let rows = choice_rows(items, &list.query).len();
+        let rows = items.len();
         // f's grid has its tiers' heading over the rows, and its cursor on a box, drawn with it;
         // a row being written has no box, so the cursor is the row's, as in every list.
         // ponytail: the heading scrolls off with the rows in a box too short for them all; pin
         // it if a dozen tasks of your own on a short terminal turn out to be a thing.
         let grid = *kind == Kind::Fav;
         let head = usize::from(grid);
+        let none = list.no_match(items.iter().map(|e| e.0.as_str()), false);
         let (sel, top) = (&list.sel, &mut list.top);
         let shown = usize::from(rect.height.saturating_sub(2));
         // At the last entry every line to the end, so the key hint below them shows too, unless
@@ -1706,6 +1730,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         let ends = (head, lines.len() - rows - head, 0..0);
         let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, Color::Reset, ends);
         *top = usize::from(scroll);
+        // On the bottom border, as a dropdown says it, so it shows however the list scrolls.
+        if none {
+            buf.set_stringn(rect.x + 2, rect.bottom() - 1, " no match ", usize::from(rect.width / 2), fg(MUTED));
+        }
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
             // its bar, as there.
@@ -2131,14 +2159,13 @@ fn tag(col: usize, label: &str) -> Option<&str> {
 }
 
 /// The dropdown's box and its entries' width, or none when fewer than one entry would fit.
-fn menu_box(area: Rect, x: u16, col: usize, items: &[(String, usize)], rows: usize) -> Option<(Rect, (usize, usize))> {
+fn menu_box(area: Rect, x: u16, col: usize, items: &[(String, usize)]) -> Option<(Rect, (usize, usize))> {
     let tag = |s: &str| tag(col, s).map_or(0, |t| t.len() + 1);
     let label_w = items.iter().map(|(s, _)| s.chars().count() + tag(s)).max().unwrap_or(0);
     let n_w = items.iter().map(|(_, n)| n.to_string().len()).max().unwrap_or(0);
-    let h = (rows as u16 + 2).min(area.height.saturating_sub(1));
-    // Room for where you are, when the entries may not all fit: by all of them, so the box
-    // keeps still while typing.
     let n = items.len();
+    let h = (n as u16 + 2).min(area.height.saturating_sub(1));
+    // Room for where you are, when the entries may not all fit.
     let foot = if n + 2 > area.height.saturating_sub(1) as usize { position(n, 0, n).len() + 2 } else { 0 };
     // The ✗ box after the ✓ one, where an entry can be left out.
     let ex = if matches!(col, 1 | PRICE | VIA) { 2 } else { 0 };
@@ -2150,8 +2177,8 @@ fn menu_box(area: Rect, x: u16, col: usize, items: &[(String, usize)], rows: usi
 }
 
 /// The list under a header opened with `d`, each entry with how many models it would show,
-/// scrolled so the selection stays in view. Only `rows`, the entries matching the search, are
-/// listed; the width fits every entry so the box keeps still while typing. `picked` entries
+/// scrolled so the selection stays in view. Every entry is listed, what the search found
+/// underlined. `picked` entries
 /// show `✓`, the rest the mark a table row has when off, grey (`faint`) or a shape of its own.
 /// Where one can be left out its `✗` follows, as on a table row: red for the ones left out (`not`).
 #[allow(clippy::too_many_arguments)]
@@ -2167,15 +2194,17 @@ fn dropdown(
     faint: bool,
 ) {
     let range = list.range();
+    // Said in the footer, short as the box keeps its width while typing.
+    let none = list.no_match(items.iter().map(|e| e.0.as_str()), true);
     let (query, sel, top) = (list.query.as_str(), list.sel, &mut list.top);
-    let rows = &menu_rows(items, query);
-    let Some((rect, (label_w, n_w))) = menu_box(area, x, col, items, rows.len()) else { return };
+    let len = items.len();
+    let Some((rect, (label_w, n_w))) = menu_box(area, x, col, items) else { return };
     let shown = rect.height.saturating_sub(2) as usize;
-    // No blank lines under the last entry when a search shortens the list.
-    *top = list_top(*top, sel, shown).min(rows.len().saturating_sub(shown));
+    *top = list_top(*top, sel, shown).min(len.saturating_sub(shown));
     let top = *top;
     // Where you are, as every box says it.
-    let footer = if rows.len() > shown { position(top, shown, rows.len()) } else { String::new() };
+    let footer = if len > shown { position(top, shown, len) } else { String::new() };
+    let footer = if none { " no match ".to_string() } else { footer };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(fg(Color::Reset))
@@ -2183,9 +2212,8 @@ fn dropdown(
     let inner = block.inner(rect);
     Clear.render(rect, buf);
     block.render(rect, buf);
-    for (k, &i) in rows.iter().enumerate().skip(top).take(shown) {
-        let (label, n) = &items[i];
-        let y = inner.y + (k - top) as u16;
+    for (i, (label, n)) in items.iter().enumerate().skip(top).take(shown) {
+        let y = inner.y + (i - top) as u16;
         // Entries keep the colour they have in the table, under the cursor like there.
         let color = match i {
             0 => Color::Reset,
@@ -2194,7 +2222,7 @@ fn dropdown(
             _ => Color::Reset,
         };
         // The cursor runs through the box's border, as in the table.
-        if k == sel || range.as_ref().is_some_and(|r| r.contains(&k)) {
+        if i == sel || range.as_ref().is_some_and(|r| r.contains(&i)) {
             cursor_ends(buf, rect.x, rect.right() - 1, y);
         }
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
@@ -2218,12 +2246,14 @@ fn dropdown(
         if let Some(t) = tag(col, label) {
             buf.set_stringn(at + label.len() as u16 + 1, y, t, t.len(), fg(MUTED));
         }
-        for r in found(label, query).into_iter().map(|r| r.start.min(label_w)..r.end.min(label_w)) {
+        // "any" is never a match.
+        let hits = if i == 0 { vec![] } else { found(label, query) };
+        for r in hits.into_iter().map(|r| r.start.min(label_w)..r.end.min(label_w)) {
             buf.set_style(Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(fg(color)));
         }
         buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, fg(MUTED));
     }
-    vmarks(buf, rect.x, inner.y, inner.bottom() - 1, top > 0, top + shown < rows.len());
+    vmarks(buf, rect.x, inner.y, inner.bottom() - 1, top > 0, top + shown < len);
 }
 
 /// The cursor on row `y`: its fill from the column `left` to `right`, and its two bars at those,
@@ -2454,8 +2484,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
                 "↓ ↑ move  / search  space enter toggle  e leave out  esc close"
             }
             (true, false) => "↓ ↑ move  / search  space enter toggle  esc close",
-            (true, true) if toggles => "↓ ↑ move  enter toggle  esc clear",
-            (true, true) => "↓ ↑ move  enter pick  esc clear",
+            (true, true) if toggles => "↓ ↑ match  enter toggle  esc clear",
+            (true, true) => "↓ ↑ match  enter pick  esc clear",
             // The key prompt, where esc is Epoch AI: as the first start's box says. One for a
             // key turned down says what esc does to it.
             _ if matches!(app.input, Input::Key { wrong: true, .. }) && app.old_key.is_some() => {
@@ -2527,32 +2557,33 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
     None
 }
 
-/// The char ranges where `q` occurs in `s`, any case: what a substring search matched.
-fn found(s: &str, q: &str) -> Vec<Range<usize>> {
-    let low = |c: char| c.to_lowercase().next().unwrap_or(c);
-    let (s, q): (Vec<char>, Vec<char>) = (s.chars().map(low).collect(), q.chars().map(low).collect());
-    if q.is_empty() {
-        return vec![];
-    }
-    (0..(s.len() + 1).saturating_sub(q.len())).filter(|&i| s[i..i + q.len()] == q[..]).map(|i| i..i + q.len()).collect()
-}
-
 /// How a search hit is drawn, as in the table: yellow, bold and underlined.
 fn hit_style(style: Style) -> Style {
     style.fg(MATCH).add_modifier(BOLD | Modifier::UNDERLINED)
 }
 
-/// `line` with the chars each span's `ranges` cover drawn as search hits.
-fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> Line<'static> {
+/// `line` with what the search `query` found in it drawn as hits, across its spans as it reads.
+fn lit(line: Line<'static>, query: &str) -> Line<'static> {
+    let r = found(&line.to_string(), query);
+    lit_at(line, &r)
+}
+
+/// `line` with the chars `r` covers, counted from its start, drawn as search hits.
+fn lit_at(mut line: Line<'static>, r: &[Range<usize>]) -> Line<'static> {
+    if r.is_empty() {
+        return line;
+    }
     let outer = line.style;
+    // Each span's chars, counted from the line's start.
+    let mut at = 0;
     line.spans = std::mem::take(&mut line.spans)
         .into_iter()
         .flat_map(|span| {
-            let r = ranges(&span.content);
             let hit = hit_style(outer.patch(span.style));
             let mut out: Vec<Span<'static>> = vec![];
-            for (i, c) in span.content.chars().enumerate() {
-                let style = if r.iter().any(|r| r.contains(&i)) { hit } else { span.style };
+            for c in span.content.chars() {
+                let style = if r.iter().any(|r| r.contains(&at)) { hit } else { span.style };
+                at += 1;
                 match out.last_mut() {
                     Some(last) if last.style == style => last.content.to_mut().push(c),
                     _ => out.push(Span::styled(c.to_string(), style)),
@@ -2562,6 +2593,11 @@ fn lit(mut line: Line<'static>, ranges: impl Fn(&str) -> Vec<Range<usize>>) -> L
         })
         .collect();
     line
+}
+
+/// `span` with what the search `query` found in it drawn as hits.
+fn lit_span(span: Span<'static>, query: &str) -> Vec<Span<'static>> {
+    lit(Line::from(span), query).spans
 }
 
 /// What stays of a row of `f`'s grid before the text written on it: the `+` of the entry that
@@ -2591,11 +2627,6 @@ fn edit_line(e: &Edit, color: Color, room: usize) -> Line<'static> {
     Line::from(vec![Span::styled(prefix, fg(color)), text])
 }
 
-/// What `/` left of a list when nothing matches, said as the dropdowns say it.
-fn no_match(query: &str) -> Line<'static> {
-    Line::from(format!(" no entry matches {query} ")).style(fg(MUTED))
-}
-
 /// The cells a box of `f`'s grid takes along its row: the cursor's bars around the mark, and
 /// the gap to the next.
 const BOX_W: usize = 6;
@@ -2611,14 +2642,12 @@ fn fav_name_w(items: &[(String, Effect)]) -> usize {
 /// each draw, so the boxes follow a change made anywhere.
 fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
     let query = list.query.as_str();
-    let rows = choice_rows(items, query);
     let w = fav_name_w(items);
     let tiers = std::iter::once("any").chain(crate::view::TIERS.iter().map(|t| t.0));
     let head: String = tiers.map(|t| format!(" {t:<0$}", BOX_W - 1)).collect();
     let mut lines = vec![Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED))];
     let mut under = String::new();
-    for (i, &k) in rows.iter().enumerate() {
-        let (label, effect) = &items[k];
+    for (i, (label, effect)) in items.iter().enumerate() {
         let on = i == list.sel;
         let Effect::Fav(key, task) = effect else {
             // The entry that names a new task.
@@ -2633,7 +2662,7 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
             lines.push(edit_line(e, color, room));
             continue;
         }
-        let name = lit(Line::from(Span::styled(label.clone(), fg(color))), |s| found(s, query));
+        let name = lit(Line::from(Span::styled(label.clone(), fg(color))), query);
         // Padded by the cells the name takes, so a wide one keeps its boxes under the heading.
         let pad = w - Span::raw(label.as_str()).width();
         let mut spans = vec![Span::raw(" ")];
@@ -2667,13 +2696,10 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
         }
         lines.push(Line::from(spans));
     }
-    if rows.is_empty() {
-        lines.push(no_match(query));
-    }
     let own = items.iter().any(|(_, e)| matches!(e, Effect::Fav(_, t) if fit::task(t).is_none()));
     let hint = match (list.typing, own) {
         // While searching the letters are typed, as the status bar says.
-        (true, _) => " ↓ ↑ move · enter toggle · esc clear",
+        (true, _) => " ↓ ↑ match · enter toggle · esc clear",
         // `r` and `a` are said once there is a task of your own. `↓ ↑` and enter work too, left
         // unsaid: with them the line is wider than 80 columns hold.
         (_, true) => " ← → tier · / search · space toggle · v via · r rename · a about · esc close",
@@ -2697,12 +2723,10 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
 /// `f`'s grid has lines of its own, `fav_lines`.
 fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
-    let rows = choice_rows(items, query);
-    let mut lines: Vec<Line> = rows
+    let mut lines: Vec<Line> = items
         .iter()
         .enumerate()
-        .map(|(n, &k)| {
-            let (label, effect) = &items[k];
+        .map(|(n, (label, effect))| {
             // A harness whose folder is being written, in the harness's colour.
             if let Some(e) = list.edit.as_ref().filter(|_| n == list.sel) {
                 return edit_line(e, dev_color(label.split(' ').next().unwrap_or_default()), room);
@@ -2715,6 +2739,9 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, room: usize
                 }
                 _ => Color::Reset,
             };
+            // What the search found in the label, as the cursor goes by it, `at` chars into the line.
+            let label_hits =
+                |at: usize| found(label, query).into_iter().map(|r| r.start + at..r.end + at).collect::<Vec<_>>();
             // A name, then what follows it muted: a harness and the command that opens it.
             let name = match effect {
                 Effect::Launch(_) | Effect::Via(..) | Effect::Harness(_) | Effect::Col(_) => {
@@ -2732,17 +2759,15 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, room: usize
                     let tick = if on { Span::styled(" ✓", fg(MARK).add_modifier(BOLD)) } else { Span::raw(" ☐") };
                     spans.insert(0, tick);
                 }
-                return lit(Line::from(spans), |s| found(s, query));
+                let at = 1 + if matches!(effect, Effect::Col(_)) { 2 } else { 0 };
+                return lit_at(Line::from(spans), &label_hits(at));
             }
-            lit(Line::from(format!(" {label} ")).style(fg(color)), |s| found(s, query))
+            lit_at(Line::from(format!(" {label} ")).style(fg(color)), &label_hits(1))
         })
         .collect();
-    if rows.is_empty() {
-        lines.push(no_match(query));
-    }
     let hint = match kind {
-        _ if typing && kind == Kind::Cols => " ↓ ↑ move · enter toggle · esc clear",
-        _ if typing => " ↓ ↑ move · enter pick · esc clear",
+        _ if typing && kind == Kind::Cols => " ↓ ↑ match · enter toggle · esc clear",
+        _ if typing => " ↓ ↑ match · enter pick · esc clear",
         Kind::Cols => " ↓ ↑ move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
@@ -2922,7 +2947,7 @@ fn heading(text: &str) -> Line<'static> {
     Line::from(text.to_string()).style(Style::new().add_modifier(BOLD))
 }
 
-fn help(query: &str) -> Vec<Line<'static>> {
+fn help() -> Vec<Line<'static>> {
     let key_w = HELP.iter().flat_map(|(_, keys)| keys.iter()).map(|(k, _)| k.chars().count()).max().unwrap_or(0);
     let mut v: Vec<Line> = Vec::new();
     for (name, keys) in HELP {
@@ -2936,16 +2961,47 @@ fn help(query: &str) -> Vec<Line<'static>> {
     v.push(Line::from(format!("Saved in {}", crate::store::path().display())).style(fg(MUTED)));
     v.push(Line::from("Every key: github.com/danctorres/modelcmp/blob/main/KEYS.md").style(fg(MUTED)));
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
-    // `/` keeps the lines that match, so a key can be looked up in a long list.
-    if !query.is_empty() {
-        let q = query.to_lowercase();
-        v.retain(|l| l.spans.iter().any(|s| s.content.to_lowercase().contains(&q)));
-        v = v.into_iter().map(|l| lit(l, |s| found(s, query))).collect();
-        if v.is_empty() {
-            v.push(Line::from(format!("no help line matches {query}")).style(fg(MUTED)));
-        }
-    }
     v
+}
+
+/// `lines` with what `/` found underlined, every line kept, and the ones it is on.
+fn lit_lines(lines: Vec<Line<'static>>, query: &str) -> (Vec<Line<'static>>, Vec<usize>) {
+    // Redrawn on every frame: with nothing searched, nothing to underline.
+    if query.is_empty() {
+        return (lines, vec![]);
+    }
+    let mut hits = vec![];
+    let lines = (lines.into_iter().enumerate())
+        .map(|(i, l)| {
+            let r = found(&l.to_string(), query);
+            hits.extend((!r.is_empty()).then_some(i));
+            lit_at(l, &r)
+        })
+        .collect();
+    (lines, hits)
+}
+
+/// The line of `hits` that `n` `N` are on, the panel scrolled to it when they or the search
+/// just moved, which the status bar says.
+fn to_hit(app: &mut App, hits: &[usize]) -> Option<usize> {
+    if app.overlay_query.is_empty() {
+        return None;
+    }
+    // From the first, round again past either end.
+    let (n, jump) = app.hit;
+    app.hit = (n.rem_euclid(hits.len().max(1) as isize), false);
+    let at = hits.get(app.hit.0 as usize).copied();
+    if jump {
+        app.status = match at {
+            Some(at) => {
+                app.scroll = at as u16;
+                // Lines, as `n` goes from line to line, not from match to match on one.
+                format!("line {} of {}", app.hit.0 + 1, hits.len())
+            }
+            None => format!("no line matches {}", app.overlay_query),
+        };
+    }
+    at
 }
 
 /// What a box of recommend's grid shows.
@@ -3050,10 +3106,24 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
         let y = v.len();
         let name = truncate(t.0, w);
         let pad = w.saturating_sub(Span::raw(name.as_str()).width());
-        let mut first = cursor(cur == Some((i, 0)), vec![Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD))]);
+        let name = Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD));
+        let mut first = cursor(cur == Some((i, 0)), lit_span(name, &app.overlay_query));
         first.push(Span::raw(" ".repeat(pad)));
         let one = ones[i];
-        let row: Vec<_> = row.into_iter().zip(&room).map(|(cell, &r)| wrap_spans(cell, r)).collect();
+        // The model in each box, a task with one pick having `high`'s in its one, where the
+        // search found its name, after a ★.
+        let model = |c: usize| ones[i].map_or(picks[i][c], |at| picks[i][LAST].filter(|_| c == at));
+        let hits = |c: usize, cell: &[Span]| {
+            let star = if cell.first().is_some_and(|s| s.content == "★ ") { 2 } else { 0 };
+            let r = model(c).map_or(vec![], |(m, _)| found(&m.name, &app.overlay_query));
+            r.into_iter().map(|r| r.start + star..r.end + star).collect::<Vec<_>>()
+        };
+        let row: Vec<_> = (row.into_iter().zip(&room).enumerate())
+            .map(|(c, (cell, &r))| {
+                let hits = hits(c, &cell);
+                wrap_spans(cell, r, &hits)
+            })
+            .collect();
         // As many lines as its longest box takes, the name on the first.
         let h = row.iter().map(Vec::len).max().unwrap_or(0).max(1);
         let mut lines: Vec<_> = (0..h).map(|_| vec![Span::raw(" ".repeat(w + 2))]).collect();
@@ -3093,7 +3163,7 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
             // Wrapped to the panel as the boxes are, so the name and what it says are whole.
             let head = Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED));
             let indent = head.width();
-            let lines = wrap_spans(entry(app, t.0, c, picks[i][c], false), text.saturating_sub(indent));
+            let lines = wrap_spans(entry(app, t.0, c, picks[i][c], false), text.saturating_sub(indent), &[]);
             for (k, piece) in lines.into_iter().enumerate() {
                 let lead = if k == 0 { head.clone() } else { Span::raw(" ".repeat(indent)) };
                 under.push(Line::from([vec![lead], piece].concat()));
@@ -3195,10 +3265,24 @@ fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, boxed: 
 
 /// `spans` in lines of at most `width` cells: broken before a span that starts with a space, as
 /// a price after its name, then between words, and a word longer than a line where it reaches the
-/// end, so nothing is cut. Each piece keeps its span's style.
-fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+/// end, so nothing is cut. Each piece keeps its span's style. The chars `hits` covers in the
+/// first part, where a search found the model name of a box, are drawn as hits, which leaves
+/// where it wraps as it was.
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize, hits: &[Range<usize>]) -> Vec<Vec<Span<'static>>> {
     type Cells = Vec<(char, Style)>;
-    if spans.iter().map(Span::width).sum::<usize>() <= width {
+    // Back to spans, a run of one style each.
+    let spans_of = |line: Cells| {
+        let mut v: Vec<Span<'static>> = vec![];
+        for (c, style) in line {
+            match v.last_mut() {
+                Some(s) if s.style == style => s.content.to_mut().push(c),
+                _ => v.push(Span::styled(c.to_string(), style)),
+            }
+        }
+        v
+    };
+    let fits = spans.iter().map(Span::width).sum::<usize>() <= width;
+    if fits && hits.is_empty() {
         return vec![spans];
     }
     let mut parts: Vec<Cells> = vec![];
@@ -3207,6 +3291,14 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>
             parts.push(vec![]);
         }
         parts.last_mut().unwrap().extend(s.content.chars().map(|c| (c, s.style)));
+    }
+    if let Some(name) = parts.first_mut() {
+        for r in hits {
+            (name.iter_mut().take(r.end).skip(r.start)).for_each(|c| c.1 = hit_style(c.1));
+        }
+    }
+    if fits {
+        return vec![spans_of(parts.concat())];
     }
     // In cells, as the boxes are measured: a wide character takes two.
     let cell = |c: char| Span::raw(&*c.encode_utf8(&mut [0; 4])).width();
@@ -3248,17 +3340,6 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>
             }
         }
     }
-    // Back to spans, a run of one style each.
-    let spans_of = |line: Cells| {
-        let mut v: Vec<Span<'static>> = vec![];
-        for (c, style) in line {
-            match v.last_mut() {
-                Some(s) if s.style == style => s.content.to_mut().push(c),
-                _ => v.push(Span::styled(c.to_string(), style)),
-            }
-        }
-        v
-    };
     lines.into_iter().map(spans_of).collect()
 }
 
@@ -3325,23 +3406,12 @@ fn compare(
     query: &str,
     muted: impl Fn(&Model) -> bool,
     spots: &mut Vec<Spot>,
-) -> (Vec<Line<'static>>, usize) {
-    let mut rows = compare_rows(models, any, get);
+) -> (Vec<Line<'static>>, usize, Vec<usize>) {
+    let rows = compare_rows(models, any, get);
     let muted: Vec<bool> = models.iter().map(|m| muted(m)).collect();
-    // The model row is the header; `query` filters the rest, forgiving a typo when nothing matches.
-    let mut typos = false;
-    if !query.trim().is_empty() {
-        let keep = |typos: bool| {
-            rows.iter().enumerate().filter(|(i, r)| *i == 0 || hits(query, [&r.label], typos).is_some()).count()
-        };
-        typos = keep(false) < 2;
-        rows = rows
-            .into_iter()
-            .enumerate()
-            .filter(|(i, r)| *i == 0 || hits(query, [&r.label], typos).is_some())
-            .map(|(_, r)| r)
-            .collect();
-    }
+    // `query` underlines the rows' labels it finds, as every panel's search does, and their
+    // lines come back for `n` `N`.
+    let mut found_on = vec![];
     let n = models.len();
     let sel = sel.min(n.saturating_sub(1));
     let label_w = rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
@@ -3389,8 +3459,11 @@ fn compare(
             out.push(Line::styled(name + &"─".repeat(rest), fg(MUTED)));
         }
         let label = Line::from(Span::styled(format!("{:<label_w$}", r.label), fg(KEY)));
-        let hit = hits(query, [&r.label], typos).map_or(vec![], |[r]| r);
-        let mut spans = lit(label, |_| hit.clone()).spans;
+        let hit = found(&r.label, query);
+        if !hit.is_empty() {
+            found_on.push(out.len());
+        }
+        let mut spans = lit(label, query).spans;
         // The two cells between models are the right bar of the cursor on the one and its left
         // bar on the next, blank off it, so a model's cells stay where they are.
         let bar = |on: bool, bar: &'static str| if on { Span::styled(bar, EDGE) } else { Span::raw(" ") };
@@ -3433,7 +3506,7 @@ fn compare(
         spots.push(Spot { lines: top..out.len(), x: x..x + w + 2, at: Stop::Compare(i) });
         x += w + 2;
     }
-    (out, first)
+    (out, first, found_on)
 }
 
 /// The verdict as a small table: question, winner in green, margin dimmed.
@@ -4001,7 +4074,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  n note  │  q quit"
+                "← → column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -4106,9 +4179,30 @@ mod tests {
             a.key(KeyCode::Char(c).into());
         }
         let (_, lines) = render(&mut a, 170, 8);
-        assert_eq!(&words(&lines[3])[5..10], ["▌", "☐", "·", "anthropic", "1"], "only matches are listed");
-        assert!(from(&lines[4]).starts_with("╰"), "{}", lines[4]);
+        let anth = lines.iter().find(|l| l.contains("anthropic")).unwrap();
+        assert_eq!(&words(anth)[5..10], ["▌", "☐", "·", "anthropic", "1"], "the cursor on the match");
+        assert!(lines.iter().any(|l| l.contains("google")), "every entry stays");
         assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
+        a.key(KeyCode::Char('z').into());
+        let (_, lines) = render(&mut a, 170, 8);
+        assert!(lines.iter().any(|l| l.contains(" no match ")), "{lines:?}");
+    }
+
+    #[test]
+    fn recommend_underlines_what_n_stops_on() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 40)).unwrap();
+        let mut a = app();
+        a.view = View::Recommend;
+        let mut underlined = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            term.backend().buffer().content().iter().filter(|c| c.modifier.contains(Modifier::UNDERLINED)).count()
+        };
+        a.overlay_query = "price".into();
+        assert_eq!(underlined(&mut a), 0, "the legend says price, but n stops on no legend");
+        a.overlay_query = "-".into();
+        assert_eq!(underlined(&mut a), 0, "nor on an empty box's -");
+        a.overlay_query = "coding".into();
+        assert!(underlined(&mut a) > 0, "a task's name is underlined");
     }
 
     #[test]
@@ -4692,22 +4786,22 @@ mod tests {
         let ms: Vec<&Model> =
             ["opus", "flash"].iter().map(|k| a.data.models.iter().find(|m| m.key == *k).unwrap()).collect();
         let row = |v: &Vec<Line>| v.iter().find(|l| l.to_string().starts_with("model ")).unwrap().to_string();
-        let (full, first) = compare(&ms, (false, &|_| None), (1, 1), 200, "", |_| false, &mut vec![]);
+        let (full, first, _) = compare(&ms, (false, &|_| None), (1, 1), 200, "", |_| false, &mut vec![]);
         assert!(row(&full).contains("opus") && row(&full).contains("flash"));
         assert_eq!(first, 0, "everything fits, so nothing scrolls off");
         assert!(!row(&full).contains('‹') && !row(&full).contains('›'), "no scroll marks when all fit");
         let mut spots = vec![];
-        let (cut, first) = compare(&ms, (false, &|_| None), (1, 0), 20, "", |_| false, &mut spots);
+        let (cut, first, _) = compare(&ms, (false, &|_| None), (1, 0), 20, "", |_| false, &mut spots);
         let edge = row(&cut).chars().position(|c| c == '‹').unwrap();
         assert_eq!(spots[0].x.start, edge + 1, "a click on ‹ is on no model");
         assert!(!row(&cut).contains("opus") && row(&cut).contains("flash"), "scrolls to show the selection");
         assert_eq!(first, 1);
         assert!(cut.iter().any(|l| l.to_string().starts_with("models 2-2 of 2")));
         assert!(row(&cut).contains('‹') && !row(&cut).contains('›'), "‹ marks models off to the left");
-        let (past, first) = compare(&ms, (false, &|_| None), (7, 0), 20, "", |_| false, &mut vec![]);
+        let (past, first, _) = compare(&ms, (false, &|_| None), (7, 0), 20, "", |_| false, &mut vec![]);
         assert!(row(&past).contains("flash") && first == 1, "a cursor past the models lands on the last");
         let mut spots = vec![];
-        let (back, first) = compare(&ms, (false, &|_| None), (0, 1), 20, "", |_| false, &mut spots);
+        let (back, first, _) = compare(&ms, (false, &|_| None), (0, 1), 20, "", |_| false, &mut spots);
         assert_eq!(spots[0].x.end, row(&back).chars().count() - 1, "nor on ›");
         assert!(row(&back).contains("opus") && !row(&back).contains("flash"));
         assert_eq!(first, 0);
@@ -4729,16 +4823,13 @@ mod tests {
         let topics: Vec<String> = full.iter().map(Line::to_string).filter(|l| l.starts_with("── ")).collect();
         assert!(topics[0].starts_with("── scores ─"), "{topics:?}");
         assert!(topics.iter().all(|t| t.chars().count() == full[rule].width()), "topic rules span the model row");
-        let (some, _) = compare(&ms, (false, &|_| None), (0, 0), 200, "eci", |_| false, &mut vec![]);
-        assert_eq!(
-            labels(&some).iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
-            ["model", "ECI"],
-            "the model row stays as the header"
-        );
-        let names = |v: &Vec<Line>| v.iter().filter(|l| l.to_string().starts_with("── ")).count();
-        assert_eq!(names(&some), 1, "only the topics with a shown row keep their rule");
-        let (typo, _) = compare(&ms, (false, &|_| None), (0, 0), 200, "contxt", |_| false, &mut vec![]);
-        assert!(labels(&typo).contains(&"context".to_string()), "a typo is forgiven when nothing matches");
+        let (some, _, on) = compare(&ms, (false, &|_| None), (0, 0), 200, "eci", |_| false, &mut vec![]);
+        assert_eq!(labels(&some), labels(&full), "a search keeps every row");
+        assert_eq!(on.len(), 1);
+        assert!(some[on[0]].to_string().starts_with("ECI"), "and says the line it found");
+        let (_, _, on) = compare(&ms, (false, &|_| None), (0, 0), 200, "ntext", |_| false, &mut vec![]);
+        let (_, _, typo) = compare(&ms, (false, &|_| None), (0, 0), 200, "contxt", |_| false, &mut vec![]);
+        assert_eq!((on.len(), typo.len()), (1, 0), "text anywhere in a label, as details find it, and no typo");
     }
 
     /// One check per defect a review found in the drawing.
@@ -4888,7 +4979,7 @@ mod tests {
     fn a_long_prompt_scrolls_and_keeps_its_cursor_off_the_hint() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
         let mut a = app();
-        a.key(KeyCode::Char('n').into());
+        a.key(KeyCode::Char('i').into());
         for c in "🔥 a note far longer than the room it has".chars() {
             a.key(KeyCode::Char(c).into());
         }
@@ -4933,6 +5024,124 @@ mod tests {
         assert_eq!((end.symbol(), end.fg, end.bg), (" ", Color::Reset, Color::Reset));
         assert!(end.modifier.contains(Modifier::REVERSED) && text.modifier.contains(Modifier::REVERSED));
         assert_eq!((text.fg, text.bg, buf[(x + 1, y)].bg), (Color::Reset, Color::Reset, ACCENT));
+    }
+
+    #[test]
+    fn details_search_underlines_and_keeps_every_line() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 60)).unwrap();
+        let mut a = app();
+        a.key(KeyCode::Enter.into());
+        assert_eq!(a.view, View::Detail(Back::Table));
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let all = text(term.backend().buffer());
+        a.overlay_query = "price".into();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let buf = term.backend().buffer();
+        // But for the status bar, whose hints add `n N match`.
+        // And for the cursor's bars, on the line `n` is on.
+        let plain = |l: &[String]| l.iter().map(|l| l.replace(['▌', '▐'], "│")).collect::<Vec<_>>();
+        assert_eq!(plain(&text(buf)[..59]), plain(&all[..59]), "every line still shows");
+        assert!(buf.content.iter().any(|c| c.fg == MATCH && c.modifier.contains(Modifier::UNDERLINED)), "{all:#?}");
+
+        // Too short for every line: a search scrolls to its first match and `n` to the next.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 12)).unwrap();
+        a.overlay_query.clear();
+        let type_in = |a: &mut App, keys: &str| keys.chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
+        type_in(&mut a, "/5.0");
+        a.key(KeyCode::Enter.into());
+        // The scroll, the status and the line with the box's cursor bar, the right one as `▲`
+        // goes over the left, the table's being on the frame's edge.
+        let mut at = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            let y = (0..12).find(|&y| (1..119).any(|x| buf[(x, y)].symbol() == "▐"));
+            (a.scroll, a.status.clone(), y.map(|y| text(buf)[y as usize].clone()))
+        };
+        let (scroll, status, on) = at(&mut a);
+        assert_eq!((scroll, status.as_str()), (2, "line 1 of 2"), "the price line, the title not counted");
+        assert!(on.unwrap().contains("price:"), "the cursor on it");
+        a.key(KeyCode::Char('n').into());
+        let (scroll, status, on) = at(&mut a);
+        assert_eq!((scroll, status.as_str()), (10, "line 2 of 2"), "the providers' row, as far down as it scrolls");
+        let on = on.unwrap();
+        assert!(on.contains("5.0  opus"), "the cursor on it, not at the top: {on}");
+        a.key(KeyCode::Char('n').into());
+        assert_eq!(at(&mut a).0, 2, "round again after the last");
+        a.key(KeyCode::Char('N').into());
+        assert_eq!(at(&mut a).0, 10, "N the previous, round to the last");
+        a.key(KeyCode::Char('N').into());
+        assert_eq!(at(&mut a).1, "line 1 of 2");
+        type_in(&mut a, "/zzz");
+        let (_, status, on) = at(&mut a);
+        assert_eq!((status.as_str(), on), ("no line matches zzz", None), "no cursor on no match");
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Char('n').into());
+        assert!(a.status.contains("/ searches first") && a.input == Input::None, "{}", a.status);
+        a.key(KeyCode::Char('i').into());
+        assert!(matches!(a.input, Input::Note { .. }), "i writes a note");
+    }
+
+    #[test]
+    fn help_and_compare_search_keep_every_line() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20)).unwrap();
+        let mut a = app();
+        let type_in = |a: &mut App, keys: &str| keys.chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
+        // As the status bar shows it, drawn in the frame that found the match.
+        let mut status = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            let bar: String = (0..buf.area.width).map(|x| buf[(x, buf.area.height - 1)].symbol()).collect();
+            // While typing, the bar is the prompt's.
+            if a.input == Input::None {
+                assert!(bar.contains(&a.status), "{bar:?} says {:?}", a.status);
+            }
+            a.status.clone()
+        };
+        type_in(&mut a, "?/sort");
+        a.key(KeyCode::Enter.into());
+        let first = status(&mut a);
+        let n: usize = first.rsplit(' ').next().unwrap().parse().unwrap();
+        assert!(first.starts_with("line 1 of ") && n > 1, "{first}");
+        let at = a.scroll;
+        assert!(at > 0, "help scrolls to the first line with sort");
+        a.key(KeyCode::Char('n').into());
+        assert_eq!(status(&mut a), format!("line 2 of {n}"));
+        a.key(KeyCode::Char('N').into());
+        assert_eq!((status(&mut a), a.scroll), (format!("line 1 of {n}"), at));
+        type_in(&mut a, "2n");
+        assert_eq!(status(&mut a), format!("line {} of {n}", 2 % n + 1), "a count goes that many matches on");
+        a.key(KeyCode::Char('N').into());
+        a.key(KeyCode::Char('N').into());
+        status(&mut a);
+        let line = Line::from(vec![Span::raw("price: "), Span::raw("$5")]);
+        assert_eq!(lit_lines(vec![line], "price: $").1, [0], "a match across spans, as the line reads");
+        assert_eq!(lit_lines(help(), "sort").0.len(), help().len(), "every line stays");
+        a.key(KeyCode::Char('n').into());
+        status(&mut a);
+        let on = (a.hit.0, a.scroll);
+        type_in(&mut a, "/zzzz");
+        status(&mut a);
+        a.key(KeyCode::Esc.into());
+        status(&mut a);
+        assert_eq!(
+            (a.overlay_query.as_str(), a.hit.0, a.scroll),
+            ("sort", on.0, on.1),
+            "esc goes back to where it was"
+        );
+        type_in(&mut a, "/");
+        a.key(KeyCode::Down.into());
+        assert!(!a.status.contains("searches first"), "nothing typed yet, ↓ moves: {}", a.status);
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Esc.into());
+        a.store.marked = vec!["opus".into(), "flash".into()];
+        a.rebuild();
+        type_in(&mut a, "C/eci");
+        a.key(KeyCode::Enter.into());
+        assert_eq!(status(&mut a), "line 1 of 1", "compare's rows, by their labels");
+        type_in(&mut a, "/contxt");
+        assert_eq!(status(&mut a), "no line matches contxt", "plain text, as every panel finds it");
     }
 
     #[test]
@@ -5036,13 +5245,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(), &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
-        assert_eq!(scroll as usize, help("").len() - 4, "scroll is clamped to the content");
+        assert_eq!(scroll as usize, help().len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(""), &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(), &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         // A grid's heading is no row: the border counts the rows under it, 20 here in a box of 4 lines.
         let grid = |scroll: &mut u16| {
@@ -5105,15 +5314,15 @@ mod tests {
             lines.iter().flat_map(|l| l.spans.iter().filter(hit).map(|s| s.content.to_string())).collect()
         };
         assert_eq!(found("Gruvbox gRUV", "ruv"), [1..4, 9..12]);
-        let hits = lit_text(&help("THEME"));
+        let hits = lit_text(&lit_lines(help(), "THEME").0);
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
         let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &search("gr"), 80);
-        let hit = lines[0].spans.iter().find(|s| s.content == "gr").unwrap();
+        let lines = choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80);
+        let hit = lines[1].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.
         let a = app();
@@ -5246,8 +5455,9 @@ mod tests {
         // An entry wider than its box wraps between the name and its price, else between words, and a word
         // wider than it where it ends: nothing is cut.
         let text = |l: &Vec<Span>| l.iter().map(|s| &*s.content).collect::<String>();
-        let wrap =
-            |w| wrap_spans(entry(&b, "overall", 2, b.tier_picks(0)[2], true), w).iter().map(text).collect::<Vec<_>>();
+        let wrap = |w| {
+            wrap_spans(entry(&b, "overall", 2, b.tier_picks(0)[2], true), w, &[]).iter().map(text).collect::<Vec<_>>()
+        };
         assert_eq!(
             (wrap(15), wrap(12), wrap(9)),
             (
@@ -5279,8 +5489,16 @@ mod tests {
         let at = under.iter().position(|l| l.starts_with("  mid:")).unwrap();
         assert_eq!(under[at..at + 2], ["  mid:     opus $5.0 (150)", "           not available"], "{under:#?}");
         assert!(under[at..].iter().all(|l| Span::raw(l.as_str()).width() <= 30), "{under:#?}");
+        // A search underlines in the name, and it wraps where it did.
+        let long = || vec![Span::raw("Claude Opus 4.5"), Span::raw(" $5")];
+        let lit = wrap_spans(long(), 12, &found("Claude Opus 4.5", "claude"));
+        assert_eq!(
+            lit.iter().map(text).collect::<Vec<_>>(),
+            wrap_spans(long(), 12, &[]).iter().map(text).collect::<Vec<_>>()
+        );
+        assert!(lit[0][0].style.add_modifier.contains(Modifier::UNDERLINED), "{lit:?}");
         // A wide character takes two cells of the box.
-        let wide: Vec<String> = wrap_spans(vec![Span::raw("通义千问 Max")], 5).iter().map(text).collect();
+        let wide: Vec<String> = wrap_spans(vec![Span::raw("通义千问 Max")], 5, &[]).iter().map(text).collect();
         assert_eq!(wide, ["通义", "千问", "Max"]);
         // A task of your own is the last row, in a colour of its own, every tier with the model you gave it; under
         // the grid, what you wrote it is about and that it is picked over a built-in task.
