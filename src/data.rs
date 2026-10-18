@@ -675,12 +675,12 @@ fn paid(o: &Offer) -> bool {
     !o.unpriced && o.input + o.output > 0.0
 }
 
-/// Of offers you can use, the one you'd pay: the cheapest paid one, else a free one, else one
-/// with no listed price.
+/// Of offers you can use, the one you'd pay: the cheapest, a free one first, as OpenCode's
+/// `beam-free` beside OpenRouter's paid Beam, else one with no listed price.
 fn cheapest<'a>(offers: impl Iterator<Item = &'a Offer>) -> Option<&'a Offer> {
     let offers: Vec<&Offer> = offers.collect();
-    let by_price = offers.iter().copied().filter(|o| paid(o)).min_by(|a, b| a.blended().total_cmp(&b.blended()));
-    by_price.or_else(|| offers.iter().copied().find(|o| !o.unpriced)).or(offers.first().copied())
+    let by_price = offers.iter().copied().filter(|o| !o.unpriced).min_by(|a, b| a.blended().total_cmp(&b.blended()));
+    by_price.or(offers.first().copied())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -790,8 +790,8 @@ impl Model {
         self.arena_more.get(b).copied().or_else(|| self.bench(b).map(|s| s * 100.0))
     }
 
-    /// The offer you'd actually use: cheapest available paid one, else a free one of yours,
-    /// else one of yours with no listed price, else the `list` one. It may be `unpriced`,
+    /// The offer you'd actually use: the cheapest available one, a free one first, else one of
+    /// yours with no listed price, else the `list` one. It may be `unpriced`,
     /// still naming the id to use; `priced_offer` is the one with prices to show.
     pub fn price(&self) -> Option<&Offer> {
         // Your machine's copy is the price of a model nothing else runs for you: free, it
@@ -4789,9 +4789,12 @@ mod tests {
         let free = Offer { provider: "f".into(), available: true, ..Default::default() };
         let m = Model { offers: vec![unknown.clone()], ..Default::default() };
         assert_eq!((m.price().unwrap().provider.as_str(), m.cost(), m.listed()), ("u", None, false));
-        let m = Model { offers: vec![unknown.clone(), free], ..Default::default() };
+        let m = Model { offers: vec![unknown.clone(), free.clone()], ..Default::default() };
         assert_eq!((m.price().unwrap().provider.as_str(), m.cost()), ("f", Some(0.0)), "a free offer is priced");
         assert!(!m.listed(), "and it is yours");
+        let paid = Offer { provider: "p".into(), input: 1.0, output: 3.0, available: true, ..Default::default() };
+        let m = Model { offers: vec![paid, free], ..Default::default() };
+        assert_eq!(m.price().unwrap().provider, "f", "a free one of yours before a paid one");
         // Yours has no price but others list one: the id is still yours, the price the list one.
         let m = Model {
             offers: vec![unknown, o("a", 5.0, false), o("b", 5.0, false), o("c", 1.0, false)],
