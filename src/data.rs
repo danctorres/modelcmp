@@ -69,7 +69,8 @@ const ARENA_RETRY: Duration = Duration::from_secs(3600);
 /// ones most offers give, where they were the most any gave. 21: `Model::arena`.
 /// 22: Epoch's task scores are one benchmark's, in percent, where they were fitted in ECI points.
 /// 23: `Model::arena_more`. 24: `Model::aka`, and rows merged by a vendor word, a sold id and a size.
-const FORMAT: u32 = 24;
+/// 25: an offer that names no models.dev page votes for the one its id is.
+const FORMAT: u32 = 25;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -3479,6 +3480,9 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         .filter(|e| !norm(&e.3).is_empty())
         .collect();
     let keys: HashSet<String> = entries.iter().map(|e| norm(&e.3)).collect();
+    // models.dev's pages by their lowercase id: an offer that names none but goes by one is that model.
+    let all_pages: HashMap<String, &str> =
+        entries.iter().map(|e| (e.2.canonical_model_id.to_lowercase(), e.2.canonical_model_id.as_str())).collect();
     // Providers and the namespaces of ids ("Pro/zai-org/GLM-5": pro, zaiorg).
     let orgs: HashSet<String> = entries
         .iter()
@@ -3518,8 +3522,12 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         if !md.release_date.is_empty() {
             dates.entry(key.clone()).or_default().push((pid, &md.release_date));
         }
-        if !md.canonical_model_id.is_empty() {
-            *page_votes.entry(key.clone()).or_default().entry(&md.canonical_model_id).or_default() += 1;
+        // W&B sells "Beam 1.0" as `reflection/Beam-1.0-501B-A23B`, naming no page: the id is one.
+        let page = Some(md.canonical_model_id.as_str())
+            .filter(|p| !p.is_empty())
+            .or_else(|| all_pages.get(&mid.to_lowercase()).copied());
+        if let Some(page) = page {
+            *page_votes.entry(key.clone()).or_default().entry(page).or_default() += 1;
         }
         if m.knowledge.is_empty() {
             m.knowledge = md.knowledge.clone();
@@ -4188,6 +4196,19 @@ mod tests {
         let d = merge(json, &Scores::default(), None).unwrap();
         let offers = |k: &str| d.models.iter().find(|m| m.key == k).map(|m| m.offers.len());
         assert_eq!((offers("gpt41"), offers("shisav2gpt41")), (Some(1), Some(1)));
+    }
+
+    #[test]
+    fn an_offer_naming_no_page_is_on_the_one_its_id_is() {
+        let json = br#"{
+            "a": {"models": {"r/beam-1.0-501b": {"name": "Beam 1.0 501B A23B", "canonical_model_id": "r/Beam-1.0-501B-A23B"}}},
+            "b": {"models": {"r/beam": {"name": "Beam 1.0 501B A23B", "canonical_model_id": "r/Beam-1.0-501B-A23B"}}},
+            "wandb": {"models": {"r/beam-1.0-501b-a23b": {"name": "Beam 1.0"}}},
+            "kilo": {"models": {"r/beam-free": {"name": "Beam 1.0"}}},
+            "vercel": {"models": {"r/beam-free": {"name": "Beam 1.0"}}}
+        }"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        assert_eq!(d.models.len(), 1, "W&B's \"Beam 1.0\" goes by the 501B's page, so is that model");
     }
 
     #[test]
