@@ -68,8 +68,8 @@ const ARENA_RETRY: Duration = Duration::from_secs(3600);
 /// 18: `Model::task_cost`. 19: `Model::task_tokens`. 20: context and max output are the
 /// ones most offers give, where they were the most any gave. 21: `Model::arena`.
 /// 22: Epoch's task scores are one benchmark's, in percent, where they were fitted in ECI points.
-/// 23: `Model::arena_more`.
-const FORMAT: u32 = 23;
+/// 23: `Model::arena_more`. 24: `Model::aka`, and rows merged by a vendor word, a sold id and a size.
+const FORMAT: u32 = 24;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -818,9 +818,12 @@ impl Model {
         counts.into_values().rev().max_by_key(|(n, _)| *n).map(|(_, o)| o)
     }
 
-    /// The offer `harness` runs the model on: of the ones it reaches, the one you'd pay.
+    /// The offer `harness` runs the model on: of the ones it reaches, the one you'd pay, your
+    /// machine's copy only when it reaches no other, as with `price`: a free quant is not the
+    /// model the scores are of.
     pub fn offer_via(&self, harness: &str) -> Option<&Offer> {
-        cheapest(self.offers.iter().filter(|o| o.via.iter().any(|v| v == harness)))
+        let via = || self.offers.iter().filter(|o| o.via.iter().any(|v| v == harness));
+        cheapest(via().filter(|o| !o.local)).or_else(|| cheapest(via()))
     }
 
     /// `price`, when its prices are known, else the `list` one: prices to show, `listed` as not yours.
@@ -2570,24 +2573,31 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
 
 /// A row goes into the one that sells its main id more: Jiekou's "claude-haiku-4-5-20251001",
 /// named by its id, is the snapshot that Anthropic and others list under "Claude Haiku 4.5".
-/// More, not any: Vercel's one `gpt-5.2-pro` sold as "GPT 5.2" must not take GPT-5.2 Pro in.
-/// And only when its name adds numbers alone, a date: "Claude Opus 5 Fast" is a price of its
-/// own, though two resellers sell `claude-opus-5-fast` as "Claude Opus 5".
+/// More, not any: Vercel's one `gpt-5.2-pro` sold as "GPT 5.2" must not take GPT-5.2 Pro in,
+/// and a tie between two sellers is no merge. And only when it has the seller's name, adding
+/// numbers alone, a date: "Claude Opus 5 Fast" is a price of its own, though two resellers sell
+/// `claude-opus-5-fast` as "Claude Opus 5", and "GPT-5.3" is not "GPT-5.2".
 // ponytail: a row whose seller moves too stays, chains are left for when one shows up.
 fn merge_into_seller(by_key: &mut HashMap<String, Model>) -> Vec<(String, String)> {
-    let sold = |m: &Model, id: &str| m.offers.iter().filter(|o| slug(&o.id) == id).count();
+    // Each id's sellers: the rows whose offers go by it, and how many of them.
+    let mut sellers: HashMap<String, HashMap<&String, usize>> = HashMap::new();
+    for (k, m) in by_key.iter() {
+        for o in &m.offers {
+            *sellers.entry(slug(&o.id)).or_default().entry(k).or_default() += 1;
+        }
+    }
+    let num = |w: &String| w.bytes().all(|b| b.is_ascii_digit());
     let mut keys: Vec<&String> = by_key.keys().collect();
     keys.sort();
     let pairs: Vec<(String, String)> = keys
         .iter()
         .filter_map(|&k| {
             let id = main_id(&by_key[k])?;
-            let own = sold(&by_key[k], &id);
-            let (n, to) = keys.iter().filter(|&&t| t != k).map(|&t| (sold(&by_key[t], &id), t)).max()?;
-            let theirs = words(&by_key[to].name);
-            let dated =
-                words(&by_key[k].name).iter().all(|w| theirs.contains(w) || w.bytes().all(|b| b.is_ascii_digit()));
-            (n > own && dated).then(|| (k.clone(), to.clone()))
+            let rows = &sellers[&id];
+            let to = winner(rows.iter().filter(|r| *r.0 != k).map(|(t, n)| (*t, *n)))?;
+            let (mine, theirs) = (words(&by_key[k].name), words(&by_key[to].name));
+            let dated = theirs.iter().all(|w| mine.contains(w)) && mine.iter().all(|w| theirs.contains(w) || num(w));
+            (rows[to] > rows[k] && dated).then(|| (k.clone(), to.clone()))
         })
         .collect();
     let from: HashSet<&String> = pairs.iter().map(|p| &p.0).collect();
@@ -2629,12 +2639,14 @@ fn merge_sized(
     let mut groups: BTreeMap<&String, Vec<&String>> = BTreeMap::new();
     for &(_, k) in &rows {
         let Some(page) = pages.get(k) else { continue };
-        let longest = rows
+        let mut longer = rows
             .iter()
             .rev()
             .map(|r| r.1)
-            .find(|&t| t != k && pages.get(t) == Some(page) && adds_size(&names[k], &names[t]));
-        if let Some(t) = longest {
+            .filter(|&t| t != k && pages.get(t) == Some(page) && adds_size(&names[k], &names[t]));
+        let Some(t) = longer.next() else { continue };
+        // Two sizes of one name are two models: "Llama 3.1" is neither 8B nor 70B.
+        if longer.all(|c| adds_size(&names[c], &names[t])) {
             groups.entry(t).or_insert_with(|| vec![t]).push(k);
         }
     }
@@ -3530,6 +3542,12 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     let row_names: HashMap<String, String> = by_key.iter().map(|(k, m)| (k.clone(), m.name.clone())).collect();
     let known = |k: &str| openrouter.contains_key(k) || names.groups.contains_key(k) || names.alias.contains_key(k);
     let mut moved = merge_same_ids(&mut by_key, known);
+    // A row's page counts the votes of the rows it absorbed.
+    for (from, to) in &moved {
+        for (page, n) in page_votes.remove(from).unwrap_or_default() {
+            *page_votes.entry(to.clone()).or_default().entry(page).or_default() += n;
+        }
+    }
     let pages: HashMap<String, String> = page_votes
         .iter()
         .filter_map(|(k, v)| Some((k.clone(), winner(v.iter().map(|(p, n)| (p.to_string(), *n)))?)))
@@ -3981,6 +3999,9 @@ mod tests {
             ("devstral2", "Devstral 2", "m/devstral"),
             ("devstral2123b", "Devstral 2 123B", "m/devstral"),
             ("devstral2124b", "Devstral 2 124B", "m/devstral-other"),
+            ("llama", "Llama 9", "l/9"),
+            ("llama8b", "Llama 9 8B", "l/9"),
+            ("llama70b", "Llama 9 70B", "l/9"),
         ] {
             by_key.insert(key.into(), Model { key: key.into(), name: name.into(), ..Default::default() });
             pages.insert(key.to_string(), page.to_string());
@@ -3997,7 +4018,7 @@ mod tests {
                 to("ultra550b", "ultra550ba55b")
             ]
         );
-        assert_eq!(by_key.len(), 8, "no version alone, no word, no other page");
+        assert_eq!(by_key.len(), 11, "no version alone, no word, no other page, no two sizes");
         assert!(by_key.contains_key("devstral2"), "the known row takes the longer name in");
     }
 
@@ -4019,6 +4040,13 @@ mod tests {
             row("gpt52pro", "GPT-5.2 Pro", &["gpt-5.2-pro", "gpt-5.2-pro"]),
             row("claudeopus5", "Claude Opus 5", &["claude-opus-5", "claude-opus-5-fast", "claude-opus-5-fast"]),
             row("claudeopus5fast", "Claude Opus 5 Fast", &["claude-opus-5-fast"]),
+            row("claudeopus6", "Claude Opus 6", &["claude-opus-6", "claude-opus-6-fast", "claude-opus-6-fast"]),
+            row("claudeopus6fast", "Claude Opus 6 Fast", &["claude-opus-6-fast"; 3]),
+            row("gpt53", "GPT-5.3", &["gpt-5.3"]),
+            row("gpt52b", "GPT-5.2", &["gpt-5.2", "gpt-5.3", "gpt-5.3"]),
+            row("glm9", "GLM 9", &["glm-9"]),
+            row("glm9a", "GLM 9 20250101", &["glm-9", "glm-9"]),
+            row("glm9b", "GLM 9 20250202", &["glm-9", "glm-9"]),
         ]
         .into();
         let moved = merge_into_seller(&mut by_key);
@@ -4026,6 +4054,9 @@ mod tests {
         assert_eq!(by_key["claudehaiku45"].offers.len(), 6);
         assert!(by_key.contains_key("gpt52pro"), "one mislabelled offer takes no row in");
         assert!(by_key.contains_key("claudeopus5fast"), "nor do two, for a name that adds a word");
+        assert!(by_key.contains_key("claudeopus6"), "nor goes a name into one that adds a word");
+        assert!(by_key.contains_key("gpt53"), "nor one into another version");
+        assert!(by_key.contains_key("glm9"), "nor one into either of two that sell it as much");
     }
 
     #[test]
@@ -4795,6 +4826,11 @@ mod tests {
         let paid = Offer { provider: "p".into(), input: 1.0, output: 3.0, available: true, ..Default::default() };
         let m = Model { offers: vec![paid, free], ..Default::default() };
         assert_eq!(m.price().unwrap().provider, "f", "a free one of yours before a paid one");
+        let via =
+            |p: &str, local| Offer { provider: p.into(), via: vec!["opencode".into()], local, ..Default::default() };
+        let cloud = Offer { input: 1.0, available: true, ..via("cloud", false) };
+        let m = Model { offers: vec![via("ollama", true), cloud], ..Default::default() };
+        assert_eq!(m.offer_via("opencode").unwrap().provider, "cloud", "not your machine's free copy");
         // Yours has no price but others list one: the id is still yours, the price the list one.
         let m = Model {
             offers: vec![unknown, o("a", 5.0, false), o("b", 5.0, false), o("c", 1.0, false)],
