@@ -755,6 +755,10 @@ pub struct Model {
     /// Its score on each of `ARENA_MORE` that ranks it, by name, in percent as `arena`.
     #[serde(default)]
     pub arena_more: BTreeMap<String, f64>,
+    /// The keys of the rows merged into it, which Arena may rank it under: "nemotron3ultra" of
+    /// "Nemotron 3 Ultra 550B A55B".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aka: Vec<String>,
     /// The other source's overall index, with its data at hand too (`Data::borrow`).
     #[serde(skip)]
     pub other_index: Option<f64>,
@@ -2148,8 +2152,9 @@ impl Arena {
     /// Gives each model its score, none to one Arena does not rank.
     fn score(&self, models: &mut [Model]) {
         for m in models {
-            m.arena = self.scores.get(&m.key).copied();
-            m.arena_more = self.more.iter().filter_map(|(n, s)| Some((n.to_string(), *s.get(&m.key)?))).collect();
+            let of = |s: &HashMap<String, f64>| std::iter::once(&m.key).chain(&m.aka).find_map(|k| s.get(k)).copied();
+            m.arena = of(&self.scores);
+            m.arena_more = self.more.iter().filter_map(|(n, s)| Some((n.to_string(), of(s)?))).collect();
         }
     }
 }
@@ -2677,15 +2682,18 @@ fn other_release(id: &str, versions: Option<&BTreeSet<String>>) -> bool {
 /// but "Grok 4.3" is not the "Grok 4.3 Beta" listed beside it.
 fn joined<'a>(
     models: &[Model],
-    absorbed: &HashMap<String, Vec<String>>,
+    absorbed: &HashMap<String, Vec<(String, String)>>,
     ep: &'a Scores,
 ) -> Vec<Option<(&'a String, bool)>> {
-    let keys = |m: &Model| std::iter::once(m.key.clone()).chain(absorbed.get(&m.key).into_iter().flatten().cloned());
+    let gone = |m: &Model| absorbed.get(&m.key).into_iter().flatten();
+    let keys = |m: &Model| std::iter::once(m.key.clone()).chain(gone(m).map(|r| r.0.clone()));
+    // Its name and the ones of the rows it absorbed: a source may name it as one of those.
+    let names = |m: &Model| std::iter::once(m.name.clone()).chain(gone(m).map(|r| r.1.clone()));
     let main: Vec<Option<String>> = models.iter().map(sold_as).collect();
     let fits = |id: &Option<String>, g: &String| !id.as_ref().is_some_and(|id| other_release(id, ep.versions.get(g)));
     let named = |m: &Model, id: &Option<String>| {
         // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
-        let aa = (ep.source == Source::Aa).then(|| aa_words(&m.name, true).join("-"));
+        let aa = names(m).filter(|_| ep.source == Source::Aa).map(|n| aa_words(&n, true).join("-"));
         keys(m).chain(aa).filter_map(|k| ep.group(&k)).find(|g| fits(id, g))
     };
     let named: Vec<Option<&String>> = models.iter().zip(&main).map(|(m, id)| named(m, id)).collect();
@@ -2696,7 +2704,7 @@ fn joined<'a>(
         let sold = id.as_ref().and_then(|id| {
             let g = ep.ids.get(&norm(id))?;
             let said = [words(id), group(g)?].concat();
-            words(&m.name).iter().all(|w| said.contains(w)).then_some(g)
+            names(m).any(|n| words(&n).iter().all(|w| said.contains(w))).then_some(g)
         });
         let g = keys(m).find_map(|k| ep.ids.get(&k)).or(sold)?;
         let group = group(g)?;
@@ -2707,7 +2715,7 @@ fn joined<'a>(
         let free = !owned.contains(g);
         // Nor does it take the name of a row that lost the group to its own offers.
         let rename = free && !rows.contains(g.as_str());
-        (fits(id, g) && (free || adds(&m.name) || id.as_deref().is_some_and(adds))).then_some((g, rename))
+        (fits(id, g) && (free || names(m).any(|n| adds(&n)) || id.as_deref().is_some_and(adds))).then_some((g, rename))
     };
     models
         .iter()
@@ -3467,16 +3475,17 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     }
 
     let names = epoch.unwrap_or(ep);
+    let row_names: HashMap<String, String> = by_key.iter().map(|(k, m)| (k.clone(), m.name.clone())).collect();
     let moved = merge_same_ids(&mut by_key, |k| {
         openrouter.contains_key(k) || names.groups.contains_key(k) || names.alias.contains_key(k)
     });
-    // The keys each row absorbed: the source may score the model under one of them.
-    let mut absorbed: HashMap<String, Vec<String>> = HashMap::new();
+    // The keys and names each row absorbed: the source may score the model under one of them.
+    let mut absorbed: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for (from, to) in moved {
         // A row merged into one that is merged in turn takes what it absorbed along.
-        let mut keys = absorbed.remove(&from).unwrap_or_default();
-        keys.push(from.clone());
-        absorbed.entry(to.clone()).or_default().extend(keys);
+        let mut rows = absorbed.remove(&from).unwrap_or_default();
+        rows.push((from.clone(), row_names[&from].clone()));
+        absorbed.entry(to.clone()).or_default().extend(rows);
         if let Some(id) = openrouter.remove(&from) {
             openrouter.entry(to.clone()).or_insert(id);
         }
@@ -3497,6 +3506,9 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         return Err("models.dev: no models found".into());
     }
     let mut models: Vec<Model> = by_key.into_values().collect();
+    for m in &mut models {
+        m.aka = absorbed.get(&m.key).into_iter().flatten().map(|r| r.0.clone()).collect();
+    }
     let plain = plain(&models);
     let groups = joined(&models, &absorbed, ep);
     // One row takes a group's name, the others that reach it keep their own: the row most
@@ -3705,6 +3717,9 @@ mod tests {
         assert_eq!((ms[0].arena, ms[0].picked("Steerability"), ms[0].picked("Praise")), (None, Some(8.7), None));
         arena.score(&mut ms);
         assert_eq!((arena.date.as_str(), arena.cut), ("2026-10-02", false), "a row with nulls is left out, not all");
+        let mut merged = [Model { key: "opus5".into(), aka: vec!["claudeopus5".into()], ..Default::default() }];
+        arena.score(&mut merged);
+        assert_eq!(merged[0].arena, Some(8.7), "or by the key of a row merged into it");
         assert!(Arena::parse(rows.replace("7,", "8,").as_bytes()).unwrap().cut, "more rows than were read");
         assert_eq!(Arena::parse(b"<html>"), None);
         // Kept from the cache when it did not come, until Arena has published none for too long.
@@ -4023,8 +4038,20 @@ mod tests {
         ep.versions.insert("mistralmedium9".into(), vs(&["mistral-medium-2609"]));
         let offers = vec![Offer { id: "mistral-medium-2609".into(), ..Default::default() }];
         let row = Model { key: "mistralmedium".into(), name: "Mistral Medium".into(), offers, ..Default::default() };
-        let absorbed = HashMap::from([("mistralmedium".to_string(), vec!["mistralmedium9".to_string()])]);
+        let absorbed =
+            HashMap::from([("mistralmedium".to_string(), vec![("mistralmedium9".into(), "Mistral Medium 9".into())])]);
         assert_eq!(joined(&[row], &absorbed, &ep), [Some((&"mistralmedium9".to_string(), true))]);
+
+        // Artificial Analysis names it as a row it absorbed: "Nemotron 3.5 Lightning" in "… 30B A3B".
+        let mut aa = Scores { source: Source::Aa, ..Default::default() };
+        let g = aa_words("Nemotron 3.5 Lightning", true).join("-");
+        aa.groups.insert(g.clone(), ("Nemotron 3.5 Lightning".into(), Some(13.0), BTreeMap::new()));
+        let row =
+            Model { key: "lightning".into(), name: "Nemotron 3.5 Lightning 30B A3B".into(), ..Default::default() };
+        let absorbed =
+            HashMap::from([("lightning".to_string(), vec![("short".into(), "Nemotron 3.5 Lightning".into())])]);
+        assert_eq!(joined(std::slice::from_ref(&row), &absorbed, &aa), [Some((&g, true))]);
+        assert_eq!(joined(&[row], &HashMap::new(), &aa), [None], "its own name alone is not the group's");
     }
 
     #[test]
