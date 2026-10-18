@@ -2559,7 +2559,51 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
     };
     let mut moved = merge_by(by_key, &known, main_id);
     moved.extend(merge_by(by_key, &known, any_order));
+    moved.extend(merge_into_seller(by_key));
     moved
+}
+
+/// A row goes into the one that sells its main id more: Jiekou's "claude-haiku-4-5-20251001",
+/// named by its id, is the snapshot that Anthropic and others list under "Claude Haiku 4.5".
+/// More, not any: Vercel's one `gpt-5.2-pro` sold as "GPT 5.2" must not take GPT-5.2 Pro in.
+/// And only when its name adds numbers alone, a date: "Claude Opus 5 Fast" is a price of its
+/// own, though two resellers sell `claude-opus-5-fast` as "Claude Opus 5".
+// ponytail: a row whose seller moves too stays, chains are left for when one shows up.
+fn merge_into_seller(by_key: &mut HashMap<String, Model>) -> Vec<(String, String)> {
+    let sold = |m: &Model, id: &str| m.offers.iter().filter(|o| slug(&o.id) == id).count();
+    let mut keys: Vec<&String> = by_key.keys().collect();
+    keys.sort();
+    let pairs: Vec<(String, String)> = keys
+        .iter()
+        .filter_map(|&k| {
+            let id = main_id(&by_key[k])?;
+            let own = sold(&by_key[k], &id);
+            let (n, to) = keys.iter().filter(|&&t| t != k).map(|&t| (sold(&by_key[t], &id), t)).max()?;
+            let theirs = words(&by_key[to].name);
+            let dated =
+                words(&by_key[k].name).iter().all(|w| theirs.contains(w) || w.bytes().all(|b| b.is_ascii_digit()));
+            (n > own && dated).then(|| (k.clone(), to.clone()))
+        })
+        .collect();
+    let from: HashSet<&String> = pairs.iter().map(|p| &p.0).collect();
+    let pairs: Vec<(String, String)> = pairs.iter().filter(|p| !from.contains(&p.1)).cloned().collect();
+    for (k, to) in &pairs {
+        let m = by_key.remove(k).unwrap();
+        absorb(by_key.get_mut(to).unwrap(), m);
+    }
+    pairs
+}
+
+/// Moves row `m` into `t`: its offers, and the features any of them has.
+fn absorb(t: &mut Model, m: Model) {
+    t.tool_call |= m.tool_call;
+    t.reasoning |= m.reasoning;
+    t.open_weights |= m.open_weights;
+    t.vision |= m.vision;
+    if t.knowledge.is_empty() {
+        t.knowledge = m.knowledge;
+    }
+    t.offers.extend(m.offers);
 }
 
 /// The id most of a row's offers go by, without its vendor. A clear winner only: a row of
@@ -2688,15 +2732,7 @@ fn merge_by(
         let to = owner.entry(main).or_insert_with(|| k.clone()).clone();
         if to != k {
             let m = by_key.remove(&k).unwrap();
-            let t = by_key.get_mut(&to).unwrap();
-            t.tool_call |= m.tool_call;
-            t.reasoning |= m.reasoning;
-            t.open_weights |= m.open_weights;
-            t.vision |= m.vision;
-            if t.knowledge.is_empty() {
-                t.knowledge = m.knowledge;
-            }
-            t.offers.extend(m.offers);
+            absorb(by_key.get_mut(&to).unwrap(), m);
             moved.push((k, to));
         }
     }
@@ -3855,6 +3891,33 @@ mod tests {
         assert_eq!(moved, [("granite40hmicro".to_string(), "granite40micro".to_string())], "the known row absorbs");
         assert_eq!(by_key["granite40micro"].offers.len(), 2);
         assert_eq!(by_key.len(), 7, "no merge on generic ids, one mislabelled offer, or a tie");
+    }
+
+    #[test]
+    fn a_row_goes_into_the_one_selling_its_id_more() {
+        let row = |key: &str, name: &str, ids: &[&str]| {
+            let offers = ids.iter().map(|i| Offer { id: i.to_string(), ..Default::default() }).collect();
+            (key.to_string(), Model { key: key.into(), name: name.into(), offers, ..Default::default() })
+        };
+        let dated = "claude-haiku-4-5-20251001";
+        let mut by_key: HashMap<String, Model> = [
+            row(
+                "claudehaiku45",
+                "Claude Haiku 4.5",
+                &["claude-haiku-4-5", dated, dated, "x/claude-haiku-4-5-20251001"],
+            ),
+            row("claudehaiku4520251001", dated, &[dated, dated]),
+            row("gpt52", "GPT-5.2", &["gpt-5.2", "gpt-5.2", "gpt-5.2-pro"]),
+            row("gpt52pro", "GPT-5.2 Pro", &["gpt-5.2-pro", "gpt-5.2-pro"]),
+            row("claudeopus5", "Claude Opus 5", &["claude-opus-5", "claude-opus-5-fast", "claude-opus-5-fast"]),
+            row("claudeopus5fast", "Claude Opus 5 Fast", &["claude-opus-5-fast"]),
+        ]
+        .into();
+        let moved = merge_into_seller(&mut by_key);
+        assert_eq!(moved, [("claudehaiku4520251001".to_string(), "claudehaiku45".to_string())]);
+        assert_eq!(by_key["claudehaiku45"].offers.len(), 6);
+        assert!(by_key.contains_key("gpt52pro"), "one mislabelled offer takes no row in");
+        assert!(by_key.contains_key("claudeopus5fast"), "nor do two, for a name that adds a word");
     }
 
     #[test]
