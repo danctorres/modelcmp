@@ -2544,8 +2544,13 @@ fn merge_same_ids(by_key: &mut HashMap<String, Model>, known: impl Fn(&str) -> b
     // ponytail: where a number sat among the names is lost; compare the positions too if two
     // models ever differ only by that.
     let any_order = |m: &Model| {
-        let w = words(&m.name);
+        let mut w = words(&m.name);
         let num = |w: &String| w.starts_with(|c: char| c.is_ascii_digit());
+        // A vendor before the name is no part of it: DigitalOcean's "Anthropic Claude 5.5
+        // Haiku" is "Claude Haiku 5.5". Not when only numbers follow, "Mistral 7B" being a name.
+        if w.first().is_some_and(|v| VENDORS.contains(&v.as_str())) && w[1..].iter().any(|w| !num(w)) {
+            w.remove(0);
+        }
         let mut k: Vec<String> = w.iter().filter(|w| !num(w)).cloned().collect();
         k.sort();
         k.extend(w.chunk_by(|a, b| num(a) && num(b)).filter(|r| num(&r[0])).map(|r| r.join(".")));
@@ -2715,6 +2720,9 @@ fn slug(id: &str) -> String {
 /// namespace (`orgs`): "au.anthropic...", "coding-glm-5.1", "Dola Seed", "Doubao Seed".
 const NAME_ORGS: &[&str] = &["au", "coding", "dola", "doubao"];
 
+/// Vendors whose name prefixes their models' in a reseller's listing: "Anthropic Claude Opus 4.7".
+const VENDORS: &[&str] = &["openai", "anthropic", "google", "xai", "meta", "mistral"];
+
 /// "openaigpt41" -> "gpt41" when "gpt41" exists: providers that prefix the vendor
 /// ("OpenAI: GPT-4.1", "Anthropic Claude Opus 4.7") fold into the plain entry. A stealth
 /// "Space Bunny Alpha" folds the same way into "Space Bunny" when a provider lists that.
@@ -2722,7 +2730,6 @@ const NAME_ORGS: &[&str] = &["au", "coding", "dola", "doubao"];
 /// 8B") keeps its own entry and prices.
 fn fold_vendor(key: &str, keys: &HashSet<String>, orgs: &HashSet<String>) -> String {
     let mut k = key;
-    const VENDORS: &[&str] = &["openai", "anthropic", "google", "xai", "meta", "mistral"];
     // ponytail: suffix must be ≥5 chars with a digit (or follow a known vendor, for "o3"),
     // a cheap guard against false merges.
     while let Some(r) = (2..k.len()).map(|i| &k[i..]).find(|r| {
@@ -3868,6 +3875,12 @@ mod tests {
         let d = merge(json, &ep, None).unwrap();
         let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.eci, m.offers.len())).collect();
         assert_eq!(rows, [("claudeopus9", Some(150.0), 3)]);
+        // And with the vendor before them, as DigitalOcean writes "Anthropic Claude 5.5 Haiku".
+        let json = br#"{"openrouter": {"models": {"x/opus-9": {"name": "Claude Opus 9"}}},
+                        "b": {"models": {"opus9-a": {"name": "Anthropic Claude 9 Opus"}}}}"#;
+        let d = merge(json, &ep, None).unwrap();
+        let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.offers.len())).collect();
+        assert_eq!(rows, [("claudeopus9", 2)]);
         // Numbers apart are not numbers side by side, and a name without one merges with none.
         let json = br#"{"b": {"models": {"a": {"name": "Grok 4.1 Fast"}, "b": {"name": "Grok 4 Fast 1"},
                         "c": {"name": "Sonar Pro"}, "d": {"name": "Pro Sonar"}}}}"#;
