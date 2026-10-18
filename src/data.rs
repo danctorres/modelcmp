@@ -2599,6 +2599,58 @@ fn merge_into_seller(by_key: &mut HashMap<String, Model>) -> Vec<(String, String
     pairs
 }
 
+/// Rows on one models.dev page go together when one name adds to another numbers alone and
+/// a size at least: OpenCode's "Beam" is "Beam 1.0 501B A23B". So "GLM", which moves on to
+/// each release, stays out of "GLM-5.3", and "Kimi K3-256K" or "Claude Opus 5 Fast", priced
+/// on their own, out of theirs. The row OpenRouter or a source knows (`known`) takes the
+/// others in, else the longest name: "Nemotron 3 Ultra" and "Nemotron 3 Ultra 550B" go into
+/// "Nemotron 3 Ultra 550B A55B". A source names the model either way (`joined`).
+fn merge_sized(
+    by_key: &mut HashMap<String, Model>,
+    pages: &HashMap<String, String>,
+    known: impl Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    let size = |w: &String| {
+        let n = w.strip_prefix('a').unwrap_or(w).strip_suffix('b');
+        n.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let num = |w: &String| w.bytes().all(|b| b.is_ascii_digit());
+    let names: HashMap<&String, Vec<String>> = by_key.iter().map(|(k, m)| (k, words(&m.name))).collect();
+    let adds_size = |short: &[String], long: &[String]| {
+        let extra: Vec<&String> = long.iter().filter(|w| !short.contains(w)).collect();
+        short.iter().all(|w| long.contains(w))
+            && extra.iter().any(|w| size(w))
+            && extra.iter().all(|w| size(w) || num(w))
+    };
+    let mut rows: Vec<(usize, &String)> = names.iter().map(|(k, w)| (w.len(), *k)).collect();
+    rows.sort();
+    // Each row's group, by the longest name that adds a size to it: that one adds a size to
+    // all the shorter ones too.
+    let mut groups: BTreeMap<&String, Vec<&String>> = BTreeMap::new();
+    for &(_, k) in &rows {
+        let Some(page) = pages.get(k) else { continue };
+        let longest = rows
+            .iter()
+            .rev()
+            .map(|r| r.1)
+            .find(|&t| t != k && pages.get(t) == Some(page) && adds_size(&names[k], &names[t]));
+        if let Some(t) = longest {
+            groups.entry(t).or_insert_with(|| vec![t]).push(k);
+        }
+    }
+    let mut moved = Vec::new();
+    for keys in groups.into_values() {
+        let to = keys.iter().max_by_key(|k| (known(k), names[*k].len(), std::cmp::Reverse(*k))).unwrap();
+        moved.extend(keys.iter().filter(|k| *k != to).map(|k| ((*k).clone(), (*to).clone())));
+    }
+    drop(names);
+    for (k, to) in &moved {
+        let m = by_key.remove(k).unwrap();
+        absorb(by_key.get_mut(to).unwrap(), m);
+    }
+    moved
+}
+
 /// Moves row `m` into `t`: its offers, and the features any of them has.
 fn absorb(t: &mut Model, m: Model) {
     t.tool_call |= m.tool_call;
@@ -3476,9 +3528,13 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
 
     let names = epoch.unwrap_or(ep);
     let row_names: HashMap<String, String> = by_key.iter().map(|(k, m)| (k.clone(), m.name.clone())).collect();
-    let moved = merge_same_ids(&mut by_key, |k| {
-        openrouter.contains_key(k) || names.groups.contains_key(k) || names.alias.contains_key(k)
-    });
+    let known = |k: &str| openrouter.contains_key(k) || names.groups.contains_key(k) || names.alias.contains_key(k);
+    let mut moved = merge_same_ids(&mut by_key, known);
+    let pages: HashMap<String, String> = page_votes
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), winner(v.iter().map(|(p, n)| (p.to_string(), *n)))?)))
+        .collect();
+    moved.extend(merge_sized(&mut by_key, &pages, known));
     // The keys and names each row absorbed: the source may score the model under one of them.
     let mut absorbed: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for (from, to) in moved {
@@ -3906,6 +3962,43 @@ mod tests {
         assert_eq!(moved, [("granite40hmicro".to_string(), "granite40micro".to_string())], "the known row absorbs");
         assert_eq!(by_key["granite40micro"].offers.len(), 2);
         assert_eq!(by_key.len(), 7, "no merge on generic ids, one mislabelled offer, or a tie");
+    }
+
+    #[test]
+    fn a_row_goes_into_the_one_naming_its_size() {
+        let mut by_key: HashMap<String, Model> = HashMap::new();
+        let mut pages = HashMap::new();
+        for (key, name, page) in [
+            ("beam", "Beam", "r/beam"),
+            ("beam10501ba23b", "Beam 1.0 501B A23B", "r/beam"),
+            ("ultra", "Nemotron 3 Ultra", "n/ultra"),
+            ("ultra550b", "Nemotron 3 Ultra 550B", "n/ultra"),
+            ("ultra550ba55b", "Nemotron 3 Ultra 550B A55B", "n/ultra"),
+            ("glm", "GLM", "z/glm-5.3"),
+            ("glm53", "GLM-5.3", "z/glm-5.3"),
+            ("kimik3", "Kimi K3", "m/k3"),
+            ("kimik3256k", "Kimi K3-256K", "m/k3"),
+            ("devstral2", "Devstral 2", "m/devstral"),
+            ("devstral2123b", "Devstral 2 123B", "m/devstral"),
+            ("devstral2124b", "Devstral 2 124B", "m/devstral-other"),
+        ] {
+            by_key.insert(key.into(), Model { key: key.into(), name: name.into(), ..Default::default() });
+            pages.insert(key.to_string(), page.to_string());
+        }
+        let mut moved = merge_sized(&mut by_key, &pages, |k| k == "devstral2" || k == "ultra550ba55b");
+        moved.sort();
+        let to = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            moved,
+            [
+                to("beam", "beam10501ba23b"),
+                to("devstral2123b", "devstral2"),
+                to("ultra", "ultra550ba55b"),
+                to("ultra550b", "ultra550ba55b")
+            ]
+        );
+        assert_eq!(by_key.len(), 8, "no version alone, no word, no other page");
+        assert!(by_key.contains_key("devstral2"), "the known row takes the longer name in");
     }
 
     #[test]
