@@ -2836,16 +2836,19 @@ const VENDORS: &[&str] = &["openai", "anthropic", "google", "xai", "meta", "mist
 /// ("OpenAI: GPT-4.1", "Anthropic Claude Opus 4.7") fold into the plain entry. A stealth
 /// "Space Bunny Alpha" folds the same way into "Space Bunny" when a provider lists that.
 /// Only a prefix in `orgs` folds, so a fine-tune ("Shisa v2 Llama 3.3 70B", "GrayLine Qwen3
-/// 8B") keeps its own entry and prices.
-fn fold_vendor(key: &str, keys: &HashSet<String>, orgs: &HashSet<String>) -> String {
+/// 8B") keeps its own entry and prices. A name without a digit folds when another provider
+/// sells the same id by the plain name (`sold`): NanoGPT's "Elorian Glimpse" is `elorian/glimpse`,
+/// which OpenRouter calls "Glimpse". Ambient's "Ambient Large" is not Mistral's "Large".
+fn fold_vendor(key: &str, sold: impl Fn(&str) -> bool, keys: &HashSet<String>, orgs: &HashSet<String>) -> String {
     let mut k = key;
-    // ponytail: suffix must be ≥5 chars with a digit (or follow a known vendor, for "o3"),
-    // a cheap guard against false merges.
+    // ponytail: suffix must be ≥5 chars with a digit, or be sold by that name under the same
+    // id (or follow a known vendor, for "o3"), a cheap guard against false merges.
     while let Some(r) = (2..k.len()).map(|i| &k[i..]).find(|r| {
         let prefix = &k[..k.len() - r.len()];
         let long = r.len() >= 5 && r.bytes().any(|b| b.is_ascii_digit());
+        let said = sold(r);
         let vendor = VENDORS.contains(&prefix);
-        (long && orgs.contains(prefix) || vendor) && keys.contains(*r)
+        ((long || said) && orgs.contains(prefix) || vendor) && keys.contains(*r)
     }) {
         k = r;
     }
@@ -3480,6 +3483,10 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         .filter(|e| !norm(&e.3).is_empty())
         .collect();
     let keys: HashSet<String> = entries.iter().map(|e| norm(&e.3)).collect();
+    let offer_id = |mid: &String, md: &MdModel| if md.id.is_empty() { mid.clone() } else { md.id.clone() };
+    // Each name with the ids it is sold as.
+    let sold: HashSet<(String, String)> =
+        entries.iter().map(|e| (norm(&e.3), offer_id(e.1, e.2).to_lowercase())).collect();
     // models.dev's pages by their lowercase id: an offer that names none but goes by one is that model.
     let all_pages: HashMap<String, &str> =
         entries.iter().map(|e| (e.2.canonical_model_id.to_lowercase(), e.2.canonical_model_id.as_str())).collect();
@@ -3494,7 +3501,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     for (pid, mid, md, name) in entries {
         let p = &providers[pid];
         let raw = norm(&name);
-        let key = fold_vendor(&raw, &keys, &orgs);
+        let id = offer_id(mid, md);
+        let key = fold_vendor(&raw, |r| sold.contains(&(r.to_string(), id.to_lowercase())), &keys, &orgs);
         if pid == "openrouter" {
             openrouter.entry(key.clone()).or_insert_with(|| mid.clone());
             // Its own models ("openrouter/<stealth>") are no model's page.
@@ -3536,7 +3544,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         m.offers.push(Offer {
             provider: pid.clone(),
             provider_name: p.name.clone(),
-            id: if md.id.is_empty() { mid.clone() } else { md.id.clone() },
+            id,
             input: cost.map_or(0.0, |c| c.0),
             output: cost.map_or(0.0, |c| c.1),
             // A few list a paid model's cache as 0, a placeholder; a cache never costs more than input.
@@ -4257,7 +4265,7 @@ mod tests {
                 .map(String::from)
                 .into();
         let orgs: HashSet<String> = ["pro", "zaiorg"].map(String::from).into();
-        let fold = |k| fold_vendor(k, &keys, &orgs);
+        let fold = |k| fold_vendor(k, |_| false, &keys, &orgs);
         assert_eq!(fold("openaigpt41"), "gpt41");
         assert_eq!(fold("prozaiorgglm5"), "zaiorgglm5");
         assert_eq!(fold("gpt41"), "gpt41");
@@ -4265,6 +4273,15 @@ mod tests {
         assert_eq!(fold("spacebunnyalpha"), "spacebunny");
         assert_eq!(fold("oxalpha"), "oxalpha", "no plain entry, no fold");
         assert_eq!(fold("shisav2gpt41"), "shisav2gpt41", "a fine-tune is not its base");
+        let keys: HashSet<String> = ["glimpse", "elorianglimpse", "large", "ambientlarge"].map(String::from).into();
+        let orgs: HashSet<String> = ["elorian", "ambient"].map(String::from).into();
+        let by_glimpse = |r: &str| r == "glimpse";
+        assert_eq!(fold_vendor("elorianglimpse", by_glimpse, &keys, &orgs), "glimpse", "sold by the plain name too");
+        assert_eq!(
+            fold_vendor("ambientlarge", by_glimpse, &keys, &orgs),
+            "ambientlarge",
+            "no digit, its id not sold so: no fold"
+        );
     }
 
     #[test]
