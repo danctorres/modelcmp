@@ -772,6 +772,7 @@ pub fn bound_said(name: &str, col: usize, lo: f64, hi: f64) -> String {
     // The level label would repeat what the number says.
     let shown = match crate::app::numeric(col) {
         _ if col == crate::app::PRICE => money(v),
+        _ if col == crate::app::VIA => crate::data::gb((v * 1e9) as u64),
         Some(c) => (c.show)(v),
         None => v.to_string(),
     };

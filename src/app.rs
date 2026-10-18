@@ -1848,7 +1848,8 @@ impl App {
     }
 
     /// Models passing every filter but the frontier, ignoring the ones on column `skip` except
-    /// Price's minimum (its dropdown only replaces the maximum; a task's drops both bounds), so
+    /// Price's minimum and Via's size (its dropdown only replaces Price's maximum, its picks no
+    /// size, and a task's drops both bounds), so
     /// a dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
         // A selected model shows even out of reach, so it can be compared, and `S` `F` `E` show
@@ -1877,7 +1878,7 @@ impl App {
     }
 
     /// What of the picks of the Dev, Price and Via dropdowns and the bounds model `i` fails, the
-    /// ones on column `skip` aside but Price's minimum, as `filtered` has them. The picks are
+    /// ones on column `skip` aside but Price's minimum and Via's size, as `filtered` has them. The picks are
     /// the CLI's (`view::picked`), the Price level by the price shown.
     fn failing(&self, i: usize, m: &Model, skip: usize) -> Option<Fail> {
         let any = self.any_available;
@@ -1899,11 +1900,22 @@ impl App {
         self.bounds
             .iter()
             .position(|&(c, lo, hi)| {
-                (c != skip || skip == PRICE && lo.is_finite())
+                (c != skip || skip == PRICE && lo.is_finite() || skip == VIA)
                     && bound_applies(c, hide)
-                    && !self.val(i, c).is_some_and(|v| v >= lo && v <= hi)
+                    && !self.bound_val(i, m, c).is_some_and(|v| v >= lo && v <= hi)
             })
             .map(Fail::Bound)
+    }
+
+    /// What a bound on the column at cursor index `col` reads of model `i`: on Via the size of
+    /// its GGUF copy, in GB.
+    fn bound_val(&self, i: usize, m: &Model, col: usize) -> Option<f64> {
+        if col == VIA { self.size(m).map(|b| b as f64 / 1e9) } else { self.val(i, col) }
+    }
+
+    /// Whether a bound on Via's size is on, which asks the size of every model with a GGUF copy.
+    fn size_bound(&self) -> bool {
+        self.bounds.iter().any(|b| b.0 == VIA)
     }
 
     /// Whether a bound on column `col` is kept for the CLI: not one typed for a benchmark picked
@@ -2266,7 +2278,11 @@ impl App {
         let rows = self.rows.iter().skip(top).take(page).map(|&i| &self.data.models[i]);
         let seen = rows.filter(|m| self.local(m) || getters(m, &self.tools).next().is_some());
         let new = |m: &&Model| m.hf_repo().is_some() && !self.downloads.contains_key(&m.key);
-        self.current().into_iter().chain(seen).filter(new)
+        // A bound on Via's size hides a model whose size is not known: every one is asked for,
+        // a screenful at a time.
+        let ask = self.size_bound() && !self.downloads.values().any(|d| *d == Download::Awaited);
+        let all = self.data.models.iter().filter(move |_| ask);
+        self.current().into_iter().chain(seen).chain(all).filter(new)
     }
 
     /// Whether a size is still to ask for. Asked ahead of `x`, once the cursor rests, and once
@@ -2284,7 +2300,7 @@ impl App {
             self.unsized_models().map(|m| (m.key.clone(), m.hf_repo().unwrap_or("").to_string())).collect();
         // Once each: the model under the cursor is a row on screen too.
         let new = |(key, _): &(String, String)| self.downloads.insert(key.clone(), Download::Awaited).is_none();
-        models.into_iter().filter(new).collect()
+        models.into_iter().filter(new).take(self.page.max(1) as usize + 1).collect()
     }
 
     /// Hugging Face's answers on the downloads of models, by key, which `x` goes by from now
@@ -2295,7 +2311,7 @@ impl App {
             self.downloads.insert(key.into(), answer);
             // Via sorts by it, and a model with no copy leaves the ones picked by `DOWNLOAD`.
             let picked = answer == Download::Gone && self.store.via_pick.iter().any(|v| v == DOWNLOAD);
-            again |= picked || self.sort_col == VIA && matches!(answer, Download::Size(_));
+            again |= picked || (self.sort_col == VIA || self.size_bound()) && matches!(answer, Download::Size(_));
             let said = match answer {
                 Download::Size(b) => format!(" ({})", crate::data::gb(b)),
                 Download::Gone => " (no GGUF copy)".into(),
@@ -3442,10 +3458,10 @@ impl App {
                 }
                 self.rebuild();
             }
-            KeyCode::Char(c @ ('>' | '<')) if table && numeric(self.col).is_some() => {
+            KeyCode::Char(c @ ('>' | '<')) if table && (numeric(self.col).is_some() || self.col == VIA) => {
                 self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
             }
-            KeyCode::Char('>' | '<') if table => self.refuse("> and < bound a column of numbers"),
+            KeyCode::Char('>' | '<') if table => self.refuse("> and < bound a column of numbers or Via's size"),
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the columns marked ▾"),
             // The next tab with something to show, past the last back to the first.
@@ -3917,13 +3933,19 @@ impl App {
                 KeyCode::Enter => {
                     let (col, min, text) = (*col, *min, std::mem::take(text));
                     self.input = Input::None;
-                    match numeric(col).and_then(|c| (c.read)(&text, !min)) {
+                    // Via's in GB, as its `↓` says the size.
+                    let gb = || text.parse().ok().filter(|v: &f64| !v.is_nan());
+                    match numeric(col).map_or_else(gb, |c| (c.read)(&text, !min)) {
                         Some(v) => {
                             let (lo, hi) = if min { (v, f64::INFINITY) } else { (f64::NEG_INFINITY, v) };
                             // A new bound on a column replaces the old one of the same kind, and a
                             // maximum on Price the level picked in its dropdown.
                             self.bounds.retain(|&(c, l, _)| c != col || l.is_finite() != lo.is_finite());
                             self.bounds.push((col, lo, hi));
+                            // The sizes that did not come are asked for again, as after a refresh.
+                            if col == VIA {
+                                self.downloads.retain(|_, d| *d != Download::NoAnswer);
+                            }
                             if col == PRICE && !min && self.store.price_pick.take().is_some() {
                                 self.rebuild();
                                 return Some(Effect::Save);
@@ -4209,6 +4231,43 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `>` `<` on Via bound the size of a model's GGUF copy, in GB, and the bound asks the size
+    /// of every model with a copy, as one of unknown size is hidden.
+    #[test]
+    fn via_bounds_the_download_size() {
+        let mut a = app();
+        for m in &mut a.data.models {
+            m.hf = Some(format!("org/{}", m.key));
+        }
+        a.set_sizes([("gpt55".into(), 40_000_000_000), ("mini".into(), 4_000_000_000)].into());
+        a.rebuild();
+        a.col = VIA;
+        press(&mut a, "<8");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(keys(&a), vec!["mini"], "the one over 8 GB and the one of unknown size hidden");
+        assert_eq!(view::bound_said("Via", VIA, f64::NEG_INFINITY, 8.0), "Via≤8.0 GB");
+        let asked: Vec<_> = a.size_ask().into_iter().map(|q| q.0).collect();
+        assert_eq!(asked, ["opus5", "llama4"], "asked, hidden ones too");
+        a.sized([("opus5", Download::Size(2_000_000_000))]);
+        assert_eq!(keys(&a), ["mini", "opus5"], "shown once its size comes");
+        let coding: Vec<_> =
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
+        assert_eq!(coding, ["mini"], "recommend leaves out the hidden ones too");
+        // One that did not answer is asked again when the bound is typed again.
+        a.sized([("llama4", Download::NoAnswer)]);
+        assert!(!a.size_wanted());
+        press(&mut a, "<8");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.size_ask(), [("llama4".to_string(), "org/llama4".to_string())]);
+        // Its dropdown counts under it: a pick there leaves the size bound as it is.
+        press(&mut a, "d");
+        assert!(menu(&a).iter().all(|&(_, n)| n <= 2), "{:?}", menu(&a));
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, ">1-2");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.failed, "not a size");
+    }
 
     /// `--min ctx=600` and `--min ctx=600000` are the same 600,000 tokens.
     #[test]
