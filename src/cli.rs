@@ -358,7 +358,9 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
         let (front, off) = task_line(models.iter().copied(), pool(), store, t);
         models = match &o.tier {
             Some(tier) => {
-                let none = Store::default();
+                // Your caps still hold.
+                let mut none = Store::default();
+                none.tiers.clone_from(&store.tiers);
                 let favs = if o.no_fav { &none } else { store };
                 tier_pick(&front, &off, favs, t.name, tier).map(|e| e.0).into_iter().collect()
             }
@@ -844,6 +846,27 @@ pub fn harness(store: &mut Store, name: Option<&str>, rm: bool) -> Result {
     Ok(())
 }
 
+/// Show the tiers' price caps, or set or reset `low`'s or `mid`'s.
+pub fn tier(store: &mut Store, name: Option<&str>, usd: Option<f64>, rm: bool) -> Result {
+    let said = |s: &Store, t: &str| match s.tier_cap(t) {
+        0.0 => "only free models".to_string(),
+        c if c.is_infinite() => "any price".into(),
+        c => format!("up to ${c} per 1M tokens"),
+    };
+    let Some(name) = name else {
+        for (t, _) in TIERS {
+            println!("{t:<5} {}", said(store, t));
+        }
+        return Ok(());
+    };
+    if usd.is_some() || rm {
+        store.set_tier_cap(name, usd).map_err(|msg| Exit { code: 2, msg })?;
+        store.save()?;
+    }
+    println!("{name}: {}", said(store, name));
+    Ok(())
+}
+
 /// Show the folder of the `.gguf` files you downloaded, or set or clear it: llama.cpp runs the
 /// models in it, and a refresh lists them.
 pub fn models_dir(store: &mut Store, dir: Option<&str>, rm: bool) -> Result {
@@ -1080,7 +1103,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     if json {
         return print_json(&recommend_json(data, store));
     }
-    println!("{RECOMMEND_LEGEND}\n");
+    println!("{}\n", RECOMMEND_LEGEND.replace("{tiers}", &crate::view::tiers_said(store)));
     // Each tier's pick, or the task's one `pick` under the last.
     let show = |task: &str, picks: [Option<(&Model, f64)>; TIERS.len()], text: &dyn Fn(&Model, f64, &str) -> String| {
         let one = one_pick(task, &picks);

@@ -194,6 +194,7 @@ modelcmp exclude llama-4-maverick              # have it, can't use it
 modelcmp harness claude                        # your default harness (`H` in the TUI)
 modelcmp fav coding sonnet-5                   # your favorite for a task
 modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier
+modelcmp tier mid 8                            # mid takes models up to $8, `modelcmp tier` shows every cap
 modelcmp fav coding opus-5.5 --via claude      # and the harness you run it on
 
 # tasks of your own
@@ -299,6 +300,8 @@ or bound can hide different models.
 | `mid` | the best up to $5 |
 | `high` | your best. It is the best to the whole point: of two models a fraction of a point apart, the cheaper |
 
+- `modelcmp tier low 1` or `modelcmp tier mid 8` changes a cap, `--rm` puts it back to its
+  default, as `enter` on the tier's header in the TUI's recommend does. `low` can't cost more than `mid`. The list splits at the caps too, so a tier picks the best model up to its cap.
 - Two tiers pick the same model when none dearer that the next may take is better. A tier
   never takes a worse model to differ from the next.
 - With no model at its price, `low` or `mid` picks the cheapest of the list. `free` never

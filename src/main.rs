@@ -42,7 +42,7 @@ enum Cmd {
         /// Best model per price level for a task (overall, coding, agentic, reasoning, vision, value): cheapest first, each row costing more and scoring higher. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, else for the task. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5, high = your best. A task of your own gives the tier's model, else the task's
+        /// One model from the task's list: your favorite for the tier, else for the task. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best. A task of your own gives the tier's model, else the task's
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -177,6 +177,19 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
+    /// The price cap of the low or mid tier, alone shows every tier's
+    ///
+    /// A tier picks the best model at its cap or under: low up to $2 per 1M tokens and mid up to $5 by default. free takes only free models and high any
+    Tier {
+        #[arg(value_parser = PossibleValuesParser::new(["low", "mid"]))]
+        name: Option<String>,
+        /// The dearest it takes, in $ per 1M tokens
+        #[arg(requires = "name", conflicts_with = "rm")]
+        usd: Option<f64>,
+        /// Back to its default
+        #[arg(long, requires = "name")]
+        rm: bool,
+    },
     /// The folder of the `.gguf` files you downloaded, alone shows it
     ///
     /// llama.cpp runs the models in it and a refresh lists them, when `LLAMA_ARG_MODELS_DIR` is not set
@@ -292,6 +305,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
     let bare = matches!(
         cmd,
         Cmd::Harness { .. }
+            | Cmd::Tier { .. }
             | Cmd::ModelsDir { .. }
             | Cmd::Quiet { .. }
             | Cmd::Fav { task: Some(_), rename: Some(_), .. }
@@ -318,6 +332,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
             | Cmd::Note { .. }
             | Cmd::Fav { .. }
             | Cmd::Harness { .. }
+            | Cmd::Tier { .. }
             | Cmd::ModelsDir { .. }
     )
     .then(|| store::lock(&store::path()))
@@ -379,6 +394,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
         Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
         Cmd::Harness { name, rm } => cli::harness(&mut store, name.as_deref(), rm),
+        Cmd::Tier { name, usd, rm } => cli::tier(&mut store, name.as_deref(), usd, rm),
         Cmd::ModelsDir { dir, rm } => cli::models_dir(&mut store, dir.as_deref(), rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),

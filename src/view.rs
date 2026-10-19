@@ -407,11 +407,13 @@ pub fn frontier<'m, T: Copy>(
 /// whether or not they earn a place on it, and are ranked only if they are among `models`;
 /// with no score for the task, a favorite's score is NaN, which `priced` shows as `-`, and no
 /// tier picks it on merit.
-/// With the line come the keys on it only for being favorites.
+/// With the line come the keys on it only for being favorites. `caps` split the levels too, the
+/// tiers' (`Store::tier_cap`), so each tier has the best at its price to pick.
 pub fn task_frontier<'a>(
     models: impl Iterator<Item = &'a Model>,
     t: &fit::Task,
     favorites: &[&'a Model],
+    caps: &[f64],
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
     // Not one only your machine runs, whose scores and context are not that copy's: free, it
     // would take every tier it has the score for. A favorite is still on the line.
@@ -432,7 +434,8 @@ pub fn task_frontier<'a>(
     v.sort_by(|a, b| dearest(a, b).then_with(|| favored(a, b)));
     let mut last = None;
     v.retain(|(m, _)| {
-        let l = Some(level(m.cost().unwrap_or(0.0)));
+        let c = m.cost().unwrap_or(0.0);
+        let l = Some((level(c), caps.iter().filter(|&&e| c > e).count()));
         std::mem::replace(&mut last, l) != l || fav(m)
     });
     let mut off = Vec::new();
@@ -456,7 +459,8 @@ pub fn task_line<'a>(
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
     let favs = store.task_favorites(t.name);
     let fav: Vec<&Model> = pool.filter(|m| favs.contains(&m.key.as_str())).collect();
-    task_frontier(models, t, &fav)
+    let caps: Vec<f64> = TIERS.iter().filter(|x| capped(x.0)).map(|x| store.tier_cap(x.0)).collect();
+    task_frontier(models, t, &fav, &caps)
 }
 
 /// The line of a task of your own: the models you gave it and its tiers, the ones among
@@ -486,6 +490,17 @@ pub fn by_value(x: Option<f64>, y: Option<f64>, desc: bool) -> std::cmp::Orderin
 /// dearer that the next may take is better.
 pub const TIERS: [(&str, f64); 4] = [("free", 0.0), ("low", 2.0), ("mid", 5.0), ("high", f64::INFINITY)];
 
+/// Whether you may set `tier`'s cap (`modelcmp tier`): not `free`'s or `high`'s.
+pub fn capped(tier: &str) -> bool {
+    TIERS[1..TIERS.len() - 1].iter().any(|t| t.0 == tier)
+}
+
+/// `free, low up to $2, mid up to $5 and high any`, at your caps.
+pub fn tiers_said(store: &Store) -> String {
+    let cap = |t| store.tier_cap(t);
+    format!("free, low up to ${}, mid up to ${} and high any", cap("low"), cap("mid"))
+}
+
 /// Whether `tier` may hold `m`: `free` only a free model, as your favorite too, and the others any.
 pub fn takes(tier: &str, m: &Model) -> bool {
     tier != TIERS[0].0 || m.cost() == Some(0.0)
@@ -502,13 +517,13 @@ fn behind<'a>(models: impl Iterator<Item = &'a Model>, task: &str) -> impl Fn(&M
 }
 
 /// The entry of a task's cheapest-first frontier that `tier` picks: the last at its price or
-/// under, which is the best of them, else the cheapest there is. `None` for an empty frontier,
+/// under, `cap` in blended $/1M (`Store::tier_cap`), which is the best of them, else the cheapest there is. `None` for an empty frontier,
 /// and for `free` with no free model on it.
 pub fn pick<'a, 'm: 'a>(
     mut front: impl Iterator<Item = &'a (&'m Model, f64)> + Clone,
     tier: &str,
+    cap: f64,
 ) -> Option<&'a (&'m Model, f64)> {
-    let cap = TIERS.iter().find(|t| t.0 == tier).map_or(f64::INFINITY, |t| t.1);
     // The dearest of them, the first of two at one price: a favorite, as `task_frontier` has them.
     let within = front.clone().filter(|(m, _)| m.cost().is_some_and(|c| c <= cap));
     let best = within.reduce(|best, e| if e.0.cost() > best.0.cost() { e } else { best });
@@ -528,7 +543,9 @@ pub fn tier_pick<'m>(
 ) -> Option<(&'m Model, f64)> {
     let on_line = |k| front.iter().find(|(m, _)| m.key == k && takes(tier, m));
     let fav = store.tier_favorites(task, tier).find_map(on_line).copied();
-    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), tier).copied())
+    fav.or_else(|| {
+        pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), tier, store.tier_cap(tier)).copied()
+    })
 }
 
 /// A task of your own's line as `tier_picks` takes it: no scores, and every model on it only
@@ -566,7 +583,8 @@ pub fn price(m: &Model) -> String {
 }
 
 /// What a tier's line of `modelcmp recommend` shows, as recommend's grid in the TUI picks them.
-pub const RECOMMEND_LEGEND: &str = "the best model for each task at each price: free, low up to $2, mid up to $5 and high any, \
+/// `{tiers}` is `tiers_said`.
+pub const RECOMMEND_LEGEND: &str = "the best model for each task at each price: {tiers}, \
      or ★ your favorite, as name [key] $/1M tokens (score on the task), marked not recommended when the favorite is not one";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
@@ -1227,12 +1245,19 @@ mod tests {
         };
         let ms = [model("free", 0.0), model("flash", 1.0), model("sonnet", 3.0), model("opus", 5.4)];
         let front: Vec<(&Model, f64)> = ms.iter().map(|m| (m, 0.0)).collect();
-        let key = |front: &[(&Model, f64)], tier| pick(front.iter(), tier).map(|e| e.0.key.clone());
+        let cap = |tier| Store::default().tier_cap(tier);
+        let key = |front: &[(&Model, f64)], tier| pick(front.iter(), tier, cap(tier)).map(|e| e.0.key.clone());
         let picks = |front: &[(&Model, f64)]| TIERS.map(|t| key(front, t.0).unwrap_or_default());
         assert_eq!(picks(&front), ["free", "flash", "sonnet", "opus"], "the best free, up to $2, up to $5, of all");
         assert_eq!(picks(&front[..2])[1..], ["flash", "flash", "flash"], "the best is cheap: every tier's");
         assert_eq!(picks(&[front[0], front[3]]), ["free", "free", "free", "opus"], "none between: not opus for mid");
         assert_eq!(key(&front[2..], "low").as_deref(), Some("sonnet"), "none at low's price: the cheapest");
+        let mut mine = Store::default();
+        mine.tiers.insert("mid".into(), 6.0);
+        mine.tiers.insert("high".into(), 1.0);
+        assert_eq!((mine.tier_cap("mid"), mine.tier_cap("high")), (6.0, f64::INFINITY), "high takes no cap");
+        let picked = pick(front.iter(), "mid", mine.tier_cap("mid")).map(|e| e.0.key.as_str());
+        assert_eq!(picked, Some("opus"), "your cap for mid");
         assert_eq!(key(&front[1..], "free"), None, "and none for free: it never costs");
         assert_eq!(key(&[], "low"), None);
     }
@@ -1247,7 +1272,7 @@ mod tests {
         };
         let ms = [model("a", 60.4, 1.0), model("b", 59.8, 1.0), model("weak", 55.0, 1.5), model("top", 90.0, 10.0)];
         fn keys<'a>(ms: &'a [Model], fav: &[&'a Model]) -> (Vec<&'a str>, Vec<&'a str>) {
-            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), fav);
+            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), fav, &[]);
             (line.iter().map(|(m, _)| m.key.as_str()).collect(), off)
         }
         let line = |fav: &[usize]| keys(&ms, &fav.iter().map(|&i| &ms[i]).collect::<Vec<_>>());
@@ -1392,11 +1417,11 @@ mod tests {
             ..Default::default()
         };
         fn keys<'a>(ms: &'a [Model], fav: &[&'a Model], task: &str) -> (Vec<&'a str>, Vec<&'a str>) {
-            let (line, off) = task_frontier(ms.iter(), fit::task(task).unwrap(), fav);
+            let (line, off) = task_frontier(ms.iter(), fit::task(task).unwrap(), fav, &[]);
             (line.iter().map(|(m, _)| m.key.as_str()).collect(), off)
         }
         let pick = |ms: &[Model], tier| {
-            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), &[]);
+            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), &[], &[]);
             tier_pick(&line, &off, &Store::default(), "coding", tier).unwrap().0.key.clone()
         };
         // a and b share the ≤$2 level, c is beaten: b is the level's best, and low's and mid's.
@@ -1415,6 +1440,12 @@ mod tests {
         ms[0].offers = vec![Offer { local: true, available: true, ..Default::default() }];
         assert_eq!(keys(&ms, &[], "coding").0, ["b", "top"], "one only your machine runs is not picked");
         assert_eq!(keys(&ms, &[&ms[0]], "coding"), (vec!["a", "b", "top"], vec!["a"]), "but as a favorite");
+        // A cap of yours inside a level splits it: low at $3 keeps the best up to $3.
+        let ms = [model("a", 162.0, 1.5, 3.0), model("b", 164.0, 2.5, 1.0), model("c", 166.0, 4.5, 0.0)];
+        let mut store = Store::default();
+        store.tiers.insert("low".into(), 3.0);
+        let (line, off) = task_line(ms.iter(), ms.iter(), &store, fit::task("coding").unwrap());
+        assert_eq!(tier_pick(&line, &off, &store, "coding", "low").unwrap().0.key, "b", "not a, the best up to $2");
         // None at low's price: the cheapest on the line, which the one level these share has one of.
         let dear = [model("a", 157.0, 16.0, 8.0), model("top", 165.0, 75.0, 0.0)];
         assert_eq!(pick(&dear, "low"), "top");

@@ -489,7 +489,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n", "next match found in a panel, `↓` while typing"),
             ("N", "previous match found in a panel, `↑` while typing"),
             (">", "minimum for the column, e.g. `>` 60 `enter`"),
-            ("<", "maximum for the column"),
+            ("<", "maximum for the column, in recommend a tier's price cap"),
             ("d", "dropdown on a header with ▾, `space` `enter` toggle, `e` leave out, `v` a range"),
             ("|", "columns to show, `space` `enter` toggle"),
             ("a", "all models, including ones you have no access to"),
@@ -677,6 +677,12 @@ pub enum Input {
     Bound {
         col: usize,
         min: bool,
+        text: String,
+        cur: usize,
+    },
+    /// Typing the price cap of tier `tier`, `low` or `mid`, on its header in recommend.
+    Cap {
+        tier: usize,
         text: String,
         cur: usize,
     },
@@ -885,6 +891,7 @@ struct SearchFrom {
     hit: isize,
     scroll: u16,
     among: Option<usize>,
+    caps: bool,
     task_cur: usize,
     task_sel: usize,
     help_sel: usize,
@@ -1148,6 +1155,8 @@ pub enum Stop {
     Recommend(usize, usize),
     /// Tab `i` on recommend's `among` line.
     Among(usize),
+    /// The header of tier `i` in recommend, `low` or `mid`: a click writes its price cap.
+    Cap(usize),
     /// Row `i` of `HELP` in `?`.
     Help(usize),
 }
@@ -1301,6 +1310,9 @@ pub struct App {
     /// The cursor on recommend's `among` line instead, the models it ranks: on the tab `among`,
     /// one of mine, all, selected and favorites.
     pub among: Option<usize>,
+    /// The cursor on recommend's tier header, under `among`, on tier `task_sel - 1` (`cap_col`):
+    /// enter writes the cap of `low` or `mid` there. Only while `among` is none.
+    pub caps: bool,
     pub query: String,
     /// The query matched nothing as typed, so it is matched allowing a typo per word.
     pub typos: bool,
@@ -1415,6 +1427,7 @@ impl App {
             task_cur: 0,
             task_sel: 0,
             among: None,
+            caps: false,
             query: String::new(),
             typos: false,
             rows: vec![],
@@ -1678,7 +1691,7 @@ impl App {
             return marked.get(self.compare_sel.min(marked.len().saturating_sub(1))).copied();
         }
         if self.view == View::Recommend {
-            if self.among.is_some() {
+            if self.among.is_some() || self.caps {
                 return None;
             }
             // A task with one pick has `high`'s in its one box: `free` may have none.
@@ -2892,10 +2905,18 @@ impl App {
         } else if self.view == View::Help {
             self.help_sel = go(self.help_sel, help_rows().count());
         } else if self.view == View::Recommend {
-            // The `among` line comes before the first task.
-            match go(self.among.map_or(self.task_cur + 1, |_| 0), self.task_count() + 1).checked_sub(1) {
-                Some(t) => self.task_to(t),
-                None => self.among = Some(self.among_on()),
+            // The `among` line comes before the tiers' header, and that before the first task.
+            let at = if self.among.is_some() {
+                0
+            } else if self.caps {
+                1
+            } else {
+                self.task_cur + 2
+            };
+            match go(at, self.task_count() + 2) {
+                0 => self.among = Some(self.among_on()),
+                1 => (self.among, self.caps) = (None, true),
+                t => self.task_to(t - 2),
             }
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
@@ -2949,7 +2970,7 @@ impl App {
             return self.refuse(format!("no task or model matches {}", self.overlay_query));
         };
         // From the `among` line, before the first task, `n` goes to the first and `N` the last.
-        let cur = (self.among.is_none()).then_some((self.task_cur, self.task_sel));
+        let cur = (self.among.is_none() && !self.caps).then_some((self.task_cur, self.task_sel));
         let at = match (n, cur) {
             (0, _) | (1.., None) => 0,
             (..0, None) => last,
@@ -2977,7 +2998,12 @@ impl App {
 
     /// Recommend's cursor to task `t`, on the name or the tier it was on.
     fn task_to(&mut self, t: usize) {
-        (self.among, self.task_cur) = (None, t);
+        (self.among, self.caps, self.task_cur) = (None, false, t);
+    }
+
+    /// The tier recommend's header cursor is on: the cursor's tier, `low` from a task's name.
+    pub fn cap_col(&self) -> usize {
+        self.task_sel.checked_sub(1).filter(|&c| c > 0 || self.task_sel == 1).unwrap_or(1).min(TIERS.len() - 1)
     }
 
     fn go_to(&mut self, row: usize) {
@@ -3398,9 +3424,14 @@ impl App {
             match (s, &self.view) {
                 (Stop::Compare(i), View::Compare) => self.compare_sel = i,
                 (Stop::Recommend(t, i), View::Recommend) => {
-                    (self.task_cur, self.task_sel, self.among) = (t, i, None);
+                    (self.task_cur, self.task_sel, self.among, self.caps) = (t, i, None, false);
                 }
                 (Stop::Among(i), View::Recommend) => return self.pick_among(i),
+                (Stop::Cap(c), View::Recommend) => {
+                    (self.among, self.caps, self.task_sel) = (None, true, c + 1);
+                    self.edit_cap(c);
+                    return None;
+                }
                 (Stop::Help(i), View::Help) => self.help_sel = i,
                 _ => return None,
             }
@@ -3549,6 +3580,24 @@ impl App {
         None
     }
 
+    /// `<` in recommend: the price cap of the cursor's tier, `low` or `mid`, written on its header,
+    /// from the one it has.
+    fn ask_cap(&mut self) {
+        let one = self.one_pick(self.task_cur) && !self.caps;
+        let sel = if self.caps { self.cap_col() + 1 } else { self.task_sel };
+        let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && !one);
+        match tier.filter(|&c| view::capped(TIERS[c].0)) {
+            Some(c) => self.edit_cap(c),
+            None => self.refuse("< sets the price cap of low or mid, on one of their boxes"),
+        }
+    }
+
+    /// Tier `c`'s cap written on its header, from the one it has.
+    fn edit_cap(&mut self, c: usize) {
+        let text = self.store.tier_cap(TIERS[c].0).to_string();
+        self.input = Input::Cap { tier: c, cur: text.len(), text };
+    }
+
     /// Index in `LEVELS` of the Price maximum picked in its dropdown, if any.
     pub fn price_level(&self) -> Option<usize> {
         self.store.price_pick
@@ -3575,6 +3624,7 @@ impl App {
         let across = matches!(self.view, View::Compare | View::Recommend);
         // On recommend's `among` line the cursor runs over the tabs, and enter or space picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
+        let caps = self.view == View::Recommend && among.is_none() && self.caps;
         match (code, among) {
             // With access to none `a` and `m` say so and stay, as in the table.
             (KeyCode::Char('a' | 'm'), _) if self.view == View::Recommend && self.no_access() => {
@@ -3584,6 +3634,28 @@ impl App {
             // A tab's key leaves recommend for it, as a click on it does.
             (KeyCode::Char(c), _) if self.view == View::Recommend && TABS[..RECOMMEND].iter().any(|t| t.1 == c) => {
                 return self.set_tab(TABS.iter().position(|t| t.1 == c).unwrap_or(MINE));
+            }
+            (KeyCode::Char('<'), _) if self.view == View::Recommend => {
+                self.ask_cap();
+                return None;
+            }
+            // On the tiers' header `h` `l` move over the tiers, and enter writes the cap of `low` or `mid`.
+            (KeyCode::Enter, None) if caps => {
+                self.ask_cap();
+                return None;
+            }
+            (KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right, None) if caps => {
+                let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
+                self.task_sel = step(self.cap_col(), n, TIERS.len()) + 1;
+                return None;
+            }
+            (KeyCode::Char(c @ ('0' | '_' | '$')), None) if caps => {
+                self.task_sel = if c == '$' { TIERS.len() } else { 1 };
+                return None;
+            }
+            (KeyCode::Char(' ' | 'e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y'), None) if caps => {
+                self.refuse("the cursor is on the tiers' prices: j goes to a task");
+                return None;
             }
             (KeyCode::Enter | KeyCode::Char(' '), Some(i)) => return self.pick_among(i),
             (KeyCode::Char('h') | KeyCode::Left, Some(i)) => {
@@ -3972,8 +4044,8 @@ impl App {
                 self.input = Input::Search { cur: 0, was: std::mem::take(self.search_target()) };
                 let (hit, scroll, among, task_cur, task_sel) =
                     (self.hit.0, self.scroll, self.among, self.task_cur, self.task_sel);
-                let help_sel = self.help_sel;
-                self.search_from = SearchFrom { hit, scroll, among, task_cur, task_sel, help_sel };
+                let (help_sel, caps) = (self.help_sel, self.caps);
+                self.search_from = SearchFrom { hit, scroll, among, caps, task_cur, task_sel, help_sel };
                 if table {
                     self.rebuild();
                 }
@@ -4015,8 +4087,9 @@ impl App {
                         self.input = Input::None;
                         // A panel goes back to where the search started, as in vim.
                         if overlay {
-                            let SearchFrom { hit, scroll, among, task_cur, task_sel, help_sel } = self.search_from;
-                            (self.hit, self.scroll, self.among) = ((hit, false), scroll, among);
+                            let SearchFrom { hit, scroll, among, caps, task_cur, task_sel, help_sel } =
+                                self.search_from;
+                            (self.hit, self.scroll, self.among, self.caps) = ((hit, false), scroll, among, caps);
                             (self.task_cur, self.task_sel, self.help_sel) = (task_cur, task_sel, help_sel);
                             return None;
                         }
@@ -4117,6 +4190,28 @@ impl App {
                 }
                 KeyCode::Esc => self.input = Input::None,
                 _ => drop(edit(text, cur, code, mods, |_| true)),
+            },
+            Input::Cap { tier, text, cur } => match code {
+                KeyCode::Esc => self.input = Input::None,
+                _ if edit(text, cur, code, mods, |c| matches!(c, '0'..='9' | '.')) => self.status.clear(),
+                KeyCode::Enter => {
+                    // Nothing typed is back to the default.
+                    let cap = match text.parse::<f64>() {
+                        _ if text.is_empty() => Ok(None),
+                        Ok(c) => Ok(Some(c)),
+                        Err(_) => Err(format!("{text} is no price")),
+                    };
+                    match cap.and_then(|c| self.store.set_tier_cap(TIERS[*tier].0, c)) {
+                        Ok(()) => {
+                            self.input = Input::None;
+                            // The lines split at the caps (`task_frontier`).
+                            self.rebuild_in_place();
+                            return Some(Effect::Save);
+                        }
+                        Err(e) => self.report(Err(e)),
+                    }
+                }
+                _ => {}
             },
             Input::Bound { col, min, text, cur } => match code {
                 KeyCode::Esc => self.input = Input::None,
@@ -6146,7 +6241,7 @@ mod tests {
     #[test]
     fn picking_a_task_shows_its_frontier() {
         let mut a = app();
-        press(&mut a, "Rjjj");
+        press(&mut a, "Rjjjj");
         assert_eq!(a.task_cur, 2);
         press(&mut a, "G");
         assert_eq!(a.task_cur, TASKS.len() - 1);
@@ -6372,7 +6467,7 @@ mod tests {
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
         assert!(crate::view::priced(m, s, false, true).ends_with("(-)"));
         assert_eq!(
-            crate::view::pick([(m, s)].iter(), "low").map(|e| e.0.key.as_str()),
+            crate::view::pick([(m, s)].iter(), "low", 2.0).map(|e| e.0.key.as_str()),
             Some("opus5"),
             "the only entry"
         );
@@ -6591,7 +6686,7 @@ mod tests {
         );
         code(&mut a, KeyCode::Esc);
         // In recommend, f starts on the task under the cursor, on the box its favorite has there.
-        press(&mut a, "Rjj2l");
+        press(&mut a, "Rjjj2l");
         assert_eq!(a.current().unwrap().key, "gpt55", "the task's favorite is every tier's but free's");
         press(&mut a, "f");
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 0, .. }, .. }));
@@ -6651,6 +6746,53 @@ mod tests {
     }
 
     #[test]
+    fn lt_in_recommend_writes_a_tier_cap_on_its_header() {
+        let mut a = app();
+        press(&mut a, "Rjjj<");
+        assert!(a.failed && a.input == Input::None, "on a task's name: no tier");
+        press(&mut a, "ll<");
+        assert_eq!(a.input, Input::Cap { tier: 1, text: "2".into(), cur: 1 }, "low's, from the cap it has");
+        code(&mut a, KeyCode::Backspace);
+        assert_eq!(press(&mut a, "9"), None);
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert!(a.failed && matches!(a.input, Input::Cap { .. }), "dearer than mid: still written");
+        code(&mut a, KeyCode::Backspace);
+        press(&mut a, "3");
+        assert!(a.status.is_empty(), "typing clears why");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((&a.input, a.store.tier_cap("low")), (&Input::None, 3.0));
+        press(&mut a, "<");
+        code(&mut a, KeyCode::Backspace);
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.tier_cap("low"), 2.0, "nothing typed: back to the default");
+        press(&mut a, "<");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.input, a.store.tiers.len()), (&Input::None, 0), "esc leaves it");
+        press(&mut a, "h<");
+        assert!(a.failed && a.input == Input::None, "free has no cap");
+        // Keyboard alone: k from the first task is the tiers' header, h l pick one, enter writes it.
+        press(&mut a, "ggj");
+        assert!(a.caps && a.current().is_none(), "on the header");
+        press(&mut a, "0");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.failed && a.input == Input::None, "free has none");
+        press(&mut a, "2l");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "mid's");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "j");
+        assert!(!a.caps && a.task_cur == 0, "j to the first task");
+        press(&mut a, "k");
+        assert!(a.caps, "k back to the header");
+        press(&mut a, "/gpt");
+        assert!(!a.caps, "the search goes to a match");
+        code(&mut a, KeyCode::Esc);
+        assert!(a.caps, "and esc back to the header");
+        a.mouse(Mouse::Model(Stop::Cap(2)));
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "a click on mid's header");
+    }
+
+    #[test]
     fn shift_r_toggles_the_recommend_overlay() {
         let mut a = app();
         press(&mut a, "R");
@@ -6667,7 +6809,7 @@ mod tests {
         let mut a = app();
         press(&mut a, "R");
         assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "the cursor starts on the among line");
-        press(&mut a, "jj");
+        press(&mut a, "jjj");
         let front: Vec<String> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, best last");
@@ -6732,7 +6874,7 @@ mod tests {
     fn the_table_cursor_follows_the_model_picked_in_an_overlay() {
         let mut a = app();
         let row = |a: &App, key: &str| a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
-        press(&mut a, "Rjj2l");
+        press(&mut a, "Rjjj2l");
         assert_eq!(a.selected(), row(&a, "mini"), "recommend's pick");
         a.mouse(Mouse::Cols(1));
         assert_eq!(a.selected(), row(&a, "mini"), "mid's too");
@@ -7017,7 +7159,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only == Some(FAV), a.rows.len()), (false, 3), "and F");
         a.store.toggle_favorite("coding", "opus5");
-        press(&mut a, "Rjj");
+        press(&mut a, "Rjjj");
         code(&mut a, KeyCode::Enter);
         assert!(a.task.is_some());
         code(&mut a, KeyCode::Esc);

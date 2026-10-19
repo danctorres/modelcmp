@@ -92,6 +92,10 @@ pub struct Store {
     /// one you gave its action. Only the changed ones.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<char, char>,
+    /// Your price caps of tiers, in blended $/1M (`modelcmp tier`), over `view::TIERS`': only
+    /// `low`'s and `mid`'s, as `free` takes none that costs and `high` any.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tiers: BTreeMap<String, f64>,
     /// The version the TUI last opened as: a different one plays the intro again.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub seen: String,
@@ -260,6 +264,8 @@ impl Store {
         // A slot of no tier is a task of your own with no model to show, and could not be cleared.
         let tier = |x: &str| crate::view::TIERS.iter().any(|t| t.0 == x);
         s.favorite.retain(|k, _| k.split_once(':').is_none_or(|(_, x)| tier(x)));
+        // A cap left by a hand edit on a tier that takes none, or that is no price.
+        s.tiers.retain(|t, c| crate::view::capped(t) && c.is_finite() && *c >= 0.0);
         // A harness is its favorite's: one left by a hand edit has no model to run.
         let Store { favorite, via, .. } = &mut s;
         via.retain(|k, _| favorite.contains_key(k));
@@ -345,6 +351,28 @@ impl Store {
             self.mtime = now;
         }
         parses
+    }
+
+    /// The dearest `tier` takes, in blended $/1M: yours (`modelcmp tier`), else `view::TIERS`'.
+    pub fn tier_cap(&self, tier: &str) -> f64 {
+        let def = crate::view::TIERS.iter().find(|t| t.0 == tier).map_or(f64::INFINITY, |t| t.1);
+        self.tiers.get(tier).copied().filter(|_| crate::view::capped(tier)).unwrap_or(def)
+    }
+
+    /// Set `tier`'s cap, `None` back to its default: not a price, or `low` dearer than `mid`, is refused.
+    pub fn set_tier_cap(&mut self, tier: &str, cap: Option<f64>) -> Result<(), String> {
+        let was = self.tiers.clone();
+        match cap {
+            Some(c) if !(c.is_finite() && c >= 0.0) => return Err(format!("{c} is no price")),
+            Some(c) => drop(self.tiers.insert(tier.into(), c)),
+            None => drop(self.tiers.remove(tier)),
+        }
+        let (low, mid) = (self.tier_cap("low"), self.tier_cap("mid"));
+        if low > mid {
+            self.tiers = was;
+            return Err(format!("low (${low}) would cost more than mid (${mid})"));
+        }
+        Ok(())
     }
 
     /// What `S` shows and `C` compares.
