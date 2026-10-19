@@ -1,4 +1,4 @@
-//! Marks, exclusions, notes, per-task favorites, the theme and the columns left out, keyed by model key. ~/.config/modelcmp/user.json
+//! Marks, exclusions, notes, per-task favorites, the theme, the columns left out and your keys, keyed by model key. ~/.config/modelcmp/user.json
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,6 +88,10 @@ pub struct Store {
     /// The columns left out of the TUI's table with `|`, by `app::col_id`.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub hide: BTreeSet<String>,
+    /// The keys you bound in the TUI's `?`: each key the TUI has by default -> the
+    /// one you gave its action. Only the changed ones.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<char, char>,
     /// The version the TUI last opened as: a different one plays the intro again.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub seen: String,
@@ -266,6 +270,42 @@ impl Store {
         // A price level left by a hand edit that is none would hide nothing, yet show as left out.
         s.price_not = s.price_not.filter(|&l| l < crate::view::LEVELS.len());
         s.price_pick = s.price_pick.filter(|&l| l < crate::view::LEVELS.len());
+        // Keys left by a hand edit that are no action's, no key or two actions on one would put
+        // an action out of reach: such an entry goes, the others stay, and the start says so.
+        let actions = || crate::app::actions();
+        let before = s.keys.clone();
+        s.keys.retain(|&d, &mut k| d != k && crate::app::bindable_char(k) && actions().any(|a| a == d));
+        // Of two actions on one key, the one there by default keeps it, else the first in `?`.
+        // Dropping an entry puts its action back on its default key, which may clash in turn,
+        // and each clash has an entry to drop, as one action alone has that key by default.
+        loop {
+            let mut on: BTreeMap<char, Vec<char>> = BTreeMap::new();
+            for a in actions() {
+                on.entry(s.keys.get(&a).copied().unwrap_or(a)).or_default().push(a);
+            }
+            let mut drop = vec![];
+            for v in on.into_values().filter(|v| v.len() > 1) {
+                let keep = v.iter().position(|a| !s.keys.contains_key(a)).unwrap_or(0);
+                drop.extend(v.into_iter().enumerate().filter(|&(i, _)| i != keep).map(|(_, a)| a));
+            }
+            if drop.is_empty() {
+                break;
+            }
+            for a in &drop {
+                s.keys.remove(a);
+            }
+        }
+        // Said, and written back as kept, so the next start does not say it again.
+        if s.keys != before {
+            let gone: Vec<String> =
+                before.iter().filter(|(d, _)| !s.keys.contains_key(d)).map(|(d, k)| format!("{d}→{k}")).collect();
+            let said =
+                format!("keys dropped from {}, no action's or two on one key: {}", path.display(), gone.join(" "));
+            s.warning = s.warning.or(Some(said));
+            if let Ok(json) = serde_json::to_string_pretty(&s) {
+                let _ = write_atomic(&path, json.as_bytes());
+            }
+        }
         s.mtime = mtime(&path);
         s.path = path;
         s
@@ -475,6 +515,31 @@ mod tests {
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("modelcmp-test-{}-{name}", std::process::id())).join("user.json")
+    }
+
+    /// Keys that would put an action out of reach, left by a hand edit, are dropped.
+    #[test]
+    fn keys_that_are_none_or_clash_are_dropped() {
+        let p = tmp("keys");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        // Each file's keys, and what is kept of them, a key and the one it is on in each pair.
+        for (keys, kept) in [
+            (r#"{"s": "o", "o": "s"}"#, "os so"),
+            (r#"{"s": "z", "j": "3", "z": "s", "k": " "}"#, "sz"),
+            (r#"{"s": "o"}"#, ""),
+            (r#"{"s": "z", "o": "z"}"#, "sz"),
+            (r#"{"s": "z", "o": "z", "c": "s", "j": "p"}"#, "cs jp sz"),
+        ] {
+            std::fs::write(&p, format!(r#"{{"keys": {keys}}}"#)).unwrap();
+            let kept = kept.split_whitespace().map(|w| (w.as_bytes()[0] as char, w.as_bytes()[1] as char));
+            let s = Store::load_from(p.clone());
+            let all = kept.clone().count() == keys.matches(':').count();
+            assert_eq!(s.warning.is_none(), all, "a drop is said: {keys}");
+            assert_eq!(s.keys, BTreeMap::from_iter(kept), "{keys}");
+            let again = Store::load_from(p.clone());
+            assert!(again.warning.is_none() && again.keys == s.keys, "written back as kept: {keys}");
+        }
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 
     /// A price level that is none, left by a hand edit, is dropped: it would hide nothing.

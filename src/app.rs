@@ -441,31 +441,44 @@ fn of_source(about: &str) -> String {
     format!("{}, {about}, {UNTESTED}", crate::data::source().label())
 }
 
+/// The keys, in groups, each with what it does, the keys it names between backticks. A row
+/// whose key is one letter or sign is that key's action, which enter in `?` moves to another
+/// key, and the rest keep theirs.
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "General",
         &[
-            ("?", "this help, / keeps the lines that match"),
-            ("esc", "back: overlay, highlight, filter, S, F, E, task"),
+            ("?", "these keys: `enter` on one gives it another, `/` finds one"),
+            ("↺", "every key back to its default, with `enter`"),
+            ("esc", "back: overlay, highlight, filter, `S`, `F`, `E`, task"),
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
             ("K", "Artificial Analysis API key, to add or replace it"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
-            ("H", "default harness, for x, Y, --cmd and --id"),
+            ("H", "default harness, for `x`, `Y`, --cmd and --id"),
         ],
     ),
     (
         "Move",
         &[
-            ("j k ↓ ↑", "move, and a count repeats, as in 3j"),
-            ("h l ← →", "pick a column. In compare a model, in recommend a tier or the task"),
-            ("0 _ $ w b", "first / last column, next / previous group"),
-            ("gg G 3gg", "top / bottom / row 3"),
-            ("( ) ^u ^d", "half a page up / down"),
-            ("] [", "next / previous selected model, or ticked entry"),
-            ("} {", "next / previous available model"),
-            ("v", "highlight a range, space e C act on all of it"),
-            ("V", "highlight the selected models, Ve excludes them all"),
+            ("j", "down, as `↓`, and a count repeats, as in `3j`"),
+            ("k", "up, as `↑`"),
+            ("h", "column left, as `←`. In compare a model, in recommend a tier or the task"),
+            ("l", "column right, as `→`"),
+            ("_", "first column, as `0`"),
+            ("$", "last column"),
+            ("w", "next group of columns"),
+            ("b", "previous group of columns"),
+            ("g", "top as `gg`, row 3 as `3gg`"),
+            ("G", "bottom"),
+            ("(", "half a page up, as `^u`"),
+            (")", "half a page down, as `^d`"),
+            ("]", "next selected model, or ticked entry"),
+            ("[", "previous selected model, or ticked entry"),
+            ("}", "next available model"),
+            ("{", "previous available model"),
+            ("v", "highlight a range, `space` `e` `C` act on all of it"),
+            ("V", "highlight the selected models, then `e` excludes them all"),
         ],
     ),
     (
@@ -473,14 +486,17 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("s", "sort by the column, again reverses"),
             ("/", "filter models, find in a panel or a list"),
-            ("n N", "next / previous match found in a panel, ↓ ↑ while typing"),
-            ("> <", "minimum / maximum for the column, e.g. > 60 enter"),
-            ("d", "dropdown on a header with ▾, space enter toggle, e leave out, v a range"),
-            ("|", "columns to show, space enter toggle"),
-            ("a m", "all models, including ones you have no access to / mine only"),
-            ("tab", "next tab, shift+tab back"),
+            ("n", "next match found in a panel, `↓` while typing"),
+            ("N", "previous match found in a panel, `↑` while typing"),
+            (">", "minimum for the column, e.g. `>` 60 `enter`"),
+            ("<", "maximum for the column"),
+            ("d", "dropdown on a header with ▾, `space` `enter` toggle, `e` leave out, `v` a range"),
+            ("|", "columns to show, `space` `enter` toggle"),
+            ("a", "all models, including ones you have no access to"),
+            ("m", "mine only"),
+            ("tab", "next tab, `shift+tab` back"),
             ("%", "Price with none of the input cached, or back to --cache"),
-            ("c", "clear filters, bounds, task, S, F, E and the dropdowns' entries, the selection stays"),
+            ("c", "clear filters, bounds, task, `S`, `F`, `E` and the dropdowns' entries, the selection stays"),
         ],
     ),
     (
@@ -489,21 +505,24 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("✓", "selected: your shortlist, kept until you deselect it"),
             ("★", "favorite: your pick for a task, always in its recommendation"),
             ("✗", "excluded: you have it but cannot use it, and recommendations skip it"),
-            ("space", "select the model, C compares the selected"),
+            ("space", "select the model, `C` compares the selected"),
             ("f", "favorite the model for a task, a tier of one, or a task you name"),
             ("f: r a", "rename a task you named, write what it is about"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
             ("D", "unfavorite every model, asks first"),
             ("X", "unexclude every model, asks first"),
-            ("S F E", "selected / favorite / excluded or hidden only"),
+            ("S", "selected only"),
+            ("F", "favorites only"),
+            ("E", "excluded or hidden only"),
         ],
     ),
     (
         "Model under the cursor",
         &[
             ("i", "note for the model, agents read it"),
-            ("y Y", "copy the model name / id"),
+            ("y", "copy the model name"),
+            ("Y", "copy the model id"),
             ("o", "open the model's page on a site"),
             ("x", "open a harness on the model in a new terminal"),
         ],
@@ -520,11 +539,58 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Input and mouse",
         &[
-            ("typing", "^a ^e ^← ^→ move, ^w ^u ^k delete"),
-            ("mouse", "click highlights, double click opens; right click selects"),
+            ("typing", "`^a` `^e` `^←` `^→` move, `^w` `^u` `^k` delete"),
+            ("mouse", "click highlights, double click opens, right click selects"),
         ],
     ),
 ];
+
+/// `HELP`'s rows, the stops of `?`'s cursor.
+pub fn help_rows() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    HELP.iter().flat_map(|g| g.1.iter())
+}
+
+/// Whether `c` can be a key of an action: a letter or a sign. Space, enter, esc, tab, the
+/// arrows and the digits keep theirs, and with them `0`, as `_` is its own.
+pub fn bindable_char(c: char) -> bool {
+    c.is_ascii_graphic() && !c.is_ascii_digit()
+}
+
+/// The key of a row of `HELP` you can move to another: one letter or sign (`bindable_char`).
+pub fn bindable(keys: &str) -> Option<char> {
+    let mut c = keys.chars();
+    c.next().filter(|&k| c.next().is_none() && bindable_char(k))
+}
+
+/// The default keys of the actions you can move, in `HELP`'s order.
+pub fn actions() -> impl Iterator<Item = char> {
+    help_rows().filter_map(|r| bindable(r.0))
+}
+
+/// What the action of the default key `d` does, as `?` says it.
+fn action(d: char) -> &'static str {
+    help_rows().find(|r| bindable(r.0) == Some(d)).map_or("", |r| r.1)
+}
+
+/// `keys`, the keys of a hint or of `?`, as `bound` has them (`Store::keys`): each word that is
+/// a key, `s`, `gg`, `3gg` or `f:`, and not `^u`, `enter` or `↓`.
+/// ponytail: a key named in a status message (`c clears`) is still its default, run those
+/// through this too if a bound key there misleads.
+pub fn bound_keys(keys: &str, bound: &BTreeMap<char, char>) -> String {
+    if bound.is_empty() {
+        return keys.to_string();
+    }
+    let word = |w: &str| {
+        let key = w.trim_start_matches(|c: char| c.is_ascii_digit()).trim_end_matches(':');
+        match key.chars().next() {
+            Some(c) if key.chars().all(|k| k == c) && w != "0" => {
+                w.replace(c, &bound.get(&c).copied().unwrap_or(c).to_string())
+            }
+            _ => w.to_string(),
+        }
+    };
+    keys.split(' ').map(word).collect::<Vec<_>>().join(" ")
+}
 
 /// The Via dropdown's entries that are no harness, after the harnesses: the models your machine
 /// runs through ollama or llama.cpp, the others, and the ones `x` can download.
@@ -629,6 +695,14 @@ pub enum Input {
     Unfavorite,
     /// `X` asks before unexcluding every model.
     Unexclude,
+    /// `enter` on `↺` in `?` asks before putting every key back.
+    Reset,
+    /// Enter on a key in `?` waits for its new key, pressed on its row; `wrong` once one that
+    /// cannot be was.
+    Bind {
+        key: char,
+        wrong: bool,
+    },
     /// A choice of what to do, `list.sel` under the cursor: `x` on a model several harnesses
     /// have launches one, `o` opens one of the model's pages. Each item is its label and effect.
     Choose {
@@ -813,6 +887,7 @@ struct SearchFrom {
     among: Option<usize>,
     task_cur: usize,
     task_sel: usize,
+    help_sel: usize,
 }
 
 /// The names of a list's entries, as `List::key` takes them.
@@ -1031,6 +1106,11 @@ pub enum Mouse {
     Extend(usize),
     /// Horizontal wheel: columns to move the cursor, negative is left.
     Cols(isize),
+    /// Click on a `▲` `▼`: rows to move, a page each way, as `PgUp` `PgDn`. Under a prompt it is
+    /// a click, which leaves it, where the wheel is still.
+    Page(isize),
+    /// Click on a `‹` `›`: columns to move, a screen of them each way, or models in compare.
+    Across(isize),
     /// Click on the # header: the first row, as `gg` goes.
     Top,
     /// Click on tab `i`: mine or all alone, and ✓ ★ ✗ on or off, as `S` `F` `E`.
@@ -1068,6 +1148,8 @@ pub enum Stop {
     Recommend(usize, usize),
     /// Tab `i` on recommend's `among` line.
     Among(usize),
+    /// Row `i` of `HELP` in `?`.
+    Help(usize),
 }
 
 /// `provider/model` as opencode takes it, else pi, else omp, when one has the model (`launch_cmd`):
@@ -1248,12 +1330,16 @@ pub struct App {
     pub input: Input,
     /// Scroll offset of the detail, compare and help views. The renderer clamps it.
     pub scroll: u16,
+    /// The row of `HELP` under the cursor in `?`.
+    pub help_sel: usize,
     /// The model under the cursor in the compare view, moved with `h l`.
     pub compare_sel: usize,
     /// First model the compare view shows, set by the renderer so the cursor stays in view.
     pub compare_x: usize,
     /// Where the renderer drew each model of the compare or recommend overlay, and the click on it.
     pub spots: Vec<(ratatui::layout::Rect, Stop)>,
+    /// Where the last draw put each `‹` `›` `▲` `▼`, and the scroll a click on it does.
+    pub more: Vec<(u16, u16, Mouse)>,
     /// The box of the open panel as last drawn, for a click outside it to close it.
     pub panel: Option<ratatui::layout::Rect>,
     /// Search of the open panel, compare, help, details or recommend, typed with `/` in any.
@@ -1344,9 +1430,11 @@ impl App {
             view: View::Table,
             input: Input::None,
             scroll: 0,
+            help_sel: 0,
             compare_sel: 0,
             compare_x: 0,
             spots: vec![],
+            more: vec![],
             panel: None,
             overlay_query: String::new(),
             back_query: (String::new(), 0),
@@ -2801,6 +2889,8 @@ impl App {
             *sel = go(*sel, len);
         } else if self.view == View::Table {
             self.select(go(self.selected(), self.rows.len()));
+        } else if self.view == View::Help {
+            self.help_sel = go(self.help_sel, help_rows().count());
         } else if self.view == View::Recommend {
             // The `among` line comes before the first task.
             match go(self.among.map_or(self.task_cur + 1, |_| 0), self.task_count() + 1).checked_sub(1) {
@@ -2820,6 +2910,24 @@ impl App {
         }
         if self.overlay_query.is_empty() {
             return self.refuse("n N go to the next / previous match: / searches first");
+        }
+        // `?`'s are its rows, as drawn, which are what is underlined.
+        if self.view == View::Help {
+            let (lines, rows) = crate::tui::help(self);
+            let has = |&l: &usize| !found(&lines[l].to_string(), &self.overlay_query).is_empty();
+            let stops: Vec<usize> = (0..rows.len()).filter(|&i| has(&rows[i])).collect();
+            let Some(last) = stops.len().checked_sub(1) else {
+                return self.refuse(format!("no key matches {}", self.overlay_query));
+            };
+            let cur = self.help_sel;
+            let at = match n {
+                0 => 0,
+                1.. => stops.iter().position(|&s| s > cur).unwrap_or(0),
+                _ => stops.iter().rposition(|&s| s < cur).unwrap_or(last),
+            };
+            self.help_sel = stops[at];
+            self.status = format!("match {} of {}", at + 1, stops.len());
+            return;
         }
         if self.view != View::Recommend {
             self.hit = (if n == 0 { 0 } else { self.hit.0 + n }, true);
@@ -2877,6 +2985,8 @@ impl App {
             *sel = row.min(len.saturating_sub(1));
         } else if self.view == View::Table {
             self.select(row);
+        } else if self.view == View::Help {
+            self.help_sel = row.min(help_rows().count() - 1);
         } else if self.view == View::Recommend {
             self.task_to(row.min(self.task_count() - 1));
         } else {
@@ -2962,10 +3072,86 @@ impl App {
         self.rebuild_in_place();
     }
 
-    pub fn key(&mut self, k: KeyEvent) -> Option<Effect> {
+    pub fn key(&mut self, mut k: KeyEvent) -> Option<Effect> {
+        // Where letters run as keys, the one pressed is the default key of the action you put on
+        // it, and one whose action you moved is no key.
+        if let KeyCode::Char(c) = k.code
+            && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && self.keys_run()
+        {
+            k.code = self.unbound(c).map_or(KeyCode::Null, KeyCode::Char);
+        }
         let effect = self.on_key(k);
         self.follow();
         effect
+    }
+
+    /// Whether letters run as keys, and are not typed into a search, a note, a bound or an entry.
+    fn keys_run(&self) -> bool {
+        matches!(
+            self.input,
+            Input::None | Input::Quit | Input::Upgrade | Input::Unfavorite | Input::Unexclude | Input::Reset
+        ) || self.open_list().is_some_and(List::idle)
+    }
+
+    /// The key the action with the default key `d` is on.
+    pub fn key_of(&self, d: char) -> char {
+        self.store.keys.get(&d).copied().unwrap_or(d)
+    }
+
+    /// The default key of the action on `c`: none when its own went to another key.
+    fn unbound(&self, c: char) -> Option<char> {
+        let keys = &self.store.keys;
+        keys.iter().find(|&(_, &k)| k == c).map(|(&d, _)| d).or((!keys.contains_key(&c)).then_some(c))
+    }
+
+    /// Enter on the row of `?` under the cursor: a key waits for its new one, `↺` puts every key
+    /// back, and one that keeps its key says so.
+    fn help_enter(&mut self) -> Option<Effect> {
+        let &(keys, _) = help_rows().nth(self.help_sel)?;
+        if let Some(d) = bindable(keys) {
+            self.input = Input::Bind { key: d, wrong: false };
+        } else if keys == "↺" {
+            self.input = Input::Reset;
+        } else if keys.chars().count() == 1 {
+            self.refuse(format!("{keys} is a mark the table shows, not a key"));
+        } else if keys.split(' ').any(|w| bindable(w.trim_end_matches(':')).is_some()) {
+            self.refuse(format!("{keys} change with the rows of those keys"));
+        } else {
+            self.refuse(format!("{keys} keeps its keys: only a key of one letter or sign changes"));
+        }
+        None
+    }
+
+    /// Key `code` pressed for the action with the default key `d`: the action takes it, and the
+    /// one that was on it takes the key `d`'s had, as in a game's menu.
+    fn bind(&mut self, d: char, code: KeyCode, mods: KeyModifiers) -> Option<Effect> {
+        let k = match code {
+            KeyCode::Esc => {
+                self.input = Input::None;
+                return None;
+            }
+            KeyCode::Char(c) if bindable_char(c) && !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => c,
+            _ => {
+                self.input = Input::Bind { key: d, wrong: true };
+                return None;
+            }
+        };
+        self.input = Input::None;
+        let old = self.key_of(d);
+        let other = actions().filter(|&o| o != d).find(|&o| self.key_of(o) == k);
+        for (a, key) in other.map(|o| (o, old)).into_iter().chain([(d, k)]) {
+            if a == key {
+                self.store.keys.remove(&a);
+            } else {
+                self.store.keys.insert(a, key);
+            }
+        }
+        self.status = match other {
+            Some(o) => format!("{k}: {}, and {old}: {}", action(d), action(o)),
+            _ => format!("{k}: {}", action(d)),
+        };
+        Some(Effect::Save)
     }
 
     /// Ask whether to quit, keeping what was open to go back to.
@@ -2976,9 +3162,7 @@ impl App {
     /// Text pasted in the terminal: typed into the search, note or bound being written, and
     /// nothing anywhere else, where its letters would run as keys.
     pub fn paste(&mut self, text: &str) {
-        if matches!(self.input, Input::None | Input::Quit | Input::Upgrade | Input::Unfavorite | Input::Unexclude)
-            || self.open_list().is_some_and(List::idle)
-        {
+        if self.keys_run() || matches!(self.input, Input::Bind { .. }) {
             self.refuse("nothing to paste into: / searches, i writes a note");
             return;
         }
@@ -3135,6 +3319,11 @@ impl App {
                 _ => return self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             }
         }
+        let m = match m {
+            Mouse::Page(n) => Mouse::Scroll(n),
+            Mouse::Across(n) => Mouse::Cols(n),
+            m => m,
+        };
         let typing = self.open_list().is_some_and(|l| l.typing);
         let list = self.open_list().is_some();
         // As a key does, and not under a prompt either.
@@ -3212,6 +3401,7 @@ impl App {
                     (self.task_cur, self.task_sel, self.among) = (t, i, None);
                 }
                 (Stop::Among(i), View::Recommend) => return self.pick_among(i),
+                (Stop::Help(i), View::Help) => self.help_sel = i,
                 _ => return None,
             }
             // Compare leaves out `space`: it would drop the model from the view.
@@ -3765,6 +3955,7 @@ impl App {
                     _ => self.refuse(format!("no model has data for {}", t.name)),
                 }
             }
+            KeyCode::Enter if self.view == View::Help => return self.help_enter(),
             // Recommend's enter on a task's name is above.
             KeyCode::Enter if row && !matches!(self.view, View::Detail(_)) => {
                 self.detail = self.current()?.key.clone();
@@ -3781,7 +3972,8 @@ impl App {
                 self.input = Input::Search { cur: 0, was: std::mem::take(self.search_target()) };
                 let (hit, scroll, among, task_cur, task_sel) =
                     (self.hit.0, self.scroll, self.among, self.task_cur, self.task_sel);
-                self.search_from = SearchFrom { hit, scroll, among, task_cur, task_sel };
+                let help_sel = self.help_sel;
+                self.search_from = SearchFrom { hit, scroll, among, task_cur, task_sel, help_sel };
                 if table {
                     self.rebuild();
                 }
@@ -3823,9 +4015,9 @@ impl App {
                         self.input = Input::None;
                         // A panel goes back to where the search started, as in vim.
                         if overlay {
-                            let SearchFrom { hit, scroll, among, task_cur, task_sel } = self.search_from;
+                            let SearchFrom { hit, scroll, among, task_cur, task_sel, help_sel } = self.search_from;
                             (self.hit, self.scroll, self.among) = ((hit, false), scroll, among);
-                            (self.task_cur, self.task_sel) = (task_cur, task_sel);
+                            (self.task_cur, self.task_sel, self.help_sel) = (task_cur, task_sel, help_sel);
                             return None;
                         }
                     }
@@ -4188,6 +4380,10 @@ impl App {
                     _ => {}
                 }
             }
+            Input::Bind { key, .. } => {
+                let d = *key;
+                return self.bind(d, code, mods);
+            }
             Input::Quit => {
                 if code == KeyCode::Char('q') {
                     return Some(Effect::Quit);
@@ -4208,6 +4404,14 @@ impl App {
                     self.store.via.clear();
                     self.rebuild_in_place();
                     self.status = "unfavorited every model".into();
+                    return Some(Effect::Save);
+                }
+            }
+            Input::Reset => {
+                self.input = Input::None;
+                if code == KeyCode::Enter {
+                    self.store.keys.clear();
+                    self.status = "every key is back to its default".into();
                     return Some(Effect::Save);
                 }
             }
@@ -4678,6 +4882,63 @@ mod tests {
         press(&mut a, "gg");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.harness, "", "any harness: none");
+    }
+
+    #[test]
+    fn enter_on_a_key_in_help_moves_it_to_another() {
+        let mut a = app();
+        press(&mut a, "?/sort by");
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.input, Input::Bind { key: 's', wrong: false }, "enter waits for the key");
+        press(&mut a, "3");
+        assert_eq!(a.input, Input::Bind { key: 's', wrong: true }, "a digit is a count, and not taken");
+        assert_eq!(press(&mut a, "o"), Some(Effect::Save));
+        assert_eq!(a.store.keys, BTreeMap::from([('o', 's'), ('s', 'o')]), "open's page takes s, as in a game");
+        assert_eq!(a.status, "o: sort by the column, again reverses, and s: open the model's page on a site");
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
+        let was = a.descending;
+        press(&mut a, "o");
+        assert_eq!(a.descending, !was, "o sorts");
+        assert_eq!(bound_keys("s o 3ss ^s f: enter", &a.store.keys), "o s 3oo ^s f: enter", "drawn as bound");
+        // On esc, a key that cannot change and the one that puts them all back.
+        press(&mut a, "?gg");
+        press(&mut a, "jj");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.status.starts_with("esc keeps its keys"), "{}", a.status);
+        press(&mut a, "/✓");
+        code(&mut a, KeyCode::Enter);
+        let mark = a.help_sel;
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.status, "✓ is a mark the table shows, not a key");
+        press(&mut a, "/selected");
+        code(&mut a, KeyCode::Enter);
+        assert!(a.help_sel < mark, "a new search starts from the top, as in recommend, ✓'s row matching too");
+        press(&mut a, "/f: r");
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.status, "f: r a change with the rows of those keys");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "ggj");
+        assert_eq!((code(&mut a, KeyCode::Enter), &a.input), (None, &Input::Reset), "↺ asks first");
+        code(&mut a, KeyCode::Esc);
+        assert!(!a.store.keys.is_empty(), "and esc keeps them");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert!(a.store.keys.is_empty(), "↺ puts every key back");
+        // A key that is no action's frees the action's own.
+        press(&mut a, "/sort by");
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "z");
+        code(&mut a, KeyCode::Esc);
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.store.keys.clone(), &a.view), (BTreeMap::from([('s', 'z')]), &View::Table));
+        press(&mut a, "s");
+        assert_eq!(a.descending, !was, "s is no key now");
+        press(&mut a, "z");
+        assert_eq!(a.descending, was, "z sorts");
     }
 
     #[test]

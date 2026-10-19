@@ -81,7 +81,7 @@ modelcmp get gemma-3-4b-it                 # download a model and run it on your
 In the TUI, `R` recommends, `space` selects models, `C` compares them, `f` sets your favorite
 for a task and `/` filters. `enter` shows everything about a model, `o` opens its page on
 a site like OpenRouter, `x` starts a harness on it and `t` changes the theme. `?` lists the
-keys and `qq` quits.
+keys, where `enter` changes one, and `qq` quits.
 
 ![The model recommended for each task and tier](https://github.com/user-attachments/assets/781a6bce-e79b-4a00-af14-4cdd3c3767c5)
 

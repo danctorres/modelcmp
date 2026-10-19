@@ -9,8 +9,8 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
-    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, box_slot, found, group_starts, hidden,
-    on_price, shown,
+    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, bindable, bound_keys, box_slot, found,
+    group_starts, help_rows, hidden, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -32,6 +32,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::{DefaultTerminal, Frame};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::ops::Range;
 use std::process::{Command, Stdio};
@@ -276,17 +277,17 @@ fn key_lines(typed: usize) -> Vec<Line<'static>> {
         Line::from(" or skip it and all benchmarks come from Epoch AI "),
         Line::default(),
         Line::from(format!("{KEY_ASK}{dots}")),
-        key_line(" enter saves · esc skips · ctrl+c quits"),
+        key_line(" enter saves · esc skips · ctrl+c quits", &BTreeMap::new()),
     ]
 }
 
 /// On the first start's screen, on the rows over the status bar: keys to try once the table is
 /// up, each with what it does, as the status bar's hints.
-fn try_lines() -> [Line<'static>; 3] {
+fn try_lines(bound: &BTreeMap<char, char>) -> [Line<'static>; 3] {
     [
         Line::from("on the next screen, try").style(fg(MUTED)),
-        key_line("o open a model's page · x run it in a harness"),
-        key_line("f favorite a model · R get recommendations · ? all keys"),
+        key_line("o open a model's page · x run it in a harness", bound),
+        key_line("f favorite a model · R get recommendations · ? all keys", bound),
     ]
 }
 
@@ -697,10 +698,48 @@ fn paint(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), String> {
     terminal
         .draw(|f| {
             draw(app, f);
+            app.more = more_at(f.buffer_mut());
             recolor(f.buffer_mut(), palette(app), app.term_bg);
         })
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Every `‹` `›` `▲` `▼` drawn in `buf` as `MORE`, which nothing else is, and the way it
+/// points, which a click on it moves a screen (`hit`), for a phone or a mouse with no sideways
+/// wheel.
+/// Found on the screen, as compare's are in its lines' spans and land where those do.
+fn more_at(buf: &Buffer) -> Vec<(u16, u16, Mouse)> {
+    let a = buf.area;
+    (a.top()..a.bottom())
+        .flat_map(|y| (a.left()..a.right()).map(move |x| (x, y)))
+        .filter_map(|(x, y)| {
+            let cell = &buf[(x, y)];
+            if (Some(cell.fg), Some(cell.bg)) != (MORE.fg, MORE.bg) || !cell.modifier.contains(BOLD) {
+                return None;
+            }
+            let m = match cell.symbol() {
+                "▲" => Mouse::Scroll(-3),
+                "▼" => Mouse::Scroll(3),
+                "‹" => Mouse::Cols(-1),
+                "›" => Mouse::Cols(1),
+                _ => return None,
+            };
+            Some((x, y, m))
+        })
+        .collect()
+}
+
+/// How many columns the table shows right of Model, or models compare shows: what a click on
+/// `‹` `›` moves, so the view moves by a screen.
+fn across(app: &App, width: u16) -> isize {
+    let n = if app.view == View::Compare {
+        app.spots.iter().filter(|(_, s)| matches!(s, Stop::Compare(_))).count()
+    } else {
+        let l = layout(width.saturating_sub(2), app);
+        l.cols.len() + usize::from(l.via.is_some()) + usize::from(l.notes.is_some()) + usize::from(l.first == 0)
+    };
+    n.max(1) as isize
 }
 
 /// What a mouse event lands on, with the same geometry `draw` uses: the frame's inner area
@@ -727,6 +766,12 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         return None;
     }
     let pos = ratatui::layout::Position::new(m.column, m.row);
+    let plain = m.kind == MouseEventKind::Down(MouseButton::Left) && !pick && !extend;
+    let more = app.more.iter().find(|&&(x, y, _)| plain && (x, y) == (m.column, m.row)).map(|&(.., a)| match a {
+        Mouse::Scroll(d) => Mouse::Page(d * app.page.max(1) as isize),
+        Mouse::Cols(d) => Mouse::Across(d * across(app, area.width)),
+        a => a,
+    });
     // The first start's box has one thing to click, its link, on its first line.
     if let Some((_, within)) = splash(app, area) {
         let lines = key_lines(0);
@@ -766,7 +811,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         }
         let inner = rect.inner(ratatui::layout::Margin::new(1, 1));
         if !inner.contains(pos) {
-            return None;
+            return more;
         }
         let k = top + (m.row - inner.y) as usize;
         // f's grid: a box is ticked, the name ticks the task's own, and the tiers' heading and
@@ -799,14 +844,14 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     if on_tabs {
         return tab.or(close);
     }
-    if close.is_some() {
-        return close;
+    if close.is_some() || more.is_some() {
+        return close.or(more);
     }
-    // In compare and recommend a click is on what is drawn under it (`App::spots`): a plain one
-    // opens it on a double click (`double`), a right one selects it, as in the table, and a ctrl
-    // or shift one, with no highlight there to add to, moves to it. Elsewhere it still clears
-    // the status, as a click does in the table.
-    if matches!(app.view, View::Compare | View::Recommend) {
+    // In compare, recommend and the keys a click is on what is drawn under it (`App::spots`): a
+    // plain one opens it on a double click (`double`), a right one selects it, as in the table,
+    // and a ctrl or shift one, with no highlight there to add to, moves to it. Elsewhere it still
+    // clears the status, as a click does in the table.
+    if matches!(app.view, View::Compare | View::Recommend | View::Help) {
         let spot = app.spots.iter().find(|(r, _)| r.contains(pos)).map(|&(_, s)| s);
         return Some(spot.map_or(Mouse::Outside, |s| {
             if mark {
@@ -1071,7 +1116,17 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         }
         View::Detail(_) => vec![vec!["↓ ↑ scroll"], search, actions("x o y space f e i"), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
-        View::Help => vec![vec!["↓ ↑ scroll"], search, vec!["esc back", "q quit"]],
+        View::Help if matches!(app.input, Input::Bind { .. }) => vec![vec!["esc cancel"]],
+        View::Help => {
+            // Offered on a row whose key changes, and on `↺`, which puts every key back.
+            let row = help_rows().nth(app.help_sel).map_or("", |r| r.0);
+            let enter: &[&str] = match row {
+                "↺" => &["enter reset keys"],
+                _ if bindable(row).is_some() => &["enter change key"],
+                _ => &[],
+            };
+            vec![vec!["↓ ↑ move"], [enter, &search[..]].concat(), vec!["esc back", "q quit"]]
+        }
         View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
         View::Compare => vec![vec!["↓ ↑ scroll", "← → 0 $ model"], search, actions("enter x o y f e i"), BACK.to_vec()],
         // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
@@ -1128,13 +1183,13 @@ fn split_hint(hint: &str) -> (&str, &str) {
 
 /// The line of keys under a list or in a box, `hint`'s parts between ` · `: muted, with each
 /// part's keys in the keys' colour, as the status bar has them.
-fn key_line(hint: &str) -> Line<'static> {
+fn key_line(hint: &str, bound: &BTreeMap<char, char>) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, part) in hint.split(" · ").enumerate() {
         let text = part.trim_start();
         let (key, what) = split_hint(text);
         spans.push(Span::raw(format!("{}{}", if i == 0 { "" } else { " · " }, &part[..part.len() - text.len()])));
-        spans.push(Span::styled(key.to_string(), fg(KEY).add_modifier(BOLD)));
+        spans.push(Span::styled(bound_keys(key, bound), fg(KEY).add_modifier(BOLD)));
         spans.push(Span::raw(what.to_string()));
     }
     Line::from(spans).style(fg(MUTED))
@@ -1293,7 +1348,7 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
         let (plus, len) = (tab_plus(app, i), name.chars().count() as u16);
         put(buf, x + 1, y, &format!(" {name} "), style);
         put(buf, x + 2 + len, y, &format!("{plus} "), fg(MARK).add_modifier(BOLD));
-        put(buf, x + 3 + len + plus.len() as u16, y, &format!("{key} "), key_style);
+        put(buf, x + 3 + len + plus.len() as u16, y, &format!("{} ", app.key_of(key)), key_style);
         let w = tab_width(app, i) as u16;
         if on {
             put(buf, x + 1, y - 1, &"─".repeat(usize::from(w - 1)), fg(MUTED));
@@ -1485,7 +1540,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         // The refresh state is always in view: under way, failed, or how old the data is.
         let age = format!("{} ", data_age(&app.data));
         let version = match app.data.update() {
-            Some(new) => Line::from(format!(" modelcmp v{new} available: U upgrades ")).style(fg(Color::Yellow)),
+            Some(new) => Line::from(format!(" modelcmp v{new} available: {} upgrades ", app.key_of('U')))
+                .style(fg(Color::Yellow)),
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         };
         let source = format!(" models.dev + {} · ", data::source().label());
@@ -1568,8 +1624,21 @@ fn draw(app: &mut App, f: &mut Frame) {
     let lines = match app.view {
         View::Table => None,
         View::Help => {
-            let (lines, hits) = lit_lines(help(), &app.overlay_query);
-            hit_line = to_hit(app, &hits);
+            let (lines, rows) = help(app);
+            // The cursor's row in view, and at the first and the last row the lines above and under it.
+            let at = rows[app.help_sel.min(rows.len() - 1)];
+            let shown = body.height.saturating_sub(2) as usize;
+            app.scroll = match app.help_sel {
+                0 => 0,
+                s if s + 1 == rows.len() => lines.len().saturating_sub(shown),
+                _ => list_top(app.scroll as usize, at, shown),
+            } as u16;
+            hit_line = Some(at);
+            spots.extend(rows.iter().enumerate().map(|(i, &l)| Spot {
+                lines: l..l + 1,
+                x: 0..usize::MAX,
+                at: Stop::Help(i),
+            }));
             Some(("keys".to_string(), lines))
         }
         View::Recommend => {
@@ -1590,20 +1659,20 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Compare if app.marked_shown < 2 => {
             // Nothing to find, which a search is told.
             hit_line = to_hit(app, &[]);
-            let key = |k: &'static str| Span::styled(k, fg(KEY).add_modifier(BOLD));
+            let key = |k: String| Span::styled(k, fg(KEY).add_modifier(BOLD));
             let n = app.marked_shown;
             let lines = vec![
                 Line::from(format!("compare needs 2 or more selected models, {n} now")),
                 Line::from(""),
-                Line::from(vec![key("esc"), Span::raw(" back to the table, then")]),
-                Line::from(vec![key("space"), Span::raw(" selects the model under the cursor, or")]),
+                Line::from(vec![key("esc".into()), Span::raw(" back to the table, then")]),
+                Line::from(vec![key("space".into()), Span::raw(" selects the model under the cursor, or")]),
                 Line::from(vec![
-                    key("v"),
+                    key(app.key_of('v').to_string()),
                     Span::raw(" or "),
-                    key("shift+click"),
+                    key("shift+click".into()),
                     Span::raw(" highlights a range, and"),
                 ]),
-                Line::from(vec![key("C"), Span::raw(" compares them")]),
+                Line::from(vec![key(app.key_of('C').to_string()), Span::raw(" compares them")]),
             ];
             Some(("compare".into(), lines))
         }
@@ -1670,13 +1739,16 @@ fn draw(app: &mut App, f: &mut Frame) {
             })
             .collect();
     }
-    // `q`, `U`, `D` and `X` ask first: the same box, confirmed by the same key again.
+    // `q`, `U`, `D`, `X` and `↺` ask first: the same box, confirmed by the same key again, each
+    // as it is bound now.
+    let key = |k: char| app.key_of(k).to_string();
     let ask = match app.input {
-        Input::Quit => Some(("q", "quit?".to_string())),
-        Input::Upgrade => app.data.update().map(|new| ("U", format!("upgrade to v{new}?"))),
-        Input::Unfavorite => Some(("D", "unfavorite every model?".to_string())),
+        Input::Quit => Some((key('q'), "quit?".to_string())),
+        Input::Upgrade => app.data.update().map(|new| (key('U'), format!("upgrade to v{new}?"))),
+        Input::Unfavorite => Some((key('D'), "unfavorite every model?".to_string())),
+        Input::Reset => Some(("enter".to_string(), "put every key back to its default?".to_string())),
         Input::Unexclude => Some((
-            "X",
+            key('X'),
             if app.filters_exclude() {
                 "unexclude every model, the hidden ones too?"
             } else {
@@ -1701,7 +1773,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
         // At the bottom of the screen, with a blank row at least under the box.
         if within.bottom() + 3 < bar.y {
-            for (hint, y) in try_lines().iter().zip(bar.y - 3..) {
+            for (hint, y) in try_lines(&app.store.keys).iter().zip(bar.y - 3..) {
                 let w = hint.width() as u16;
                 buf.set_line(within.x + within.width.saturating_sub(w) / 2, y, hint, w);
             }
@@ -2392,6 +2464,8 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Upgrade, _) => ("UPGRADE", Color::Yellow),
         (Input::Unfavorite, _) => ("UNFAVORITE", Color::Red),
         (Input::Unexclude, _) => ("UNEXCLUDE", Color::Red),
+        (Input::Reset, _) => ("RESET", Color::Red),
+        (Input::Bind { .. }, _) => ("BIND", Color::Blue),
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
@@ -2426,6 +2500,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             | Input::Upgrade
             | Input::Unfavorite
             | Input::Unexclude
+            | Input::Reset
             | Input::Choose { list: List { typing: false, .. }, .. }
     ) || boxed
     {
@@ -2459,7 +2534,13 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             _ => (format!("{} ▾ /", app.col_name(*col)), &list.query, list.cur),
         }),
         Input::Choose { title, list, .. } => Some((format!("{title} /"), &list.query, list.cur)),
-        Input::Quit | Input::Upgrade | Input::Unfavorite | Input::Unexclude | Input::None => None,
+        Input::Quit
+        | Input::Upgrade
+        | Input::Unfavorite
+        | Input::Unexclude
+        | Input::Reset
+        | Input::Bind { .. }
+        | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
         // Ctx is bounded in thousands of tokens, as its cells read: `Ctx ≥ 200k`.
@@ -2515,7 +2596,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             let mut hx = hx;
             for part in hint.split("  ") {
                 let (key, what) = split_hint(part);
-                hx = buf.set_stringn(hx, area.y, key, width(key), fg(KEY).add_modifier(BOLD)).0;
+                let key = bound_keys(key, &app.store.keys);
+                hx = buf.set_stringn(hx, area.y, &key, width(&key), fg(KEY).add_modifier(BOLD)).0;
                 hx = buf.set_stringn(hx, area.y, what, width(what), fg(MUTED)).0 + 2;
             }
         }
@@ -2543,7 +2625,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             x = buf.set_stringn(x, area.y, SEP, width, fg(MUTED)).0;
         } else {
             let (key, what) = split_hint(hint);
-            x = buf.set_stringn(x, area.y, key, width, fg(KEY).add_modifier(BOLD)).0;
+            x = buf.set_stringn(x, area.y, bound_keys(key, &app.store.keys), width, fg(KEY).add_modifier(BOLD)).0;
             x = buf.set_stringn(x, area.y, what, width, Style::new()).0;
         }
         if i + 1 < hints.len() {
@@ -2713,15 +2795,21 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     // hint it stands for.
     lines.push(match &list.edit {
         Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
-        Some(_) => key_line(&format!("{:<width$}", " enter apply · esc cancel")),
-        None => key_line(hint),
+        Some(_) => key_line(&format!("{:<width$}", " enter apply · esc cancel"), &app.store.keys),
+        None => key_line(hint, &app.store.keys),
     });
     lines
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `f`'s grid has lines of its own, `fav_lines`.
-fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
+fn choice_lines(
+    kind: Kind,
+    items: &[(String, Effect)],
+    list: &List,
+    room: usize,
+    bound: &BTreeMap<char, char>,
+) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let mut lines: Vec<Line> = items
         .iter()
@@ -2826,8 +2914,8 @@ fn choice_lines(kind: Kind, items: &[(String, Effect)], list: &List, room: usize
     }
     lines.push(match &list.edit {
         Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
-        Some(_) => key_line(&format!("{:<width$}", " tab complete · enter opens · esc back")),
-        None => key_line(hint),
+        Some(_) => key_line(&format!("{:<width$}", " tab complete · enter opens · esc back"), bound),
+        None => key_line(hint, bound),
     });
     lines
 }
@@ -2847,7 +2935,7 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
     let within = Rect { y: area.y + tabs, height: area.height - 1 - tabs, ..area };
     let lines = match kind {
         Kind::Fav => fav_lines(app, items, list, edit_room(within)),
-        _ => choice_lines(*kind, items, list, edit_room(within)),
+        _ => choice_lines(*kind, items, list, edit_room(within), &app.store.keys),
     };
     Some((within, lines))
 }
@@ -2947,21 +3035,51 @@ fn heading(text: &str) -> Line<'static> {
     Line::from(text.to_string()).style(Style::new().add_modifier(BOLD))
 }
 
-fn help() -> Vec<Line<'static>> {
-    let key_w = HELP.iter().flat_map(|(_, keys)| keys.iter()).map(|(k, _)| k.chars().count()).max().unwrap_or(0);
-    let mut v: Vec<Line> = Vec::new();
+/// `?`'s lines, and the line of each row of `HELP`, the cursor's stops, which alone have what
+/// `/` found underlined, as `n` finds it (`App::next_hit`). A key you can move is in the keys'
+/// colour, as you bound it, with its default after what it does once it is another, and the one
+/// waiting for its new key says so. The rest are grey. The keys a row names are drawn as bound.
+pub fn help(app: &App) -> (Vec<Line<'static>>, Vec<usize>) {
+    let bound = &app.store.keys;
+    let shown = |k: &str| bindable(k).map_or_else(|| bound_keys(k, bound), |d| app.key_of(d).to_string());
+    let key_w = help_rows().map(|r| shown(r.0).chars().count()).max().unwrap_or(0);
+    let (mut v, mut rows): (Vec<Line>, _) = (Vec::new(), vec![]);
     for (name, keys) in HELP {
         v.push(heading(name));
-        v.extend(keys.iter().map(|(k, what)| {
-            Line::from(vec![Span::styled(format!("{k:<key_w$}  "), fg(KEY).add_modifier(BOLD)), Span::raw(*what)])
-        }));
+        for &(k, what) in keys.iter() {
+            rows.push(v.len());
+            let d = bindable(k);
+            let waiting = match app.input {
+                Input::Bind { key, wrong } if d == Some(key) => Some(wrong),
+                _ => None,
+            };
+            let key = if waiting.is_some() { "…".to_string() } else { shown(k) };
+            let style = if d.is_some() || k == "↺" { fg(KEY).add_modifier(BOLD) } else { fg(MUTED) };
+            let mut spans = vec![Span::styled(format!("{key:<key_w$}  "), style)];
+            // Between backticks the keys it names, in the keys' colour.
+            for (i, part) in what.split('`').enumerate() {
+                spans.push(match i % 2 {
+                    0 => Span::raw(part.to_string()),
+                    _ => Span::styled(bound_keys(part, bound), fg(KEY)),
+                });
+            }
+            spans.push(match (waiting, d) {
+                (Some(true), _) => Span::styled("  a letter or a sign, esc cancels", fg(BAD)),
+                (Some(false), _) => Span::styled("  press its new key", fg(MUTED)),
+                (None, Some(d)) if app.key_of(d) != d => Span::styled(format!(" (default {d})"), fg(MUTED)),
+                _ => Span::raw(""),
+            });
+            let line = Line::from(spans);
+            let hits = found(&line.to_string(), &app.overlay_query);
+            v.push(lit_at(line, &hits));
+        }
         v.push(Line::default());
     }
     v.push(Line::from("Columns: described in the top border; green the best shown, red the worst").style(fg(MUTED)));
     v.push(Line::from(format!("Saved in {}", crate::store::path().display())).style(fg(MUTED)));
     v.push(Line::from("Every key: github.com/danctorres/modelcmp/blob/main/KEYS.md").style(fg(MUTED)));
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
-    v
+    (v, rows)
 }
 
 /// `lines` with what `/` found underlined, every line kept, and the ones it is on.
@@ -3052,8 +3170,9 @@ fn recommend(app: &App, width: usize, spots: &mut Vec<Spot>) -> (Vec<Line<'stati
     let among = v.len();
     v.extend(wrapped(vec![], words(TIER_LEGEND), &space, text).into_iter().map(|l| l.style(fg(MUTED))));
     let keyless = data::source() == data::Source::Epoch && data::aa_key().is_none();
-    let mut warn: Vec<Line> = words(UNRATED);
-    warn.extend(if keyless { words(MORE_RATED) } else { vec![] });
+    // The keys they name as they are bound now.
+    let mut warn: Vec<Line> = words(&UNRATED.replace(" f ", &format!(" {} ", app.key_of('f'))));
+    warn.extend(if keyless { words(&MORE_RATED.replace("K ", &format!("{} ", app.key_of('K')))) } else { vec![] });
     let warning = vec![Span::styled("warning: ", fg(Color::Yellow))];
     v.extend(wrapped(warning, warn, &space, text).into_iter().map(|l| l.style(fg(MUTED))));
     v.push(Line::default());
@@ -3444,7 +3563,8 @@ fn compare(
     out.extend(verdict_lines(models));
     out.push(Line::default());
     if shown < n {
-        out.push(key_line(&format!("models {}-{} of {n} · ← → move", first + 1, first + shown)));
+        // The arrows keep their keys.
+        out.push(key_line(&format!("models {}-{} of {n} · ← → move", first + 1, first + shown), &BTreeMap::new()));
     }
     let top = out.len();
     // The model row carries `‹` and `›` for models scrolled off, as the table's header does.
@@ -3579,7 +3699,10 @@ mod tests {
         assert_eq!(tries, Some(26), "keys to try, at the bottom");
         assert_eq!(row(&lines, "o open a model's page · x run it in a harness"), tries.map(|y| y + 1));
         assert_eq!(row(&lines, "f favorite a model · R get recommendations · ? all keys"), tries.map(|y| y + 2));
-        assert!(try_lines().iter().all(|l| l.width() <= LOGO[0].chars().count()), "as wide as the wordmark at most");
+        assert!(
+            try_lines(&BTreeMap::new()).iter().all(|l| l.width() <= LOGO[0].chars().count()),
+            "as wide as the wordmark at most"
+        );
         let narrow = screen(&mut a, 60, 30);
         let small = row(&narrow, SMALL[1]);
         assert!(small.is_some() && small < row(&narrow, KEY_TITLE), "the small wordmark in a narrow window");
@@ -3993,6 +4116,50 @@ mod tests {
     }
 
     #[test]
+    fn a_click_on_a_more_marker_scrolls_that_way() {
+        // A phone's terminal sends taps and no sideways wheel: the `›` takes the cursor a screen
+        // of columns right, so the view moves.
+        let mut a = app();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        a.more = more_at(term.backend().buffer());
+        let &(column, row, _) = a.more.iter().find(|(.., m)| *m == Mouse::Cols(1)).expect("a ›");
+        let click =
+            MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
+        let at = |a: &App| hit(a, Rect::new(0, 0, 60, 12), click);
+        let Some(Mouse::Across(n)) = at(&a) else { panic!("{:?}", at(&a)) };
+        assert!(n > 1, "a screen of columns: {n}");
+        let col = a.col;
+        a.mouse(Mouse::Across(n));
+        assert_eq!(a.col, col + n as usize);
+        // Under a prompt it is a click, which leaves it, where the wheel is still.
+        a.key(KeyCode::Char('/').into());
+        a.mouse(Mouse::Cols(1));
+        assert!(matches!(a.input, Input::Search { .. }));
+        a.mouse(at(&a).unwrap());
+        assert_eq!(a.input, Input::None);
+    }
+
+    #[test]
+    fn a_click_on_a_key_in_help_moves_to_it() {
+        let mut a = app();
+        a.key(KeyCode::Char('?').into());
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let (rect, _) = *a.spots.iter().find(|(_, s)| *s == Stop::Help(2)).expect("a spot per row");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let hit = hit(&a, Rect::new(0, 0, 120, 30), click);
+        assert_eq!(hit, Some(Mouse::Open(Stop::Help(2))));
+        a.mouse(double(&mut None, hit.unwrap(), Instant::now()));
+        assert_eq!(a.help_sel, 2);
+    }
+
+    #[test]
     fn access_to_no_model_says_so_above_the_first_row() {
         let mut a = app();
         assert!(!render(&mut a, 120, 6).1.concat().contains(NO_ACCESS));
@@ -4206,12 +4373,36 @@ mod tests {
     }
 
     #[test]
+    fn help_underlines_what_n_stops_on_and_shows_the_keys_you_set() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 120)).unwrap();
+        let mut a = app();
+        a.key(KeyCode::Char('?').into());
+        let mut screen = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            let lit = buf.content().iter().filter(|c| c.modifier.contains(Modifier::UNDERLINED)).count();
+            (lit, text(buf).join("\n"))
+        };
+        a.overlay_query = "described".into();
+        assert_eq!(screen(&mut a).0, 0, "the footer says described, but n stops on no footer");
+        a.overlay_query = "column".into();
+        assert!(screen(&mut a).0 > 0, "a key's row is underlined");
+        // A key named in what a row does, and the box `q` opens, are drawn as bound.
+        a.store.keys = BTreeMap::from([('C', 'z'), ('z', 'C'), ('q', 'Q')]);
+        a.store.keys.remove(&'z');
+        let help = screen(&mut a).1;
+        assert!(help.contains("select the model, z compares the selected"), "{help}");
+        a.input = Input::Quit;
+        assert!(screen(&mut a).1.contains("Q confirms"), "the key that confirms");
+    }
+
+    #[test]
     fn a_click_on_a_hint_presses_its_key() {
         use ratatui::crossterm::event::KeyModifiers;
         assert_eq!(split_hint("← → 0 $ model"), ("← → 0 $", " model"));
         assert_eq!(split_hint("enter best models first"), ("enter", " best models first"));
         // Under a list, each part's keys in their colour and the rest muted.
-        let line = key_line(" ↓ ↑ move · esc t close · ctrl+c quits");
+        let line = key_line(" ↓ ↑ move · esc t close · ctrl+c quits", &BTreeMap::new());
         assert_eq!(line.to_string(), " ↓ ↑ move · esc t close · ctrl+c quits");
         let keys = line.spans.iter().filter(|s| s.style.fg == Some(KEY)).map(|s| &*s.content);
         assert_eq!(keys.collect::<Vec<_>>(), ["↓ ↑", "esc t", "ctrl+c"]);
@@ -5098,37 +5289,33 @@ mod tests {
             }
             a.status.clone()
         };
-        type_in(&mut a, "?/sort");
+        type_in(&mut a, "?/column");
         a.key(KeyCode::Enter.into());
         let first = status(&mut a);
         let n: usize = first.rsplit(' ').next().unwrap().parse().unwrap();
-        assert!(first.starts_with("line 1 of ") && n > 1, "{first}");
-        let at = a.scroll;
-        assert!(at > 0, "help scrolls to the first line with sort");
+        assert!(first.starts_with("match 1 of ") && n > 2, "{first}");
+        let at = a.help_sel;
+        assert!(at > 0, "the cursor goes to the first key with column");
         a.key(KeyCode::Char('n').into());
-        assert_eq!(status(&mut a), format!("line 2 of {n}"));
+        assert_eq!(status(&mut a), format!("match 2 of {n}"));
         a.key(KeyCode::Char('N').into());
-        assert_eq!((status(&mut a), a.scroll), (format!("line 1 of {n}"), at));
+        assert_eq!((status(&mut a), a.help_sel), (format!("match 1 of {n}"), at));
         type_in(&mut a, "2n");
-        assert_eq!(status(&mut a), format!("line {} of {n}", 2 % n + 1), "a count goes that many matches on");
+        assert_eq!(status(&mut a), format!("match 3 of {n}"), "a count goes that many matches on");
         a.key(KeyCode::Char('N').into());
         a.key(KeyCode::Char('N').into());
         status(&mut a);
         let line = Line::from(vec![Span::raw("price: "), Span::raw("$5")]);
         assert_eq!(lit_lines(vec![line], "price: $").1, [0], "a match across spans, as the line reads");
-        assert_eq!(lit_lines(help(), "sort").0.len(), help().len(), "every line stays");
+        assert_eq!(lit_lines(help(&a).0, "sort").0.len(), help(&a).0.len(), "every line stays");
         a.key(KeyCode::Char('n').into());
         status(&mut a);
-        let on = (a.hit.0, a.scroll);
+        let on = a.help_sel;
         type_in(&mut a, "/zzzz");
         status(&mut a);
         a.key(KeyCode::Esc.into());
         status(&mut a);
-        assert_eq!(
-            (a.overlay_query.as_str(), a.hit.0, a.scroll),
-            ("sort", on.0, on.1),
-            "esc goes back to where it was"
-        );
+        assert_eq!((a.overlay_query.as_str(), a.help_sel), ("column", on), "esc goes back to where it was");
         type_in(&mut a, "/");
         a.key(KeyCode::Down.into());
         assert!(!a.status.contains("searches first"), "nothing typed yet, ↓ moves: {}", a.status);
@@ -5245,13 +5432,13 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(), &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
-        assert_eq!(scroll as usize, help().len() - 4, "scroll is clamped to the content");
+        assert_eq!(scroll as usize, help(&app()).0.len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(), &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, Color::Reset, (0, 0, 0..0));
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         // A grid's heading is no row: the border counts the rows under it, 20 here in a box of 4 lines.
         let grid = |scroll: &mut u16| {
@@ -5298,7 +5485,7 @@ mod tests {
     #[test]
     fn a_list_colours_what_the_table_does() {
         let fgs = |kind, label: &str, effect| {
-            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), 80);
+            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), 80, &BTreeMap::new());
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
         assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
@@ -5314,14 +5501,14 @@ mod tests {
             lines.iter().flat_map(|l| l.spans.iter().filter(hit).map(|s| s.content.to_string())).collect()
         };
         assert_eq!(found("Gruvbox gRUV", "ruv"), [1..4, 9..12]);
-        let hits = lit_text(&lit_lines(help(), "THEME").0);
+        let hits = lit_text(&lit_lines(help(&app()).0, "THEME").0);
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80);
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new());
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80);
+        let lines = choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80, &BTreeMap::new());
         let hit = lines[1].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.
