@@ -5,9 +5,9 @@ use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
-    CUSTOM_ABOUT, CUSTOM_WHEN, RECOMMEND_LEGEND, TIERS, by_value, compare_rows, custom_front, custom_line,
-    detail_lines, excluded, left_out_by, one_pick, price, priced, shown_via, task_line, tier_pick, tier_picks,
-    truncate, used_benches, verdict, via, visible,
+    CUSTOM_ABOUT, CUSTOM_WHEN, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front, custom_line,
+    detail_lines, excluded, fits, left_out_by, one_pick, over_cap, price, priced, shown_via, task_line, tier_pick,
+    tier_picks, truncate, used_benches, verdict, via, visible,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -349,7 +349,7 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
             Some(_) if o.no_fav => vec![],
             Some(tier) => store
                 .tier_favorites(c, tier)
-                .find_map(|k| line.iter().find(|m| m.key == k && crate::view::takes(tier, m)).copied())
+                .find_map(|k| line.iter().find(|m| m.key == k && fits(store, tier, m)).copied())
                 .into_iter()
                 .collect(),
             None => line,
@@ -942,7 +942,9 @@ pub fn fav(
         let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score)" } else { "" };
         let about = store.about(t).map_or(String::new(), |a| format!("  {a}"));
         let via = store.via(t).map_or(String::new(), |h| format!("  via {h}"));
-        format!("★ {} [{k}]{via}{skipped}{about}", m.map_or(k, |m| m.name.as_str()))
+        // One a later cap left dearer than its tier: kept for when the cap is raised.
+        let over = m.and_then(|m| over_cap(store, t, m)).map_or(String::new(), |w| format!("  (unused: {w})"));
+        format!("★ {} [{k}]{via}{skipped}{over}{about}", m.map_or(k, |m| m.name.as_str()))
     };
     match (task, q, rm) {
         (None, ..) => {
@@ -984,6 +986,10 @@ pub fn fav(
                 // An unknown harness is a usage error, as it is for `harness`.
                 let code = if vias().any(|v| v == h) { 1 } else { 2 };
                 return Err(Exit { code, msg: format!("{h} does not have {}: {has}", m.name) });
+            }
+            // A tier is a budget: its favorite fits it.
+            if let Err(why) = can_fav(store, t, m) {
+                return Err(format!("{why}: set it for the task, or a dearer tier").into());
             }
             // Said, as a mistyped task makes one of your own too.
             let name = t.split(':').next().unwrap_or(t);
@@ -1035,7 +1041,12 @@ type Slots<'a> = (Option<&'a str>, BTreeMap<&'static str, &'a str>);
 /// off it, so agents are not pointed at it either. Then the harnesses you run them on, while
 /// they have the model, as `--id` and `--cmd` go by.
 fn favorites<'a>(data: &Data, store: &'a Store, task: &str, on: impl Fn(&str) -> bool) -> (Slots<'a>, Slots<'a>) {
-    let fav = |s: &str| store.favorite(s).filter(|k| on(k));
+    // A tier's dearer than the tier is no pick of it either.
+    let in_budget = |s: &str, k: &str| {
+        s.split_once(':')
+            .is_none_or(|(_, tier)| data.models.iter().find(|m| m.key == k).is_none_or(|m| fits(store, tier, m)))
+    };
+    let fav = |s: &str| store.favorite(s).filter(|k| on(k) && in_budget(s, k));
     let has = |k: &str, h: &str| data.models.iter().any(|m| m.key == k && launch_cmd(m, h, &data.harness).is_some());
     let via = |s: &str| fav(s).and_then(|k| store.via(s).filter(|h| has(k, h)));
     let slots = |of: &dyn Fn(&str) -> Option<&'a str>| {
@@ -1308,8 +1319,7 @@ mod tests {
     /// `--id --via pi` is the id pi takes: a favorite pi lacks is an error, not opencode's id.
     #[test]
     fn the_id_is_the_one_the_harness_asked_for_takes() {
-        let mut data =
-            Data { models: vec![model("mini", 60.0, 1.0), model("gpt55", 90.0, 10.0)], ..Default::default() };
+        let mut data = Data { models: vec![model("mini", 60.0, 1.0), model("gpt55", 90.0, 2.0)], ..Default::default() };
         for (m, h) in data.models.iter_mut().zip(["opencode", "pi"]) {
             (m.available, m.via, m.offers[0].via) = (true, vec![h.into()], vec![h.into()]);
         }
@@ -1361,7 +1371,7 @@ mod tests {
         o.bounds = vec![(COLS.iter().position(|c| c.id == "ctx").unwrap(), 600.0, f64::INFINITY)];
         assert_eq!(line(&data, &store, &o), Some(format!("{QUIET} pi --model p/gpt55 -p \"<prompt>\"  1M")));
         // The tier's favorite ruled out: the task's is next, before the pick on merit.
-        data.models.push(model("big", 10.0, 50.0));
+        data.models.push(model("big", 10.0, 2.0));
         let big = data.models.last_mut().unwrap();
         (big.available, big.context, big.via, big.offers[0].via) =
             (true, 2_000_000, vec!["pi".into()], vec!["pi".into()]);
@@ -1602,8 +1612,14 @@ mod tests {
             (names(own), &own["tier_favorites"]),
             (vec!["mini".into(), "gpt55".into()], &serde_json::json!({"low": "mini"}))
         );
-        let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "gpt55", "high": "gpt55"});
-        assert_eq!(own["tiers"], tiers, "the tier it is for, the task's for the rest");
+        let tiers = serde_json::json!({"free": null, "low": "mini", "mid": null, "high": "gpt55"});
+        assert_eq!(own["tiers"], tiers, "the tier it is for, the task's for the rest it fits");
+        // One dearer than its tier, as a cap lowered after it leaves it, points no agent at it.
+        store.set_favorite("debugging:mid", "gpt55", None);
+        let all = recommend_json(&data, &store);
+        let own = all.last().unwrap();
+        assert_eq!((&own["tier_favorites"], &own["tiers"]), (&serde_json::json!({"low": "mini"}), &tiers));
+        store.clear_favorite("debugging:mid");
         store.toggle_excluded("gpt55");
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();

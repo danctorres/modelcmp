@@ -89,7 +89,7 @@ keys, where `enter` changes one, and `qq` quits.
 
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
 the best up to $2 and `mid` up to $5 per 1M tokens (the tier header in recommend or `modelcmp tier` changes these), and `high`
-the best one. A favorite you set beats that pick.
+the best one. A favorite you set beats that pick in every tier whose price it fits.
 
 To get a local model, press `a` in the TUI to list every model, then `x` on one and pick its
 `download and run` entry, or run `modelcmp get <model>`. Models on your machine show as free.

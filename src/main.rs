@@ -42,7 +42,7 @@ enum Cmd {
         /// Best model per price level for a task (overall, coding, agentic, reasoning, vision, value): cheapest first, each row costing more and scoring higher. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, else for the task. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best. A task of your own gives the tier's model, else the task's
+        /// One model from the task's list: your favorite for the tier, else for the task, when it costs no more than the tier's cap. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best, none when nothing is at the tier's price. A task of your own gives the tier's model, else the task's
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -82,7 +82,7 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
     },
-    /// For an agent, one call: each task with what it is for, and the model for its free, low, mid and high tier (your favorite, else the best at the tier's price), with its context and your note
+    /// For an agent, one call: each task with what it is for, and the model for its free, low, mid and high tier (your favorite at the tier's price or under, else the best there), with its context and your note
     Pick {
         /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes, and a favorite it lacks after the tier's own pick. Without it, the command that runs a prompt on each model, on the harness you have it on
         #[arg(long)]
@@ -200,7 +200,7 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Your favorite model for a task, or for one tier of it: --tier picks it and recommend marks it ★. Alone, shows them (`f` in the TUI)
+    /// Your favorite model for a task, or for one tier of it at its price or under: --tier picks it and recommend marks it ★. Alone, shows them (`f` in the TUI)
     Fav {
         /// overall, coding, agentic, reasoning, vision or value. Any other name is a task of your own, e.g. debugging, which has only the models you give it
         #[arg(value_parser = store::task_name)]

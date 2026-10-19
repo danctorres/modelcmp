@@ -457,8 +457,7 @@ pub fn task_line<'a>(
     store: &Store,
     t: &fit::Task,
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
-    let favs = store.task_favorites(t.name);
-    let fav: Vec<&Model> = pool.filter(|m| favs.contains(&m.key.as_str())).collect();
+    let fav: Vec<&Model> = pool.filter(|m| fav_on_line(store, t.name, m)).collect();
     let caps: Vec<f64> = TIERS.iter().filter(|x| capped(x.0)).map(|x| store.tier_cap(x.0)).collect();
     task_frontier(models, t, &fav, &caps)
 }
@@ -466,8 +465,7 @@ pub fn task_line<'a>(
 /// The line of a task of your own: the models you gave it and its tiers, the ones among
 /// `pool`, cheapest first as a built-in task's line.
 pub fn custom_line<'a>(pool: impl Iterator<Item = &'a Model>, store: &Store, task: &str) -> Vec<&'a Model> {
-    let favs = store.task_favorites(task);
-    let mut v: Vec<&Model> = pool.filter(|m| favs.contains(&m.key.as_str())).collect();
+    let mut v: Vec<&Model> = pool.filter(|m| fav_on_line(store, task, m)).collect();
     v.sort_by(|a, b| a.cost().partial_cmp(&b.cost()).unwrap_or(std::cmp::Ordering::Equal));
     v
 }
@@ -501,9 +499,42 @@ pub fn tiers_said(store: &Store) -> String {
     format!("free, low up to ${}, mid up to ${} and high any", cap("low"), cap("mid"))
 }
 
-/// Whether `tier` may hold `m`: `free` only a free model, as your favorite too, and the others any.
-pub fn takes(tier: &str, m: &Model) -> bool {
-    tier != TIERS[0].0 || m.cost() == Some(0.0)
+/// Whether `m` is at or under `tier`'s cap (`Store::tier_cap`), as a favorite must be to be its
+/// pick: a favorite dearer than the tier is passed over there, and one of unknown price too.
+pub fn fits(store: &Store, tier: &str, m: &Model) -> bool {
+    let cap = store.tier_cap(tier);
+    cap.is_infinite() || m.cost().is_some_and(|c| c <= cap)
+}
+
+/// Why `m` can be no favorite for `slot`, a tier's it is dearer than (`fits`). None when it can.
+pub fn over_cap(store: &Store, slot: &str, m: &Model) -> Option<String> {
+    let tier = slot.split_once(':')?.1;
+    if fits(store, tier, m) {
+        return None;
+    }
+    let costs = m.cost().map_or("has no known price".into(), |c| format!("costs {}", usd(c)));
+    let takes = match store.tier_cap(tier) {
+        0.0 => "only free models".to_string(),
+        c => format!("models up to ${c}"),
+    };
+    Some(format!("{} {costs} and {tier} takes {takes}", m.name))
+}
+
+/// Whether `m` may be ticked for `slot`, by `f` or `fav`: not on a tier it is dearer than
+/// (`over_cap`), unless it is the favorite there already, a cap lowered after it, which can then
+/// be cleared or given a harness. Err says why not.
+pub fn can_fav(store: &Store, slot: &str, m: &Model) -> Result<(), String> {
+    if store.favorite(slot) == Some(m.key.as_str()) {
+        return Ok(());
+    }
+    over_cap(store, slot, m).map_or(Ok(()), Err)
+}
+
+/// Whether `m` joins `task`'s line as a favorite: of the task, or of a tier it fits. One a
+/// lowered cap left dearer than its tier is no tier's pick, so not on the line either.
+fn fav_on_line(store: &Store, task: &str, m: &Model) -> bool {
+    crate::store::task_slots(task)
+        .any(|s| store.favorite(&s) == Some(m.key.as_str()) && over_cap(store, &s, m).is_none())
 }
 
 /// How far behind your best on coding a model makes "value"'s line, in months of progress (`fit::add_lag`).
@@ -516,22 +547,17 @@ fn behind<'a>(models: impl Iterator<Item = &'a Model>, task: &str) -> impl Fn(&M
     move |m| m.lag.get(task).map(|l| l - best)
 }
 
-/// The entry of a task's cheapest-first frontier that `tier` picks: the last at its price or
-/// under, `cap` in blended $/1M (`Store::tier_cap`), which is the best of them, else the cheapest there is. `None` for an empty frontier,
-/// and for `free` with no free model on it.
-pub fn pick<'a, 'm: 'a>(
-    mut front: impl Iterator<Item = &'a (&'m Model, f64)> + Clone,
-    tier: &str,
-    cap: f64,
-) -> Option<&'a (&'m Model, f64)> {
+/// The entry of a task's cheapest-first frontier that a tier picks: the last at its price or
+/// under, `cap` in blended $/1M (`Store::tier_cap`), which is the best of them. `None` when
+/// nothing is: a tier is a budget, `free`'s too.
+pub fn pick<'a, 'm: 'a>(front: impl Iterator<Item = &'a (&'m Model, f64)>, cap: f64) -> Option<&'a (&'m Model, f64)> {
     // The dearest of them, the first of two at one price: a favorite, as `task_frontier` has them.
-    let within = front.clone().filter(|(m, _)| m.cost().is_some_and(|c| c <= cap));
-    let best = within.reduce(|best, e| if e.0.cost() > best.0.cost() { e } else { best });
-    best.or(front.next().filter(|e| takes(tier, e.0)))
+    let within = front.filter(|(m, _)| m.cost().is_some_and(|c| c <= cap));
+    within.reduce(|best, e| if e.0.cost() > best.0.cost() { e } else { best })
 }
 
 /// The entry of a task's line (`task_line`) that `tier` picks, as `--tier` does: your favorite
-/// for the tier, else for the task, beats the pick on merit, which a favorite on the line only
+/// for the tier, else for the task, when at or under its cap (`fits`), beats the pick on merit, which a favorite on the line only
 /// for being one (`off`) is neither best nor good enough for; one the line lacks gives way to
 /// the next.
 pub fn tier_pick<'m>(
@@ -541,11 +567,9 @@ pub fn tier_pick<'m>(
     task: &str,
     tier: &str,
 ) -> Option<(&'m Model, f64)> {
-    let on_line = |k| front.iter().find(|(m, _)| m.key == k && takes(tier, m));
+    let on_line = |k| front.iter().find(|(m, _)| m.key == k && fits(store, tier, m));
     let fav = store.tier_favorites(task, tier).find_map(on_line).copied();
-    fav.or_else(|| {
-        pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), tier, store.tier_cap(tier)).copied()
-    })
+    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), store.tier_cap(tier)).copied())
 }
 
 /// A task of your own's line as `tier_picks` takes it: no scores, and every model on it only
@@ -1246,17 +1270,17 @@ mod tests {
         let ms = [model("free", 0.0), model("flash", 1.0), model("sonnet", 3.0), model("opus", 5.4)];
         let front: Vec<(&Model, f64)> = ms.iter().map(|m| (m, 0.0)).collect();
         let cap = |tier| Store::default().tier_cap(tier);
-        let key = |front: &[(&Model, f64)], tier| pick(front.iter(), tier, cap(tier)).map(|e| e.0.key.clone());
+        let key = |front: &[(&Model, f64)], tier| pick(front.iter(), cap(tier)).map(|e| e.0.key.clone());
         let picks = |front: &[(&Model, f64)]| TIERS.map(|t| key(front, t.0).unwrap_or_default());
         assert_eq!(picks(&front), ["free", "flash", "sonnet", "opus"], "the best free, up to $2, up to $5, of all");
         assert_eq!(picks(&front[..2])[1..], ["flash", "flash", "flash"], "the best is cheap: every tier's");
         assert_eq!(picks(&[front[0], front[3]]), ["free", "free", "free", "opus"], "none between: not opus for mid");
-        assert_eq!(key(&front[2..], "low").as_deref(), Some("sonnet"), "none at low's price: the cheapest");
+        assert_eq!(key(&front[2..], "low"), None, "none at low's price: a tier is a budget");
         let mut mine = Store::default();
         mine.tiers.insert("mid".into(), 6.0);
         mine.tiers.insert("high".into(), 1.0);
         assert_eq!((mine.tier_cap("mid"), mine.tier_cap("high")), (6.0, f64::INFINITY), "high takes no cap");
-        let picked = pick(front.iter(), "mid", mine.tier_cap("mid")).map(|e| e.0.key.as_str());
+        let picked = pick(front.iter(), mine.tier_cap("mid")).map(|e| e.0.key.as_str());
         assert_eq!(picked, Some("opus"), "your cap for mid");
         assert_eq!(key(&front[1..], "free"), None, "and none for free: it never costs");
         assert_eq!(key(&[], "low"), None);
@@ -1446,13 +1470,26 @@ mod tests {
         store.tiers.insert("low".into(), 3.0);
         let (line, off) = task_line(ms.iter(), ms.iter(), &store, fit::task("coding").unwrap());
         assert_eq!(tier_pick(&line, &off, &store, "coding", "low").unwrap().0.key, "b", "not a, the best up to $2");
-        // None at low's price: the cheapest on the line, which the one level these share has one of.
+        // None at low's price: low has none, as free has none with no free model.
         let dear = [model("a", 157.0, 16.0, 8.0), model("top", 165.0, 75.0, 0.0)];
-        assert_eq!(pick(&dear, "low"), "top");
+        let (line, off) = task_frontier(dear.iter(), fit::task("coding").unwrap(), &[], &[]);
+        assert!(tier_pick(&line, &off, &Store::default(), "coding", "low").is_none());
+        assert_eq!(pick(&dear, "high"), "top");
         // Value goes by your best on coding, 9 months behind the source's, not by the source's.
         let mut old =
             [model("mine", 150.0, 1.0, 9.0), model("cheap", 147.0, 0.2, 12.0), model("weak", 140.0, 0.0, 19.0)];
         fit::add_value(&mut old);
         assert_eq!(keys(&old, &[], "value").0, ["cheap"], "weak is free, and 10 months behind yours");
+    }
+
+    #[test]
+    fn a_favorite_over_its_tiers_cap_is_off_the_line() {
+        let offers = vec![Offer { input: 10.0, output: 10.0, ..Default::default() }];
+        let m = Model { key: "dear".into(), offers, ..Default::default() };
+        let mut store = Store::default();
+        store.set_favorite("debugging:low", "dear", None);
+        assert!(custom_line([&m].into_iter(), &store, "debugging").is_empty(), "low's, a cap lowered after it");
+        store.set_favorite("debugging:high", "dear", None);
+        assert_eq!(custom_line([&m].into_iter(), &store, "debugging").len(), 1, "high's");
     }
 }

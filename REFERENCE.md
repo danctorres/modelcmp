@@ -193,7 +193,7 @@ modelcmp note sonnet-5 "fast enough for refactors"
 modelcmp exclude llama-4-maverick              # have it, can't use it
 modelcmp harness claude                        # your default harness (`H` in the TUI)
 modelcmp fav coding sonnet-5                   # your favorite for a task
-modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier
+modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier, at its price or under
 modelcmp tier mid 8                            # mid takes models up to $8, `modelcmp tier` shows every cap
 modelcmp fav coding opus-5.5 --via claude      # and the harness you run it on
 
@@ -241,7 +241,7 @@ stored as `tool-dispatch`).
 
 - No benchmark ranks it. It has the models you give it, one for the task and one per tier if
   you like.
-- `--task` lists them, cheapest first. With `--tier` it returns that tier's, else the task's,
+- `--task` lists them, cheapest first. With `--tier` it returns that tier's, else the task's when it fits the tier's cap,
   leaving out one you excluded or lost access to.
 - `recommend` lists it after the built-in tasks, with what you wrote it is about and the model
   of each tier.
@@ -304,15 +304,17 @@ or bound can hide different models.
   default, as `enter` on the tier's header in the TUI's recommend does. `low` can't cost more than `mid`. The list splits at the caps too, so a tier picks the best model up to its cap.
 - Two tiers pick the same model when none dearer that the next may take is better. A tier
   never takes a worse model to differ from the next.
-- With no model at its price, `low` or `mid` picks the cheapest of the list. `free` never
-  holds a model that costs, your favorite included.
+- A tier never holds a model dearer than its cap, your favorite included. With none at its
+  price it has none, as `free` has none with no free model, and `pick` says `no model` there.
 - `value` lists the models within 8 months of progress of your best on coding. A month of
   progress is a twelfth of what the best coding score rose in the last year, among the models
   listed here that the source scored.
 
 ### Favorites
 
-- A model you `fav` for the tier, else for the task, beats the tier's pick.
+- A model you `fav` for the tier, else for the task, beats the tier's pick when it costs no more
+  than the tier's cap. `fav --tier` refuses a model over it, and a task's favorite skips the
+  tiers it is over.
 - Every favorite of the task that you have and did not exclude sits on the task's list,
   whatever `--dev`, `--via`, `--min`, `--max` or `--selected` narrow it to.
 - `recommend` marks it `★`, whether or not it is on the frontier or has a score for the task,

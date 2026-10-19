@@ -2736,7 +2736,9 @@ fn fav_name_w(items: &[(String, Effect)]) -> usize {
 }
 
 /// `f`'s grid: the tiers' heading, a row per task with a box for the task and for each tier,
-/// `✓` where the model is the favorite, `●` where another is and `☐` where none, the entry that
+/// `✓` where the model is the favorite, `●` where another is, `☐` where none and `$` on a tier
+/// it is dearer than, which cannot take it (`view::over_cap`), bold where it is the favorite
+/// all the same, a cap lowered after it, the entry that
 /// names a new task, what the box under the cursor holds, and the keys. Read from the store at
 /// each draw, so the boxes follow a change made anywhere.
 fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
@@ -2746,6 +2748,9 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     let head: String = tiers.map(|t| format!(" {t:<0$}", BOX_W - 1)).collect();
     let mut lines = vec![Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED))];
     let mut under = String::new();
+    // The grid is for one model: looked up once, not per box.
+    let key = items.iter().find_map(|(_, e)| if let Effect::Fav(k, _) = e { Some(k) } else { None });
+    let model = key.and_then(|k| app.data.models.iter().find(|m| m.key == *k));
     for (i, (label, effect)) in items.iter().enumerate() {
         let on = i == list.sel;
         let Effect::Fav(key, task) = effect else {
@@ -2769,10 +2774,16 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
         spans.push(Span::raw(" ".repeat(pad + 1)));
         for col in 0..BOXES {
             let slot = box_slot(task, col);
-            let mark = match app.store.favorite(&slot) {
-                Some(k) if k == key => Span::styled("✓", fg(MARK).add_modifier(BOLD)),
-                Some(_) => Span::styled("●", fg(MUTED)),
-                None => Span::styled("☐", fg(color)),
+            let over = model.and_then(|m| crate::view::over_cap(&app.store, &slot, m));
+            let mark = match (app.store.favorite(&slot), &over) {
+                // Its own glyph, not a grey ✓, so it reads without colours too. A favorite a
+                // later cap left there is bold, as a ✓ is, the cursor stopping on it so space
+                // clears it. Over the cap, another model's favorite there is a `$` too: h l skip it.
+                (Some(k), Some(_)) if k == key => Span::styled("$", fg(MARK).add_modifier(BOLD)),
+                (Some(k), _) if k == key => Span::styled("✓", fg(MARK).add_modifier(BOLD)),
+                (_, Some(_)) => Span::styled("$", fg(MUTED)),
+                (Some(_), None) => Span::styled("●", fg(MUTED)),
+                (None, None) => Span::styled("☐", fg(color)),
             };
             let at = on && col == list.col;
             spans.extend(cursor(at, vec![mark]));
@@ -2780,11 +2791,13 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
             if at {
                 let name =
                     |k: &str| app.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
-                under = match (app.store.favorite(&slot), app.store.via(&slot)) {
-                    (Some(k), Some(h)) if k == key => format!("{slot}: {}, via {h}", name(k)),
-                    (Some(k), _) if k == key => format!("{slot}: {}", name(k)),
-                    (Some(k), _) => format!("{slot}: now {}", name(k)),
-                    (None, _) => format!("{slot}: no favorite"),
+                under = match (app.store.favorite(&slot), app.store.via(&slot), &over) {
+                    (Some(k), _, Some(why)) if k == key => format!("{slot}: unused, {why}, space clears it"),
+                    (Some(k), Some(h), _) if k == key => format!("{slot}: {}, via {h}", name(k)),
+                    (Some(k), ..) if k == key => format!("{slot}: {}", name(k)),
+                    (Some(k), ..) => format!("{slot}: now {}", name(k)),
+                    (None, _, Some(why)) => format!("{slot}: {why}"),
+                    (None, _, None) => format!("{slot}: no favorite"),
                 };
             }
         }
@@ -4880,7 +4893,8 @@ mod tests {
         a.store.toggle_favorite("coding", "flash");
         a.set_data(data);
         // Under the grid, the box under the cursor says why.
-        (a.view, a.among, a.task_cur, a.task_sel) = (View::Recommend, None, 1, 2);
+        // High's: at $6 it fits no other tier.
+        (a.view, a.among, a.task_cur, a.task_sel) = (View::Recommend, None, 1, 4);
         let lines = recommend(&a, 200, &mut vec![]).0;
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
         let star = spans.iter().rposition(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
@@ -5860,7 +5874,7 @@ mod tests {
             "and none has a built-in task's, nor the gold ★'s, nor the red ✗'s"
         );
         let models = |row: &str| row.split("★ ").skip(1).map(|s| s.trim().to_string()).collect::<Vec<_>>();
-        assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0", "opus $5.0"]);
+        assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0"], "mid and high: low is up to $2");
         assert_eq!(text[own + 2], "debugging finding and fixing a bug");
         assert_eq!(text[own + 3], format!("  use for: {CUSTOM_WHEN}"));
         // A tier's model is in that tier's box, the task's in the others.

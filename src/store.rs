@@ -427,17 +427,6 @@ impl Store {
         [self.favorite(&slot(task, Some(tier))), self.favorite(task)].into_iter().flatten()
     }
 
-    /// Every model that is a favorite of the task or of one of its tiers: all join its line.
-    pub fn task_favorites(&self, task: &str) -> Vec<&str> {
-        let mut v: Vec<&str> = Vec::new();
-        for k in task_slots(task).filter_map(|s| self.favorite(&s)) {
-            if !v.contains(&k) {
-                v.push(k);
-            }
-        }
-        v
-    }
-
     /// Your own tasks, by name: the favorites, of the task or a tier of it, of no built-in
     /// task. One has no ranking, only the models you gave it, and is gone when they are cleared.
     pub fn custom_tasks(&self) -> Vec<&str> {
@@ -484,7 +473,7 @@ impl Store {
     /// Whether the model is a favorite of the task or its tiers, or with no task of any.
     pub fn is_favorite(&self, task: Option<&crate::fit::Task>, key: &str) -> bool {
         match task {
-            // Asked per row and per frame, so without `task_favorites`' list.
+            // Asked per row and per frame, so without a list of them.
             Some(t) => self.favorite.iter().any(|(s, k)| k == key && s.split(':').next() == Some(t.name)),
             None => self.favorite.values().any(|k| k == key),
         }
@@ -617,7 +606,6 @@ mod tests {
         s.toggle_favorite(&slot("coding", Some("high")), "gpt55");
         assert_eq!(s.tier_favorites("coding", "low").collect::<Vec<_>>(), ["flash", "gpt55"], "the tier's first");
         assert_eq!(s.tier_favorites("coding", "mid").collect::<Vec<_>>(), ["gpt55"], "else the task's");
-        assert_eq!(s.task_favorites("coding"), ["gpt55", "flash"], "each model once");
         assert_eq!(s.favorite_for("gpt55"), ["coding", "coding:high"]);
         s.set_favorite("coding", "gpt55", Some("codex"));
         assert_eq!(s.task_via("coding", Some("mid"), "gpt55"), Some("codex"), "the task's harness");

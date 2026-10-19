@@ -2650,10 +2650,29 @@ impl App {
         self.fav_at(key, &slot);
     }
 
+    /// Which boxes of the row under `f`'s cursor can be ticked, so `h` `l` skip the others: a tier
+    /// the model is dearer than cannot (`view::over_cap`), unless it is its favorite there, which
+    /// `space` clears.
+    fn fav_open(&self) -> [bool; BOXES] {
+        let Input::Choose { kind: Kind::Fav, items, list, .. } = &self.input else { return [true; BOXES] };
+        let Some((_, Effect::Fav(key, task))) = items.get(list.sel) else { return [true; BOXES] };
+        let m = self.data.models.iter().find(|m| m.key == *key);
+        std::array::from_fn(|c| {
+            let slot = box_slot(task, c);
+            m.is_none_or(|m| crate::view::can_fav(&self.store, &slot, m).is_ok())
+        })
+    }
+
     /// `f`: favorite the model `key` for the slot, a task, one tier of it or a task of your own,
     /// or unfavorite it when it already is.
     fn fav(&mut self, key: &str, task: &str) -> Option<Effect> {
-        let name = self.data.models.iter().find(|m| m.key == key)?.name.clone();
+        let m = self.data.models.iter().find(|m| m.key == key)?;
+        let name = m.name.clone();
+        // A tier is a budget: a model dearer than it is no favorite for it.
+        if let Err(why) = crate::view::can_fav(&self.store, task, m) {
+            self.refuse(why);
+            return None;
+        }
         let on = self.custom_at().map(String::from);
         self.store.toggle_favorite(task, key);
         self.back_on(on);
@@ -3108,8 +3127,18 @@ impl App {
             k.code = self.unbound(c).map_or(KeyCode::Null, KeyCode::Char);
         }
         let effect = self.on_key(k);
+        self.snap_fav_col();
         self.follow();
         effect
+    }
+
+    /// `f`'s cursor off a box it cannot tick, where `j` `k` `]` `[` or a cleared favorite leave
+    /// it: to the nearest open one before it, the task's own at worst, which is always open.
+    fn snap_fav_col(&mut self) {
+        let open = self.fav_open();
+        if let Input::Choose { kind: Kind::Fav, list, .. } = &mut self.input {
+            list.col = (0..=list.col.min(BOXES - 1)).rev().find(|&c| open[c]).unwrap_or(0);
+        }
     }
 
     /// Whether letters run as keys, and are not typed into a search, a note, a bound or an entry.
@@ -3275,11 +3304,16 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.go_to(usize::MAX),
             // ^e is not `e`: only the keys above take ctrl.
             KeyCode::Char(_) if ctrl => {}
-            // `h l` move along the boxes of a row of f's grid, stopping at its ends.
+            // `h l` move along the boxes of a row of f's grid that can be ticked, stopping at its ends.
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if self.choosing_favs() => {
                 let back = matches!(k.code, KeyCode::Char('h') | KeyCode::Left);
+                let open = self.fav_open();
                 if let Input::Choose { list, .. } = &mut self.input {
-                    list.col = list.col.saturating_add_signed(if back { -n } else { n }).min(BOXES - 1);
+                    let ahead: Vec<usize> =
+                        if back { (0..list.col).rev().collect() } else { (list.col + 1..BOXES).collect() };
+                    if let Some(&c) = ahead.iter().filter(|&&c| open[c]).take(n.unsigned_abs()).last() {
+                        list.col = c;
+                    }
                 }
             }
             KeyCode::Char(c @ (']' | '['))
@@ -6467,9 +6501,9 @@ mod tests {
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
         assert!(crate::view::priced(m, s, false, true).ends_with("(-)"));
         assert_eq!(
-            crate::view::pick([(m, s)].iter(), "low", 2.0).map(|e| e.0.key.as_str()),
+            crate::view::pick([(m, s)].iter(), f64::INFINITY).map(|e| e.0.key.as_str()),
             Some("opus5"),
-            "the only entry"
+            "the only entry, at high"
         );
         assert!(a.favorite_unrecommended(coding, "opus5"), "no score, so not recommended");
         // A tier's favorite joins the line too, beside the task's.
@@ -6583,8 +6617,10 @@ mod tests {
         press(&mut a, "l");
         assert!(a.current().is_none(), "free holds a free model alone");
         press(&mut a, "l");
-        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "its model is every other tier's");
-        press(&mut a, "2h");
+        assert!(a.current().is_none(), "low holds it alone at its price or under");
+        press(&mut a, "2l");
+        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "its model is high's");
+        press(&mut a, "4h");
         code(&mut a, KeyCode::Enter);
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, on.as_str()));
         assert!(a.status.ends_with("your model for tool-dispatch"), "{}", a.status);
@@ -6592,32 +6628,40 @@ mod tests {
         // the task before.
         press(&mut a, "RGf");
         assert!(a.failed && a.input == Input::None, "f on a task's name has no model to favorite");
-        press(&mut a, "2lf");
+        press(&mut a, "4lf");
         assert!(ticked(&a) && under(&a) == "tool-dispatch");
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.task_cur, a.store.favorite("tool-dispatch")), (TASKS.len() - 1, None));
         // An empty name names no task.
-        press(&mut a, "2gg2lfG");
+        press(&mut a, "2ggfG");
         code(&mut a, KeyCode::Enter);
         assert_eq!(edit(&a), Some(("New".into(), String::new())));
         assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.custom_tasks().len()), (None, None, 0));
         code(&mut a, KeyCode::Esc);
         // A tier of it takes a model of its own, as a built-in task's: its boxes follow the
-        // task's on its row, and in recommend its low tier has that model, the others the task's.
+        // task's on its row, and in recommend its low tier has that model, the others the task's where it fits.
         a.store.toggle_favorite("tool-dispatch", &on);
         a.store.toggle_favorite("tool-dispatch:low", "mini");
         a.rebuild();
         press(&mut a, "G02l");
         assert_eq!((&a.view, a.current().map(|m| m.key.as_str())), (&View::Recommend, Some("mini")));
-        press(&mut a, "l");
-        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "h l move along its tiers");
+        press(&mut a, "2l");
+        assert_eq!(
+            a.current().map(|m| m.key.clone()),
+            Some(on.clone()),
+            "h l move along its tiers: the task's at high"
+        );
         press(&mut a, "fl");
-        assert_eq!((under(&a).as_str(), a.open_list().map(|l| l.col)), ("tool-dispatch", Some(1)), "l: its low tier");
+        assert_eq!(
+            (under(&a).as_str(), a.open_list().map(|l| l.col)),
+            ("tool-dispatch", Some(4)),
+            "l: past the tiers it is dearer than, to high"
+        );
         press(&mut a, "a");
         a.paste(" fast");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!(a.open_list().map(|l| l.col), Some(1), "what it is about leaves the cursor on its box");
+        assert_eq!(a.open_list().map(|l| l.col), Some(4), "what it is about leaves the cursor on its box");
         press(&mut a, "4l5h");
         assert_eq!(a.open_list().map(|l| l.col), Some(0), "h l stop at the ends of the row");
         press(&mut a, "j");
@@ -6661,10 +6705,31 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         press(&mut a, " ");
         assert_eq!((a.store.favorite("coding"), a.store.via("coding")), (None, None), "gone with the favorite");
+        // A tier is a budget: gpt55, at $10, is no favorite for mid, and a click there says why.
+        assert_eq!(a.mouse(Mouse::Tick(1, 3)), None);
+        assert_eq!(
+            (a.store.favorite("coding:mid"), a.status.as_str()),
+            (None, "gpt55 costs $10 and mid takes models up to $5")
+        );
+        // h l skip the tiers it is dearer than: free, low and mid.
+        press(&mut a, "4hl");
+        assert_eq!(a.open_list().map(|l| l.col), Some(4), "any, then high");
+        press(&mut a, "h");
+        assert_eq!(a.open_list().map(|l| l.col), Some(0));
+        // One a lowered cap left there is still reached, so space can clear it.
+        a.store.set_favorite("coding:mid", "gpt55", None);
+        press(&mut a, "l");
+        assert_eq!(a.open_list().map(|l| l.col), Some(3), "its stale favorite");
+        press(&mut a, "j");
+        assert_eq!(a.open_list().map(|l| l.col), Some(0), "j: agentic's mid can't take it, so the open box before");
+        press(&mut a, "kl");
+        assert_eq!(a.open_list().map(|l| l.col), Some(3));
+        press(&mut a, " ");
+        assert_eq!(a.store.favorite("coding:mid"), None, "cleared");
         // A tier's box has a harness of its own, and v comes back to that box.
-        press(&mut a, "3l vj");
+        press(&mut a, "l vj");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.store.via("coding:mid"), a.open_list().map(|l| l.col)), (Some("opencode"), Some(3)));
+        assert_eq!((a.store.via("coding:high"), a.open_list().map(|l| l.col)), (Some("opencode"), Some(4)));
     }
 
     #[test]
@@ -6687,13 +6752,16 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         // In recommend, f starts on the task under the cursor, on the box its favorite has there.
         press(&mut a, "Rjjj2l");
-        assert_eq!(a.current().unwrap().key, "gpt55", "the task's favorite is every tier's but free's");
+        assert_eq!(a.current().unwrap().key, "mini", "the task's favorite, at $10, is not low's");
+        press(&mut a, "2l");
+        assert_eq!(a.current().unwrap().key, "gpt55", "but high's");
         press(&mut a, "f");
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 0, .. }, .. }));
         code(&mut a, KeyCode::Esc);
         a.store.toggle_favorite("coding", "gpt55");
         a.rebuild();
         // On a tier's own pick, f starts on that tier's box, so f enter is for the tier alone.
+        press(&mut a, "2h");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 2, .. }, .. }));
@@ -6719,7 +6787,8 @@ mod tests {
             press(&mut a, key);
             assert!(matches!(&a.input, Input::Choose { list: List { sel: s, .. }, .. } if *s == sel), "{key} to {sel}");
         }
-        press(&mut a, "2l k2h");
+        // l skips free, which mini at $1 is dearer than, so lands on low.
+        press(&mut a, "l k2h");
         assert_eq!((a.store.favorite("coding:low"), a.store.favorite("overall")), (None, Some("mini")));
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
