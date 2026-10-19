@@ -3271,14 +3271,28 @@ fn recommend(
         })
         .collect();
     let left = width.saturating_sub(w + 2 + 2 * TIERS.len());
-    let fits = |cap: usize| need.iter().map(|&n| n.min(cap)).sum::<usize>() <= left;
-    let cap = (4..=need.iter().copied().max().unwrap_or(4)).rev().find(|&cap| fits(cap)).unwrap_or(4);
-    let room: Vec<usize> = need.iter().map(|&n| n.min(cap)).collect();
+    // A box no narrower than its header where that fits, so the header shows the cap, else
+    // narrower, the header the tier's name alone.
+    let heads_w: Vec<usize> = heads.iter().map(|h| h.chars().count()).collect();
+    let sized = |cap: usize, head: bool| -> Vec<usize> {
+        need.iter().zip(&heads_w).map(|(&n, &h)| n.min(if head { cap.max(h) } else { cap })).collect()
+    };
+    let caps = (4..=need.iter().copied().max().unwrap_or(4)).rev();
+    let fits = |r: &Vec<usize>| r.iter().sum::<usize>() <= left;
+    let room = (caps.clone().map(|c| sized(c, true)).find(fits))
+        .or_else(|| caps.map(|c| sized(c, false)).find(fits))
+        .unwrap_or_else(|| sized(4, false));
     let head_y = v.len();
     let on_caps = app.among.is_none() && app.caps;
     let mut head = vec![Span::styled(format!(" {:w$} ", ""), fg(MUTED))];
     let mut text_at = None;
     for (c, (h, &r)) in heads.iter().zip(&room).enumerate() {
+        // Too narrow for the cap, the tier's name alone, so the header stays over its column.
+        let h = match editing {
+            Some((e, ..)) if e == c => truncate(h, r),
+            _ if h.chars().count() > r => TIERS[c].0.to_string(),
+            _ => h.clone(),
+        };
         let piece = Span::raw(format!("{h:<r$}"));
         match editing {
             // The cursor's bars around it, the text cursor after what is typed up to `cur`.
@@ -5654,6 +5668,15 @@ mod tests {
         recommend(&a, 200, &mut spots);
         let caps: Vec<_> = spots.iter().filter_map(|p| if let Stop::Cap(c) = p.at { Some(c) } else { None }).collect();
         assert_eq!(caps, [1, 2], "low's and mid's headers take a click");
+        // Narrow, each header fits its box and its click lands on its column.
+        let mut spots = vec![];
+        let lines = recommend(&a, 36, &mut spots).0;
+        let at = |s: Stop| spots.iter().find(|p| p.at == s).map(|p| p.x.clone());
+        for c in [1, 2] {
+            assert_eq!(at(Stop::Cap(c)), at(Stop::Recommend(0, c + 1)), "tier {c}");
+        }
+        let line = |s: &str| lines.iter().map(ToString::to_string).find(|l| l.trim_start().starts_with(s)).unwrap();
+        assert_eq!(line("free ").chars().count(), line("▌overall").chars().count(), "{}", line("free "));
         (a.view, a.among, a.task_sel) = (View::Recommend, None, 2);
         assert!(hints(&a, 300).contains(&"< price cap"), "on a box of low or mid");
         a.task_sel = 4;
