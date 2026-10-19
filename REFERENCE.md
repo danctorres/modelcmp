@@ -64,6 +64,7 @@ The source in use is Artificial Analysis when its key is there and works, else E
 - Price is per token, and models differ in how many tokens and steps the same job takes them.
   `$task` is what one task of DeepSWE cost the model in dollars, as the benchmark measured it,
   every model on the same harness.
+- It is at the price Epoch paid, not yours, except that a model whose Price is free shows `free`.
 - It is the cost of the run the model's DeepSWE score is of, its best reasoning setting. A lower
   setting costs less and scores less.
 - Few models have it, 26 of them on 2026-10-06, and the rest show `-`. No tier goes by it.
@@ -480,7 +481,7 @@ Each model carries these fields:
 | `tasks` | each task's table column: the 0-100 score of its benchmark with `source`, overall and vision the `eci`, value a 0-100 percentile |
 | `other_index` | the other source's index, AAII with `epoch` and ECI with `aa`, when both are cached |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
-| `task_cost_usd` | `$task`, from Epoch AI, when the model has one |
+| `task_cost_usd` | `$task`, from Epoch AI, when the model has one, 0 where it is free |
 | `task_output_tokens` | `Tok/task`, in tokens, from Epoch AI, when the model has one |
 | `tokens_per_second`, `ttft_seconds` | from Artificial Analysis, when the model has them |
 

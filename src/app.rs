@@ -219,7 +219,7 @@ pub const COLS: [Col; 17] = [
         only: Some(Source::Epoch),
         lower_better: true,
         show: money,
-        ..col("$task", "cost", "USD per coding task on DeepSWE, measured by Epoch AI", |m| m.task_cost)
+        ..col("$task", "cost", "USD per coding task on DeepSWE, measured by Epoch AI", |m| m.task_usd())
     },
     Col {
         only: Some(Source::Epoch),
@@ -7612,5 +7612,12 @@ mod tests {
         // Unfavorited, opus5 leaves the task's line; the second tick is still for it.
         press(&mut a, "f  ");
         assert_eq!(a.store.favorite("coding"), Some("opus5"));
+    }
+
+    #[test]
+    fn task_cost_is_free_where_the_price_is() {
+        let free = Model { task_cost: Some(0.48), ..model("glm", true, Some(60.0), 0.0) };
+        let paid = Model { task_cost: Some(0.48), ..model("glm", true, Some(60.0), 1.0) };
+        assert_eq!((free.task_usd(), paid.task_usd()), (Some(0.0), Some(0.48)), "Epoch's cost, but you pay nothing");
     }
 }

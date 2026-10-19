@@ -169,7 +169,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
         arena_agent: m.arena,
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
-        task_cost_usd: m.task_cost,
+        task_cost_usd: m.task_usd(),
         task_output_tokens: m.task_tokens.map(f64::round),
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),

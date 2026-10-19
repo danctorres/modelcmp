@@ -850,6 +850,12 @@ impl Model {
         self.quoted().map(|q| q.0.blended())
     }
 
+    /// What a task costs you: Epoch's measured cost, at the price Epoch paid, but nothing where
+    /// the price you'd pay is free.
+    pub fn task_usd(&self) -> Option<f64> {
+        self.task_cost.map(|c| if self.cost() == Some(0.0) { 0.0 } else { c })
+    }
+
     /// What the Dev dropdown and `--dev` pick the model by: its developer and that one's country.
     pub fn devs(&self) -> impl Iterator<Item = &str> {
         [self.developer.as_str(), self.country.as_str()].into_iter().filter(|s| !s.is_empty())

@@ -911,7 +911,10 @@ pub fn detail_rows(
         ));
     }
     // What a task came to, where the price is per token.
-    v.extend(m.task_cost.map(|c| format!("  task cost:  ${} a coding task on DeepSWE (measured)", money(c))));
+    v.extend(m.task_usd().map(|c| match c {
+        0.0 => "  task cost:  free, as its price".into(),
+        c => format!("  task cost:  ${} a coding task on DeepSWE (measured)", money(c)),
+    }));
     v.extend(m.task_tokens.map(|t| format!("  task took:  {} output tokens (measured)", ctx(t as u64))));
     v.extend(m.arena.map(|a| format!("  arena:      {}% net improvement in agent sessions (arena.ai)", signed(a))));
     v.extend([
@@ -1079,7 +1082,7 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
     }
     if models.iter().any(|m| m.task_cost.is_some()) {
         let at = rows.len() - 1;
-        rows.insert(at, row("$ / coding task", models.iter().map(|m| m.task_cost).collect(), money, false));
+        rows.insert(at, row("$ / coding task", models.iter().map(|m| m.task_usd()).collect(), money, false));
     }
     if models.iter().any(|m| m.task_tokens.is_some()) {
         let at = rows.len() - 1;
