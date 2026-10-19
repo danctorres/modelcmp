@@ -364,17 +364,10 @@ pub fn group_starts() -> Vec<usize> {
     GROUPS.iter().enumerate().filter_map(|(i, &g)| (g..end(i)).find(|&c| !hidden(c))).collect()
 }
 
-/// Cursor index `col` moved `n` shown columns right, or left when negative, wrapping.
-fn step_col(mut col: usize, n: isize) -> usize {
-    for _ in 0..n.unsigned_abs() {
-        loop {
-            col = if n < 0 { (col + NCOLS - 1) % NCOLS } else { (col + 1) % NCOLS };
-            if !hidden(col) {
-                break;
-            }
-        }
-    }
-    col
+/// Cursor index `col` moved `n` shown columns right, or left when negative: a counted move,
+/// the wheel or a click on `‹` `›` stops at the last / first column, and one from there wraps.
+fn step_col(col: usize, n: isize) -> usize {
+    nth_hit(col, NCOLS, n, |&c| !hidden(c)).unwrap_or(col)
 }
 
 /// The numeric column at cursor index `col`, if it is one.
@@ -6173,14 +6166,26 @@ mod tests {
         assert_eq!(a.current().unwrap().key, "gpt55");
         let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
         assert_eq!(shown, NCOLS, "Epoch has no speed columns, which show empty");
+        a.col = 0;
         press(&mut a, &format!("{shown}l"));
-        assert_eq!(a.col, ECI, "counted column moves wrap around, over the shown ones");
+        assert_eq!(a.col, NCOLS - 1, "a counted column move stops at the last column");
+        press(&mut a, "l");
+        assert_eq!(a.col, 0, "and wraps from there");
         crate::data::set_source(Source::Aa);
-        let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
-        assert!(shown < NCOLS, "Artificial Analysis has no cost of a task");
+        let shown: Vec<usize> = (0..NCOLS).filter(|&c| !hidden(c)).collect();
+        assert!(shown.len() < NCOLS, "Artificial Analysis has no cost of a task");
         a.off_hidden();
-        press(&mut a, &format!("{shown}l"));
-        assert_eq!(a.col, AAII, "with its speed columns in their place, from its own index");
+        a.col = 0;
+        press(&mut a, &format!("{}l", shown.len() - 2));
+        assert_eq!(a.col, shown[shown.len() - 2], "over the shown ones");
+        press(&mut a, "9l");
+        assert_eq!(a.col, shown[shown.len() - 1], "stopping at the last of them");
+        // From a column left out, as between a switch of source and `off_hidden`: the next shown.
+        let off = (0..NCOLS).find(|c| !shown.contains(c)).unwrap();
+        let next = shown.iter().copied().find(|&c| c > off).unwrap();
+        a.col = off;
+        press(&mut a, "l");
+        assert_eq!(a.col, next, "from a hidden column, the next shown one");
     }
 
     #[test]
@@ -7618,6 +7623,11 @@ mod tests {
         assert_eq!(a.col, 3);
         a.mouse(Mouse::Cols(-3));
         assert_eq!(a.col, 0);
+        let last = (0..NCOLS).rfind(|&c| !hidden(c)).unwrap();
+        a.mouse(Mouse::Cols(NCOLS as isize));
+        assert_eq!(a.col, last, "a screen past the end stops at the last column");
+        a.mouse(Mouse::Cols(NCOLS as isize));
+        assert_eq!(a.col, 0, "and from there wraps");
         a.mouse(Mouse::Menu(0));
         assert_eq!(a.input, Input::None, "Model has no dropdown");
         a.mouse(Mouse::Menu(1));
