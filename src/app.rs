@@ -365,7 +365,7 @@ pub fn group_starts() -> Vec<usize> {
 }
 
 /// Cursor index `col` moved `n` shown columns right, or left when negative: a counted move,
-/// the wheel or a click on `‹` `›` stops at the last / first column, and one from there wraps.
+/// or the wheel stops at the last / first column, and one from there wraps.
 fn step_col(col: usize, n: isize) -> usize {
     nth_hit(col, NCOLS, n, |&c| !hidden(c)).unwrap_or(col)
 }
@@ -1109,8 +1109,12 @@ pub enum Mouse {
     /// Click on a `▲` `▼`: rows to move, a page each way, as `PgUp` `PgDn`. Under a prompt it is
     /// a click, which leaves it, where the wheel is still.
     Page(isize),
-    /// Click on a `‹` `›`: columns to move, a screen of them each way, or models in compare.
+    /// Click on a `‹` `›` in compare or recommend: models to move, a screen of them each way in
+    /// compare, one in recommend.
     Across(isize),
+    /// Click on the table's `‹` `›`: the `hscroll` and cursor column to page to, as `layout` worked
+    /// them out.
+    ToCol(usize, usize),
     /// Click on the # header: the first row, as `gg` goes.
     Top,
     /// Click on tab `i`: mine or all alone, and ✓ ★ ✗ on or off, as `S` `F` `E`.
@@ -3426,7 +3430,7 @@ impl App {
                     }
                     effect
                 }
-                Mouse::Cols(_) => None,
+                Mouse::Cols(_) | Mouse::ToCol(..) => None,
                 // A click on another tab leaves the theme list for it, as `tab` does.
                 Mouse::Tab(i) if self.tab_on(i) => None,
                 Mouse::Tab(_) => {
@@ -3487,6 +3491,7 @@ impl App {
         }
         match m {
             Mouse::Cols(n) => return self.table_key(KeyCode::Char(if n < 0 { 'h' } else { 'l' }), n.abs()),
+            Mouse::ToCol(h, c) => (self.hscroll, self.col) = (h, c),
             // A plain click replaces the selection, as in a file manager.
             Mouse::Row(n) if n < self.rows.len() => {
                 self.deselect();

@@ -730,16 +730,9 @@ fn more_at(buf: &Buffer) -> Vec<(u16, u16, Mouse)> {
         .collect()
 }
 
-/// How many columns the table shows right of Model, or models compare shows: what a click on
-/// `‹` `›` moves, so the view moves by a screen.
-fn across(app: &App, width: u16) -> isize {
-    let n = if app.view == View::Compare {
-        app.spots.iter().filter(|(_, s)| matches!(s, Stop::Compare(_))).count()
-    } else {
-        let l = layout(width.saturating_sub(2), app);
-        l.cols.len() + usize::from(l.via.is_some()) + usize::from(l.notes.is_some()) + usize::from(l.first == 0)
-    };
-    n.max(1) as isize
+/// How many models compare shows: what a click on its `‹` `›` moves, so the view moves by a screen.
+fn across(app: &App) -> isize {
+    app.spots.iter().filter(|(_, s)| matches!(s, Stop::Compare(_))).count().max(1) as isize
 }
 
 /// What a mouse event lands on, with the same geometry `draw` uses: the frame's inner area
@@ -767,9 +760,22 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     let pos = ratatui::layout::Position::new(m.column, m.row);
     let plain = m.kind == MouseEventKind::Down(MouseButton::Left) && !pick && !extend;
+    // Under the tabs' two lines and the frame's top border.
+    let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
+    let l = layout(inner.width, app);
     let more = app.more.iter().find(|&&(x, y, _)| plain && (x, y) == (m.column, m.row)).map(|&(.., a)| match a {
         Mouse::Scroll(d) => Mouse::Page(d * app.page.max(1) as isize),
-        Mouse::Cols(d) => Mouse::Across(d * across(app, area.width)),
+        // The table pages: `›` to the first column cut off, which then starts the view, `‹` to the
+        // one before the view, which then ends it, `hscroll` 0 letting `layout` bring in all it can.
+        Mouse::Cols(d) if app.view == View::Table => {
+            let to = if d > 0 {
+                l.next.map(|c| (c - 1, c))
+            } else {
+                (1..=l.first).rev().find(|&c| !hidden(c)).map(|c| (0, c))
+            };
+            to.map_or(Mouse::Cols(d), |(h, c)| Mouse::ToCol(h, c))
+        }
+        Mouse::Cols(d) => Mouse::Across(d * across(app)),
         a => a,
     });
     // The first start's box has one thing to click, its link, on its first line.
@@ -780,9 +786,6 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         let link = m.row == rect.y + 1 && (x..x + lines[0].spans[1].width() as u16).contains(&m.column);
         return Some(if link && !mark && !extend { Mouse::Link } else { Mouse::Outside });
     }
-    // Under the tabs' two lines and the frame's top border.
-    let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
-    let l = layout(inner.width, app);
     let head = head(app);
     // A tab on the first two lines, or the edge left of it, over recommend too.
     let on_tabs = m.row <= area.y + 1 && !mark && !pick && !extend;
@@ -1859,6 +1862,9 @@ struct Layout {
     first: usize,
     /// Columns cut off on the right; `‹` after Model and `›` on the frame say where to scroll.
     more: bool,
+    /// The cursor index a click on `›` pages to: the first column right of the view or cut short,
+    /// or the one after it when it starts the view.
+    next: Option<usize>,
     /// Where a `│` parts two groups of columns (`GROUPS`): after Model when scrolled, and before
     /// each group that starts right of it.
     seps: Vec<u16>,
@@ -1946,6 +1952,9 @@ fn layout(width: u16, app: &App) -> Layout {
         None => 0,
     };
     let (mut cols, mut tail, mut more, mut seps) = (Vec::with_capacity(COLS.len()), [None; 2], false, vec![]);
+    // The cut column, or the one after it when it already starts the view, as a cursor index.
+    let page = |k: usize| if k > first { Some(k + 1) } else { (k + 1..ws.len()).find(|&j| ws[j] > 0).map(|j| j + 1) };
+    let mut next = None;
     let (mut started, mut dev_w) = (false, 0);
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
         let part = if started { sep(k) == 1 } else { k > lead };
@@ -1956,9 +1965,13 @@ fn layout(width: u16, app: &App) -> Layout {
         started = true;
         if w == 0 || x + w > width {
             more = true;
+            next = next.or_else(|| page(k));
             break;
         }
         more = w < ws[k];
+        if more {
+            next = next.or_else(|| page(k));
+        }
         if part {
             seps.push(x - 2);
         }
@@ -1969,7 +1982,7 @@ fn layout(width: u16, app: &App) -> Layout {
         }
         x += w + GAP;
     }
-    Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, seps }
+    Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, next, seps }
 }
 
 /// Lines of the table above its first row: the header, the rule and, with access to no model,
@@ -1984,7 +1997,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     if area.height == 0 {
         return (false, false, false);
     }
-    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, seps } = layout(area.width, app);
+    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, next, seps } = layout(area.width, app);
     app.hscroll = first;
     let arrow = |i: usize| match i == app.sort_col {
         true if app.descending => "▼",
@@ -2219,7 +2232,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let bench: Vec<String> = bench.into_iter().map(crate::app::bench_label).collect();
     let not = if let Input::Menu { col, .. } = &app.input { app.left_out(*col) } else { vec![] };
     if let Input::Menu { col, items, list } = &mut app.input {
-        let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, seps };
+        let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, next, seps };
         let picked = match *col {
             1 => &app.store.dev_pick,
             VIA => &app.store.via_pick,
@@ -4241,27 +4254,62 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_a_more_marker_scrolls_that_way() {
-        // A phone's terminal sends taps and no sideways wheel: the `›` takes the cursor a screen
-        // of columns right, so the view moves.
+    fn a_click_on_the_more_marker_pages_past_a_column_cut_short_at_the_start() {
+        // A narrow screen and a wide Via: Via starts the view cut short, and `›` still goes on to
+        // Notes rather than to Via again.
         let mut a = app();
-        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
+        a.data.models[0].via = crate::data::vias().map(String::from).collect();
+        a.col = VIA;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(44, 12)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         a.more = more_at(term.backend().buffer());
+        let l = layout(42, &a);
+        assert_eq!((l.first, l.next), (VIA - 1, Some(NOTES)), "Via starts the view, cut short");
         let &(column, row, _) = a.more.iter().find(|(.., m)| *m == Mouse::Cols(1)).expect("a ›");
-        let click =
+        let e =
             MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
-        let at = |a: &App| hit(a, Rect::new(0, 0, 60, 12), click);
-        let Some(Mouse::Across(n)) = at(&a) else { panic!("{:?}", at(&a)) };
-        assert!(n > 1, "a screen of columns: {n}");
-        let col = a.col;
-        a.mouse(Mouse::Across(n));
-        assert_eq!(a.col, col + n as usize);
+        a.mouse(hit(&a, Rect::new(0, 0, 44, 12), e).unwrap());
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        assert_eq!((a.col, a.hscroll), (NOTES, NOTES - 1));
+    }
+
+    #[test]
+    fn a_click_on_a_more_marker_scrolls_that_way() {
+        // A phone's terminal sends taps and no sideways wheel: the `›` pages the columns, the
+        // first one cut off starting the view, and `‹` back, the one before it ending the view.
+        let mut a = app();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
+        let area = Rect::new(0, 0, 60, 12);
+        let mut draw_at = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            a.more = more_at(term.backend().buffer());
+        };
+        let click = |a: &App, dir: isize| {
+            let &(column, row, _) = a.more.iter().find(|(.., m)| *m == Mouse::Cols(dir)).expect("a marker");
+            let e = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            hit(a, area, e)
+        };
+        draw_at(&mut a);
+        let cut = layout(58, &a).next.expect("columns cut off");
+        assert_eq!(click(&a, 1), Some(Mouse::ToCol(cut - 1, cut)));
+        a.mouse(Mouse::ToCol(cut - 1, cut));
+        draw_at(&mut a);
+        assert_eq!((a.col, layout(58, &a).first), (cut, cut - 1), "the first column cut off starts the view");
+        let Some(Mouse::ToCol(0, back)) = click(&a, -1) else { panic!("{:?}", click(&a, -1)) };
+        assert!(back < cut);
+        a.mouse(Mouse::ToCol(0, back));
+        draw_at(&mut a);
+        assert_eq!((a.col, layout(58, &a).next), (back, Some(cut)), "the one before the view ends it");
         // Under a prompt it is a click, which leaves it, where the wheel is still.
         a.key(KeyCode::Char('/').into());
         a.mouse(Mouse::Cols(1));
         assert!(matches!(a.input, Input::Search { .. }));
-        a.mouse(at(&a).unwrap());
+        a.mouse(click(&a, -1).unwrap());
         assert_eq!(a.input, Input::None);
     }
 
