@@ -27,10 +27,15 @@ const AA_API_URL: &str = "https://artificialanalysis.ai/api/v2/data/llms/models"
 // (`Arena::cut`). Page with `offset` then.
 macro_rules! arena_url {
     ($config:literal) => {
+        arena_url!($config, 0)
+    };
+    ($config:literal, $offset:literal) => {
         concat!(
             "https://datasets-server.huggingface.co/rows?dataset=lmarena-ai/leaderboard-dataset&config=",
             $config,
-            "&split=latest&offset=0&length=100"
+            "&split=latest&offset=",
+            $offset,
+            "&length=100"
         )
     };
 }
@@ -43,6 +48,24 @@ pub const ARENA_MORE: [(&str, &str); 5] = [
     ("Steerability", arena_url!("agent_steerability")),
     ("Bash recovery", arena_url!("agent_bash_recovery_steps")),
     ("Praise", arena_url!("agent_praise_complaint")),
+];
+/// Arena's leaderboards of chat and of web development, in the Arena column's dropdown too, rated
+/// as Arena rates them, around 1500 and not in percent: the name there, the leaderboard on arena.ai,
+/// which a click on a rating opens, and the pages the overall rows are on, as they come first
+/// (`Arena::parse`).
+pub const ARENA_BOARDS: [(&str, &str, &[&str]); 2] = [
+    (
+        "Chat",
+        "https://arena.ai/leaderboard/text",
+        &[
+            arena_url!("text"),
+            arena_url!("text", 100),
+            arena_url!("text", 200),
+            arena_url!("text", 300),
+            arena_url!("text", 400),
+        ],
+    ),
+    ("WebDev", "https://arena.ai/leaderboard/code/webdev", &[arena_url!("webdev"), arena_url!("webdev", 100)]),
 ];
 /// The leaderboard itself, which `o` and a click on a model's Arena score open (`arena_page`).
 const ARENA_PAGE: &str = "https://arena.ai/leaderboard/agent";
@@ -70,7 +93,8 @@ const ARENA_RETRY: Duration = Duration::from_secs(3600);
 /// 22: Epoch's task scores are one benchmark's, in percent, where they were fitted in ECI points.
 /// 23: `Model::arena_more`. 24: `Model::aka`, and rows merged by a vendor word, a sold id and a size.
 /// 25: an offer that names no models.dev page votes for the one its id is.
-const FORMAT: u32 = 25;
+/// 26: `Model::arena_more` has `ARENA_BOARDS` too.
+const FORMAT: u32 = 26;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -753,7 +777,8 @@ pub struct Model {
     /// in real agent sessions, the best of its reasoning settings (`Arena`).
     #[serde(default)]
     pub arena: Option<f64>,
-    /// Its score on each of `ARENA_MORE` that ranks it, by name, in percent as `arena`.
+    /// Its score on each of `ARENA_MORE` that ranks it, by name, in percent as `arena`, and its
+    /// rating on each of `ARENA_BOARDS`.
     #[serde(default)]
     pub arena_more: BTreeMap<String, f64>,
     /// The keys of the rows merged into it, which Arena may rank it under: "nemotron3ultra" of
@@ -913,9 +938,11 @@ impl Model {
         offered.or(self.hf.as_deref())
     }
 
-    /// Arena's Agent leaderboard, for a model it ranks (`arena`): Arena has no page per model.
+    /// Arena's Agent leaderboard, for a model it ranks (`arena`), else the first of
+    /// `ARENA_BOARDS` that rates it: Arena has no page per model.
     pub fn arena_page(&self) -> Option<String> {
-        self.arena.map(|_| ARENA_PAGE.to_string())
+        let board = ARENA_BOARDS.into_iter().find(|b| self.arena_more.contains_key(b.0)).map(|b| b.1);
+        self.arena.map(|_| ARENA_PAGE).or(board).map(String::from)
     }
 
     /// The model's pages, (site, url), of the sites that have one: models.dev, the benchmark
@@ -960,6 +987,9 @@ pub struct Data {
     /// The day Arena published the leaderboard `Model::arena` is of, "2026-10-02"; empty with none.
     #[serde(default)]
     pub arena_date: String,
+    /// The day Arena published each of `ARENA_BOARDS` that `Model::arena_more` has, by name.
+    #[serde(default)]
+    pub arena_dates: BTreeMap<String, String>,
     /// huggingface.co did not send the leaderboard and no kept scores stood in: the Arena column
     /// is empty, and the cache is stale after `ARENA_RETRY`.
     #[serde(default)]
@@ -1678,9 +1708,12 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         first.harness.extend(awaited.iter().filter_map(|h| Some((h.to_string(), shown.remove(*h)?))));
         first.listing = awaited.iter().any(|h| !first.harness.contains_key(*h));
         // Arena's leaderboard, the slowest download, is not waited for either.
-        if let Some(arena) = Arena::cached(&cache).filter(|a| a.current(now())) {
+        if let Some(mut arena) = Arena::cached(&cache, now()) {
+            if !arena.current(now()) {
+                arena = Arena { boards: arena.boards, ..Default::default() };
+            }
             arena.score(&mut first.models);
-            first.arena_date.clone_from(&arena.date);
+            (first.arena_date, first.arena_dates) = (arena.date.clone(), arena.dates());
         }
         first.apply_available();
         early(first);
@@ -1699,7 +1732,9 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let [arena, more @ ..] = late.all(steps);
     let ranked = Arena::parse(&arena.unwrap_or_default());
     let unranked = ranked.is_none().then_some("huggingface.co did not send Arena's agent leaderboard");
-    let arena = ranked.or_else(|| Arena::cached(&cache)).unwrap_or_default();
+    let mut kept = Arena::cached(&cache, now()).unwrap_or_default();
+    let mut kept_boards = std::mem::take(&mut kept.boards);
+    let arena = ranked.or(Some(kept).filter(|k| !k.scores.is_empty())).unwrap_or_default();
     let unranked = match (unranked, arena.current(now())) {
         (Some(e), true) => Some(format!("{e}: its scores are kept from the last refresh")),
         (Some(e), false) => {
@@ -1718,18 +1753,34 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     // A leaderboard kept from the last refresh has its signals too.
     // ponytail: with the leaderboard new, a signal that did not come, or is of another day, is
     // empty until the next refresh, with no warning. Keep that one from the cache if it shows.
-    for ((name, _), rows) in ARENA_MORE.into_iter().zip(more) {
-        let signal = rows.ok().and_then(|r| Arena::parse(&r)).filter(|s| s.date == arena.date);
+    let (signals, mut pages) = more.split_at(ARENA_MORE.len());
+    for ((name, _), rows) in ARENA_MORE.into_iter().zip(signals) {
+        let signal = rows.as_ref().ok().and_then(|r| Arena::parse(r)).filter(|s| s.date == arena.date);
         arena.more.extend(signal.map(|s| (name, s.scores)));
+    }
+    // Of its own day, and current, else the one of the last refresh while it is: one bad page is
+    // not a day without it.
+    let mut uncut = vec![];
+    for (name, _, urls) in ARENA_BOARDS {
+        let got;
+        (got, pages) = pages.split_at(urls.len());
+        let board = Arena::board(got.iter().map(|r| r.as_deref().ok())).filter(|b| b.current(now()));
+        let Some(board) = board.or_else(|| kept_boards.remove(name)) else { continue };
+        let said =
+            || format!("Arena's {name} leaderboard has more rows than were read: some models have no {name} rating");
+        uncut.extend(board.cut.then(said));
+        arena.boards.insert(name, board);
     }
     arena.score(&mut data.models);
     data.arena_date.clone_from(&arena.date);
+    data.arena_dates = arena.dates();
     if let Some((_, Ok(o))) = &mut other {
         aa_pages(&mut o.models, &aa);
         epoch_listed(&mut o.models, &epoch);
         hf_listed(&mut o.models, &openrouter);
         arena.score(&mut o.models);
-        (o.arena_date, o.arena_missed) = (arena.date.clone(), data.arena_missed);
+        (o.arena_date, o.arena_dates, o.arena_missed) =
+            (arena.date.clone(), data.arena_dates.clone(), data.arena_missed);
     }
     // Until the last harness has answered. One that never does, its thread dead, is silent.
     listed.extend(answers.iter());
@@ -1762,7 +1813,8 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let renamed = data.warning.take();
     let warnings =
         [renamed, unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
-    let warnings = warnings.into_iter().chain(unpaged).chain([unnamed, unranked, unswitched]);
+    let warnings =
+        warnings.into_iter().chain(unpaged).chain([unnamed, unranked, unswitched]).chain(uncut.into_iter().map(Some));
     data.warning = Some(warnings.flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
@@ -1774,13 +1826,23 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
 type Downloaded =
     (Data, Option<(Source, Result<Data, Failure>)>, [Result<Vec<u8>, Failure>; 3], Result<Vec<u8>, Failure>, Late);
 
-/// Where Arena's downloads start in `download`'s: its agent leaderboard, then `ARENA_MORE`.
+/// Where Arena's downloads start in `download`'s: its agent leaderboard, then `ARENA_MORE`, then
+/// the pages of `ARENA_BOARDS`.
 const ARENA_AT: usize = 7;
+
+/// How many of `download`'s are Arena's.
+const ARENA_URLS: usize = 1 + ARENA_MORE.len() + {
+    let (mut n, mut b) = (0, 0);
+    while b < ARENA_BOARDS.len() {
+        (n, b) = (n + ARENA_BOARDS[b].2.len(), b + 1);
+    }
+    n
+};
 
 /// Arena's downloads, which `download` does not wait for: the ones it `got`, and the rest as
 /// they come, until `end`.
 struct Late {
-    got: [Result<Vec<u8>, Failure>; 6],
+    got: [Result<Vec<u8>, Failure>; ARENA_URLS],
     rx: std::sync::mpsc::Receiver<(usize, Result<Vec<u8>, Failure>)>,
     end: Instant,
     sites: Vec<&'static str>,
@@ -1788,7 +1850,7 @@ struct Late {
 
 impl Late {
     /// All of them, waited for until `end`: one that did not come is a failure.
-    fn all(mut self, steps: &Steps) -> [Result<Vec<u8>, Failure>; 6] {
+    fn all(mut self, steps: &Steps) -> [Result<Vec<u8>, Failure>; ARENA_URLS] {
         let timed =
             std::iter::from_fn(|| self.rx.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok());
         // The ones that came before `end`, when it is past.
@@ -1810,21 +1872,27 @@ const GRACE: Duration = Duration::from_secs(10);
 /// their own: none is waited for once the refresh cannot finish, and the links and the newest
 /// release no longer than `GRACE` once it can. Arena's are not waited for at all, but by `Late`.
 fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded, Failure> {
-    const URLS: [&str; 13] = [
-        MODELS_URL,
-        EPOCH_URL,
-        AA_API_URL,
-        AA_URL,
-        EPOCH_PAGES_URL,
-        OPENROUTER_URL,
-        RELEASE_URL,
-        ARENA_URL,
-        ARENA_MORE[0].1,
-        ARENA_MORE[1].1,
-        ARENA_MORE[2].1,
-        ARENA_MORE[3].1,
-        ARENA_MORE[4].1,
-    ];
+    const URLS: [&str; ARENA_AT + ARENA_URLS] = {
+        let head = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, EPOCH_PAGES_URL, OPENROUTER_URL, RELEASE_URL, ARENA_URL];
+        let (mut urls, mut n, mut i) = ([""; ARENA_AT + ARENA_URLS], 0, 0);
+        while n < head.len() {
+            urls[n] = head[n];
+            n += 1;
+        }
+        while i < ARENA_MORE.len() {
+            (urls[n], n, i) = (ARENA_MORE[i].1, n + 1, i + 1);
+        }
+        let mut b = 0;
+        while b < ARENA_BOARDS.len() {
+            i = 0;
+            while i < ARENA_BOARDS[b].2.len() {
+                (urls[n], n, i) = (ARENA_BOARDS[b].2[i], n + 1, i + 1);
+            }
+            b += 1;
+        }
+        assert!(n == urls.len());
+        urls
+    };
     let needed = [0, if src == Source::Aa { 2 } else { 1 }];
     let (tx, rx) = std::sync::mpsc::channel();
     let (mut sites, mut left) = (vec![], 0);
@@ -1849,7 +1917,8 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         });
     }
     drop(tx);
-    let mut got: [Result<Vec<u8>, Failure>; 13] = URLS.map(|url| Err(format!("{url}: no reply").into()));
+    let mut got: [Result<Vec<u8>, Failure>; ARENA_AT + ARENA_URLS] =
+        URLS.map(|url| Err(format!("{url}: no reply").into()));
     // Once the first three that were asked for are in, the rest get `GRACE` and no more. The
     // other source's scores are among them, though not needed: they fill its cache, and Epoch's
     // names decide which key a merged row keeps, which your favorites and notes hang on.
@@ -2078,8 +2147,15 @@ fn hf_listed(models: &mut [Model], list: &[u8]) -> bool {
 /// longer publishes is not shown as today's.
 const ARENA_MAX_AGE: f64 = 2.0;
 
-/// Arena's Agent leaderboard: the day it was published, each model's score by `Model::key`, in
-/// percent to a decimal, and whether it has rows that were not read.
+/// Whether a leaderboard of `date` was published within `ARENA_MAX_AGE` of `now`, in seconds
+/// since 1970.
+fn fresh(date: &str, now: u64) -> bool {
+    let age = crate::fit::months(date).map(|then| now as f64 / (30.44 * 86400.0) - then);
+    age.is_some_and(|a| a <= ARENA_MAX_AGE)
+}
+
+/// Arena's Agent leaderboard: the day it was published, each model's score by the words of its
+/// name, "gpt 6 high", in percent to a decimal, and whether it has rows that were not read.
 #[derive(Default, PartialEq, Debug)]
 struct Arena {
     date: String,
@@ -2087,14 +2163,25 @@ struct Arena {
     cut: bool,
     /// Each of `ARENA_MORE` that came with it, by name: its scores, as `scores`.
     more: BTreeMap<&'static str, HashMap<String, f64>>,
+    /// Each of `ARENA_BOARDS`, by name, of its own day: it shows whatever the agent leaderboard's.
+    boards: BTreeMap<&'static str, Arena>,
 }
 
 impl Arena {
-    /// From the rows of its dataset, none when they are not that: `{"num_rows_total": 50, "rows":
-    /// [{"row": {"model_name": "Claude Opus 5 (High)", "score": 0.0867, "category": "overall",
-    /// "leaderboard_publish_date": "2026-10-02"}}]}`. Arena has a row per reasoning setting,
-    /// named in brackets: the model gets its best, as with Epoch's benchmarks.
+    /// `page` with a score at least.
     fn parse(rows: &[u8]) -> Option<Arena> {
+        Arena::page(rows).filter(|a| !a.scores.is_empty())
+    }
+
+    /// From a page of the rows of its dataset, none when they are not that: `{"num_rows_total":
+    /// 50, "rows": [{"row_idx": 0, "row": {"model_name": "Claude Opus 5 (High)", "score": 0.0867,
+    /// "category": "overall", "leaderboard_publish_date": "2026-10-02"}}]}`, or a "rating" for a
+    /// score in `ARENA_BOARDS`. Arena has a row per reasoning setting, named in brackets or at the
+    /// end, "gpt-5.5-high": the model gets its best, as with Epoch's benchmarks (`score`). The
+    /// overall rows come first: it is cut when a page ends in one with more rows after it.
+    // ponytail: an order Arena keeps, not one it says. Ask its filter endpoint for the overall
+    // rows if that changes, which was not up at the time.
+    fn page(rows: &[u8]) -> Option<Arena> {
         #[derive(Deserialize)]
         struct Rows {
             #[serde(default)]
@@ -2103,6 +2190,8 @@ impl Arena {
         }
         #[derive(Deserialize)]
         struct Wrapped {
+            /// Its place in the dataset, from 0: a page with none is the first.
+            row_idx: Option<usize>,
             row: Row,
         }
         // Any of them may be null: the row is then left out, not the leaderboard.
@@ -2110,29 +2199,62 @@ impl Arena {
         struct Row {
             model_name: Option<String>,
             score: Option<f64>,
+            rating: Option<f64>,
             category: Option<String>,
             leaderboard_publish_date: Option<String>,
         }
         let all = serde_json::from_slice::<Rows>(rows).ok()?;
-        let mut arena = Arena { cut: all.num_rows_total > all.rows.len(), ..Default::default() };
-        for r in all.rows.into_iter().map(|w| w.row).filter(|r| r.category.as_deref() == Some("overall")) {
-            let (Some(name), Some(score)) = (r.model_name, r.score.filter(|s| s.is_finite())) else { continue };
+        let overall = |r: &Row| r.category.as_deref().is_none_or(|c| c == "overall");
+        let ends_overall = all.rows.last().is_none_or(|w| overall(&w.row));
+        let read = all.rows.last().and_then(|w| w.row_idx).map_or(all.rows.len(), |i| i + 1);
+        let mut arena = Arena { cut: all.num_rows_total > read && ends_overall, ..Default::default() };
+        for r in all.rows.into_iter().map(|w| w.row).filter(overall) {
             // No -0.0, which would show apart from 0.0.
-            let pct = (score * 1000.0).round() / 10.0 + 0.0;
-            arena.scores.entry(norm(&clean_name(&name))).and_modify(|b| *b = b.max(pct)).or_insert(pct);
+            let pct = r.score.map(|s| (s * 1000.0).round() / 10.0 + 0.0);
+            let (Some(name), Some(score)) = (r.model_name, pct.or(r.rating.map(f64::round)).filter(|s| s.is_finite()))
+            else {
+                continue;
+            };
+            let w = words(&clean_name(&name)).join(" ");
+            arena.scores.entry(w).and_modify(|b| *b = b.max(score)).or_insert(score);
             arena.date = arena.date.max(r.leaderboard_publish_date.unwrap_or_default());
         }
-        (!arena.scores.is_empty()).then_some(arena)
+        Some(arena)
+    }
+
+    /// One of `ARENA_BOARDS`, from its pages in order: those with its overall rows, as one past
+    /// them may have other rows or none. None when one of those did not come.
+    fn board<'a>(pages: impl IntoIterator<Item = Option<&'a [u8]>>) -> Option<Arena> {
+        let mut pages = pages.into_iter().map(|p| Arena::page(p?));
+        let mut board = pages.next()??;
+        for page in pages {
+            if !board.cut {
+                break;
+            }
+            board = board.and(page?);
+        }
+        Some(board).filter(|b| !b.scores.is_empty())
+    }
+
+    /// The leaderboard of its pages `self` and `next`, its scores the best of either.
+    fn and(mut self, next: Arena) -> Arena {
+        for (k, v) in next.scores {
+            self.scores.entry(k).and_modify(|b| *b = b.max(v)).or_insert(v);
+        }
+        Arena { date: self.date.max(next.date), cut: next.cut, ..self }
     }
 
     /// The one of the last refresh, from its cache, when this refresh got none: one bad download
-    /// is not a day without the column.
-    fn cached(cache: &[u8]) -> Option<Arena> {
+    /// is not a day without the column. Its boards are those still current at `now`, and its
+    /// scores may be none.
+    fn cached(cache: &[u8], now: u64) -> Option<Arena> {
         #[derive(Deserialize)]
         struct Kept {
             format: u32,
             #[serde(default)]
             arena_date: String,
+            #[serde(default)]
+            arena_dates: BTreeMap<String, String>,
             models: Vec<Row>,
         }
         #[derive(Deserialize)]
@@ -2144,27 +2266,64 @@ impl Arena {
             arena_more: BTreeMap<String, f64>,
         }
         let kept = serde_json::from_slice::<Kept>(cache).ok().filter(|d| d.format == FORMAT)?;
-        let mut more: BTreeMap<_, HashMap<_, _>> = BTreeMap::new();
-        for (name, _) in ARENA_MORE {
-            let scored = kept.models.iter().filter_map(|m| Some((m.key.clone(), *m.arena_more.get(name)?)));
-            more.insert(name, scored.collect());
-        }
-        let scores: HashMap<_, _> = kept.models.into_iter().filter_map(|m| Some((m.key, m.arena?))).collect();
-        (!scores.is_empty()).then_some(Arena { date: kept.arena_date, scores, more, cut: false })
+        let of = |name| kept.models.iter().filter_map(|m| Some((m.key.clone(), *m.arena_more.get(name)?))).collect();
+        let more = ARENA_MORE.into_iter().map(|(name, _)| (name, of(name))).collect();
+        let boards = ARENA_BOARDS.into_iter().filter_map(|(name, ..)| {
+            let date = kept.arena_dates.get(name)?.clone();
+            Some((name, Arena { date, scores: of(name), ..Default::default() })).filter(|b| b.1.current(now))
+        });
+        let boards = boards.collect();
+        let scores = kept.models.into_iter().filter_map(|m| Some((m.key, m.arena?))).collect();
+        Some(Arena { date: kept.arena_date, scores, more, boards, cut: false })
+    }
+
+    /// Its signals and boards, by name.
+    fn lists(&self) -> impl Iterator<Item = (&&'static str, &HashMap<String, f64>)> {
+        self.more.iter().chain(self.boards.iter().map(|(n, b)| (n, &b.scores)))
+    }
+
+    /// The day each of its boards was published, as `Data::arena_dates`.
+    fn dates(&self) -> BTreeMap<String, String> {
+        self.boards.iter().map(|(n, b)| (n.to_string(), b.date.clone())).collect()
     }
 
     /// Whether it was published within `ARENA_MAX_AGE` of `now`, in seconds since 1970.
     fn current(&self, now: u64) -> bool {
-        let age = crate::fit::months(&self.date).map(|then| now as f64 / (30.44 * 86400.0) - then);
-        age.is_some_and(|a| a <= ARENA_MAX_AGE)
+        fresh(&self.date, now)
     }
 
-    /// Gives each model its score, none to one Arena does not rank.
+    /// Gives each model its score, none to one Arena does not rank. A name that is no model's,
+    /// ending in a reasoning setting or a "max", is that setting of the model it names before
+    /// it: Arena's chat leaderboard has "gpt-6.1-sol-max", and "Qwen3.8-Max" is a model. Not when
+    /// that one cannot reason: "Phi-4-reasoning" is not Phi-4 set to reason (`own_reasoner`).
+    // ponytail: a Max model models.dev does not list gets its rating given to the one before it,
+    // which can reason. Only a list of Arena's own models would tell them apart.
     fn score(&self, models: &mut [Model]) {
+        let known: HashSet<&str> =
+            models.iter().flat_map(|m| std::iter::once(&m.key).chain(&m.aka)).map(String::as_str).collect();
+        let plain = plain(models);
+        let settled = |s: &HashMap<String, f64>| {
+            let mut out: HashMap<String, f64> = HashMap::new();
+            for (name, &v) in s {
+                let w: Vec<String> = name.split(' ').map(String::from).collect();
+                let n = match setting_at(&w) {
+                    n if n == w.len() && n > 1 && w[n - 1] == "max" => n - 1,
+                    n => n,
+                };
+                let (whole, base) = (w.concat(), w[..n].concat());
+                let set = n < w.len() && !known.contains(whole.as_str()) && known.contains(base.as_str());
+                // As `own_reasoner`, with "max" a setting too.
+                let own = setting(&w[n..]).0 == Some(true) && plain.contains(&base);
+                let k = if set && !own { base } else { whole };
+                out.entry(k).and_modify(|b| *b = b.max(v)).or_insert(v);
+            }
+            out
+        };
+        let (scores, more) = (settled(&self.scores), self.lists().map(|(n, s)| (n, settled(s))).collect::<Vec<_>>());
         for m in models {
             let of = |s: &HashMap<String, f64>| std::iter::once(&m.key).chain(&m.aka).find_map(|k| s.get(k)).copied();
-            m.arena = of(&self.scores);
-            m.arena_more = self.more.iter().filter_map(|(n, s)| Some((n.to_string(), of(s)?))).collect();
+            m.arena = of(&scores);
+            m.arena_more = more.iter().filter_map(|(n, s)| Some((n.to_string(), of(s)?))).collect();
         }
     }
 }
@@ -3818,16 +3977,63 @@ mod tests {
         assert_eq!(merged[0].arena, Some(8.7), "or by the key of a row merged into it");
         assert!(Arena::parse(rows.replace("7,", "8,").as_bytes()).unwrap().cut, "more rows than were read");
         assert_eq!(Arena::parse(b"<html>"), None);
+        // A board's ratings, over the pages with its overall rows: cut while a page ends in one
+        // that is not the dataset's last.
+        let page = |total: usize, rows: &[(usize, &str, f64, &str)]| {
+            let rows = rows.iter().map(|(i, name, rating, cat)| {
+                format!(
+                    r#"{{"row_idx": {i}, "row": {{"model_name": "{name}", "rating": {rating}, "category": "{cat}"}}}}"#
+                )
+            });
+            format!(r#"{{"num_rows_total": {total}, "rows": [{}]}}"#, rows.collect::<Vec<_>>().join(","))
+        };
+        let first = page(9, &[(0, "gpt-6-high", 1520.4, "overall"), (1, "gpt-6-max", 1510.0, "overall")]);
+        let tail = page(9, &[(7, "qwen3.8-max", 1490.0, "overall"), (8, "kimi-k2-thinking", 1480.0, "overall")]);
+        let ended = page(9, &[(2, "phi-4-reasoning", 1400.0, "overall"), (3, "gpt-6", 1600.0, "coding")]);
+        let (first, tail) = (first.as_bytes(), tail.as_bytes());
+        assert!(Arena::page(first).unwrap().cut && !Arena::page(tail).unwrap().cut, "the dataset's last row");
+        assert!(!Arena::page(ended.as_bytes()).unwrap().cut, "its last overall row");
+        let past = page(9, &[(4, "gpt-6", 1600.0, "coding")]);
+        let board = Arena::board([Some(first), Some(ended.as_bytes()), None, Some(past.as_bytes())]).unwrap();
+        assert!(!board.cut, "no page read past the overall rows, nor needed");
+        assert_eq!(Arena::board([Some(first), None, Some(tail)]), None, "one with overall rows did not come");
+        assert_eq!(Arena::board([Some(past.as_bytes())]), None, "no rating");
+        let uncategorized = br#"{"num_rows_total": 1, "rows": [{"row": {"model_name": "x-1", "rating": 1000}}]}"#;
+        let one = Arena::page(uncategorized).unwrap();
+        assert_eq!((one.scores.get("x 1"), one.cut), (Some(&1000.0), false), "a row of no category is overall");
+        let board = Arena::board([Some(first), Some(tail)]).unwrap();
+        // A setting or a "max" at the end of a name that is no model's goes, but not from one that
+        // cannot reason, nor a "max" that is part of a word.
+        let more = [("phi 4 reasoning", 1400.0), ("foo 3dsmax", 1300.0), ("foo 2 max", 1250.0)];
+        let scores = board.scores.into_iter().chain(more.map(|(k, v)| (k.to_string(), v))).collect();
+        let reasoner = |key: &str| Model { reasoning: true, ..row(key) };
+        let mut ms = [reasoner("gpt6"), row("qwen38max"), row("qwen38"), row("kimik2thinking"), reasoner("kimik2")];
+        let mut ms2 = [row("phi4"), row("foo3ds"), row("foo2")];
+        let board = Arena { scores, ..Default::default() };
+        let rated = Arena { boards: [("Chat", board)].into(), ..Default::default() };
+        rated.score(&mut ms);
+        rated.score(&mut ms2);
+        let got = ms.each_ref().map(|m| m.arena_more.get("Chat").copied());
+        assert_eq!(got, [Some(1520.0), Some(1490.0), None, Some(1480.0), None], "the best setting, or its own");
+        assert_eq!(ms2.each_ref().map(|m| m.arena_more.get("Chat").copied()), [None, None, None]);
         // Kept from the cache when it did not come, until Arena has published none for too long.
         let cache = format!(
             r#"{{"format": {FORMAT}, "fetched": 0, "arena_date": "2026-10-02",
-            "models": [{{"key": "claudeopus5", "arena": 8.7, "arena_more": {{"Praise": 3.1}}}}, {{"key": "gpt6"}}]}}"#
+            "arena_dates": {{"Chat": "2026-09-30", "WebDev": "2026-07-01"}},
+            "models": [{{"key": "claudeopus5", "arena": 8.7, "arena_more": {{"Praise": 3.1}}}},
+                {{"key": "gpt6", "arena_more": {{"Chat": 1500, "WebDev": 1400}}}}]}}"#
         );
-        let kept = Arena::cached(cache.as_bytes()).unwrap();
+        let day = |d: u64| (56 * 365 + 14 + 273 + d) * 86400; // 2026-10-01 and d days
+        let kept = Arena::cached(cache.as_bytes(), day(7)).unwrap();
+        assert_eq!(kept.boards.get("Chat").map(|c| c.scores["gpt6"]), Some(1500.0), "a board of its own day");
+        assert!(kept.boards.keys().eq(&["Chat"]), "while that is not too old");
+        let unranked = cache.replace(r#""arena": 8.7, "#, "");
+        let unranked = Arena::cached(unranked.as_bytes(), day(7)).unwrap();
+        assert!(unranked.scores.is_empty() && unranked.boards.contains_key("Chat"), "with no agent score kept");
         assert_eq!((kept.more["Praise"]["claudeopus5"], kept.more["Steerability"].len()), (3.1, 0), "its signals too");
         assert_eq!((kept.date.as_str(), kept.scores.len(), kept.scores["claudeopus5"]), ("2026-10-02", 1, 8.7));
-        assert_eq!(Arena::cached(cache.replace(&FORMAT.to_string(), "1").as_bytes()), None, "not of another format");
-        let day = |d: u64| (56 * 365 + 14 + 273 + d) * 86400; // 2026-10-01 and d days
+        let other = cache.replace(&FORMAT.to_string(), "1");
+        assert_eq!(Arena::cached(other.as_bytes(), day(7)), None, "not of another format");
         assert!(kept.current(day(7)) && !kept.current(day(120)) && !Arena::default().current(day(7)));
         // A cache that missed them is tried again within the hour, not the day.
         let aged = |mins: u64, arena_missed| Data {

@@ -117,7 +117,7 @@ model for a subtask.
 - [Artificial Analysis](https://artificialanalysis.ai): benchmarks and speed, and it needs a
   free API key.
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models rank in real agent sessions,
-  the Arena column, and it needs no API key.
+  chat and web development, the Arena column, and it needs no API key.
 
 When the TUI is first started, it prompts the user for an Artificial Analysis API key.
 If a key is provided, the recommended models are based on Artificial Analysis benchmarks, else Epoch AI is used.

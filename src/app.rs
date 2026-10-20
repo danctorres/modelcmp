@@ -88,7 +88,8 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
 /// at hand too.
 fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
     if id == ARENA {
-        return Some(("Agent", crate::data::ARENA_MORE.iter().map(|s| s.0).collect()));
+        let boards = crate::data::ARENA_BOARDS.iter().map(|b| b.0);
+        return Some(("Agent", boards.chain(crate::data::ARENA_MORE.iter().map(|s| s.0)).collect()));
     }
     let task = crate::fit::task(id)?;
     let (own, more) = task.sourced();
@@ -101,9 +102,15 @@ pub fn bench_label(b: &str) -> String {
     format!("{b} · {}", if arena_bench(b) { "Arena" } else { crate::fit::bench_source(b).label() })
 }
 
-/// Whether `b` is in the Arena column's dropdown: its score or one of its signals.
+/// Whether `b` is in the Arena column's dropdown: its score, one of its signals or another of its
+/// leaderboards.
 fn arena_bench(b: &str) -> bool {
-    b == "Agent" || crate::data::ARENA_MORE.iter().any(|s| s.0 == b)
+    b == "Agent" || crate::data::ARENA_MORE.iter().any(|s| s.0 == b) || arena_board(b)
+}
+
+/// Whether `b` is one of `ARENA_BOARDS`, rated and not in percent.
+fn arena_board(b: &str) -> bool {
+    crate::data::ARENA_BOARDS.iter().any(|s| s.0 == b)
 }
 
 fn positive(x: f64) -> Option<f64> {
@@ -246,9 +253,16 @@ pub fn on_price(i: usize) -> bool {
     COLS[i].price
 }
 
-/// A value of `COLS[i]` as its cell shows it: after a `~` when it comes from a list price (`Model::listed`).
-pub fn shown(i: usize, v: f64, listed: bool) -> String {
-    let s = (COLS[i].show)(v);
+/// How `COLS[i]` shows a value with `bench` picked in its dropdown: a rating of `ARENA_BOARDS`
+/// whole, not in percent as the rest of Arena's.
+pub fn show(i: usize, bench: Option<&str>) -> fn(f64) -> String {
+    if bench.is_some_and(arena_board) { |v| score(Some(v)) } else { COLS[i].show }
+}
+
+/// A value of `COLS[i]` as its cell shows it, with `bench` picked: after a `~` when it comes from
+/// a list price (`Model::listed`).
+pub fn shown(i: usize, v: f64, listed: bool, bench: Option<&str>) -> String {
+    let s = show(i, bench)(v);
     if listed && on_price(i) { format!("~{s}") } else { s }
 }
 
@@ -1529,7 +1543,7 @@ impl App {
                 None => (COLS[c].get)(m),
             };
         }
-        let shown = self.vals.iter().zip(&self.listed).filter_map(|(v, &l)| Some(shown(c, v[c]?, l)));
+        let shown = self.vals.iter().zip(&self.listed).filter_map(|(v, &l)| Some(shown(c, v[c]?, l, pick)));
         self.widths[c] = shown.map(|s| s.chars().count()).max().unwrap_or(0);
     }
 
@@ -1581,6 +1595,9 @@ impl App {
     /// What the column at cursor index `col` means.
     pub fn col_about(&self, col: usize) -> String {
         let about = match self.col_bench(col) {
+            Some(b) if arena_board(b) => {
+                format!("{} rating from people's votes, higher is better, measured by arena.ai", b.to_lowercase())
+            }
             Some(b) if arena_bench(b) => {
                 "net improvement on this signal alone in real agent sessions, %, measured by arena.ai".into()
             }
@@ -2539,7 +2556,7 @@ impl App {
             Fail::Pick(_) => Some(format!("{} picked in Dev", picks(&self.store.dev_pick))),
             Fail::Bound(b) => {
                 let (c, lo, hi) = self.bounds[b];
-                Some(view::bound_said(self.col_name(c), c, lo, hi))
+                Some(view::bound_said(self.col_name(c), c, lo, hi, self.col_bench(c)))
             }
         })
     }
@@ -3562,7 +3579,9 @@ impl App {
                 let (site, page) = if col < ECI {
                     ("models.dev", m.price_page())
                 } else if numeric(col).is_some_and(|c| c.id == ARENA) {
-                    ("arena.ai", m.arena_page())
+                    // A rating opens its own leaderboard, the rest the agent one.
+                    let board = crate::data::ARENA_BOARDS.iter().find(|b| self.col_bench(col) == Some(b.0));
+                    ("arena.ai", board.map(|b| b.1.to_string()).or_else(|| m.arena_page()))
                 } else {
                     let src = self.col_source(col).unwrap_or_else(crate::data::source);
                     (src.site(), m.page(src))
@@ -4577,7 +4596,7 @@ mod tests {
         press(&mut a, "<8");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), vec!["mini"], "the one over 8 GB and the one of unknown size hidden");
-        assert_eq!(view::bound_said("Via", VIA, f64::NEG_INFINITY, 8.0), "Via≤8.0 GB");
+        assert_eq!(view::bound_said("Via", VIA, f64::NEG_INFINITY, 8.0, None), "Via≤8.0 GB");
         let asked: Vec<_> = a.size_ask().into_iter().map(|q| q.0).collect();
         assert_eq!(asked, ["opus5", "llama4"], "asked, hidden ones too");
         a.sized([("opus5", Download::Size(2_000_000_000))]);
@@ -5294,24 +5313,33 @@ mod tests {
         assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0 · Artificial Analysis"]);
     }
 
-    /// Arena's dropdown lists its signals, in percent as its score, with a task picked too.
+    /// Arena's dropdown lists its other leaderboards, rated, then its signals, in percent as its
+    /// score, with a task picked too.
     #[test]
     fn the_arena_column_shows_the_signal_picked_in_its_dropdown() {
         let mut a = app();
         let mut data = std::mem::take(&mut a.data);
         let m = data.models.iter_mut().find(|m| m.key == "mini").unwrap();
-        (m.arena, m.arena_more) = (Some(8.7), [("Steerability".to_string(), -1.2)].into());
+        (m.arena, m.arena_more) = (Some(8.7), [("Steerability".into(), -1.2), ("Chat".into(), 1532.0)].into());
         a.set_data(data);
         a.task = crate::fit::task("coding");
         a.col = ARENA_COL;
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("Agent · Arena", 1), ("Task outcome · Arena", 0)]);
-        assert_eq!(menu(&a)[3], ("Steerability · Arena", 1));
-        press(&mut a, "3j ");
-        code(&mut a, KeyCode::Esc);
+        assert_eq!(
+            menu(&a)[..4],
+            [("Agent · Arena", 1), ("Chat · Arena", 1), ("WebDev · Arena", 0), ("Task outcome · Arena", 0)]
+        );
+        assert_eq!(menu(&a)[5], ("Steerability · Arena", 1));
+        press(&mut a, "j ");
         let mini = a.data.models.iter().position(|m| m.key == "mini").unwrap();
+        assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Chat", Some(1532.0)));
+        assert_eq!(shown(a.col - TEXT, 1532.0, false, a.col_bench(a.col)), "1532", "a rating, not a percent");
+        assert_eq!(view::bound_said("Chat", a.col, 1500.0, f64::INFINITY, a.col_bench(a.col)), "Chat≥1500");
+        assert!(a.col_about(a.col).starts_with("chat rating"), "{}", a.col_about(a.col));
+        press(&mut a, "4j ");
+        code(&mut a, KeyCode::Esc);
         assert_eq!((a.col_name(a.col), a.val(mini, a.col), a.col_source(a.col)), ("Steerability", Some(-1.2), None));
-        assert_eq!(shown(a.col - TEXT, -1.2, true), "-1.2");
+        assert_eq!(shown(a.col - TEXT, -1.2, true, a.col_bench(a.col)), "-1.2");
         press(&mut a, "d ");
         assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Arena", Some(8.7)), "the picked one again drops it");
     }

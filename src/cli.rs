@@ -107,6 +107,12 @@ struct ModelOut<'a> {
     /// Net improvement in real agent sessions, in percent, from arena.ai's Agent leaderboard
     #[serde(skip_serializing_if = "Option::is_none")]
     arena_agent: Option<f64>,
+    /// Rating from people's votes on chat, around 1500, from arena.ai's Text leaderboard
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arena_chat: Option<f64>,
+    /// Rating from people's votes on web development, from arena.ai's WebDev leaderboard
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arena_webdev: Option<f64>,
     /// Output tokens per second, median, from Artificial Analysis
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens_per_second: Option<f64>,
@@ -167,6 +173,8 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
             .collect(),
         other_index: m.other_index,
         arena_agent: m.arena,
+        arena_chat: m.arena_more.get(crate::data::ARENA_BOARDS[0].0).copied(),
+        arena_webdev: m.arena_more.get(crate::data::ARENA_BOARDS[1].0).copied(),
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
         task_cost_usd: m.task_usd(),
@@ -190,8 +198,9 @@ fn print_json<T: Serialize>(v: &T) -> Result {
 fn table(models: &[&Model], store: &Store, any: bool) {
     let cols: Vec<(usize, &Col)> =
         COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT) && !unmeasured(i + TEXT)).collect();
-    let cell =
-        |m: &Model, &(i, c): &(usize, &Col)| (c.get)(m).map_or("-".into(), |v| shown(i, v, on_price(i) && m.listed()));
+    let cell = |m: &Model, &(i, c): &(usize, &Col)| {
+        (c.get)(m).map_or("-".into(), |v| shown(i, v, on_price(i) && m.listed(), None))
+    };
     let cells: Vec<Vec<String>> = models.iter().map(|m| cols.iter().map(|c| cell(m, c)).collect()).collect();
     let cols: Vec<&Col> = cols.into_iter().map(|(_, c)| c).collect();
     let widths: Vec<usize> = (0..cols.len())

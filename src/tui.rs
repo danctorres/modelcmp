@@ -2166,7 +2166,13 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 _ => text,
             };
             let w = w as usize;
-            buf.set_stringn(area.x + x, y, format!("{:>w$}", shown(i, v, listed)), w, style);
+            buf.set_stringn(
+                area.x + x,
+                y,
+                format!("{:>w$}", shown(i, v, listed, app.col_bench(i + crate::app::TEXT))),
+                w,
+                style,
+            );
         }
         if let Some((x, w)) = via {
             let (start, end) = (area.x + x, area.x + x + w);
@@ -2463,7 +2469,8 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     // benchmark picked is.
     let hide = &app.store.hide;
     let bounds = app.bounds.iter().filter(|b| crate::app::bound_applies(b.0, hide));
-    let bounds = bounds.map(|&(col, lo, hi)| crate::view::bound_said(app.col_name(col), col, lo, hi));
+    let bounds =
+        bounds.map(|&(col, lo, hi)| crate::view::bound_said(app.col_name(col), col, lo, hi, app.col_bench(col)));
     for said in crate::view::picks_said(&app.store).into_iter().chain(bounds) {
         parts.push(part(said, Color::Yellow));
     }

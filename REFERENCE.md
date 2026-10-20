@@ -20,7 +20,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Ctx | context window, in tokens |
 | ECI | Epoch Capabilities Index. From Epoch AI |
 | AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
-| Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard |
+| Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard, and its chat and WebDev ratings in the dropdown |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | Coding score per dollar of Price, ranked 0-100 |
 | $task | USD per coding task, [measured](#task) by Epoch AI |
@@ -145,14 +145,17 @@ Artificial Analysis (`--source aa`, its API with your key):
 - It scores more models than Epoch AI does, most of all on Agentic.
 - Its API lists no cost of a task, so `$task` and `Tok/task` are hidden with it.
 
-Arena (its Agent leaderboard, no key needed):
+Arena (its Agent, Text and WebDev leaderboards, no key needed):
 
 - Arena is the score arena.ai publishes, its net improvement in real agent sessions, in
   percent. It can be negative, and higher is better. modelcmp does not compute it.
 - Arena lists a model once per reasoning setting, and the column has the best of them.
-- The column's dropdown (`d`) has the signals the score is made of, each as Arena publishes
-  it, in percent: task outcome, tool hallucination, steerability, bash recovery and praise.
-  One that a refresh could not get is empty until the next.
+- The column's dropdown (`d`) has Arena's Chat and WebDev ratings, from people's votes in
+  its Text and WebDev leaderboards, around 1500 and higher is better. A click on one opens its
+  leaderboard. Then the signals the agent score is made of, each as Arena publishes it, in
+  percent: task outcome, tool hallucination, steerability, bash recovery and praise.
+  One that a refresh could not get is empty until the next, and a rating is empty once its
+  leaderboard is more than two months old.
 - It shows with either source, and counts toward no task score and no recommendation.
 - A refresh that cannot reach it keeps the scores of the last one, and with none to keep it
   leaves the column empty, and the first start or command an hour later tries again. The
@@ -486,6 +489,7 @@ Each model carries these fields:
 | `tasks` | each task's table column: the 0-100 score of its benchmark with `source`, overall and vision the `eci`, value a 0-100 percentile |
 | `other_index` | the other source's index, AAII with `epoch` and ECI with `aa`, when both are cached |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
+| `arena_chat`, `arena_webdev` | Arena's chat and WebDev ratings, when Arena rates the model |
 | `task_cost_usd` | `$task`, from Epoch AI, when the model has one, 0 where it is free |
 | `task_output_tokens` | `Tok/task`, in tokens, from Epoch AI, when the model has one |
 | `tokens_per_second`, `ttft_seconds` | from Artificial Analysis, when the model has them |

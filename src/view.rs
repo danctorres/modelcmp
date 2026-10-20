@@ -786,7 +786,7 @@ pub fn left_out_by(m: &Model, store: &Store, any: bool) -> Option<String> {
     let at = crate::app::COLS.iter().position(|c| c.id == b.col)?;
     let col = crate::app::TEXT + at;
     let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
-    Some(bound_said(crate::app::base_col_name(col), col, lo, hi))
+    Some(bound_said(crate::app::base_col_name(col), col, lo, hi, None))
 }
 
 /// Whether `m` is within a bound typed in the TUI: every model is in one that does not apply
@@ -803,19 +803,20 @@ pub fn bounds_said(store: &Store) -> impl Iterator<Item = String> {
     store.bounds.iter().filter_map(|b| {
         let col = crate::app::TEXT + crate::app::COLS.iter().position(|c| c.id == b.col)?;
         let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
-        crate::app::bound_applies(col, &store.hide).then(|| bound_said(crate::app::base_col_name(col), col, lo, hi))
+        crate::app::bound_applies(col, &store.hide)
+            .then(|| bound_said(crate::app::base_col_name(col), col, lo, hi, None))
     })
 }
 
 /// A bound as the status bar says it, `Coding≥60` or `Price≤2.0`, `name` the header of the
-/// column at cursor index `col`.
-pub fn bound_said(name: &str, col: usize, lo: f64, hi: f64) -> String {
+/// column at cursor index `col`, `bench` picked in its dropdown.
+pub fn bound_said(name: &str, col: usize, lo: f64, hi: f64, bench: Option<&str>) -> String {
     let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
     // The level label would repeat what the number says.
     let shown = match crate::app::numeric(col) {
         _ if col == crate::app::PRICE => money(v),
         _ if col == crate::app::VIA => crate::data::gb((v * 1e9) as u64),
-        Some(c) => (c.show)(v),
+        Some(_) => crate::app::show(col - crate::app::TEXT, bench)(v),
         None => v.to_string(),
     };
     format!("{name}{sign}{shown}")
@@ -959,6 +960,13 @@ pub fn detail_rows(
     }));
     v.extend(m.task_tokens.map(|t| format!("  task took:  {} output tokens (measured)", ctx(t as u64))));
     v.extend(m.arena.map(|a| format!("  arena:      {}% net improvement in agent sessions (arena.ai)", signed(a))));
+    for (b, ..) in crate::data::ARENA_BOARDS {
+        v.extend(
+            m.arena_more
+                .get(b)
+                .map(|&r| format!("  arena:      {} {} rating (arena.ai)", score(Some(r)), b.to_lowercase())),
+        );
+    }
     v.extend([
         format!(
             "  features:   tools {} · reasoning {} · vision {} · open weights {}",
@@ -1148,6 +1156,13 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
     if models.iter().any(|m| m.arena.is_some()) {
         let arena = models.iter().map(|m| m.arena).collect();
         rows.push(Row { section: "scores", ..row("arena agent %", arena, signed, true) });
+    }
+    for (b, ..) in crate::data::ARENA_BOARDS {
+        let vals: Vec<Option<f64>> = models.iter().map(|m| m.arena_more.get(b).copied()).collect();
+        if vals.iter().any(Option::is_some) {
+            let name = format!("arena {}", b.to_lowercase());
+            rows.push(Row { section: "scores", ..row(&name, vals, |v| score(Some(v)), true) });
+        }
     }
     let mut benches: Vec<&String> = models.iter().flat_map(|m| m.scores.keys()).collect();
     benches.sort();
