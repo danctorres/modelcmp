@@ -9,8 +9,8 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
-    Mouse, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, bindable, bound_keys, box_slot, found,
-    group_starts, help_rows, hidden, on_price, shown,
+    Mouse, NCOLS, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, base_col_name, bindable, bound_keys,
+    box_slot, found, group_starts, help_rows, hidden, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -31,7 +31,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::{DefaultTerminal, Frame};
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::ops::Range;
@@ -1870,20 +1869,19 @@ struct Layout {
     seps: Vec<u16>,
 }
 
-/// Header of the column at cursor index `col`: a picked benchmark's name cut short, so a long
-/// one does not push the columns after it off the screen; the top border has it whole.
-fn col_head(app: &App, col: usize) -> Cow<'static, str> {
-    match app.col_bench(col) {
-        Some(b) if b.chars().count() > 10 => truncate(b, 10).into(),
-        _ => app.col_name(col).into(),
-    }
+/// Header of the column at cursor index `col`, its own name whatever its dropdown picked, and
+/// the `*` after it while a benchmark picked there is shown in its place. Apart, as it is asked
+/// of every header on every frame.
+fn col_head(app: &App, col: usize) -> (&'static str, &'static str) {
+    (base_col_name(col), if app.col_bench(col).is_some() { "*" } else { "" })
 }
 
 fn layout(width: u16, app: &App) -> Layout {
     let ms = &app.data.models;
     // Headers need room for the sort arrow, and a dropdown's for its " ▾".
     let widths: [u16; COLS.len()] = std::array::from_fn(|i| {
-        let head = col_head(app, i + 2).chars().count() + 1 + if app.menu(i + 2) { 2 } else { 0 };
+        let (name, mark) = col_head(app, i + 2);
+        let head = name.chars().count() + mark.len() + 1 + if app.menu(i + 2) { 2 } else { 0 };
         head.max(app.widths[i]) as u16
     });
     let dev_w = ms.iter().map(|m| m.developer.chars().count()).max().unwrap_or(0).clamp(6, 12) as u16;
@@ -2026,7 +2024,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         buf.set_stringn(name_x + name_w, y, "‹", 1, MORE);
     }
     for &(i, x, w) in &cols {
-        let text = format!("{}{}{}", arrow(i + 2), col_head(app, i + 2), if app.menu(i + 2) { " ▾" } else { "" });
+        let (name, mark) = col_head(app, i + 2);
+        let text = format!("{}{name}{mark}{}", arrow(i + 2), if app.menu(i + 2) { " ▾" } else { "" });
         buf.set_stringn(area.x + x, y, format!("{text:>w$}", w = w as usize), w as usize, header(i + 2));
     }
     if let Some((x, w)) = via {
@@ -2047,13 +2046,15 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         c => cols.iter().find(|&&(i, ..)| i + 2 == c).map(|&(_, x, w)| (area.x + x, w)),
     };
     // A header whose dropdown narrows the table, by an entry picked or left out, has its ▾ in
-    // the yellow the status bar says the filter in.
+    // the yellow the status bar says the filter in. One showing a benchmark picked in it has it
+    // yellow too, though no model is hidden and the status bar does not say it.
     let picked = |c: usize| match c {
         1 => !app.store.dev_pick.is_empty(),
         VIA => !app.store.via_pick.is_empty(),
-        _ => app.price_level().is_some(),
+        PRICE => app.price_level().is_some(),
+        _ => app.col_bench(c).is_some(),
     };
-    for (x, w) in [1, PRICE, VIA].into_iter().filter(|&c| picked(c) || !app.left_out(c).is_empty()).filter_map(span) {
+    for (x, w) in (1..NCOLS).filter(|&c| picked(c) || !app.left_out(c).is_empty()).filter_map(span) {
         for x in x..(x + w).min(area.right()) {
             if buf[(x, y)].symbol() == "▾" {
                 buf[(x, y)].set_fg(Color::Yellow);
@@ -2565,8 +2566,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             Some((format!("{} {} ", app.col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
         }
         Input::Menu { col, list, .. } => Some(match (list.typing, list.query.is_empty()) {
-            (false, true) => (format!("{} ▾", app.col_name(*col)), &list.query, list.cur),
-            _ => (format!("{} ▾ /", app.col_name(*col)), &list.query, list.cur),
+            (false, true) => (format!("{} ▾", base_col_name(*col)), &list.query, list.cur),
+            _ => (format!("{} ▾ /", base_col_name(*col)), &list.query, list.cur),
         }),
         Input::Choose { title, list, .. } => Some((format!("{title} /"), &list.query, list.cur)),
         Input::Quit
@@ -4475,6 +4476,15 @@ mod tests {
         assert_eq!(on, [price], "left out");
         (a.store.price_not, a.store.dev_pick, a.store.via_not) = (None, vec!["OpenAI".into()], vec!["claude".into()]);
         assert_eq!(yellow(&mut a).0, [dev, via], "picked on Dev, left out on Via");
+        // A benchmark picked keeps the header's name, marked `*`, its ▾ yellow.
+        (a.task, a.store.dev_pick, a.store.via_not) = (None, vec![], vec![]);
+        for k in [KeyCode::Char('d'), KeyCode::Char('G'), KeyCode::Char(' '), KeyCode::Esc] {
+            a.key(k.into());
+        }
+        let bench = a.col_bench(a.col).expect("a benchmark picked");
+        let (on, lines) = (yellow(&mut a).0, render(&mut a, 206, 6).1);
+        let coding = lines[0][..lines[0].find("Coding* ▾").unwrap()].chars().count() as u16 + 8;
+        assert!(on == [coding] && !lines[0].contains(bench), "{on:?} {lines:?}");
     }
 
     #[test]

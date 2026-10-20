@@ -1587,7 +1587,8 @@ impl App {
         self.col_bench(col).filter(|_| base.is_some()).map(crate::fit::bench_source).or(base)
     }
 
-    /// Header of the column at cursor index `col`: a task column's picked benchmark, else `col_name`.
+    /// What the sort, the bounds and the top border call the column at cursor index `col`: a
+    /// picked benchmark, else its header, `base_col_name`.
     pub fn col_name(&self, col: usize) -> &'static str {
         self.col_bench(col).unwrap_or_else(|| base_col_name(col))
     }
