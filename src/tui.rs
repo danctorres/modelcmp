@@ -10,7 +10,7 @@
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
     Mouse, NCOLS, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, base_col_name, bindable, bound_keys,
-    box_slot, found, group_starts, help_rows, hidden, on_price, shown,
+    box_slot, found, got, group_starts, help_rows, hidden, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -2211,10 +2211,16 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             } else if get.is_none() {
                 buf.set_stringn(x, y, OUT_OF_REACH, w as usize, tint(MUTED).add_modifier(Modifier::ITALIC));
             }
-            // The download `x` offers, after the harnesses or alone.
+            // The download `x` offers, after the harnesses or alone: grey when it is too big for
+            // your machine's memory, and in the text's colour when it fits, on a muted row too.
             if let Some(get) = get {
                 x += u16::from(x > start);
-                buf.set_stringn(x, y, get, end.saturating_sub(x) as usize, text);
+                let style = match app.fits_here(m) {
+                    Some(false) => tint(MUTED),
+                    Some(true) if !excluded => base,
+                    _ => text,
+                };
+                buf.set_stringn(x, y, get, end.saturating_sub(x) as usize, style);
             }
         }
         let note = app.store.note(&m.key).unwrap_or("");
@@ -2886,6 +2892,7 @@ fn choice_lines(
     list: &List,
     room: usize,
     bound: &BTreeMap<char, char>,
+    fits: Option<bool>,
 ) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let mut lines: Vec<Line> = items
@@ -2916,8 +2923,15 @@ fn choice_lines(
             };
             if let Some((end, style)) = name {
                 let (name, rest) = label.split_at(end);
-                let mut spans =
-                    vec![Span::styled(format!(" {name}"), style), Span::styled(format!("{rest} "), fg(MUTED))];
+                let mut spans = vec![Span::styled(format!(" {name}"), style)];
+                // A download's size in the text's colour when it fits in your machine's memory, as in Via.
+                match rest.rfind(" (").filter(|_| fits == Some(true) && got(effect).is_some()) {
+                    Some(at) => spans.extend([
+                        Span::styled(rest[..at].to_string(), fg(MUTED)),
+                        Span::raw(format!("{} ", &rest[at..])),
+                    ]),
+                    None => spans.push(Span::styled(format!("{rest} "), fg(MUTED))),
+                }
                 // A column has its checkbox, as an entry of a dropdown: ticked while it shows.
                 if let Effect::Col(c) = effect {
                     let on = !crate::app::hidden(*c);
@@ -3012,7 +3026,10 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
     let within = Rect { y: area.y + tabs, height: area.height - 1 - tabs, ..area };
     let lines = match kind {
         Kind::Fav => fav_lines(app, items, list, edit_room(within)),
-        _ => choice_lines(*kind, items, list, edit_room(within), &app.store.keys),
+        _ => {
+            let fits = app.current().and_then(|m| app.fits_here(m)).filter(|_| *kind == Kind::Launch);
+            choice_lines(*kind, items, list, edit_room(within), &app.store.keys, fits)
+        }
     };
     Some((within, lines))
 }
@@ -3663,6 +3680,7 @@ fn detail(
     (get, size): (Option<String>, Option<u64>),
 ) -> (String, Vec<Line<'static>>) {
     let is_label = |k: &str| k.len() < 16 && k.trim().chars().all(|c| c.is_alphabetic() || c == ' ');
+    let big = size.zip(crate::view::room(store)).is_some_and(|(b, r)| b > r);
     let mut lines = detail_rows(m, store, any, get.as_deref(), size).into_iter();
     let title = lines.next().map(|r| r.1).unwrap_or_default();
     // A task's name in its colour, as its ★ in the table: on its fit line and after `favorite:`.
@@ -3684,6 +3702,10 @@ fn detail(
                 _ if fit.is_some() => {
                     let (t, (pre, post)) = fit.unwrap_or_default();
                     Line::from(vec![Span::raw(pre.to_string()), named(t), Span::raw(post.to_string())])
+                }
+                // A download's size grey when it is too big for your machine's memory, as in Via.
+                Some((k, v)) if k.trim() == "size" && big => {
+                    Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::styled(v.to_string(), fg(MUTED))])
                 }
                 Some((k, v)) if s.starts_with("  ") && is_label(k) => {
                     Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(v.to_string())])
@@ -5770,13 +5792,22 @@ mod tests {
     #[test]
     fn a_list_colours_what_the_table_does() {
         let fgs = |kind, label: &str, effect| {
-            let lines = choice_lines(kind, &[(label.to_string(), effect)], &List::default(), 80, &BTreeMap::new());
+            let lines =
+                choice_lines(kind, &[(label.to_string(), effect)], &List::default(), 80, &BTreeMap::new(), None);
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
         assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
         assert_eq!(fgs(Kind::Open, "epoch.ai", Effect::Open(String::new())), [Some(Color::Reset)]);
         let pi = fgs(Kind::Launch, "pi --model x", Effect::Launch(vec![]));
         assert_eq!(pi, [Some(dev_color("pi")), Some(MUTED)], "the harness as in Via, its command muted");
+        let get = || Effect::Launch(["modelcmp", "get", "x"].map(String::from).to_vec());
+        let size = |fits| {
+            let items = [("ollama download and run (2.5 GB)".to_string(), get())];
+            let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), fits);
+            lines[0].spans.iter().map(|s| (s.content.to_string(), lines[0].style.patch(s.style).fg)).next_back()
+        };
+        assert_eq!(size(Some(true)), Some((" (2.5 GB) ".into(), None)), "a download that fits, in the text's colour");
+        assert_eq!(size(Some(false)).unwrap().1, Some(MUTED), "one too big stays muted");
     }
 
     #[test]
@@ -5790,10 +5821,10 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new());
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new(), None);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80, &BTreeMap::new());
+        let lines = choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80, &BTreeMap::new(), None);
         let hit = lines[1].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.

@@ -454,7 +454,7 @@ pub fn base_col_about(col: usize) -> String {
     match col {
         0 => "model name (dimmed if Via is empty)".into(),
         1 => "company that trained the model".into(),
-        VIA => "harnesses listing it (↓ can be downloaded)".into(),
+        VIA => "harnesses listing it (↓ can be downloaded, grey if too big for your memory)".into(),
         NOTES => "your own note on the model".into(),
         PRICE => format!(
             "{}, {:.0}% of the input cached, ~ list price when yours has none",
@@ -1303,7 +1303,7 @@ fn no_copy(name: &str) -> String {
 }
 
 /// The key of the model a `modelcmp get` of `get_items` downloads.
-fn got(e: &Effect) -> Option<&str> {
+pub fn got(e: &Effect) -> Option<&str> {
     match e {
         Effect::Launch(c) if c.len() > 2 && c[1] == "get" => Some(&c[2]),
         _ => None,
@@ -2594,6 +2594,12 @@ impl App {
             Some(Download::Size(b)) => Some(*b),
             _ => None,
         }
+    }
+
+    /// Whether the model's download fits in the memory local models run in (`view::room`), as
+    /// its size's colour says: None while its size or the memory is not known.
+    pub fn fits_here(&self, m: &Model) -> Option<bool> {
+        Some(self.size(m)? <= view::room(&self.store)?)
     }
 
     /// What Via says of a model `x` can download: `↓`, and the download's size once known. None
@@ -4764,11 +4770,13 @@ mod tests {
         assert_eq!(free(&a), None, "no size known yet");
         a.set_sizes([("llama4".into(), 4_000_000_000)].into());
         assert_eq!(free(&a).as_deref(), Some("llama4"), "4 GB fits in 8 of 10");
+        assert_eq!(a.fits_here(&a.data.models[2]), Some(true), "its size in the text's colour");
+        assert_eq!(a.fits_here(&a.data.models[0]), None, "no size known");
         let llama = &a.data.models[2];
         assert!(a.local_pick(&TASKS[coding], 0, llama), "marked free, to download");
         assert_eq!(a.tier_picks(coding)[3].unwrap().0.key, "gpt55", "high's own pick scores higher");
         a.sized([("llama4", Download::Size(9_000_000_000))]);
-        assert_eq!(free(&a), None, "9 GB does not");
+        assert_eq!((free(&a), a.fits_here(&a.data.models[2])), (None, Some(false)), "9 GB does not, grey");
     }
 
     /// `>` `<` on Via bound the size of a model's GGUF copy, in GB, and the bound asks the size

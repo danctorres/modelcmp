@@ -25,7 +25,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Value | Coding score per dollar of Price, ranked 0-100 |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
-| Via | the harnesses that have the model, by a [short name](#what-you-have) |
+| Via | the harnesses that have the model, by a [short name](#what-you-have), and `↓` with its download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory |
 | Notes | your note on it |
 
 One table shows the columns of both sources. The ones of the source not in use show when both
@@ -407,6 +407,8 @@ holding the context. `recommend` marks it `↓` with the size when `modelcmp get
 download it first, and `recommend --json` names it under `local` for each task. The memory is the
 NVIDIA GPUs' (`nvidia-smi`), else the RAM, which a Mac's GPU shares. `modelcmp memory 24` sets it
 by hand, for another GPU or a model split between GPU and RAM, and `modelcmp memory` shows it.
+The TUI shows a download's size in Via, in `x` and in the details grey when it is over that 80%,
+and in the text's colour when it fits, on a greyed row too.
 
 The scores are the full weights', which a quantized copy falls a little short of, and the context
 shown is not the copy's either. `--via ollama` and `--via llama-cli` on a task still pick a copy
