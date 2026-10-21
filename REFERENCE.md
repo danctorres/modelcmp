@@ -436,10 +436,14 @@ llama.cpp, `llama-server` with its own address), then refresh, and Via shows `pi
 } } }
 ```
 
-`modelcmp fav coding qwen3.5-4b --via pi` then makes `pick` start it for that task as any other
+`modelcmp fav coding qwen3.5-4b` then makes `pick` start it in pi for that task as any other
 model, `modelcmp quiet pi --model ollama/qwen3.5:4b -p "<prompt>"`. The run is a process of its
-own with its own context, so the agent that starts it reads the answer alone. A small model on a
-CPU is slow: Qwen3.5 4B took 90 seconds to reply `pong` and failed to count files with a tool.
+own with its own context, so the agent that starts it reads the answer alone.
+
+ollama gives a model 4096 tokens of context unless told otherwise, too few for pi's prompt and
+tools, so the model writes a command instead of running it. Set `OLLAMA_CONTEXT_LENGTH=16384`
+where ollama serves (`systemctl edit ollama` on Linux), and `ollama ps` then shows 16384 under
+CONTEXT. With 16384, Qwen3.5 4B counted files with a tool in 70 seconds.
 
 A model is matched by its tag, repo or file name, without the quantization, so the name must be the
 one the model has here (`modelcmp list --all` shows them): `gemma-3-4b-it-Q4_K_M.gguf` is Gemma 3 4B IT.
