@@ -3233,6 +3233,22 @@ impl App {
         self.input = Input::Menu { col: self.col, items, list: List::at(picked.map_or(0, |i| i + 1)) };
     }
 
+    /// `c`: the search, bounds, task, `S` `F` `E` and the dropdowns' entries picked and left out
+    /// gone, which the store keeps for the CLI, so it saves when there were any.
+    fn clear_filters(&mut self) -> Option<Effect> {
+        let save = self.filters_exclude();
+        self.query.clear();
+        self.clear_left_out();
+        self.drop_benches(true);
+        // The task set the sort; back to the default.
+        if self.task.take().is_some() {
+            (self.sort_col, self.descending) = default_sort();
+        }
+        self.only = None;
+        self.rebuild();
+        save.then_some(Effect::Save)
+    }
+
     /// The entries of `col`'s dropdown, each with how many models it would show, and the one
     /// in effect, counted from the first entry after "any".
     fn menu_items(&self, col: usize) -> (Vec<(String, usize)>, Option<usize>) {
@@ -3997,22 +4013,7 @@ impl App {
                 self.refuse("no excluded models: e excludes the one under the cursor");
             }
             KeyCode::Char('X') if table => self.input = Input::Unexclude,
-            KeyCode::Char('c') if table => {
-                // The dropdowns' entries picked and left out too, which the store keeps for the CLI.
-                let save = self.filters_exclude();
-                self.query.clear();
-                self.clear_left_out();
-                self.drop_benches(true);
-                // The task set the sort; back to the default.
-                if self.task.take().is_some() {
-                    (self.sort_col, self.descending) = default_sort();
-                }
-                self.only = None;
-                self.rebuild();
-                if save {
-                    return Some(Effect::Save);
-                }
-            }
+            KeyCode::Char('c') if table => return self.clear_filters(),
             KeyCode::Char('q') => self.ask_quit(),
             KeyCode::Char('U') if self.data.update().is_some() => self.input = Input::Upgrade,
             KeyCode::Char('U') if self.data.latest.is_empty() => {
@@ -4553,6 +4554,13 @@ impl App {
                         return Some(Effect::Save);
                     }
                     KeyCode::Esc if list.visual.is_some() && !list.typing => list.visual = None,
+                    // `c` clears every filter as in the table, the dropdown staying open on "any".
+                    KeyCode::Char('c') if list.idle() => {
+                        let col = *col;
+                        let save = self.clear_filters();
+                        self.input = Input::Menu { col, items: self.menu_items(col).0, list: List::at(0) };
+                        return save;
+                    }
                     // Enter does what space does; while searching, space is typed. On Price it
                     // picks the level, or drops it when it is the picked one, and on a task's
                     // column its benchmark. The dropdown stays open.
@@ -6185,6 +6193,20 @@ mod tests {
         a.input = Input::Bound { col: PRICE, min: true, text: "15".into(), cur: 1 };
         press(&mut a, "x.");
         assert!(matches!(&a.input, Input::Bound { text, cur: 2, .. } if text == "1.5"));
+    }
+
+    #[test]
+    fn c_clears_the_filters_from_an_open_dropdown() {
+        let mut a = app();
+        a.col = 1;
+        press(&mut a, "djj ke");
+        assert!(!a.store.dev_pick.is_empty() && !a.store.dev_not.is_empty());
+        assert_eq!(press(&mut a, "c"), Some(Effect::Save), "the store keeps the picks for the CLI");
+        assert!(a.store.dev_pick.is_empty() && a.store.dev_not.is_empty() && keys(&a).len() == 3, "{:?}", keys(&a));
+        assert!(matches!(a.input, Input::Menu { col: 1, list: List { sel: 0, .. }, .. }), "open on any");
+        // While searching, c is typed.
+        press(&mut a, "/c");
+        assert!(matches!(&a.input, Input::Menu { list: List { query, .. }, .. } if query == "c"));
     }
 
     #[test]
