@@ -633,11 +633,10 @@ pub fn bound_keys(keys: &str, bound: &BTreeMap<char, char>) -> String {
 }
 
 /// The Via dropdown's entries that are no harness, after the harnesses: the models your machine
-/// runs through ollama or llama.cpp, the others, and the ones `x` can download.
-const LOCAL: &str = "local";
-const NOT_LOCAL: &str = "not local";
-const DOWNLOAD: &str = "↓ download";
-pub const VIA_KINDS: [&str; 3] = [LOCAL, NOT_LOCAL, DOWNLOAD];
+/// runs through ollama or llama.cpp, and the ones `x` can download.
+pub const INSTALLED: &str = "installed";
+pub const DOWNLOAD: &str = "↓ downloadable";
+pub const VIA_KINDS: [&str; 2] = [INSTALLED, DOWNLOAD];
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
@@ -2100,8 +2099,19 @@ impl App {
                 && (e || self.failing(i, m, skip).is_none())
                 && (skip == 1 || e || !view::dev_out(m, &self.store))
                 && (skip == PRICE || e || !view::price_out(self.val(i, PRICE), &self.store))
-                && (skip == VIA || e || !view::via_out(m, &self.store, self.any_available))
+                && (skip == VIA || e || !self.via_out(m))
         })
+    }
+
+    /// `view::via_out`, and with "↓ downloadable" left out a model only a download reaches, as
+    /// only the TUI knows what `x` can download.
+    fn via_out(&self, m: &Model) -> bool {
+        view::via_out(m, &self.store, self.any_available) || self.download_out(m)
+    }
+
+    /// Whether "↓ downloadable" is left out and `m` is reachable only by a download.
+    fn download_out(&self, m: &Model) -> bool {
+        view::left_out(&self.store, DOWNLOAD) && self.shown_via(m) == [view::OUT_OF_REACH] && self.download(m).is_some()
     }
 
     /// What of the picks of the Dev, Price and Via dropdowns and the bounds model `i` fails, the
@@ -2639,7 +2649,7 @@ impl App {
     /// through ollama or llama.cpp, and `DOWNLOAD` for one `x` can download (`download`).
     fn via_labels<'a>(&self, m: &'a Model) -> Vec<&'a str> {
         let mut v = self.shown_via(m);
-        v.push(if m.here() { LOCAL } else { NOT_LOCAL });
+        v.extend(m.here().then_some(INSTALLED));
         v.extend(self.download(m).map(|_| DOWNLOAD));
         v
     }
@@ -2685,11 +2695,13 @@ impl App {
     fn in_excluded(&self, i: usize, m: &Model) -> bool {
         self.store.is_excluded(&m.key)
             || (self.in_reach(m) || self.store.is_marked(&m.key))
-                && (view::excluded(m, &self.store, self.any_available) || self.failing(i, m, usize::MAX).is_some())
+                && (view::excluded(m, &self.store, self.any_available)
+                    || self.download_out(m)
+                    || self.failing(i, m, usize::MAX).is_some())
     }
 
     /// Why `E` shows the model under the cursor with a grey `✗`: the filter that hides it, as
-    /// `view::left_out_by` says it, or a pick or bound of the TUI's own, as `↓ download picked in
+    /// `view::left_out_by` says it, or a pick or bound of the TUI's own, as `↓ downloadable picked in
     /// Via` or `FrontierSWE≥60`. None off `E`, and for a model excluded with `e`, its red `✗` saying so.
     pub fn hidden_by(&self) -> Option<String> {
         if self.view != View::Table || self.only != Some(EXCLUDED) {
@@ -2699,6 +2711,9 @@ impl App {
         let m = &self.data.models[i];
         if self.store.is_excluded(&m.key) {
             return None;
+        }
+        if self.download_out(m) {
+            return Some(format!("{DOWNLOAD} left out in Via"));
         }
         let picks = |l: &[String]| l.join(", ");
         view::left_out_by(m, &self.store, self.any_available).or_else(|| match self.failing(i, m, usize::MAX)? {
@@ -3236,14 +3251,10 @@ impl App {
         } else if col == 1 || col == VIA {
             let by_dev = col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            // Via as the table shows it, so "not available" can be picked too, then `LOCAL` and the like.
+            // Via as the table shows it, so "not available" can be picked too, then `INSTALLED` and the like.
             let labels = ms.iter().flat_map(|&(_, m)| if by_dev { m.devs().collect() } else { self.via_labels(m) });
             for l in labels.filter(|l| !l.is_empty()) {
                 *counts.entry(l).or_default() += 1;
-            }
-            // With no local model the rest are every model, as "any" is.
-            if !counts.contains_key(LOCAL) {
-                counts.remove(NOT_LOCAL);
             }
             // Countries, then developers, each A-Z whatever their case, so xAI comes before Z.ai;
             // harnesses with the most models first, where the stable sort keeps ties A-Z.
@@ -4503,10 +4514,8 @@ impl App {
                         list.visual = None;
                         let entries: Vec<usize> = range.filter(|&i| i < items.len()).collect();
                         let entries = entries.as_slice();
-                        let fixed =
-                            |i: usize| i == 0 || leave && col == VIA && VIA_KINDS.contains(&items[i].0.as_str());
                         let names: Vec<String> =
-                            entries.iter().filter(|&&i| !fixed(i)).map(|&i| items[i].0.clone()).collect();
+                            entries.iter().filter(|&&i| i != 0).map(|&i| items[i].0.clone()).collect();
                         let why = match entries {
                             _ if !names.is_empty() => None,
                             [0, ..] if !leave => None,
@@ -5704,7 +5713,7 @@ mod tests {
         assert_eq!(on(&mut a, "mini").as_deref(), Some("anthropic picked in Dev"), "the status bar says why");
         press(&mut a, "E");
         a.store.dev_pick.clear();
-        // A pick of `↓ download`, which only the TUI knows, says so too.
+        // A pick of `↓ downloadable`, which only the TUI knows, says so too.
         a.store.via_pick = vec![DOWNLOAD.into()];
         a.rebuild();
         press(&mut a, "E");
@@ -5833,7 +5842,7 @@ mod tests {
     }
 
     #[test]
-    fn via_dropdown_picks_the_local_models_or_the_rest() {
+    fn via_dropdown_picks_or_leaves_out_the_installed_models() {
         let mut a = app();
         a.col = VIA;
         a.data.models[3].via.push(crate::data::OLLAMA.into());
@@ -5847,24 +5856,37 @@ mod tests {
             code(a, KeyCode::Esc);
         };
         press(&mut a, "d");
-        assert_eq!(menu(&a)[menu(&a).len() - 2..], [("local", 1), ("not local", 2)], "after the harnesses");
+        assert_eq!(menu(&a).last(), Some(&("installed", 1)), "after the harnesses");
         code(&mut a, KeyCode::Esc);
-        pick(&mut a, "local");
+        pick(&mut a, "installed");
         assert_eq!(
             (a.store.via_pick.as_slice(), keys(&a)),
-            (&["local".to_string()][..], vec!["mini"]),
+            (&["installed".to_string()][..], vec!["mini"]),
             "whoever else has it"
         );
         assert!(a.filtered_too(), "recommend says so");
         press(&mut a, "c");
-        pick(&mut a, "not local");
-        assert_eq!((keys(&a).len(), a.store.via_pick.len()), (2, 1), "the others");
-        press(&mut a, "c");
         assert_eq!((keys(&a).len(), a.store.via_pick.len()), (3, 0), "c clears it");
+        // The last entry, "installed".
+        press(&mut a, "dGe");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.store.via_not, ["installed"]);
+        assert!(keys(&a).contains(&"mini"), "another harness has it too");
+        a.data.models[3].via = vec![crate::data::OLLAMA.into()];
+        a.rebuild();
+        assert!(!keys(&a).contains(&"mini"), "only your machine runs it");
+        press(&mut a, "c");
         // With all, the ones ollama or llama.cpp can download have an entry of their own.
         press(&mut a, "a");
         pick(&mut a, "download");
         assert_eq!(keys(&a), ["llama4"], "it has a repo to download");
+        press(&mut a, "c");
+        a.store.via_not = vec![DOWNLOAD.into()];
+        a.rebuild();
+        assert!(!keys(&a).contains(&"llama4"), "left out, it is not shown");
+        a.store.via_not.clear();
+        a.rebuild();
+        pick(&mut a, "download");
         a.sized([("llama4", Download::Gone)]);
         assert!(keys(&a).is_empty(), "Hugging Face has no GGUF copy of it after all");
     }

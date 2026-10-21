@@ -9,8 +9,8 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
-    Mouse, NCOLS, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, VIA_KINDS, View, What, base_col_name, bindable, bound_keys,
-    box_slot, found, got, group_starts, help_rows, hidden, on_price, shown,
+    Mouse, NCOLS, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys, box_slot,
+    found, got, group_starts, help_rows, hidden, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -831,8 +831,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         }
         // The ✗ after the ✓, on an entry of Dev, Price or Via that has one, leaves it out.
         let ex = (inner.x + 3..inner.x + 5).contains(&m.column)
-            && matches!(&app.input, Input::Menu { col: 1 | PRICE | VIA, items, list }
-                if items.get(k).is_some_and(|(name, _)| k != 0 && !VIA_KINDS.contains(&name.as_str())));
+            && matches!(&app.input, Input::Menu { col: 1 | PRICE | VIA, items, .. } if k != 0 && k < items.len());
         return (k < len).then_some(if ex { Mouse::Exclude(k) } else { Mouse::Item(k) });
     }
     // The frame's ⚠ opens the issues, as `!` does, over a panel too.
@@ -2373,7 +2372,7 @@ fn dropdown(
         if matches!(col, 1 | PRICE | VIA) {
             let (s, style) = match i {
                 _ if not.contains(label) => ("✗", fg(BAD).add_modifier(BOLD)),
-                _ if i == 0 || VIA_KINDS.contains(&label.as_str()) => (" ", fg(MUTED)),
+                0 => (" ", fg(MUTED)),
                 _ => (included, fg(MUTED)),
             };
             buf.set_stringn(x, y, s, 1, style);

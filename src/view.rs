@@ -494,7 +494,15 @@ pub fn local_best<'a>(
         return None;
     }
     let bench = crate::app::task_bench(store, t);
-    let runs = |m: &Model| m.here() || m.hf_repo().is_some() && size(m).zip(room).is_some_and(|(b, r)| b <= r);
+    // Not one whose entry is left out in Via: "installed", or "↓ downloadable".
+    let runs = |m: &Model| match m.here() {
+        true => !left_out(store, crate::app::INSTALLED),
+        false => {
+            !left_out(store, crate::app::DOWNLOAD)
+                && m.hf_repo().is_some()
+                && size(m).zip(room).is_some_and(|(b, r)| b <= r)
+        }
+    };
     models.filter(|m| runs(m)).filter_map(|m| Some((m, line_score(m, t, bench)?))).max_by(|a, b| a.1.total_cmp(&b.1))
 }
 
@@ -862,7 +870,14 @@ pub fn left_out_by(m: &Model, store: &Store, any: bool) -> Option<String> {
         return Some(format!("{} left out in Price", level_label(store.price_not?)));
     }
     if via_out(m, store, any) {
-        return Some(format!("{} left out in Via", shown_via(m, any).join(", ")));
+        // An ollama or llama.cpp not left out itself is by "installed".
+        let mut by: Vec<&str> = vec![];
+        for h in shown_via(m, any).into_iter().map(|h| if left_out(store, h) { h } else { crate::app::INSTALLED }) {
+            if !by.contains(&h) {
+                by.push(h);
+            }
+        }
+        return Some(format!("{} left out in Via", by.join(", ")));
     }
     let picks = |l: &[String]| l.join(", ");
     if !picked(m, any, &store.dev_pick, &[], None, None) {
@@ -960,10 +975,17 @@ pub fn price_out(price: Option<f64>, store: &Store) -> bool {
     store.price_not.is_some_and(|l| price.is_some_and(|v| v <= LEVELS[l]))
 }
 
-/// Whether every harness that has `m` is left out (`Store::via_not`).
+/// Whether every harness that has `m` is left out (`Store::via_not`), ollama and llama.cpp
+/// with "installed".
 pub fn via_out(m: &Model, store: &Store, any: bool) -> bool {
     let v = if store.via_not.is_empty() { vec![] } else { shown_via(m, any) };
-    !v.is_empty() && v.iter().all(|h| store.via_not.iter().any(|x| x == h))
+    let out = |h: &str| left_out(store, h) || crate::data::runs_here(h) && left_out(store, crate::app::INSTALLED);
+    !v.is_empty() && v.iter().all(|h| out(h))
+}
+
+/// Whether `entry` of the Via dropdown is left out.
+pub fn left_out(store: &Store, entry: &str) -> bool {
+    store.via_not.iter().any(|x| x == entry)
 }
 
 /// Whether `m` is among the entries picked in the TUI's Dev, Price (a level of `LEVELS`) and Via
@@ -977,11 +999,10 @@ pub fn picked(
     price: Option<usize>,
     download: Option<bool>,
 ) -> bool {
-    let [local, not_local, dl] = crate::app::VIA_KINDS;
+    let [local, dl] = crate::app::VIA_KINDS;
     let known = |v: &&String| download.is_some() || *v != dl;
     let has = |v: &str| match v {
         _ if v == local => m.here(),
-        _ if v == not_local => !m.here(),
         _ if v == dl => download == Some(true),
         h => shown_via(m, any).contains(&h),
     };
@@ -1321,9 +1342,9 @@ mod tests {
         let via =
             |v: &[&str], dl| picked(&m, false, &[], &v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None, dl);
         assert!(via(&[], None) && via(&["claude"], None) && !via(&["pi"], None));
-        assert!(via(&["not local"], None) && !via(&["local"], None));
-        assert!(!via(&["↓ download"], Some(false)) && via(&["↓ download"], Some(true)), "the TUI knows");
-        assert!(via(&["↓ download"], None) && !via(&["↓ download", "pi"], None), "the CLI passes it over");
+        assert!(!via(&["installed"], None));
+        assert!(!via(&["↓ downloadable"], Some(false)) && via(&["↓ downloadable"], Some(true)), "the TUI knows");
+        assert!(via(&["↓ downloadable"], None) && !via(&["↓ downloadable", "pi"], None), "the CLI passes it over");
     }
 
     #[test]
@@ -1381,6 +1402,17 @@ mod tests {
         assert_eq!(best(&all, Some(20)).as_deref(), Some("fits"), "not big, whose download is over the room");
         assert_eq!(best(&all, Some(40)).as_deref(), Some("big"));
         assert_eq!(best(&all, None).as_deref(), Some("pulled"), "no memory known: only the one on your machine");
+        let left = |entry: &str| {
+            let mut s = Store::default();
+            s.via_not = vec![entry.into()];
+            local_best(all.iter().copied(), t, &s, size, Some(20)).map(|e| e.0.key.clone())
+        };
+        assert_eq!(left(crate::app::DOWNLOAD).as_deref(), Some("pulled"), "no download");
+        assert_eq!(left(crate::app::INSTALLED).as_deref(), Some("fits"), "not the installed one");
+        let mut s = Store::default();
+        s.via_not = vec![crate::app::INSTALLED.into()];
+        assert!(via_out(&ollama, &s, false), "only installed has it");
+        assert_eq!(left_out_by(&ollama, &s, false).as_deref(), Some("installed left out in Via"));
         let mut gpu = Store::default();
         gpu.memory = Some(24.0);
         assert_eq!(memory(&gpu), Some(24 << 30), "a GPU's GB, of 2^30 bytes");
