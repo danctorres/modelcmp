@@ -425,6 +425,22 @@ Then run `modelcmp --refresh`, which opens the TUI, or `modelcmp list --refresh`
 The scores and the context shown are the full weights', which a quantized copy with its own context
 falls short of, so a model only your machine runs is recommended for a task only as your favorite.
 
+`ollama run` and `llama-cli` answer a prompt with text alone. For the model to edit files and run
+commands, as an agent, run it in pi: add your runner to `~/.pi/agent/models.json` as below (for
+llama.cpp, `llama-server` with its own address), then refresh, and Via shows `pi` beside `oll`.
+
+```json
+{ "providers": { "ollama": {
+  "baseUrl": "http://localhost:11434/v1", "api": "openai-completions", "apiKey": "ollama",
+  "models": [{ "id": "qwen3.5:4b" }]
+} } }
+```
+
+`modelcmp fav coding qwen3.5-4b --via pi` then makes `pick` start it for that task as any other
+model, `modelcmp quiet pi --model ollama/qwen3.5:4b -p "<prompt>"`. The run is a process of its
+own with its own context, so the agent that starts it reads the answer alone. A small model on a
+CPU is slow: Qwen3.5 4B took 90 seconds to reply `pong` and failed to count files with a tool.
+
 A model is matched by its tag, repo or file name, without the quantization, so the name must be the
 one the model has here (`modelcmp list --all` shows them): `gemma-3-4b-it-Q4_K_M.gguf` is Gemma 3 4B IT.
 A name that says `it` is the instruction-tuned model, never the base one beside it.

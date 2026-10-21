@@ -28,7 +28,7 @@ installed, shows which one has each model, and starts it on the model you pick.
 - **Your agent** gets a CLI to find the favorite or recommended model for a task,
   for each price tier. In a multi-agent setup, the CLI allows an orchestrator in one
   harness (e.g. `Opus 5.5` in `Claude Code`) to find and hand a subtask to a cheaper model in another harness (e.g.
-  `DeepSeek V4 Pro` in `pi`), or even to local one (e.g. `Qwen3.8 Flash Next` in `llama.cpp`).
+  `DeepSeek V4 Pro` in `pi`), or even to a local one (e.g. `Qwen3.8 Flash Next` from `llama.cpp`, in `pi`).
 
 ![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
 
@@ -92,7 +92,8 @@ the best up to $2 and `mid` up to $5 per 1M tokens (the tier header in recommend
 the best one. A favorite you set beats that pick in every tier whose price it fits.
 
 To get a local model, press `a` in the TUI to list every model, then `x` on one and pick its
-`download and run` entry, or run `modelcmp get <model>`. Models on your machine show as free.
+`download and run` entry, or run `modelcmp get <model>`. Models on your machine show as free, and
+[run as agents in pi](REFERENCE.md#models-on-your-machine) once you add your runner to it.
 
 ## For agents
 
