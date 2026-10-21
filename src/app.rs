@@ -45,7 +45,7 @@ impl Col {
             ("coding", Source::Aa) => "mean of Terminal-Bench 4.0 and SciCode (0-100)",
             ("agentic", Source::Aa) => "Terminal-Bench 4.0 score (0-100)",
             ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
-            ("coding", Source::Epoch) => "WeirdML score (0-100)",
+            ("coding", Source::Epoch) => "WeirdML v3 score (0-100)",
             ("agentic", Source::Epoch) => "APEX-Agents score (0-100)",
             ("reasoning", Source::Epoch) => "LMCA score (0-100)",
             _ => self.about,
@@ -4694,7 +4694,7 @@ mod tests {
         let mut store = Store::default();
         crate::data::set_source(Source::Epoch);
         // Picked from Epoch's list under Artificial Analysis, now Coding's own score.
-        store.bench.insert("coding".into(), "WeirdML".into());
+        store.bench.insert("coding".into(), "WeirdML v3".into());
         assert!(!pick_gone(&store, coding), "its bounds stay, on the column's own value");
         store.bench.insert("coding".into(), "DeepSWE".into());
         assert!(pick_gone(&store, coding), "one no list has any more is gone");
@@ -5365,7 +5365,7 @@ mod tests {
         press(&mut a, "d");
         assert_eq!(
             menu(&a)[..2],
-            [("WeirdML · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
+            [("WeirdML v3 · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
             "each with the models it scored"
         );
         // The entry already shown changes nothing: a bound typed for the column stays.
@@ -5384,12 +5384,12 @@ mod tests {
         // already keeps it, and counts what the table shows.
         a.bounds.push((a.col, 1e9, f64::MAX));
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("WeirdML · Epoch AI", 0), ("FrontierCode · Epoch AI", 2)]);
+        assert_eq!(menu(&a)[..2], [("WeirdML v3 · Epoch AI", 0), ("FrontierCode · Epoch AI", 2)]);
         // Choosing one shows it again, and no other is picked.
         press(&mut a, "j ");
         assert_eq!(
             menu(&a)[..2],
-            [("WeirdML · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
+            [("WeirdML v3 · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
             "the open list counts again, the bound gone"
         );
         code(&mut a, KeyCode::Esc);
@@ -5476,7 +5476,7 @@ mod tests {
         let names: Vec<&str> = menu(&a).iter().map(|e| e.0).collect();
         assert_eq!(
             names[..2],
-            ["WeirdML · Epoch AI", "FrontierCode · Epoch AI"],
+            ["WeirdML v3 · Epoch AI", "FrontierCode · Epoch AI"],
             "its own first, each named with its source"
         );
         assert_eq!(menu(&a).last(), Some(&("scicode · Artificial Analysis", 1)));
@@ -6270,7 +6270,7 @@ mod tests {
         assert!(COLS[ECI - TEXT..].iter().all(sourced));
         assert_eq!(of(ARENA), None, "neither source's");
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
-        assert_eq!(about("coding"), "Epoch AI, WeirdML score (0-100), blank = not tested");
+        assert_eq!(about("coding"), "Epoch AI, WeirdML v3 score (0-100), blank = not tested");
         assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100), blank = not tested");
         assert_eq!(about("value"), "Coding score per dollar of Price, ranked 0-100", "no benchmarks of its own");
         crate::data::set_source(Source::Aa);

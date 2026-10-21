@@ -7,7 +7,7 @@
 use crate::data::Model;
 use std::collections::{BTreeMap, HashMap};
 
-/// Months over which the source's best score is taken to have risen steadily (`add_lag`).
+/// Most months over which the source's best score is taken to have risen steadily (`add_lag`).
 const WINDOW: f64 = 12.0;
 
 pub enum Need {
@@ -76,8 +76,9 @@ pub const AA_INDEX: &str = "artificial_analysis_intelligence_index";
 pub const AA_CODING: &str = "terminalbench_scicode_mean";
 
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
-/// not be about code. Math and factual-recall benchmarks stay out, and those Epoch no longer
-/// runs on new models: SWE-Bench verified, Terminal Bench, GSO-Bench, DeepResearch Bench (2026-10).
+/// not be about code. Factual recall and math that most models max out stay out, and those Epoch
+/// no longer runs on new models: SWE-Bench verified, Terminal Bench, GSO-Bench, DeepResearch
+/// Bench, and WeirdML for WeirdML v3 (2026-10).
 /// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
 /// Listed with the general pick first, then the ones a tier picks for, coding, agentic, reasoning and vision, and last
 /// the cheaper pick, which has one model and not one per tier.
@@ -98,7 +99,7 @@ pub const TASKS: &[Task] = &[
         need: Need::None,
         aa: Some(AA_CODING),
         aa_more: &["terminalbench_v4_0", "scicode"],
-        benches: &["WeirdML", "FrontierCode", "FrontierSWE", "MirrorCode"],
+        benches: &["WeirdML v3", "FrontierCode", "FrontierSWE", "MirrorCode", "Surface Evolver Bench"],
     },
     Task {
         name: "agentic",
@@ -107,11 +108,11 @@ pub const TASKS: &[Task] = &[
         need: Need::Tools,
         aa: Some("terminalbench_v4_0"),
         aa_more: &[],
-        benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0"],
+        benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0", "EBR-bench", "SpireClimb"],
     },
     Task {
         name: "reasoning",
-        about: "hard science questions, puzzles, abstraction",
+        about: "hard math and science questions, puzzles, abstraction",
         when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
         need: Need::None,
         aa: Some("hle"),
@@ -125,6 +126,9 @@ pub const TASKS: &[Task] = &[
             "Mystery Game Puzzles",
             "Chess Puzzles",
             "DTBench",
+            "FrontierMath-Tiers-1-3-v2-Private",
+            "FrontierMath-Tier-4-v2-Private",
+            "ProofBench",
         ],
     },
     Task {
@@ -253,28 +257,30 @@ pub fn months(date: &str) -> Option<f64> {
 }
 
 /// Each task's `Model::lag`: how far the model is behind the source's best on it, in months of
-/// progress, a month being a twelfth of what the best score rose over the last `WINDOW`
-/// months. `now` is in seconds since 1970. One scale for every source and task, which a share
+/// progress, a month's share of what the best score rose over the last `WINDOW` months, or
+/// over the months it was scored in when fewer. `now` is in seconds since 1970. One scale for every source and task, which a share
 /// of the best score is not (an index has no zero) and a gap in points is not either (each
 /// benchmark moves at its own pace); a percentile among every model ever scored counts a
-/// model at half the best score as near the top. A task scored for less than `WINDOW` months,
-/// or whose best has not risen in them, has no lag, and its line leaves none out for it. A
+/// model at half the best score as near the top. A task scored for under half of `WINDOW`,
+/// or whose best has not risen in it, has no lag, and its line leaves none out for it. A
 /// best of then that scored nothing still gives a pace: the floor hides part of the rise, so
 /// the lags come out too long, the strict side. "value" has none, being a rank.
-// ponytail: a straight line over `WINDOW`; a benchmark whose scores rose in a few of those
+// ponytail: a straight line over that window; a benchmark whose scores rose in a few of those
 // months counts its models as closer than they are. The best score at each date if it bites.
 pub fn add_lag(models: &mut [Model], now: f64) {
     let now = now / 86400.0 / 30.436_875;
     for t in TASKS.iter().filter(|t| t.name != "value") {
         let score = |m: &Model| if ECI_TASKS.contains(&t.name) { m.eci } else { m.shown.get(t.name).copied() };
+        let first = models.iter().filter(|m| score(m).is_some()).filter_map(|m| months(&m.release)).fold(now, f64::min);
+        let window = (now - first).min(WINDOW);
         let best = |old: bool| {
-            let scores = models.iter().filter(|m| !old || months(&m.release).is_some_and(|r| r <= now - WINDOW));
+            let scores = models.iter().filter(|m| !old || months(&m.release).is_some_and(|r| r <= now - window));
             scores.filter_map(score).fold(f64::NEG_INFINITY, f64::max)
         };
         let (best, old) = (best(false), best(true));
-        let rate = (best - old) / WINDOW;
+        let rate = (best - old) / window;
         for m in models.iter_mut() {
-            match score(m).filter(|_| rate > 0.0 && rate.is_finite()) {
+            match score(m).filter(|_| window >= WINDOW / 2.0 && rate > 0.0 && rate.is_finite()) {
                 Some(s) => m.lag.insert(t.name.to_string(), (best - s) / rate),
                 None => m.lag.remove(t.name),
             };
@@ -323,8 +329,8 @@ mod tests {
     #[test]
     fn ranks_by_task() {
         use crate::data::Source::{Aa, Epoch};
-        let a = scores(&[("APEX-Agents", 0.9), ("WeirdML", 0.2), ("FrontierSWE", 0.9)]);
-        let b = scores(&[("APEX-Agents", 0.5), ("WeirdML", 0.7)]);
+        let a = scores(&[("APEX-Agents", 0.9), ("WeirdML v3", 0.2), ("FrontierSWE", 0.9)]);
+        let b = scores(&[("APEX-Agents", 0.5), ("WeirdML v3", 0.7)]);
         let p = pools([(Some(145.0), &a), (None, &b)].into_iter());
         let ((pa, shown_a), (pb, _)) = (scored(Epoch, Some(145.0), &a, &p), scored(Epoch, None, &b, &p));
         assert!(pa["agentic"] > pb["agentic"]);
@@ -378,8 +384,12 @@ mod tests {
         ms[0].shown.insert("coding".into(), 0.0);
         add_lag(&mut ms, now);
         assert_eq!(lag(&ms, "coding"), [Some(12.0), Some(0.0), None, None]);
-        // Scored for under a year: no pace either, and the lags of the last data go.
-        ms[0].release = "2026-01-01".into();
+        // Scored for 8 months: the pace over those, 3 points a month.
+        ms[0].release = "2026-02-01".into();
+        add_lag(&mut ms, now);
+        assert_eq!(lag(&ms, "overall"), [Some(8.0), Some(2.0), Some(0.0), None]);
+        // Under half a year: no pace, and the lags of the last data go.
+        (ms[0].release, ms[1].release) = ("2026-05-01".into(), "2026-06".into());
         add_lag(&mut ms, now);
         assert_eq!(lag(&ms, "overall"), [None; 4]);
     }

@@ -63,7 +63,7 @@ A task column is a benchmark score, 0-100, blank for a model not tested on it.
 
 With Epoch AI, the default, it is one widely run benchmark about the task:
 
-- Coding: WeirdML
+- Coding: WeirdML v3
 - Agentic: APEX-Agents
 - Reason: LMCA
 
@@ -286,7 +286,8 @@ or bound can hide different models.
   price it has none, as `free` has none with no free model, and `pick` says `no model` there.
 - `value` lists the models within 8 months of progress of your best on coding. A month of
   progress is a twelfth of what the best coding score rose in the last year, among the models
-  listed here that the source scored.
+  listed here that the source scored. A benchmark scored for 6 to 12 months is measured over
+  those months.
 
 ### Favorites
 
