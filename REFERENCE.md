@@ -25,7 +25,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Value | Coding score per dollar of Price, ranked 0-100 |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
-| Via | the harnesses that have the model, by a [short name](#what-you-have), and `↓` with its download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory |
+| Via | the harnesses that have the model, by a [short name](#what-you-have), and `↓` with its download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, in `x`, the details and compare too |
 | Notes | your note on it |
 
 One table shows the columns of both sources. The ones of the source not in use show when both

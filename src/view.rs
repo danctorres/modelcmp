@@ -833,12 +833,16 @@ pub fn shown_via(m: &Model, any: bool) -> Vec<&str> {
 /// download `x` offers in the TUI (`↓ 2.5 GB`, `App::download`), which follows the harnesses
 /// and stands for `OUT_OF_REACH`, as in the table.
 pub fn via(m: &Model, any: bool, get: Option<&str>) -> String {
-    let harnesses = shown_via(m, any).into_iter().filter(|v| get.is_none() || *v != OUT_OF_REACH);
-    let mut said = harnesses.collect::<Vec<_>>().join(", ");
+    let mut said = via_harnesses(m, any, get.is_some()).join(", ");
     if let Some(get) = get {
         said = format!("{said} {get}").trim_start().into();
     }
     or_dash(&said).into()
+}
+
+/// The harnesses `via` names, the download (`get`) standing for `OUT_OF_REACH`.
+pub fn via_harnesses(m: &Model, any: bool, get: bool) -> Vec<&str> {
+    shown_via(m, any).into_iter().filter(|v| !get || *v != OUT_OF_REACH).collect()
 }
 
 /// Whether `m` is excluded: with `e`, or by the TUI's filters (`left_out_by`). Recommendations

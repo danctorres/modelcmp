@@ -403,13 +403,22 @@ const HF: &str = "huggingface";
 /// The harnesses that run models on this machine, and what each is called.
 const LOCAL: &[(&str, &str)] = &[(OLLAMA, "Ollama"), (LLAMA, "llama.cpp")];
 
-/// llama.cpp's CLI as this machine has it: `llama-cli`, else the one binary of newer builds, else
+/// llama.cpp's CLI as a machine may have it: `llama-cli`, else the one binary of newer builds, else
 /// its server, which lists and loads the same models.
+const LLAMA_CMDS: [&[&str]; 3] = [&[LLAMA], &["llama", "cli"], &["llama-server"]];
+
+/// `LLAMA_CMDS`' first this machine has.
 pub fn llama_cmd() -> Option<&'static [&'static str]> {
     if cfg!(test) {
         return Some(&[LLAMA]);
     }
-    [&[LLAMA][..], &["llama", "cli"], &["llama-server"]].into_iter().find(|c| installed(c[0]))
+    LLAMA_CMDS.into_iter().find(|c| installed(c[0]))
+}
+
+/// The harness a command starting with `bin` runs: llama.cpp's starts with the binary this machine
+/// has, which is not its name.
+pub fn harness_of(bin: &str) -> &str {
+    if LLAMA_CMDS.iter().any(|c| c[0] == bin) { LLAMA } else { bin }
 }
 
 /// Whether `harness` is installed here.

@@ -4146,7 +4146,7 @@ impl App {
                     self.refuse(why);
                 } else {
                     // On your default harness when it has the model.
-                    let on = |e: &Effect| matches!(e, Effect::Launch(c) if c[0] == self.store.harness);
+                    let on = |e: &Effect| matches!(e, Effect::Launch(c) if crate::data::harness_of(&c[0]) == self.store.harness);
                     let sel = items.iter().position(|(_, e)| on(e)).unwrap_or(0);
                     self.input = Input::choose("open in which harness?", Kind::Launch, items, sel);
                     let (key, repo) = ask?;

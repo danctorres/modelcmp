@@ -1716,7 +1716,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         View::Compare => {
             let (lines, first, hits) = compare(
                 &app.marked_models(),
-                (app.any_available(), &|m| app.download(m)),
+                (app.any_available(), &|m| app.download(m), &app.store.via_not),
                 (app.compare_sel, app.compare_x),
                 area.width.saturating_sub(4) as usize,
                 &app.overlay_query,
@@ -2206,7 +2206,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             if reach {
                 for (j, h) in m.via.iter().enumerate() {
                     x += u16::from(j > 0);
-                    x = buf.set_stringn(x, y, short(h), end.saturating_sub(x) as usize, soft(dev_color(h))).0;
+                    let style = soft(via_color(&app.store.via_not, h));
+                    x = buf.set_stringn(x, y, short(h), end.saturating_sub(x) as usize, style).0;
                 }
             } else if get.is_none() {
                 buf.set_stringn(x, y, OUT_OF_REACH, w as usize, tint(MUTED).add_modifier(Modifier::ITALIC));
@@ -2765,6 +2766,28 @@ fn edit_prefix(e: &Edit) -> String {
 
 /// A row of `f`'s grid while it is written in place: `edit_prefix`, then the text, or in grey
 /// what to write while there is none. Text too long for `room` cells scrolls sideways.
+/// A harness's colour, grey when it is left out in the Via dropdown (`out`): the model shows for
+/// its others. The table, `x`, `v`'s list, the details and compare all say it so.
+fn via_color(out: &[String], h: &str) -> Color {
+    if out.iter().any(|x| x == h) { MUTED } else { dev_color(h) }
+}
+
+/// `said`, `view::via`'s text for `m`, in `style`, a harness left out in the Via dropdown grey.
+fn via_spans(m: &Model, any: bool, get: bool, said: &str, out: &[String], style: Style) -> Vec<Span<'static>> {
+    let harnesses = crate::view::via_harnesses(m, any, get);
+    let Some(rest) = said.strip_prefix(&*harnesses.join(", ")) else {
+        return vec![Span::styled(said.to_string(), style)];
+    };
+    let mut spans = vec![];
+    for (i, h) in harnesses.into_iter().enumerate() {
+        spans.extend((i > 0).then(|| Span::styled(", ", style)));
+        let grey = via_color(out, h) == MUTED;
+        spans.push(Span::styled(h.to_string(), if grey { style.fg(MUTED) } else { style }));
+    }
+    spans.push(Span::styled(rest.to_string(), style));
+    spans
+}
+
 fn edit_line(e: &Edit, color: Color, room: usize) -> Line<'static> {
     let prefix = edit_prefix(e);
     let empty = match e.what {
@@ -2885,7 +2908,8 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
 }
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
-/// `f`'s grid has lines of its own, `fav_lines`.
+/// `out` are the harnesses left out in the Via dropdown, grey as in the table. `f`'s grid has
+/// lines of its own, `fav_lines`.
 fn choice_lines(
     kind: Kind,
     items: &[(String, Effect)],
@@ -2893,22 +2917,22 @@ fn choice_lines(
     room: usize,
     bound: &BTreeMap<char, char>,
     fits: Option<bool>,
+    out: &[String],
 ) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let mut lines: Vec<Line> = items
         .iter()
         .enumerate()
         .map(|(n, (label, effect))| {
+            let harness = crate::data::harness_of(label.split(' ').next().unwrap_or_default());
             // A harness whose folder is being written, in the harness's colour.
             if let Some(e) = list.edit.as_ref().filter(|_| n == list.sel) {
-                return edit_line(e, dev_color(label.split(' ').next().unwrap_or_default()), room);
+                return edit_line(e, via_color(out, harness), room);
             }
             // What has a colour in the table keeps it here: a harness. A site, a theme and a
             // source have none, so they take the text's and not one their name gives.
             let color = match effect {
-                Effect::Launch(_) | Effect::Via(_, _, Some(_)) | Effect::Harness(Some(_)) => {
-                    dev_color(label.split(' ').next().unwrap_or_default())
-                }
+                Effect::Launch(_) | Effect::Via(_, _, Some(_)) | Effect::Harness(Some(_)) => via_color(out, harness),
                 _ => Color::Reset,
             };
             // What the search found in the label, as the cursor goes by it, `at` chars into the line.
@@ -3028,7 +3052,7 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
         Kind::Fav => fav_lines(app, items, list, edit_room(within)),
         _ => {
             let fits = app.current().and_then(|m| app.fits_here(m)).filter(|_| *kind == Kind::Launch);
-            choice_lines(*kind, items, list, edit_room(within), &app.store.keys, fits)
+            choice_lines(*kind, items, list, edit_room(within), &app.store.keys, fits, &app.store.via_not)
         }
     };
     Some((within, lines))
@@ -3713,6 +3737,12 @@ fn detail(
                     let (t, (pre, post)) = fit.unwrap_or_default();
                     Line::from(vec![Span::raw(pre.to_string()), named(t), Span::raw(post.to_string())])
                 }
+                Some((k, v)) if k.trim() == "via" && s.starts_with("  ") => {
+                    let (pad, said) = v.split_at(v.len() - v.trim_start().len());
+                    let mut spans = vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(pad.to_string())];
+                    spans.extend(via_spans(m, any, get.is_some(), said, &store.via_not, Style::new()));
+                    Line::from(spans)
+                }
                 // A download's size grey when it is too big for your machine's memory, as in Via.
                 Some((k, v)) if k.trim() == "size" && big => {
                     Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::styled(v.to_string(), fg(MUTED))])
@@ -3738,7 +3768,7 @@ fn detail(
 /// the table.
 fn compare(
     models: &[&Model],
-    (any, get): (bool, crate::view::Get),
+    (any, get, via_not): (bool, crate::view::Get, &[String]),
     (sel, first): (usize, usize),
     avail: usize,
     query: &str,
@@ -3823,7 +3853,12 @@ fn compare(
             spans.push(bar(i == sel, "▌"));
             let style = if i == sel { style.bg(CURSOR) } else { style };
             let pad = " ".repeat(widths[i] - Span::raw(c.as_str()).width());
-            spans.push(Span::styled(pad + &c, style));
+            if r.label == "via" && !muted[i] {
+                spans.push(Span::styled(pad, style));
+                spans.extend(via_spans(models[i], any, get(models[i]).is_some(), &c, via_not, style));
+            } else {
+                spans.push(Span::styled(pad + &c, style));
+            }
         }
         spans.push(bar(first + shown == sel + 1, "▐"));
         if k == 0 && first + shown < n {
@@ -4041,6 +4076,13 @@ mod tests {
         assert!(a.rows.len() == 1 && on(x) && on(x + 1) && !on(x + 3), "cx finds codex");
         a.query.clear();
         a.rebuild();
+        // A harness left out in the dropdown is grey, the model still showing for its others.
+        a.store.via_not = vec!["codex".into()];
+        let (buf, lines) = render(&mut a, 215, 5);
+        let at = |s: &str| lines[2][..lines[2].find(s).unwrap()].chars().count() as u16;
+        let (cx, oc) = (at("cx gem"), at("oc pi"));
+        assert_eq!((buf[(cx, 2)].fg, buf[(oc, 2)].fg), (MUTED, dev_color("opencode")), "cx grey, oc not");
+        a.store.via_not.clear();
         // The dropdown says which harness a short name is.
         a.col = VIA;
         a.key(KeyCode::Char('d').into());
@@ -4315,8 +4357,16 @@ mod tests {
         assert_eq!(buf[(cell(&lines[opus as usize], "★"), opus)].fg, STAR, "{lines:?}");
         a.term_bg = None;
         // In compare its column is muted.
-        let rows =
-            compare(&a.marked_models(), (a.any_available(), &|_| None), (0, 0), 200, "", |m| a.muted(m), &mut vec![]).0;
+        let rows = compare(
+            &a.marked_models(),
+            (a.any_available(), &|_| None, &[]),
+            (0, 0),
+            200,
+            "",
+            |m| a.muted(m),
+            &mut vec![],
+        )
+        .0;
         let names = rows.iter().find(|l| l.to_string().starts_with("model ")).unwrap();
         let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
         assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
@@ -5228,11 +5278,17 @@ mod tests {
     fn compare_colours_every_tied_cell() {
         let mk = |n: &str, context| Model { name: n.into(), context, ..Default::default() };
         let (a, b, c) = (mk("a", 1_000_000), mk("b", 200_000), mk("c", 200_000));
-        let lines = compare(&[&a, &b, &c], (false, &|_| None), (0, 0), 200, "", |_| false, &mut vec![]).0;
+        let lines = compare(&[&a, &b, &c], (false, &|_| None, &[]), (0, 0), 200, "", |_| false, &mut vec![]).0;
         let ctx = lines.iter().find(|l| l.to_string().starts_with("context")).unwrap();
         let fgs: Vec<_> =
             ctx.spans.iter().filter(|s| s.content.trim().ends_with(['M', 'k'])).map(|s| s.style.fg).collect();
         assert_eq!(fgs, [Some(GOOD), Some(BAD), Some(BAD)], "{ctx:?}");
+        // A harness left out in Via is grey, as in the table.
+        let m = Model { name: "m".into(), via: vec!["codex".into(), "pi".into()], ..Default::default() };
+        let lines = compare(&[&m], (false, &|_| None, &["codex".into()]), (0, 0), 200, "", |_| false, &mut vec![]).0;
+        let via = lines.iter().find(|l| l.to_string().starts_with("via")).unwrap();
+        let fg = |h: &str| via.spans.iter().find(|s| s.content == h).map(|s| s.style.fg);
+        assert_eq!((fg("codex"), fg("pi")), (Some(Some(MUTED)), Some(None)), "{via:?}");
     }
 
     #[test]
@@ -5241,22 +5297,22 @@ mod tests {
         let ms: Vec<&Model> =
             ["opus", "flash"].iter().map(|k| a.data.models.iter().find(|m| m.key == *k).unwrap()).collect();
         let row = |v: &Vec<Line>| v.iter().find(|l| l.to_string().starts_with("model ")).unwrap().to_string();
-        let (full, first, _) = compare(&ms, (false, &|_| None), (1, 1), 200, "", |_| false, &mut vec![]);
+        let (full, first, _) = compare(&ms, (false, &|_| None, &[]), (1, 1), 200, "", |_| false, &mut vec![]);
         assert!(row(&full).contains("opus") && row(&full).contains("flash"));
         assert_eq!(first, 0, "everything fits, so nothing scrolls off");
         assert!(!row(&full).contains('‹') && !row(&full).contains('›'), "no scroll marks when all fit");
         let mut spots = vec![];
-        let (cut, first, _) = compare(&ms, (false, &|_| None), (1, 0), 20, "", |_| false, &mut spots);
+        let (cut, first, _) = compare(&ms, (false, &|_| None, &[]), (1, 0), 20, "", |_| false, &mut spots);
         let edge = row(&cut).chars().position(|c| c == '‹').unwrap();
         assert_eq!(spots[0].x.start, edge + 1, "a click on ‹ is on no model");
         assert!(!row(&cut).contains("opus") && row(&cut).contains("flash"), "scrolls to show the selection");
         assert_eq!(first, 1);
         assert!(cut.iter().any(|l| l.to_string().starts_with("models 2-2 of 2")));
         assert!(row(&cut).contains('‹') && !row(&cut).contains('›'), "‹ marks models off to the left");
-        let (past, first, _) = compare(&ms, (false, &|_| None), (7, 0), 20, "", |_| false, &mut vec![]);
+        let (past, first, _) = compare(&ms, (false, &|_| None, &[]), (7, 0), 20, "", |_| false, &mut vec![]);
         assert!(row(&past).contains("flash") && first == 1, "a cursor past the models lands on the last");
         let mut spots = vec![];
-        let (back, first, _) = compare(&ms, (false, &|_| None), (0, 1), 20, "", |_| false, &mut spots);
+        let (back, first, _) = compare(&ms, (false, &|_| None, &[]), (0, 1), 20, "", |_| false, &mut spots);
         assert_eq!(spots[0].x.end, row(&back).chars().count() - 1, "nor on ›");
         assert!(row(&back).contains("opus") && !row(&back).contains("flash"));
         assert_eq!(first, 0);
@@ -5278,12 +5334,12 @@ mod tests {
         let topics: Vec<String> = full.iter().map(Line::to_string).filter(|l| l.starts_with("── ")).collect();
         assert!(topics[0].starts_with("── scores ─"), "{topics:?}");
         assert!(topics.iter().all(|t| t.chars().count() == full[rule].width()), "topic rules span the model row");
-        let (some, _, on) = compare(&ms, (false, &|_| None), (0, 0), 200, "eci", |_| false, &mut vec![]);
+        let (some, _, on) = compare(&ms, (false, &|_| None, &[]), (0, 0), 200, "eci", |_| false, &mut vec![]);
         assert_eq!(labels(&some), labels(&full), "a search keeps every row");
         assert_eq!(on.len(), 1);
         assert!(some[on[0]].to_string().starts_with("ECI"), "and says the line it found");
-        let (_, _, on) = compare(&ms, (false, &|_| None), (0, 0), 200, "ntext", |_| false, &mut vec![]);
-        let (_, _, typo) = compare(&ms, (false, &|_| None), (0, 0), 200, "contxt", |_| false, &mut vec![]);
+        let (_, _, on) = compare(&ms, (false, &|_| None, &[]), (0, 0), 200, "ntext", |_| false, &mut vec![]);
+        let (_, _, typo) = compare(&ms, (false, &|_| None, &[]), (0, 0), 200, "contxt", |_| false, &mut vec![]);
         assert_eq!((on.len(), typo.len()), (1, 0), "text anywhere in a label, as details find it, and no typo");
     }
 
@@ -5778,8 +5834,14 @@ mod tests {
         let lines = detail(&m, &a.store, a.any_available(), (None, None)).1;
         let coding = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == "coding").expect("a coding fit line");
         assert_eq!(coding.style.fg, Some(task_color("coding")), "a task's name is in its colour");
+        // A harness left out in Via is grey, the others not.
+        let mut store = a.store.clone();
+        (m.via, store.via_not) = (vec!["codex".into(), "pi".into()], vec!["codex".into()]);
+        let lines = detail(&m, &store, true, (None, None)).1;
+        let fg = |h: &str| lines.iter().flat_map(|l| &l.spans).find(|s| s.content == h).map(|s| s.style.fg);
+        assert_eq!((fg("codex"), fg("pi")), (Some(Some(MUTED)), Some(None)), "{lines:?}");
         let rows =
-            compare(&a.marked_models(), (a.any_available(), &|_| None), (0, 0), 200, "", |_| false, &mut vec![]).0;
+            compare(&a.marked_models(), (a.any_available(), &|_| None, &[]), (0, 0), 200, "", |_| false, &mut vec![]).0;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
         assert!(rows.iter().any(|l| l.to_string().starts_with("model")));
     }
@@ -5803,17 +5865,29 @@ mod tests {
     fn a_list_colours_what_the_table_does() {
         let fgs = |kind, label: &str, effect| {
             let lines =
-                choice_lines(kind, &[(label.to_string(), effect)], &List::default(), 80, &BTreeMap::new(), None);
+                choice_lines(kind, &[(label.to_string(), effect)], &List::default(), 80, &BTreeMap::new(), None, &[]);
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
         assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
         assert_eq!(fgs(Kind::Open, "epoch.ai", Effect::Open(String::new())), [Some(Color::Reset)]);
         let pi = fgs(Kind::Launch, "pi --model x", Effect::Launch(vec![]));
         assert_eq!(pi, [Some(dev_color("pi")), Some(MUTED)], "the harness as in Via, its command muted");
+        let items = [("pi --model x".to_string(), Effect::Launch(vec!["pi".into()]))];
+        let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &["pi".into()]);
+        assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(MUTED), "left out in Via, grey");
+        // llama.cpp's command starts with the binary the machine has, and `v`'s list grey too.
+        let llama = |bin: &str| (format!("{bin} -hf x"), Effect::Launch(vec![bin.into()]));
+        let via = ("pi --model x".to_string(), Effect::Via("k".into(), "coding".into(), Some("pi".into())));
+        let items = [llama("llama-server"), llama("llama"), via];
+        let out = [crate::data::LLAMA.into(), "pi".into()];
+        let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &out);
+        assert!(lines.iter().all(|l| l.style.patch(l.spans[0].style).fg == Some(MUTED)), "{lines:?}");
+        let lines = choice_lines(Kind::Launch, &items[..1], &List::default(), 80, &BTreeMap::new(), None, &[]);
+        assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(dev_color(crate::data::LLAMA)));
         let get = || Effect::Launch(["modelcmp", "get", "x"].map(String::from).to_vec());
         let size = |fits| {
             let items = [("ollama download and run (2.5 GB)".to_string(), get())];
-            let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), fits);
+            let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), fits, &[]);
             lines[0].spans.iter().map(|s| (s.content.to_string(), lines[0].style.patch(s.style).fg)).next_back()
         };
         assert_eq!(size(Some(true)), Some((" (2.5 GB) ".into(), None)), "a download that fits, in the text's colour");
@@ -5831,10 +5905,11 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new(), None);
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new(), None, &[]);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80, &BTreeMap::new(), None);
+        let lines =
+            choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80, &BTreeMap::new(), None, &[]);
         let hit = lines[1].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.
