@@ -261,7 +261,7 @@ values from the source in use, hides none and is kept for when the column is bac
 
 `recommend` gives the same picks as the TUI's `R` with no search and the `mine` tab, which the
 TUI does not keep. A pick of `↓ downloadable` in Via is passed over, as only the TUI knows what can
-be downloaded. A benchmark picked in a task column's dropdown ranks that task in both, and a
+be downloaded, and leaving it out only keeps the downloads off the tiers. A benchmark picked in a task column's dropdown ranks that task in both, and a
 bound on that column is on the benchmark, both kept across restarts until `c`, and the commands
 say on stderr which tasks a pick ranks. Prices are at
 the cache share of each, the TUI's set with `%` or `--cache`, so with different ones a Price level
@@ -415,9 +415,9 @@ and in the text's colour when it fits, on a greyed row too.
 
 The scores are the full weights', which a quantized copy falls a little short of, and the context
 shown is not the copy's either. With `--via` a tier never takes one this way, and `--via ollama`
-and `--via llama-cli` on a task still pick a copy only as your favorite. Leaving out `installed`
-in the TUI's Via dropdown keeps the models on your machine off the tiers, and `↓ downloadable` the
-ones to download, for `recommend` and `pick` too.
+and `--via llama-cli` on a task still pick a copy only as your favorite. Leaving out `ollama` and
+`llama-cli` in the TUI's Via dropdown keeps the models on your machine off the tiers, and `↓ downloadable`
+the ones to download, for `recommend` and `pick` too.
 
 `ollama run` and `llama-cli` answer a prompt with text alone. For the model to edit files and run
 commands, as an agent, run it in pi: add your runner to `~/.pi/agent/models.json` as below (for

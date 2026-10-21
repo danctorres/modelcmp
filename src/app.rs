@@ -634,9 +634,7 @@ pub fn bound_keys(keys: &str, bound: &BTreeMap<char, char>) -> String {
 
 /// The Via dropdown's entries that are no harness, after the harnesses: the models your machine
 /// runs through ollama or llama.cpp, and the ones `x` can download.
-pub const INSTALLED: &str = "installed";
 pub const DOWNLOAD: &str = "↓ downloadable";
-pub const VIA_KINDS: [&str; 2] = [INSTALLED, DOWNLOAD];
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
@@ -2103,15 +2101,15 @@ impl App {
         })
     }
 
-    /// `view::via_out`, and with "↓ downloadable" left out a model only a download reaches, as
-    /// only the TUI knows what `x` can download.
+    /// `view::via_out`, and with "↓ downloadable" left out a model `x` can download, whoever else
+    /// has it, as only the TUI knows what `x` can download.
     fn via_out(&self, m: &Model) -> bool {
         view::via_out(m, &self.store, self.any_available) || self.download_out(m)
     }
 
-    /// Whether "↓ downloadable" is left out and `m` is reachable only by a download.
+    /// Whether "↓ downloadable" is left out and `x` can download `m`.
     fn download_out(&self, m: &Model) -> bool {
-        view::left_out(&self.store, DOWNLOAD) && self.shown_via(m) == [view::OUT_OF_REACH] && self.download(m).is_some()
+        view::left_out(&self.store, DOWNLOAD) && self.download(m).is_some()
     }
 
     /// What of the picks of the Dev, Price and Via dropdowns and the bounds model `i` fails, the
@@ -2645,11 +2643,10 @@ impl App {
         self.any_available
     }
 
-    /// What the Via dropdown picks `m` by: `shown_via`, then whether your machine runs it
-    /// through ollama or llama.cpp, and `DOWNLOAD` for one `x` can download (`download`).
+    /// What the Via dropdown picks `m` by: `shown_via`, then `DOWNLOAD` for one `x` can download
+    /// (`download`).
     fn via_labels<'a>(&self, m: &'a Model) -> Vec<&'a str> {
         let mut v = self.shown_via(m);
-        v.extend(m.here().then_some(INSTALLED));
         v.extend(self.download(m).map(|_| DOWNLOAD));
         v
     }
@@ -2790,7 +2787,7 @@ impl App {
 
     /// Whether `m` can be recommended: in reach and not excluded.
     fn usable(&self, m: &Model) -> bool {
-        self.in_reach(m) && !view::excluded(m, &self.store, self.any_available)
+        self.in_reach(m) && !view::excluded(m, &self.store, self.any_available) && !self.download_out(m)
     }
 
     /// Whether `key`, a favorite of the task, is on its line only for being a favorite.
@@ -3251,7 +3248,7 @@ impl App {
         } else if col == 1 || col == VIA {
             let by_dev = col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            // Via as the table shows it, so "not available" can be picked too, then `INSTALLED` and the like.
+            // Via as the table shows it, so "not available" can be picked too, then `DOWNLOAD`.
             let labels = ms.iter().flat_map(|&(_, m)| if by_dev { m.devs().collect() } else { self.via_labels(m) });
             for l in labels.filter(|l| !l.is_empty()) {
                 *counts.entry(l).or_default() += 1;
@@ -3263,7 +3260,7 @@ impl App {
                 let countries: std::collections::HashSet<&str> = ms.iter().map(|(_, m)| m.country.as_str()).collect();
                 names.sort_by_key(|(d, _)| (!countries.contains(d.as_str()), d.to_lowercase()));
             } else {
-                names.sort_by_key(|(h, n)| (VIA_KINDS.iter().position(|k| k == h), Reverse(*n)));
+                names.sort_by_key(|(h, n)| (h == DOWNLOAD, Reverse(*n)));
             }
             let current = if col == 1 { &self.store.dev_pick } else { &self.store.via_pick };
             let picked = current.first().and_then(|d| names.iter().position(|(x, _)| x == d));
@@ -5842,7 +5839,7 @@ mod tests {
     }
 
     #[test]
-    fn via_dropdown_picks_or_leaves_out_the_installed_models() {
+    fn via_dropdown_picks_or_leaves_out_the_models_to_download() {
         let mut a = app();
         a.col = VIA;
         a.data.models[3].via.push(crate::data::OLLAMA.into());
@@ -5856,26 +5853,14 @@ mod tests {
             code(a, KeyCode::Esc);
         };
         press(&mut a, "d");
-        assert_eq!(menu(&a).last(), Some(&("installed", 1)), "after the harnesses");
+        assert!(menu(&a).iter().any(|e| e.0 == "ollama"), "ollama is the one that runs it here");
+        assert!(!menu(&a).iter().any(|e| e.0 == "installed"), "nothing ollama and llama.cpp do not say");
         code(&mut a, KeyCode::Esc);
-        pick(&mut a, "installed");
-        assert_eq!(
-            (a.store.via_pick.as_slice(), keys(&a)),
-            (&["installed".to_string()][..], vec!["mini"]),
-            "whoever else has it"
-        );
+        pick(&mut a, "ollama");
+        assert_eq!((a.store.via_pick.as_slice(), keys(&a)), (&["ollama".to_string()][..], vec!["mini"]));
         assert!(a.filtered_too(), "recommend says so");
         press(&mut a, "c");
         assert_eq!((keys(&a).len(), a.store.via_pick.len()), (3, 0), "c clears it");
-        // The last entry, "installed".
-        press(&mut a, "dGe");
-        code(&mut a, KeyCode::Esc);
-        assert_eq!(a.store.via_not, ["installed"]);
-        assert!(keys(&a).contains(&"mini"), "another harness has it too");
-        a.data.models[3].via = vec![crate::data::OLLAMA.into()];
-        a.rebuild();
-        assert!(!keys(&a).contains(&"mini"), "only your machine runs it");
-        press(&mut a, "c");
         // With all, the ones ollama or llama.cpp can download have an entry of their own.
         press(&mut a, "a");
         pick(&mut a, "download");
@@ -5884,6 +5869,10 @@ mod tests {
         a.store.via_not = vec![DOWNLOAD.into()];
         a.rebuild();
         assert!(!keys(&a).contains(&"llama4"), "left out, it is not shown");
+        (a.data.models[2].via, a.data.models[2].available) = (vec!["codex".into()], true);
+        a.rebuild();
+        assert!(!keys(&a).contains(&"llama4"), "nor when a harness has it too");
+        (a.data.models[2].via, a.data.models[2].available) = (vec![], false);
         a.store.via_not.clear();
         a.rebuild();
         pick(&mut a, "download");

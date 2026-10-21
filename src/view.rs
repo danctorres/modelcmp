@@ -494,9 +494,9 @@ pub fn local_best<'a>(
         return None;
     }
     let bench = crate::app::task_bench(store, t);
-    // Not one whose entry is left out in Via: "installed", or "↓ downloadable".
+    // Not one whose runner is left out in Via, nor a download with "↓ downloadable" left out.
     let runs = |m: &Model| match m.here() {
-        true => !left_out(store, crate::app::INSTALLED),
+        true => m.via.iter().any(|h| crate::data::runs_here(h) && !left_out(store, h)),
         false => {
             !left_out(store, crate::app::DOWNLOAD)
                 && m.hf_repo().is_some()
@@ -870,14 +870,7 @@ pub fn left_out_by(m: &Model, store: &Store, any: bool) -> Option<String> {
         return Some(format!("{} left out in Price", level_label(store.price_not?)));
     }
     if via_out(m, store, any) {
-        // An ollama or llama.cpp not left out itself is by "installed".
-        let mut by: Vec<&str> = vec![];
-        for h in shown_via(m, any).into_iter().map(|h| if left_out(store, h) { h } else { crate::app::INSTALLED }) {
-            if !by.contains(&h) {
-                by.push(h);
-            }
-        }
-        return Some(format!("{} left out in Via", by.join(", ")));
+        return Some(format!("{} left out in Via", shown_via(m, any).join(", ")));
     }
     let picks = |l: &[String]| l.join(", ");
     if !picked(m, any, &store.dev_pick, &[], None, None) {
@@ -975,12 +968,10 @@ pub fn price_out(price: Option<f64>, store: &Store) -> bool {
     store.price_not.is_some_and(|l| price.is_some_and(|v| v <= LEVELS[l]))
 }
 
-/// Whether every harness that has `m` is left out (`Store::via_not`), ollama and llama.cpp
-/// with "installed".
+/// Whether every harness that has `m` is left out (`Store::via_not`).
 pub fn via_out(m: &Model, store: &Store, any: bool) -> bool {
     let v = if store.via_not.is_empty() { vec![] } else { shown_via(m, any) };
-    let out = |h: &str| left_out(store, h) || crate::data::runs_here(h) && left_out(store, crate::app::INSTALLED);
-    !v.is_empty() && v.iter().all(|h| out(h))
+    !v.is_empty() && v.iter().all(|h| left_out(store, h))
 }
 
 /// Whether `entry` of the Via dropdown is left out.
@@ -999,10 +990,9 @@ pub fn picked(
     price: Option<usize>,
     download: Option<bool>,
 ) -> bool {
-    let [local, dl] = crate::app::VIA_KINDS;
+    let dl = crate::app::DOWNLOAD;
     let known = |v: &&String| download.is_some() || *v != dl;
     let has = |v: &str| match v {
-        _ if v == local => m.here(),
         _ if v == dl => download == Some(true),
         h => shown_via(m, any).contains(&h),
     };
@@ -1342,7 +1332,6 @@ mod tests {
         let via =
             |v: &[&str], dl| picked(&m, false, &[], &v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None, dl);
         assert!(via(&[], None) && via(&["claude"], None) && !via(&["pi"], None));
-        assert!(!via(&["installed"], None));
         assert!(!via(&["↓ downloadable"], Some(false)) && via(&["↓ downloadable"], Some(true)), "the TUI knows");
         assert!(via(&["↓ downloadable"], None) && !via(&["↓ downloadable", "pi"], None), "the CLI passes it over");
     }
@@ -1408,11 +1397,11 @@ mod tests {
             local_best(all.iter().copied(), t, &s, size, Some(20)).map(|e| e.0.key.clone())
         };
         assert_eq!(left(crate::app::DOWNLOAD).as_deref(), Some("pulled"), "no download");
-        assert_eq!(left(crate::app::INSTALLED).as_deref(), Some("fits"), "not the installed one");
+        assert_eq!(left(crate::data::OLLAMA).as_deref(), Some("fits"), "not the one ollama runs");
         let mut s = Store::default();
-        s.via_not = vec![crate::app::INSTALLED.into()];
-        assert!(via_out(&ollama, &s, false), "only installed has it");
-        assert_eq!(left_out_by(&ollama, &s, false).as_deref(), Some("installed left out in Via"));
+        s.via_not = vec![crate::data::OLLAMA.into()];
+        assert!(via_out(&ollama, &s, false), "only ollama has it");
+        assert_eq!(left_out_by(&ollama, &s, false).as_deref(), Some("ollama left out in Via"));
         let mut gpu = Store::default();
         gpu.memory = Some(24.0);
         assert_eq!(memory(&gpu), Some(24 << 30), "a GPU's GB, of 2^30 bytes");
