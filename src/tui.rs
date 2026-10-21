@@ -2184,7 +2184,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 _ if listed && on_price(i) => tint(MUTED).add_modifier(Modifier::ITALIC),
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
                 _ if i + 2 == PRICE => soft(LEVEL[level(v)]),
-                // Free is green and no more, in $in, $cache, $out and $task as in Price: every free
+                // Free is green and no more, in $in, $cache and $out as in Price: every free
                 // model ties for the best, and a column of them in bold says nothing of any one.
                 _ if COLS[i].lower_better && v == 0.0 => soft(GOOD),
                 // Nor is the largest context bold: it is a size many models share, as free is.
@@ -4437,7 +4437,7 @@ mod tests {
         let mut a = app();
         let (buf, lines) = render(&mut a, 229, 6);
         let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI AAII Arena ▾ Coding ▾ Agentic ▾ \
-                      Reason ▾ Value │ $task Tok/task Tok/s TTFT │ Via ▾ Notes";
+                      Reason ▾ Value │ Tok/s TTFT │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);

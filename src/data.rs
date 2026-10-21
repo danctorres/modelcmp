@@ -766,13 +766,6 @@ pub struct Model {
     pub tps: Option<f64>,
     #[serde(default)]
     pub ttft: Option<f64>,
-    /// USD one task of `COST_BENCH` cost the model, at the setting its score there is of. Epoch
-    /// lists it, Artificial Analysis's API does not.
-    #[serde(default)]
-    pub task_cost: Option<f64>,
-    /// Output tokens that task took it, of the same run. Epoch lists no input tokens.
-    #[serde(default)]
-    pub task_tokens: Option<f64>,
     /// Its score on Arena's Agent leaderboard, in percent: the net improvement arena.ai measures
     /// in real agent sessions, the best of its reasoning settings (`Arena`).
     #[serde(default)]
@@ -873,12 +866,6 @@ impl Model {
     /// `Offer::blended` of `priced_offer`; 0 when it is free, none when nobody lists a price.
     pub fn cost(&self) -> Option<f64> {
         self.quoted().map(|q| q.0.blended())
-    }
-
-    /// What a task costs you: Epoch's measured cost, at the price Epoch paid, but nothing where
-    /// the price you'd pay is free.
-    pub fn task_usd(&self) -> Option<f64> {
-        self.task_cost.map(|c| if self.cost() == Some(0.0) { 0.0 } else { c })
     }
 
     /// What the Dev dropdown and `--dev` pick the model by: its developer and that one's country.
@@ -1022,24 +1009,12 @@ struct Lent {
     #[serde(default)]
     ttft: Option<f64>,
     #[serde(default)]
-    task_cost: Option<f64>,
-    #[serde(default)]
-    task_tokens: Option<f64>,
-    #[serde(default)]
     scores: BTreeMap<String, f64>,
 }
 
 impl From<&Model> for Lent {
     fn from(m: &Model) -> Self {
-        Lent {
-            key: m.key.clone(),
-            eci: m.eci,
-            tps: m.tps,
-            ttft: m.ttft,
-            task_cost: m.task_cost,
-            task_tokens: m.task_tokens,
-            scores: m.scores.clone(),
-        }
+        Lent { key: m.key.clone(), eci: m.eci, tps: m.tps, ttft: m.ttft, scores: m.scores.clone() }
     }
 }
 
@@ -1086,11 +1061,8 @@ impl Data {
         for m in &mut self.models {
             let l = by_key.remove(m.key.as_str());
             m.other_index = l.as_ref().and_then(|l| l.eci);
-            match src {
-                Source::Epoch => (m.tps, m.ttft) = l.as_ref().map_or((None, None), |l| (l.tps, l.ttft)),
-                Source::Aa => {
-                    (m.task_cost, m.task_tokens) = l.as_ref().map_or((None, None), |l| (l.task_cost, l.task_tokens))
-                }
+            if src == Source::Epoch {
+                (m.tps, m.ttft) = l.as_ref().map_or((None, None), |l| (l.tps, l.ttft));
             }
             m.other_scores = l.map(|l| l.scores).unwrap_or_default();
         }
@@ -1120,9 +1092,7 @@ impl Data {
 
     /// What `missed` leaves empty, said at every load until a refresh brings it.
     pub fn unscored(&self) -> Option<String> {
-        let cost = self.missed.iter().any(|b| b == COST_BENCH.0).then_some(", and so no $task or Tok/task");
-        (!self.missed.is_empty())
-            .then(|| format!("epoch.ai sent no {} scores{}", self.missed.join(", "), cost.unwrap_or_default()))
+        (!self.missed.is_empty()).then(|| format!("epoch.ai sent no {} scores", self.missed.join(", ")))
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness. A model ollama
@@ -1990,7 +1960,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         // Analysis's names deciding the keys.
         let mut data = merge(&models, &parse_aa(api.as_ref().map_err(Failure::clone)?)?, ep.as_ref().ok())?;
         match &ep {
-            // Its $task and the other scores are Epoch's, lent (`Data::borrow`): what Epoch missed is missed here too.
+            // Its other scores are Epoch's, lent (`Data::borrow`): what Epoch missed is missed here too.
             Ok(ep) => {
                 epoch_named(&mut data.models, ep);
                 data.missed.clone_from(&ep.missed);
@@ -3188,9 +3158,6 @@ struct Scores {
     org: HashMap<String, String>,
     /// Developer (`dev_key`) -> its country, Epoch's only.
     country: HashMap<String, String>,
-    /// group -> its best score on `COST_BENCH`, and what a task cost there and the output tokens
-    /// it took, when the run says, Epoch's only.
-    cost: HashMap<String, (f64, Option<f64>, Option<f64>)>,
     /// group -> task -> percentile, and the value it shows.
     fit: crate::fit::Fit,
     /// The task benchmarks no row scored, Epoch's only (`Data::missed`).
@@ -3431,11 +3398,6 @@ fn epoch_named(models: &mut [Model], ep: &Scores) {
     }
 }
 
-/// The benchmark whose runs say what a task cost, and the columns that say it, in USD and in
-/// output tokens: every model is run there on one harness, so the costs compare.
-// ponytail: one benchmark, some 30 models; mean a second one in if Epoch lists a cost as wide.
-const COST_BENCH: (&str, &str, &str) = ("DeepSWE", "Mean cost (USD)", "Mean output tokens");
-
 fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("epoch zip: {e}"))?;
     let meta = csv_rows(&mut zip, "model_metadata.csv").ok_or("epoch zip: missing model_metadata.csv")?;
@@ -3501,15 +3463,6 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             }
             let best = e.2.entry(bench.to_string()).or_insert(0.0);
             *best = best.max(s * scale);
-            // The cost of the run the score is of, never a lower run's, and the cheaper of two that tie.
-            if bench == COST_BENCH.0 {
-                let num = |c| r.get(c).and_then(|c| c.parse::<f64>().ok()).filter(|c| c.is_finite() && *c > 0.0);
-                let (usd, tokens) = (num(COST_BENCH.1), num(COST_BENCH.2));
-                let kept = ep.cost.entry(norm(&e.0)).or_insert((s, usd, tokens));
-                if s > kept.0 || s == kept.0 && usd.is_some_and(|u| kept.1.is_none_or(|k| u < k)) {
-                    *kept = (s, usd, tokens);
-                }
-            }
         }
     }
     for (g, versions) in unscored {
@@ -3918,7 +3871,6 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             }
             (m.eci, m.scores) = (eci, scores);
             (m.fit, m.shown) = fit;
-            (m.task_cost, m.task_tokens) = ep.cost.get(k).map_or((None, None), |c| (c.1, c.2));
         }
     }
     unify_developers(&mut models);
@@ -4099,19 +4051,19 @@ mod tests {
 
     #[test]
     fn a_row_borrows_the_other_sources_columns() {
-        let row = |key: &str| Model { key: key.into(), tps: Some(1.0), task_cost: Some(2.0), ..Default::default() };
+        let row = |key: &str| Model { key: key.into(), tps: Some(1.0), ..Default::default() };
         let mut d = Data { models: vec![row("a"), row("b")], ..Default::default() };
         let mut a = Model { key: "a".into(), eci: Some(60.0), tps: Some(90.0), ..Default::default() };
         a.scores.insert("scicode".into(), 0.3);
         let aa = [Lent::from(&a)];
         d.borrow(Source::Epoch, Some(aa.into()));
         assert_eq!((d.models[0].bench("scicode"), d.models[1].bench("scicode")), (Some(0.3), None));
-        let got = |d: &Data, i: usize| (d.models[i].other_index, d.models[i].tps, d.models[i].task_cost);
-        assert_eq!(got(&d, 0), (Some(60.0), Some(90.0), Some(2.0)), "its own cost stays");
-        assert_eq!(got(&d, 1), (None, None, Some(2.0)), "a row it does not have: not what the cache kept");
+        let got = |d: &Data, i: usize| (d.models[i].other_index, d.models[i].tps);
+        assert_eq!(got(&d, 0), (Some(60.0), Some(90.0)));
+        assert_eq!(got(&d, 1), (None, None), "a row it does not have: not what the cache kept");
         assert!(d.lent);
         d.borrow(Source::Epoch, None);
-        assert_eq!((got(&d, 0), d.lent), ((None, None, Some(2.0)), false));
+        assert_eq!((got(&d, 0), d.lent), ((None, None), false));
         assert_eq!(d.models[0].bench("scicode"), None);
     }
 
@@ -5410,17 +5362,14 @@ mod tests {
             );
             file(
                 "benchmark_metadata.csv",
-                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,DeepSWE,1\n",
+                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,FrontierSWE,1\nhle.csv,Accuracy,HLE,1\n",
             );
             file(
                 "ocr.csv",
                 b"Model version,score\ngoogle/flash-9,0.5\nflash-9-preview-09,0.6\nchat-4o-03,0.5\nfoo-2,0.5\n",
             );
-            file(
-                "swe.csv",
-                b"Model version,score,Mean cost (USD),Mean output tokens\nfoo-2-09,0.5,4,4000\n\
-                  foo-2-09_max,0.5,9,9000\nfoo-2-09_low,0.2,1,1000\nbar-3-09,0.5,,\nbar-3-09_low,0.3,2,2000\n",
-            );
+            file("swe.csv", b"Model version,score\nfoo-2-09,0.5\nfoo-2-09_low,0.2\nbar-3-09,0.5\nbar-3-09_low,0.3\n");
+            file("hle.csv", b"Model version,Accuracy\nfoo-2-09,0.9\n");
             file(
                 "epoch_capabilities_index/eci_scores.csv",
                 b"Model,eci\nGPT-4o (Nov 2024),128\nBar 3 (Jul 2025),140\n",
@@ -5430,7 +5379,8 @@ mod tests {
         let ep = parse_epoch(buf.get_ref()).unwrap();
         assert_eq!(ep.alias["flash9"], "flash9jun2025", "the release filed under the bare id, not the newest");
         let missed = |b: &str| ep.missed.iter().any(|m| m == b);
-        assert!(!missed("DeepSWE") && missed("HLE"), "a task benchmark no row scored, as one with no file");
+        assert!(!missed("FrontierSWE") && missed("MirrorCode"), "a task benchmark no row scored, as one with no file");
+        assert!(!missed("HLE") && !ep.groups["foo2sep2025"].2.contains_key("HLE"), "Epoch dropped it from its tasks");
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
         assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
         assert_eq!(ep.alias["bar3"], "bar3jul2025", "and before a newer one scored on a task");
@@ -5438,9 +5388,6 @@ mod tests {
         assert_eq!(ep.group("foo2").unwrap(), "foo2sep2025", "the name before the id, an older release's");
         assert!(!ep.ids.contains_key("flash9chat"), "an id of another kind of model is not its group's");
         assert!(ep.ids.contains_key("flash9") && !ep.ids.contains_key("googleflash9"), "without its provider");
-        assert_eq!(ep.cost["foo2sep2025"].1, Some(4.0), "the cost of its best run, the cheaper of two that tie");
-        assert_eq!(ep.cost["foo2sep2025"].2, Some(4000.0), "and that run's output tokens");
-        assert_eq!(ep.cost["bar3sep2025"].1, None, "its best run lists no cost: not a lower run's");
     }
 
     #[test]

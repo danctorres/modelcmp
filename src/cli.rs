@@ -119,12 +119,6 @@ struct ModelOut<'a> {
     /// Seconds to the first answer token, after any thinking, median, from Artificial Analysis
     #[serde(skip_serializing_if = "Option::is_none")]
     ttft_seconds: Option<f64>,
-    /// USD one coding task cost on DeepSWE, at the setting its score there is of, from Epoch AI
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task_cost_usd: Option<f64>,
-    /// Output tokens that task took, of the same run, from Epoch AI
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task_output_tokens: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,8 +171,6 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
         arena_webdev: m.arena_more.get(crate::data::ARENA_BOARDS[1].0).copied(),
         tokens_per_second: m.tps,
         ttft_seconds: m.ttft,
-        task_cost_usd: m.task_usd(),
-        task_output_tokens: m.task_tokens.map(f64::round),
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
     }
@@ -1553,22 +1545,22 @@ mod tests {
         let mut data =
             Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
         for (m, s) in data.models.iter_mut().zip([0.5, 0.7]) {
-            m.scores.insert("DeepSWE".into(), s);
+            m.scores.insert("FrontierSWE".into(), s);
         }
         let mut store = Store::default();
         let coding = |s: &Store| recommend_json(&data, s).into_iter().find(|t| t["name"] == "coding").unwrap();
-        store.bench.insert("coding".into(), "DeepSWE".into());
+        store.bench.insert("coding".into(), "FrontierSWE".into());
         let t = coding(&store);
-        assert_eq!(t["benchmarks"], serde_json::json!(["DeepSWE"]));
+        assert_eq!(t["benchmarks"], serde_json::json!(["FrontierSWE"]));
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "mini"});
-        assert_eq!(t["tiers"], tiers, "mini beats gpt55 on DeepSWE for less");
-        assert_eq!(t["frontier"][0]["score"], 70.0, "scored on DeepSWE");
+        assert_eq!(t["tiers"], tiers, "mini beats gpt55 on FrontierSWE for less");
+        assert_eq!(t["frontier"][0]["score"], 70.0, "scored on FrontierSWE");
         // A bound typed on the column is on the benchmark too.
         store.bounds = vec![crate::store::Bound { col: "coding".into(), min: Some(65.0), max: None }];
-        store.bench.insert("coding".into(), "DeepSWE".into());
-        assert_eq!(crate::view::bounds_said(&store).collect::<Vec<_>>(), ["DeepSWE≥65"]);
+        store.bench.insert("coding".into(), "FrontierSWE".into());
+        assert_eq!(crate::view::bounds_said(&store).collect::<Vec<_>>(), ["FrontierSWE≥65"]);
         let out = data.models.iter().map(|m| excluded(m, &store, false)).collect::<Vec<_>>();
-        assert_eq!(out, [true, false], "gpt55 scores 50 on DeepSWE, 90 on coding");
+        assert_eq!(out, [true, false], "gpt55 scores 50 on FrontierSWE, 90 on coding");
         store.bounds.clear();
         // One no dropdown lists with the source in use ranks nothing.
         store.bench.insert("coding".into(), "nope".into());

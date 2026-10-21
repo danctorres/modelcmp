@@ -163,11 +163,10 @@ const ARENA: &str = "arena";
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
 /// index, the other source's and Arena's score, the three overall scores side by side, the task
-/// scores, Value and what a task cost and took when Epoch lists it, then speed when Artificial
-/// Analysis measures it. What the source in use does
+/// scores and Value, then speed when Artificial Analysis measures it. What the source in use does
 /// not measure is the other one's, when its data is there too, and Artificial Analysis's show
 /// empty without it (`absent`).
-pub const COLS: [Col; 17] = [
+pub const COLS: [Col; 15] = [
     Col {
         ranked: false,
         show: month,
@@ -223,19 +222,6 @@ pub const COLS: [Col; 17] = [
         ..col("Value", "value", "Coding score per dollar of Price, ranked 0-100", |m| m.fit.get("value").copied())
     },
     Col {
-        only: Some(Source::Epoch),
-        lower_better: true,
-        show: money,
-        ..col("$task", "cost", "USD per coding task on DeepSWE, measured by Epoch AI", |m| m.task_usd())
-    },
-    Col {
-        only: Some(Source::Epoch),
-        lower_better: true,
-        // In tokens, not thousands as Ctx: a task may take fewer than Ctx's 10,000 that tell them apart.
-        show: |v| ctx(v as u64),
-        ..col("Tok/task", "tokens", "output tokens per coding task on DeepSWE, measured by Epoch AI", |m| m.task_tokens)
-    },
-    Col {
         only: Some(Source::Aa),
         show: |v| format!("{v:.0}"),
         ..col("Tok/s", "tps", "output tokens per second (median)", |m| m.tps)
@@ -289,7 +275,7 @@ pub fn index_col() -> usize {
 pub fn by_role(c: usize) -> usize {
     if crate::data::source() == Source::Aa && [ECI, AAII].contains(&(c + TEXT)) { ECI + AAII - 2 * TEXT - c } else { c }
 }
-/// Column index of $task, the first of what a run measured: a task's cost and tokens, then speed.
+/// Column index of Tok/s, the first of what a run measured: speed.
 const MEASURED: usize = TEXT + 13;
 /// First column of each group: names and release, price and context, scores, measured, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, MEASURED, VIA];
@@ -2582,7 +2568,7 @@ impl App {
 
     /// Why `E` shows the model under the cursor with a grey `✗`: the filter that hides it, as
     /// `view::left_out_by` says it, or a pick or bound of the TUI's own, as `↓ download picked in
-    /// Via` or `DeepSWE≥60`. None off `E`, and for a model excluded with `e`, its red `✗` saying so.
+    /// Via` or `FrontierSWE≥60`. None off `E`, and for a model excluded with `e`, its red `✗` saying so.
     pub fn hidden_by(&self) -> Option<String> {
         if self.view != View::Table || self.only != Some(EXCLUDED) {
             return None;
@@ -6188,8 +6174,8 @@ mod tests {
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
         let of = |id| base_col_source(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
         assert_eq!(
-            (of("price"), of("ctx"), of("eci"), of("value"), of("cost")),
-            (None, None, Some(Source::Epoch), Some(Source::Epoch), Some(Source::Epoch))
+            (of("price"), of("ctx"), of("eci"), of("value"), of("tps")),
+            (None, None, Some(Source::Epoch), Some(Source::Epoch), Some(Source::Aa))
         );
         let sourced = |c: &Col| c.only.is_some() || c.price || c.id == ARENA || crate::fit::task(c.id).is_some();
         assert!(COLS[ECI - TEXT..].iter().all(sourced));
@@ -6265,7 +6251,7 @@ mod tests {
         assert_eq!(a.col, 0, "and wraps from there");
         crate::data::set_source(Source::Aa);
         let shown: Vec<usize> = (0..NCOLS).filter(|&c| !hidden(c)).collect();
-        assert!(shown.len() < NCOLS, "Artificial Analysis has no cost of a task");
+        assert!(shown.len() < NCOLS, "Epoch's columns are left out without its data");
         a.off_hidden();
         a.col = 0;
         press(&mut a, &format!("{}l", shown.len() - 2));
@@ -6412,7 +6398,7 @@ mod tests {
         let mut a = app();
         let mut data = std::mem::take(&mut a.data);
         for (m, s) in data.models.iter_mut().zip([0.5, 0.9, 0.9, 0.7]) {
-            m.scores.insert("DeepSWE".into(), s);
+            m.scores.insert("FrontierSWE".into(), s);
         }
         a.set_data(data);
         let front = |a: &App| {
@@ -6420,16 +6406,16 @@ mod tests {
         };
         assert_eq!(front(&a).len(), 2, "mini and gpt55 by the task's score");
         let col = TEXT + COLS.iter().position(|c| c.id == "coding").unwrap();
-        let i = col_benches(col).unwrap().1.iter().position(|&b| b == "DeepSWE").unwrap();
+        let i = col_benches(col).unwrap().1.iter().position(|&b| b == "FrontierSWE").unwrap();
         a.pick_bench(col, i + 1);
         a.rebuild();
         let want = [("mini".to_string(), 70.0), ("opus5".to_string(), 90.0)];
-        assert_eq!(front(&a), want, "gpt55 is beaten on DeepSWE for less, opus5 has no coding score but this one");
+        assert_eq!(front(&a), want, "gpt55 is beaten on FrontierSWE for less, opus5 has no coding score but this one");
         // Kept for the CLI and the next start, which ranks the same.
         assert!(a.take_bounds_changed(), "to be saved");
-        assert_eq!(a.store.bench.get("coding").map(String::as_str), Some("DeepSWE"));
+        assert_eq!(a.store.bench.get("coding").map(String::as_str), Some("FrontierSWE"));
         let b = App::new(a.data.clone(), a.store.clone());
-        assert_eq!((b.col_bench(col), front(&b)), (Some("DeepSWE"), want.to_vec()));
+        assert_eq!((b.col_bench(col), front(&b)), (Some("FrontierSWE"), want.to_vec()));
         a.pick_bench(col, 0);
         a.rebuild();
         assert_eq!(front(&a).len(), 2, "back to the task's score");
@@ -7955,12 +7941,5 @@ mod tests {
         // Unfavorited, opus5 leaves the task's line; the second tick is still for it.
         press(&mut a, "f  ");
         assert_eq!(a.store.favorite("coding"), Some("opus5"));
-    }
-
-    #[test]
-    fn task_cost_is_free_where_the_price_is() {
-        let free = Model { task_cost: Some(0.48), ..model("glm", true, Some(60.0), 0.0) };
-        let paid = Model { task_cost: Some(0.48), ..model("glm", true, Some(60.0), 1.0) };
-        assert_eq!((free.task_usd(), paid.task_usd()), (Some(0.0), Some(0.48)), "Epoch's cost, but you pay nothing");
     }
 }

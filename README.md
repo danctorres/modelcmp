@@ -130,8 +130,7 @@ local model from ollama or llama.cpp that you made your favorite.
 
 - [models.dev](https://models.dev): prices, context windows and what each model can do
   (tools, reasoning, vision).
-- [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks and what a coding task cost, and it
-  needs no API key.
+- [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks, and it needs no API key.
 - [Artificial Analysis](https://artificialanalysis.ai): benchmarks and speed, and it needs a
   free API key.
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models rank in real agent sessions,

@@ -98,7 +98,7 @@ pub const TASKS: &[Task] = &[
         need: Need::None,
         aa: Some(AA_CODING),
         aa_more: &["terminalbench_v4_0", "scicode"],
-        benches: &["WeirdML", "FrontierCode", "DeepSWE", "FrontierSWE", "MirrorCode"],
+        benches: &["WeirdML", "FrontierCode", "FrontierSWE", "MirrorCode"],
     },
     Task {
         name: "agentic",
@@ -119,7 +119,6 @@ pub const TASKS: &[Task] = &[
         benches: &[
             "LMCA",
             "GPQA diamond",
-            "HLE",
             "ARC-AGI-2",
             "ARC-AGI",
             "SimpleBench",
@@ -324,12 +323,12 @@ mod tests {
     #[test]
     fn ranks_by_task() {
         use crate::data::Source::{Aa, Epoch};
-        let a = scores(&[("APEX-Agents", 0.9), ("WeirdML", 0.2), ("DeepSWE", 0.9)]);
+        let a = scores(&[("APEX-Agents", 0.9), ("WeirdML", 0.2), ("FrontierSWE", 0.9)]);
         let b = scores(&[("APEX-Agents", 0.5), ("WeirdML", 0.7)]);
         let p = pools([(Some(145.0), &a), (None, &b)].into_iter());
         let ((pa, shown_a), (pb, _)) = (scored(Epoch, Some(145.0), &a, &p), scored(Epoch, None, &b, &p));
         assert!(pa["agentic"] > pb["agentic"]);
-        assert!(pb["coding"] > pa["coding"], "DeepSWE is not the task's score");
+        assert!(pb["coding"] > pa["coding"], "FrontierSWE is not the task's score");
         assert_eq!(shown_a["coding"], 20.0, "shown as the score, 0..100");
         assert!(!pa.contains_key("reasoning"), "no LMCA, no reasoning score");
 

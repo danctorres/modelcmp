@@ -968,12 +968,6 @@ pub fn detail_rows(
             n(m.ttft, |v| format!("{v:.1}s"))
         ));
     }
-    // What a task came to, where the price is per token.
-    v.extend(m.task_usd().map(|c| match c {
-        0.0 => "  task cost:  free, as its price".into(),
-        c => format!("  task cost:  ${} a coding task on DeepSWE (measured)", money(c)),
-    }));
-    v.extend(m.task_tokens.map(|t| format!("  task took:  {} output tokens (measured)", ctx(t as u64))));
     v.extend(m.arena.map(|a| format!("  arena:      {}% net improvement in agent sessions (arena.ai)", signed(a))));
     for (b, ..) in crate::data::ARENA_BOARDS {
         v.extend(
@@ -1145,15 +1139,6 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         rows.insert(at, row("answer starts", models.iter().map(|m| m.ttft).collect(), |v| format!("{v:.1}s"), false));
         rows.insert(at, row("tokens/s", models.iter().map(|m| m.tps).collect(), |v| format!("{v:.0}"), true));
     }
-    if models.iter().any(|m| m.task_cost.is_some()) {
-        let at = rows.len() - 1;
-        rows.insert(at, row("$ / coding task", models.iter().map(|m| m.task_usd()).collect(), money, false));
-    }
-    if models.iter().any(|m| m.task_tokens.is_some()) {
-        let at = rows.len() - 1;
-        let tokens = models.iter().map(|m| m.task_tokens).collect();
-        rows.insert(at, row("output tokens / task", tokens, |v| ctx(v as u64), false));
-    }
     // The other source's index beside this one's, with its data there too: ECI then AAII, as
     // the table's columns.
     if models.iter().any(|m| m.other_index.is_some()) {
@@ -1278,14 +1263,14 @@ mod tests {
 
     #[test]
     fn details_list_the_benchmarks_no_task_score_is() {
-        let scores = [("WeirdML", 0.5), ("DeepSWE", 0.4), ("scicode", 0.1)].map(|(b, s)| (b.to_string(), s)).into();
+        let scores = [("WeirdML", 0.5), ("FrontierSWE", 0.4), ("scicode", 0.1)].map(|(b, s)| (b.to_string(), s)).into();
         let mut m = Model { scores, ..Default::default() };
         m.fit.insert("coding".into(), 50.0);
         m.shown.insert("coding".into(), 50.0);
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
         assert!(lines[at("    coding")].contains("  50  "), "{}", lines[at("    coding")]);
-        assert_eq!(at("    DeepSWE"), at("  other benchmarks") + 1, "not the task's score");
+        assert_eq!(at("    FrontierSWE"), at("  other benchmarks") + 1, "not the task's score");
         assert_eq!(at("    scicode"), at("  other benchmarks") + 2);
         assert!(!lines.iter().any(|l| l.starts_with("    WeirdML")), "the task's score, the same number again");
     }

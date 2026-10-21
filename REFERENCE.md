@@ -23,8 +23,6 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard, and its chat and WebDev ratings in the dropdown |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | Coding score per dollar of Price, ranked 0-100 |
-| $task | USD per coding task, [measured](#task) by Epoch AI |
-| Tok/task | output tokens per coding task, [measured](#task) by Epoch AI |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
 | Via | the harnesses that have the model, by a [short name](#what-you-have) |
@@ -58,25 +56,6 @@ The source in use is Artificial Analysis when its key is there and works, else E
 - A provider without a cache price pays full input.
 - A provider that charges more past a context size is priced as at 100k tokens.
 - A price after a `~` is the list price of other providers, yours listing none.
-
-### $task
-
-- Price is per token, and models differ in how many tokens and steps the same job takes them.
-  `$task` is what one task of DeepSWE cost the model in dollars, as the benchmark measured it,
-  every model on the same harness.
-- It is at the price Epoch paid, not yours, except that a model whose Price is free shows `free`.
-- It is the cost of the run the model's DeepSWE score is of, its best reasoning setting. A lower
-  setting costs less and scores less.
-- Few models have it, 26 of them on 2026-10-06, and the rest show `-`. No tier goes by it.
-- `--sort cost` and `--max cost=5` take it.
-- `Tok/task` is the output tokens that same run took per task, for an allowance counted in
-  tokens and not in dollars. Epoch lists no input tokens, which an agent spends far more of, so
-  it compares models and does not total what a task takes. `--sort tokens` and
-  `--max tokens=50000` take it.
-- For a model that shows `-`, [Artificial Analysis](https://artificialanalysis.ai) charts the
-  input and output tokens its own benchmarks took on the model's page, which
-  `modelcmp open MODEL --on aa` opens. Its API does not list them and its terms forbid scraping
-  the site, so modelcmp cannot show them.
 
 ### Task columns
 
@@ -132,8 +111,6 @@ Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data
   compute them.
 - A task's other benchmarks are in its column's dropdown (`d`), only those Epoch still runs on
   new models.
-- `$task` and `Tok/task` are the mean cost and the mean output tokens of a task that Epoch
-  lists for the model's best DeepSWE run, as published. modelcmp does not compute them.
 
 Artificial Analysis (`--source aa`, its API with your key):
 
@@ -143,7 +120,6 @@ Artificial Analysis (`--source aa`, its API with your key):
 - A model's numbers are those of one of its reasoning settings, chosen as
   [Task columns](#task-columns) says.
 - It scores more models than Epoch AI does, most of all on Agentic.
-- Its API lists no cost of a task, so `$task` and `Tok/task` are hidden with it.
 
 Arena (its Agent, Text and WebDev leaderboards, no key needed):
 
@@ -179,7 +155,6 @@ modelcmp list --task coding --tier mid         # just one, the tier's pick
 modelcmp list --task coding --tier mid --via opencode --id    # only its provider/model, for opencode -m $(...)
 modelcmp list --task coding --tier mid --cmd   # the command that opens a harness on it
 modelcmp list --min coding=60 --sort price    # good enough, cheapest first
-modelcmp list --sort cost --max cost=5         # by what a coding task cost, $5 at most
 modelcmp list --max price=2 --via opencode --dev anthropic --dev openai
 modelcmp list --dev china                      # every model of a developer from there
 
@@ -263,8 +238,6 @@ stored as `tool-dispatch`).
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
 | `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores |
-| `cost` | `$task`, from Epoch AI |
-| `tokens` | `Tok/task`, from Epoch AI, in tokens |
 | `tps`, `ttft` | from Artificial Analysis |
 | `arena` | from Arena's Agent leaderboard, in percent |
 | `other` | the other source's index |
@@ -481,8 +454,8 @@ with the age of the data still shown, `⚠ refresh had issues` in yellow until a
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
 When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no file
-for it, a warning names it at every start and command, with `$task` and `Tok/task` for DeepSWE, and
-the first start or command an hour later downloads it again.
+for it, a warning names it at every start and command, with Artificial Analysis too, whose other
+scores are Epoch's, and the first start or command an hour later downloads it again.
 
 ## JSON
 
@@ -517,8 +490,6 @@ Each model carries these fields:
 | `other_index` | the other source's index, AAII with `epoch` and ECI with `aa`, when both are cached |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `arena_chat`, `arena_webdev` | Arena's chat and WebDev ratings, when Arena rates the model |
-| `task_cost_usd` | `$task`, from Epoch AI, when the model has one, 0 where it is free |
-| `task_output_tokens` | `Tok/task`, in tokens, from Epoch AI, when the model has one |
 | `tokens_per_second`, `ttft_seconds` | from Artificial Analysis, when the model has them |
 
 `price` has:
