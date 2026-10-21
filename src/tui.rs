@@ -444,7 +444,7 @@ fn event_loop(
     let ask_size = |key: String, base: String| {
         let tx = size_tx.clone();
         std::thread::spawn(move || {
-            let size = data::gguf_repo(&base, &key).and_then(|r| r.map_or(Ok(None), |r| data::gguf_size(&r)));
+            let size = data::download_size(&base, &key);
             let answer = match size {
                 Ok(Some(bytes)) => Download::Size(bytes),
                 Ok(None) => Download::Gone,
@@ -3203,6 +3203,7 @@ fn to_hit(app: &mut App, hits: &[usize]) -> Option<usize> {
 /// `{tiers}` is `view::tiers_said`.
 const TIER_LEGEND: &str = "the best model for each task at each price: {tiers}, \
                            or ★ your favorite. Each box shows the model's name, its price per 1M tokens and, in parentheses, its score on the task. \
+                           A model free on your machine takes a tier when it scores higher, with ↓ and its size when x has to download it. \
                            The header shows the price of each tier: k from the first task goes there and enter changes low's or mid's.";
 
 /// What recommend leaves out, and how to pick it anyway.
@@ -3535,10 +3536,19 @@ fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, boxed: 
     };
     let fav = app.store.tier_favorites(task, TIERS[col].0).any(|k| k == m.key);
     let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
-    let out = out_of_reach(app, m);
+    // The best model your machine runs, free there, and downloaded by `x` when not on it yet.
+    let local = !fav && built_in.is_some_and(|t| app.local_pick(t, col, m));
+    let out = out_of_reach(app, m).filter(|_| !local);
     let grey = off || out.is_some();
-    let price = m.quoted().filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]);
+    let price = match m.quoted() {
+        _ if local => LEVEL[0],
+        q => q.filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]),
+    };
     let rest = match built_in {
+        Some(_) if local => {
+            let at = app.size(m).filter(|_| !m.here()).map_or("here".into(), |b| format!("↓ {}", crate::data::gb(b)));
+            format!(" free {at} ({s:.0})")
+        }
         Some(_) => priced(m, s, false, false)[m.name.len()..].to_string(),
         None => format!(" {}", crate::view::price(m)),
     };

@@ -164,6 +164,7 @@ modelcmp compare sonnet-5 gpt-5 --json         # side by side, with a verdict
 modelcmp open sonnet-5 --on epoch              # its web page: models.dev, epoch, aa, openrouter or hf
 modelcmp get gemma-3-4b-it --via ollama        # download its GGUF copy and run it here
 modelcmp models-dir ~/models                   # the folder of the .gguf files you downloaded
+modelcmp memory 24                             # the GB your GPU has, when the one found is wrong
 
 # your choices
 modelcmp select sonnet-5                       # shortlist it, list --selected shows them
@@ -190,8 +191,8 @@ modelcmp pick --via claude --min ctx=600       # only models that hold a 600,000
 modelcmp pick --not opus-5.5                   # without a model, as one your note rules out
 ```
 
-`--rm` undoes `select`, `note`, `exclude`, `harness`, `models-dir` and `fav`. Alone, `harness`,
-`models-dir` and `fav` show what is set, and `note <model>` without text shows the note. Agents
+`--rm` undoes `select`, `note`, `exclude`, `harness`, `models-dir`, `memory` and `fav`. Alone, `harness`,
+`models-dir`, `memory` and `fav` show what is set, and `note <model>` without text shows the note. Agents
 weigh a note when choosing.
 
 - `open` without `--on` opens the first site to have a page for the model.
@@ -282,6 +283,8 @@ or bound can hide different models.
   default, as `enter` on the tier's header in the TUI's recommend does. `low` can't cost more than `mid`. The list splits at the caps too, so a tier picks the best model up to its cap.
 - Two tiers pick the same model when none dearer that the next may take is better. A tier
   never takes a worse model to differ from the next.
+- A model your machine runs, or can download, takes a tier when it scores higher than the
+  tier's pick, as it is free there. See [models on your machine](#models-on-your-machine).
 - A tier never holds a model dearer than its cap, your favorite included. With none at its
   price it has none, as `free` has none with no free model, and `pick` says `no model` there.
 - `value` lists the models within 8 months of progress of your best on coding. A month of
@@ -348,6 +351,8 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
   opencode/ling-3.1-flash-free "<prompt>")`.
 - `--min` and `--not` leave a favorite out too. A tier's favorite they leave out gives way to
   the task's, and a task of your own whose model is out says `no model`.
+- A line with a model to download says so in place of the command: `not on your machine, ask
+  the user to download it (17.4 GB): modelcmp get qwen3827b`.
 - When no task has a model (`--via ollama`, whose copies are picked only as favorites, or a
   `--min` nothing meets), `pick` fails and says to choose none.
 - `--task` and `--tier` print only that task or tier, for an agent that chose it already.
@@ -396,8 +401,16 @@ llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`,
 
 Then run `modelcmp --refresh`, which opens the TUI, or `modelcmp list --refresh` in a script.
 
-The scores and the context shown are the full weights', which a quantized copy with its own context
-falls short of, so a model only your machine runs is recommended for a task only as your favorite.
+A tier takes the best model your machine runs when it scores higher than the tier's pick, as it
+is free there: one on it already, or one whose download takes at most 80% of its memory, the rest
+holding the context. `recommend` marks it `↓` with the size when `modelcmp get` or `x` has to
+download it first, and `recommend --json` names it under `local` for each task. The memory is the
+NVIDIA GPUs' (`nvidia-smi`), else the RAM, which a Mac's GPU shares. `modelcmp memory 24` sets it
+by hand, for another GPU or a model split between GPU and RAM, and `modelcmp memory` shows it.
+
+The scores are the full weights', which a quantized copy falls a little short of, and the context
+shown is not the copy's either. `--via ollama` and `--via llama-cli` on a task still pick a copy
+only as your favorite.
 
 `ollama run` and `llama-cli` answer a prompt with text alone. For the model to edit files and run
 commands, as an agent, run it in pi: add your runner to `~/.pi/agent/models.json` as below (for

@@ -544,6 +544,44 @@ pub fn gguf_size(repo: &str) -> Result<Option<u64>, String> {
     Ok(gguf_bytes(&tree, file.as_deref()).map(|b| b + proj))
 }
 
+/// `gguf_size` of the GGUF repo `gguf_repo` finds for the model `key`, whose weights are in the
+/// Hugging Face repo `base`: None when Hugging Face has no such copy.
+pub fn download_size(base: &str, key: &str) -> Result<Option<u64>, String> {
+    gguf_repo(base, key)?.map_or(Ok(None), |r| gguf_size(&r))
+}
+
+/// The memory a model runs in on this machine, in bytes, once looked up: the NVIDIA GPUs'
+/// together (`nvidia-smi`), else the RAM, which on a Mac the GPU shares.
+// ponytail: other GPUs (AMD, Intel) count as RAM, and a model split between GPU and RAM runs
+// slower than one that fits: `modelcmp memory` sets it by hand.
+pub fn memory() -> Option<u64> {
+    static MEMORY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *MEMORY.get_or_init(|| {
+        let out = |bin: &str, args: &[&str]| {
+            let o = std::process::Command::new(bin).args(args).stderr(std::process::Stdio::null()).output().ok()?;
+            o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+        };
+        let nvidia = || {
+            let mib = out("nvidia-smi", &["--query-gpu=memory.total", "--format=csv,noheader,nounits"])?;
+            let all: u64 = mib.lines().filter_map(|l| l.trim().parse::<u64>().ok()).sum();
+            (all > 0).then_some(all << 20)
+        };
+        let mac = || out("sysctl", &["-n", "hw.memsize"])?.trim().parse().ok();
+        let linux = || {
+            let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+            let kb = info.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
+            Some(kb.trim().trim_end_matches("kB").trim().parse::<u64>().ok()? << 10)
+        };
+        if cfg!(test) {
+            None
+        } else if cfg!(target_os = "macos") {
+            mac()
+        } else {
+            nvidia().or_else(linux)
+        }
+    })
+}
+
 /// The file Hugging Face's manifest for llama.cpp names, its size and its projector's (0 for
 /// none), out of `{"ggufFile": {"rfilename": "x.gguf", "size": 1}, "mmprojFile": {...}}`.
 fn gguf_file(manifest: &[u8]) -> Option<(String, u64, u64)> {

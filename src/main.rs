@@ -42,7 +42,7 @@ enum Cmd {
         /// Best model per price level for a task (overall, coding, agentic, reasoning, vision, value): cheapest first, each row costing more and scoring higher. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, else for the task, when it costs no more than the tier's cap. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best, none when nothing is at the tier's price. A task of your own gives the tier's model, else the task's
+        /// One model from the task's list: your favorite for the tier, else for the task, when it costs no more than the tier's cap. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best, none when nothing is at the tier's price. A model your machine runs, or can download (`modelcmp memory`), takes the tier when it scores higher, as it is free there. A task of your own gives the tier's model, else the task's
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -200,6 +200,16 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
+    /// The memory local models run in, in GB: your GPU's, or a Mac's RAM. Alone shows it
+    ///
+    /// A tier picks the best model your machine runs, or can download, when it scores higher than the tier's pick: one whose download takes at most 80% of it, the rest holding its context. Without it, the NVIDIA GPUs' memory, else the RAM
+    Memory {
+        #[arg(conflicts_with = "rm")]
+        gb: Option<f64>,
+        /// Back to the one found
+        #[arg(long)]
+        rm: bool,
+    },
     /// Your favorite model for a task, or for one tier of it at its price or under: --tier picks it and recommend marks it ★. Alone, shows them (`f` in the TUI)
     Fav {
         /// overall, coding, agentic, reasoning, vision or value. Any other name is a task of your own, e.g. debugging, which has only the models you give it
@@ -307,6 +317,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
         Cmd::Harness { .. }
             | Cmd::Tier { .. }
             | Cmd::ModelsDir { .. }
+            | Cmd::Memory { .. }
             | Cmd::Quiet { .. }
             | Cmd::Fav { task: Some(_), rename: Some(_), .. }
     );
@@ -346,6 +357,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
             | Cmd::Harness { .. }
             | Cmd::Tier { .. }
             | Cmd::ModelsDir { .. }
+            | Cmd::Memory { .. }
     )
     .then(|| store::lock(&store::path()))
     .transpose()
@@ -408,6 +420,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
         Cmd::Harness { name, rm } => cli::harness(&mut store, name.as_deref(), rm),
         Cmd::Tier { name, usd, rm } => cli::tier(&mut store, name.as_deref(), usd, rm),
         Cmd::ModelsDir { dir, rm } => cli::models_dir(&mut store, dir.as_deref(), rm),
+        Cmd::Memory { gb, rm } => cli::memory(&mut store, gb, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),
         Cmd::Fav { task, model, tier, via, rm, about, .. } => {

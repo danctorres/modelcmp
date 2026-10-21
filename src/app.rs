@@ -1367,6 +1367,10 @@ pub struct App {
     /// Per task of `TASKS`. Set by `rebuild`, as each is a pass over every model and recommend
     /// draws them all.
     fronts: Vec<Front>,
+    /// Per task of `TASKS`, the best model your machine runs or can download
+    /// (`view::local_best`), as (index into `data.models`, score). Set by `rebuild`, and again
+    /// when sizes come (`sized`).
+    locals: Vec<Option<(usize, f64)>>,
     pub table: TableState,
     /// How many marks are of models the data has: the ones `S`, `C` and `u` act on, as a
     /// refresh or a source switch can drop a selected model while its mark stays. Set by
@@ -1480,6 +1484,7 @@ impl App {
             typos: false,
             rows: vec![],
             fronts: vec![],
+            locals: vec![],
             table: TableState::default().with_selected(0),
             marked_shown: 0,
             marked_out: 0,
@@ -1803,11 +1808,7 @@ impl App {
     /// frontier. None where the task has no model for the tier.
     pub fn tier_picks(&self, i: usize) -> [Option<(&Model, f64)>; TIERS.len()] {
         let (name, front, off) = match TASKS.get(i) {
-            Some(t) => {
-                let off =
-                    self.cached(t).map_or(vec![], |f| f.1.iter().map(|&i| self.data.models[i].key.as_str()).collect());
-                (t.name, self.task_frontier(t), off)
-            }
+            Some(t) => (t.name, self.task_frontier(t), self.off(t)),
             // A task of your own has no ranking: its models are on its line only as favorites.
             None => {
                 let Some(&name) = self.store.custom_tasks().get(i - TASKS.len()) else { return [None; TIERS.len()] };
@@ -1815,7 +1816,45 @@ impl App {
                 (name, front, off)
             }
         };
-        view::tier_picks(&front, &off, &self.store, name)
+        let picks = view::tier_picks(&front, &off, &self.store, name);
+        // A task of your own has no ranking for it to beat.
+        match TASKS.get(i) {
+            Some(t) => view::with_local(picks, self.local_best(t), &self.store, name),
+            None => picks,
+        }
+    }
+
+    /// The keys of the favorites on task `t`'s line only for being favorites.
+    fn off(&self, t: &Task) -> Vec<&str> {
+        self.cached(t).map_or(vec![], |f| f.1.iter().map(|&i| self.data.models[i].key.as_str()).collect())
+    }
+
+    /// The best model for `t` your machine runs or can download (`view::local_best`), excluded
+    /// ones aside. As of the last `rebuild` or size that came.
+    pub fn local_best(&self, t: &Task) -> Option<(&Model, f64)> {
+        let (i, s) = (*self.locals.get(TASKS.iter().position(|x| x.name == t.name)?)?)?;
+        Some((&self.data.models[i], s))
+    }
+
+    fn set_locals(&mut self) {
+        let ok = |m: &&Model| !view::excluded(m, &self.store, self.any_available);
+        let room = view::room(&self.store);
+        let at = |m: &Model| self.data.models.iter().position(|x| std::ptr::eq(x, m));
+        self.locals = TASKS
+            .iter()
+            .map(|t| {
+                let (m, s) =
+                    view::local_best(self.data.models.iter().filter(ok), t, &self.store, |m| self.size(m), room)?;
+                Some((at(m)?, s))
+            })
+            .collect();
+    }
+
+    /// Whether `m`, the pick of tier `col` of task `t`, is the best model your machine runs in
+    /// place of the tier's own pick (`view::or_local`).
+    pub fn local_pick(&self, t: &Task, col: usize, m: &Model) -> bool {
+        let own = view::tier_pick(&self.task_frontier(t), &self.off(t), &self.store, t.name, TIERS[col].0);
+        self.local_best(t).is_some_and(|l| l.0.key == m.key) && own.is_none_or(|o| o.0.key != m.key)
     }
 
     /// The built-in task under recommend's cursor, which runs over `TASKS` and then your own.
@@ -2193,6 +2232,7 @@ impl App {
             &rows
         };
         self.fronts = TASKS.iter().map(|t| self.front(t, pool)).collect();
+        self.set_locals();
         let ms = &self.data.models;
         // `F` and `E` keep theirs off the line too: one out of reach or excluded is on none.
         if let Some(t) = self.task.filter(|_| !matches!(self.only, Some(FAV | EXCLUDED))) {
@@ -2473,9 +2513,17 @@ impl App {
         let new = |m: &&Model| m.hf_repo().is_some() && !self.downloads.contains_key(&m.key);
         // A bound on Via's size hides a model whose size is not known: every one is asked for,
         // a screenful at a time.
-        let ask = self.size_bound() && !self.downloads.values().any(|d| *d == Download::Awaited);
+        let ask = self.size_bound() && !self.awaited();
         let all = self.data.models.iter().filter(move |_| ask);
-        self.current().into_iter().chain(seen).chain(all).filter(new)
+        // Recommend's tiers weigh the best model your machine can download (`local_best`).
+        let local = self.view == View::Recommend && view::room(&self.store).is_some() && !self.awaited();
+        let local = self.data.models.iter().filter(move |m| local && view::wants_size(m));
+        self.current().into_iter().chain(seen).chain(all).chain(local).filter(new)
+    }
+
+    /// Whether a size asked for has not come yet.
+    fn awaited(&self) -> bool {
+        self.downloads.values().any(|d| *d == Download::Awaited)
     }
 
     /// Whether a size is still to ask for. Asked ahead of `x`, once the cursor rests, and once
@@ -2499,9 +2547,10 @@ impl App {
     /// Hugging Face's answers on the downloads of models, by key, which `x` goes by from now
     /// on. Its open list says them too, on the entries, which stay where they are under the cursor.
     pub fn sized<'a>(&mut self, answers: impl IntoIterator<Item = (&'a str, Download)>) {
-        let mut again = false;
+        let (mut again, mut sized) = (false, false);
         for (key, answer) in answers {
             self.downloads.insert(key.into(), answer);
+            sized |= matches!(answer, Download::Size(_));
             // Via sorts by it, and a model with no copy leaves the ones picked by `DOWNLOAD`.
             let picked = answer == Download::Gone && self.store.via_pick.iter().any(|v| v == DOWNLOAD);
             again |= picked || (self.sort_col == VIA || self.size_bound()) && matches!(answer, Download::Size(_));
@@ -2519,6 +2568,8 @@ impl App {
         // Once for the answers that came together, not once each.
         if again {
             self.rebuild();
+        } else if sized {
+            self.set_locals();
         }
     }
 
@@ -2534,6 +2585,7 @@ impl App {
     /// The sizes kept by a run before.
     pub fn set_sizes(&mut self, sizes: std::collections::HashMap<String, u64>) {
         self.downloads.extend(sizes.into_iter().map(|(k, b)| (k, Download::Size(b))));
+        self.set_locals();
     }
 
     /// The size of the model's GGUF copy on Hugging Face, once known, which its details say.
@@ -4698,6 +4750,25 @@ mod tests {
         assert!(!pick_gone(&store, coding), "its bounds stay, on the column's own value");
         store.bench.insert("coding".into(), "DeepSWE".into());
         assert!(pick_gone(&store, coding), "one no list has any more is gone");
+    }
+
+    /// Recommend's free tier takes a model your machine can download once its size is known,
+    /// kept from a run before or come since.
+    #[test]
+    fn a_download_that_fits_takes_the_free_tier() {
+        let mut a = app();
+        a.data.models[2].hf = Some("meta/llama4".into());
+        a.store.memory = Some(10.0);
+        let coding = TASKS.iter().position(|t| t.name == "coding").unwrap();
+        let free = |a: &App| a.tier_picks(coding)[0].map(|p| p.0.key.clone());
+        assert_eq!(free(&a), None, "no size known yet");
+        a.set_sizes([("llama4".into(), 4_000_000_000)].into());
+        assert_eq!(free(&a).as_deref(), Some("llama4"), "4 GB fits in 8 of 10");
+        let llama = &a.data.models[2];
+        assert!(a.local_pick(&TASKS[coding], 0, llama), "marked free, to download");
+        assert_eq!(a.tier_picks(coding)[3].unwrap().0.key, "gpt55", "high's own pick scores higher");
+        a.sized([("llama4", Download::Size(9_000_000_000))]);
+        assert_eq!(free(&a), None, "9 GB does not");
     }
 
     /// `>` `<` on Via bound the size of a model's GGUF copy, in GB, and the bound asks the size

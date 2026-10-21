@@ -83,6 +83,10 @@ pub struct Store {
     /// llama.cpp's own `LLAMA_ARG_MODELS_DIR` is not set.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub models_dir: String,
+    /// The memory a model runs in on this machine, in GB (`modelcmp memory`), in place of the
+    /// one found (`data::memory`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<f64>,
     /// What each task of your own is about, in your words, by its name: agents choose it by that.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub about: BTreeMap<String, String>,

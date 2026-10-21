@@ -418,10 +418,7 @@ pub fn task_frontier<'a>(
     caps: &[f64],
     bench: Option<&str>,
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
-    let score = |m: &Model| match bench {
-        Some(b) => m.picked(b).filter(|_| fit::qualifies(m, t)),
-        None => fit::fit(m, t).map(|s| fit::shown(m, t, s)),
-    };
+    let score = |m: &Model| line_score(m, t, bench);
     // Not one only your machine runs, whose scores and context are not that copy's: free, it
     // would take every tier it has the score for. A favorite is still on the line.
     let mut ranked: Vec<_> = models.filter(|m| !m.local()).filter_map(|m| Some((m, score(m)?))).collect();
@@ -456,6 +453,76 @@ pub fn task_frontier<'a>(
     v.sort_by(dearest);
     v.reverse();
     (v, off)
+}
+
+/// A model's score on a task's line, as the task's column shows it: the task's, or with
+/// `bench`, the benchmark picked in that column.
+fn line_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> Option<f64> {
+    match bench {
+        Some(b) => m.picked(b).filter(|_| fit::qualifies(m, t)),
+        None => fit::fit(m, t).map(|s| fit::shown(m, t, s)),
+    }
+}
+
+/// What of the memory a model runs in its download may take: the rest holds its context.
+const HEADROOM: f64 = 0.8;
+
+/// The largest download your machine runs, in bytes: `HEADROOM` of the memory you set
+/// (`modelcmp memory`), else of the one found (`data::memory`). None when neither is known.
+pub fn room(store: &Store) -> Option<u64> {
+    let memory = store.memory.map(|gb| gb * 1e9).or_else(|| Some(crate::data::memory()? as f64))?;
+    Some((memory * HEADROOM) as u64)
+}
+
+/// The best model for `t` among `models` that your machine runs: one on it already, or one
+/// whose download (`size`, in bytes) is at most `room`, which `x` and `modelcmp get` fetch.
+/// Scored as the full model, a quantized copy scoring a little lower. None for "value", a
+/// rank per dollar that a copy of your own has none of.
+pub fn local_best<'a>(
+    models: impl Iterator<Item = &'a Model>,
+    t: &fit::Task,
+    store: &Store,
+    size: impl Fn(&Model) -> Option<u64>,
+    room: Option<u64>,
+) -> Option<(&'a Model, f64)> {
+    if t.name == "value" {
+        return None;
+    }
+    let bench = crate::app::task_bench(store, t);
+    let runs = |m: &Model| m.here() || m.hf_repo().is_some() && size(m).zip(room).is_some_and(|(b, r)| b <= r);
+    models.filter(|m| runs(m)).filter_map(|m| Some((m, line_score(m, t, bench)?))).max_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Whether `local_best` needs the size of `m`'s download: one not on your machine, with a
+/// Hugging Face repo and a score for a task it ranks.
+pub fn wants_size(m: &Model) -> bool {
+    !m.here() && m.hf_repo().is_some() && fit::TASKS.iter().any(|t| t.name != "value" && fit::fit(m, t).is_some())
+}
+
+/// `tier`'s pick, `local` in place of `pick` when it scores higher, as the best model your
+/// machine runs (`local_best`) costs you nothing: not in place of your favorite.
+pub fn or_local<'m>(
+    pick: Option<(&'m Model, f64)>,
+    local: Option<(&'m Model, f64)>,
+    store: &Store,
+    task: &str,
+    tier: &str,
+) -> Option<(&'m Model, f64)> {
+    let fav = pick.is_some_and(|(m, _)| store.tier_favorites(task, tier).any(|k| k == m.key));
+    match local {
+        Some(l) if !fav && pick.is_none_or(|(_, s)| l.1 > s) => Some(l),
+        _ => pick,
+    }
+}
+
+/// `or_local` for every tier.
+pub fn with_local<'m>(
+    picks: [Option<(&'m Model, f64)>; TIERS.len()],
+    local: Option<(&'m Model, f64)>,
+    store: &Store,
+    task: &str,
+) -> [Option<(&'m Model, f64)>; TIERS.len()] {
+    std::array::from_fn(|i| or_local(picks[i], local, store, task, TIERS[i].0))
 }
 
 /// `task_frontier` with the favorites `store` has for the task, the ones among `pool`, ranked
@@ -619,7 +686,8 @@ pub fn price(m: &Model) -> String {
 /// What a tier's line of `modelcmp recommend` shows, as recommend's grid in the TUI picks them.
 /// `{tiers}` is `tiers_said`.
 pub const RECOMMEND_LEGEND: &str = "the best model for each task at each price: {tiers}, \
-     or ★ your favorite, as name [key] $/1M tokens (score on the task), marked not recommended when the favorite is not one";
+     or ★ your favorite, as name [key] $/1M tokens (score on the task), marked not recommended when the favorite is not one. \
+     A model free on your machine takes a tier when it scores higher, with ↓ and its size when it needs a download (modelcmp memory)";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
 pub const CUSTOM_ABOUT: &str = "your own task";
@@ -1276,6 +1344,39 @@ mod tests {
         assert_eq!(at("    FrontierSWE"), at("  other benchmarks") + 1, "not the task's score");
         assert_eq!(at("    scicode"), at("  other benchmarks") + 2);
         assert!(!lines.iter().any(|l| l.starts_with("    WeirdML v3")), "the task's score, the same number again");
+    }
+
+    #[test]
+    fn a_tier_takes_the_best_model_your_machine_runs() {
+        let t = fit::task("reasoning").unwrap();
+        let model = |key: &str, score: f64, price: f64| Model {
+            key: key.into(),
+            hf: Some(format!("org/{key}")),
+            fit: [("reasoning".to_string(), score)].into(),
+            offers: vec![Offer { input: price, output: price, available: true, ..Default::default() }],
+            ..Default::default()
+        };
+        let ollama = Model { via: vec![crate::data::OLLAMA.into()], ..model("pulled", 20.0, 0.3) };
+        let ms =
+            [model("hosted", 30.0, 0.0), model("paid", 50.0, 1.0), model("fits", 40.0, 0.2), model("big", 45.0, 0.2)];
+        let size = |m: &Model| [("fits", 10), ("big", 30)].into_iter().find(|s| s.0 == m.key).map(|s| s.1);
+        let store = Store::default();
+        let best = |ms: &[&Model], room| local_best(ms.iter().copied(), t, &store, size, room).map(|e| e.0.key.clone());
+        let all: Vec<&Model> = ms.iter().chain([&ollama]).collect();
+        assert_eq!(best(&all, Some(20)).as_deref(), Some("fits"), "not big, whose download is over the room");
+        assert_eq!(best(&all, Some(40)).as_deref(), Some("big"));
+        assert_eq!(best(&all, None).as_deref(), Some("pulled"), "no memory known: only the one on your machine");
+        let value = fit::task("value").unwrap();
+        assert!(local_best(all.iter().copied(), value, &store, size, Some(40)).is_none(), "no price to rank it by");
+        let front: Vec<(&Model, f64)> = vec![(&ms[0], 30.0), (&ms[1], 50.0)];
+        let local = local_best(all.iter().copied(), t, &store, size, Some(20));
+        let keys = |s: &Store| {
+            with_local(tier_picks(&front, &[], s, "reasoning"), local, s, "reasoning").map(|p| p.unwrap().0.key.clone())
+        };
+        assert_eq!(keys(&store), ["fits", "paid", "paid", "paid"], "free only, as paid scores higher");
+        let mut fav = Store::default();
+        fav.set_favorite(&crate::store::slot("reasoning", Some("free")), "hosted", None);
+        assert_eq!(keys(&fav)[0], "hosted", "your favorite stays");
     }
 
     #[test]
