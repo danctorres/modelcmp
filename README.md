@@ -80,19 +80,35 @@ modelcmp get gemma-3-4b-it                 # download a model and run it on your
 
 In the TUI, `R` recommends, `space` selects models, `C` compares them, `f` sets your favorite
 for a task and `/` filters. `enter` shows everything about a model, `o` opens its page on
-a site like OpenRouter, `x` starts a harness on it and `t` changes the theme. `?` lists the
-keys, where `enter` changes one, and `qq` quits.
+a site like OpenRouter and `t` changes the theme. `x` opens a harness on the model, or downloads
+a local model and runs it with ollama or llama.cpp, installing the runner if you have neither.
+Movement uses vim keys (`hjkl`, `gg`, `G`, counts like `3j`), and the arrows and mouse work too.
+`?` lists every key, and `enter` on one changes it. `qq` quits.
 
 ![The model recommended for each task and tier](https://github.com/user-attachments/assets/781a6bce-e79b-4a00-af14-4cdd3c3767c5)
 
 <p align="center"><i>The model recommended for each task and tier.</i></p>
 
+Recommendations come from each task's Pareto frontier of price and score: the models that no
+cheaper or equally priced model beats. Each tier picks the best of them within its price.
+
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
 the best up to $2 and `mid` up to $5 per 1M tokens (the tier header in recommend or `modelcmp tier` changes these), and `high`
 the best one. A favorite you set beats that pick in every tier whose price it fits.
 
+You can add tasks of your own, next to the built-in ones. In the TUI, press `f` on a model and pick
+`+ new task`, or from the command line:
+
+```sh
+modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"   # a new task, with its model
+modelcmp fav debugging 3.7-flash --tier low                          # a cheaper model for its low tier
+```
+
+Agents choose a task by what you wrote in `--about`, and your tasks show up last in recommend.
+
 To get a local model, press `a` in the TUI to list every model, then `x` on one and pick its
-`download and run` entry, or run `modelcmp get <model>`. Models on your machine show as free, and
+`download and run` entry, or run `modelcmp get <model>`. Via shows how big each download is, and
+`<` `8` on Via hides the models over 8 GB. Models on your machine show as free, and
 [run as agents in pi](REFERENCE.md#models-on-your-machine) once you add your runner to it.
 
 ## For agents
@@ -102,8 +118,9 @@ npx skills add danctorres/modelcmp -g                        # install the skill
 modelcmp pick                                                # what the skill runs: every task and tier, with the command to run
 ```
 
-The [skill](skills/modelcmp/SKILL.md) makes your agent run `modelcmp pick` before it names a
-model for a subtask.
+The [skill](skills/modelcmp/SKILL.md) lets an orchestrator agent choose the model for each subtask.
+It runs `modelcmp pick` and starts the subtask on that model, in whichever harness has it, even a
+local model from ollama or llama.cpp that you made your favorite.
 
 ![An agent using the modelcmp skill to pick a free model for the unit tests and the best one for a race condition](https://github.com/user-attachments/assets/d2c5349e-0cc6-475c-b978-9897ca203bdf)
 

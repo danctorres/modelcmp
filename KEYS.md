@@ -4,6 +4,9 @@ Every key and mouse action in the TUI. Press `?` in the TUI for the short list. 
 [README](README.md) covers install and the basics, [REFERENCE.md](REFERENCE.md) the columns,
 commands and JSON.
 
+Movement follows vim, and the arrow keys, `PgUp`/`PgDn` and the mouse work as well. In `?`,
+`enter` on a key changes it.
+
 ## General
 
 | Key | Action |
