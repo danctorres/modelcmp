@@ -95,8 +95,8 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// 25: an offer that names no models.dev page votes for the one its id is.
 /// 26: `Model::arena_more` has `ARENA_BOARDS` too. 27: `Data::missed`. 28: Artificial Analysis's has
 /// Epoch's, and no `Model::task_cost` nor `task_tokens`. 29: Epoch's coding score is WeirdML v3, where
-/// it was WeirdML, which stopped at 2026-09-03, and its tasks have more benchmarks.
-const FORMAT: u32 = 29;
+/// it was WeirdML, which stopped at 2026-09-03, and its tasks have more benchmarks. 30: `SHORT_NAMES`.
+const FORMAT: u32 = 30;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -3438,6 +3438,10 @@ fn epoch_named(models: &mut [Model], ep: &Scores) {
     }
 }
 
+/// Epoch's benchmark names too long for a column's dropdown, and what modelcmp calls them.
+const SHORT_NAMES: [(&str, &str); 2] =
+    [("FrontierMath-Tiers-1-3-v2-Private", "FrontierMath T1-3"), ("FrontierMath-Tier-4-v2-Private", "FrontierMath T4")];
+
 fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("epoch zip: {e}"))?;
     let meta = csv_rows(&mut zip, "model_metadata.csv").ok_or("epoch zip: missing model_metadata.csv")?;
@@ -3476,6 +3480,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
     for b in &benches {
         let (file, score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
+        let bench = SHORT_NAMES.iter().find(|(long, _)| *long == bench).map_or(bench, |(_, short)| short);
         if file.is_empty() || score_col.is_empty() {
             continue;
         }
@@ -5402,7 +5407,8 @@ mod tests {
             );
             file(
                 "benchmark_metadata.csv",
-                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,FrontierSWE,1\nhle.csv,Accuracy,HLE,1\n",
+                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,FrontierSWE,1\nhle.csv,Accuracy,HLE,1\n\
+                  fm.csv,score,FrontierMath-Tier-4-v2-Private,1\n",
             );
             file(
                 "ocr.csv",
@@ -5410,6 +5416,7 @@ mod tests {
             );
             file("swe.csv", b"Model version,score\nfoo-2-09,0.5\nfoo-2-09_low,0.2\nbar-3-09,0.5\nbar-3-09_low,0.3\n");
             file("hle.csv", b"Model version,Accuracy\nfoo-2-09,0.9\n");
+            file("fm.csv", b"Model version,score\nfoo-2-09,0.8\n");
             file(
                 "epoch_capabilities_index/eci_scores.csv",
                 b"Model,eci\nGPT-4o (Nov 2024),128\nBar 3 (Jul 2025),140\n",
@@ -5421,6 +5428,7 @@ mod tests {
         let missed = |b: &str| ep.missed.iter().any(|m| m == b);
         assert!(!missed("FrontierSWE") && missed("MirrorCode"), "a task benchmark no row scored, as one with no file");
         assert!(!missed("HLE") && !ep.groups["foo2sep2025"].2.contains_key("HLE"), "Epoch dropped it from its tasks");
+        assert_eq!(ep.groups["foo2sep2025"].2.get("FrontierMath T4"), Some(&0.8), "under its short name");
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
         assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
         assert_eq!(ep.alias["bar3"], "bar3jul2025", "and before a newer one scored on a task");
