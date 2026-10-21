@@ -1844,11 +1844,8 @@ impl App {
     /// whatever their reach, as a download is in no harness yet.
     fn set_locals(&mut self) {
         let only = self.only.filter(|&o| o != EXCLUDED);
-        let pool: Vec<usize> = self
-            .filtered_as(usize::MAX, only, false)
-            .filter(|(_, m)| !view::excluded(m, &self.store, self.any_available))
-            .map(|(i, _)| i)
-            .collect();
+        let pool: Vec<usize> =
+            self.filtered_as(usize::MAX, only, false).filter(|(_, m)| !self.excluded(m)).map(|(i, _)| i).collect();
         let room = view::room(&self.store);
         self.locals = TASKS
             .iter()
@@ -2101,10 +2098,19 @@ impl App {
         })
     }
 
-    /// `view::via_out`, and with "↓ downloadable" left out a model `x` can download, whoever else
-    /// has it, as only the TUI knows what `x` can download.
+    /// `view::via_out`, as only the TUI knows what `x` can download.
     fn via_out(&self, m: &Model) -> bool {
-        view::via_out(m, &self.store, self.any_available) || self.download_out(m)
+        view::via_out(m, &self.store, self.any_available, self.download(m).is_some())
+    }
+
+    /// `view::excluded`, knowing what `x` can download as `via_out` does.
+    fn excluded(&self, m: &Model) -> bool {
+        self.store.is_excluded(&m.key) || self.left_out_by(m).is_some()
+    }
+
+    /// `view::left_out_by`, knowing what `x` can download as `via_out` does.
+    fn left_out_by(&self, m: &Model) -> Option<String> {
+        view::left_out_by(m, &self.store, self.any_available, self.download(m).is_some())
     }
 
     /// Whether "↓ downloadable" is left out and `x` can download `m`.
@@ -2692,9 +2698,7 @@ impl App {
     fn in_excluded(&self, i: usize, m: &Model) -> bool {
         self.store.is_excluded(&m.key)
             || (self.in_reach(m) || self.store.is_marked(&m.key))
-                && (view::excluded(m, &self.store, self.any_available)
-                    || self.download_out(m)
-                    || self.failing(i, m, usize::MAX).is_some())
+                && (self.excluded(m) || self.failing(i, m, usize::MAX).is_some())
     }
 
     /// Why `E` shows the model under the cursor with a grey `✗`: the filter that hides it, as
@@ -2709,11 +2713,8 @@ impl App {
         if self.store.is_excluded(&m.key) {
             return None;
         }
-        if self.download_out(m) {
-            return Some(format!("{DOWNLOAD} left out in Via"));
-        }
         let picks = |l: &[String]| l.join(", ");
-        view::left_out_by(m, &self.store, self.any_available).or_else(|| match self.failing(i, m, usize::MAX)? {
+        self.left_out_by(m).or_else(|| match self.failing(i, m, usize::MAX)? {
             Fail::Pick(PRICE) => Some(format!("{} picked in Price", level_label(self.store.price_pick?))),
             Fail::Pick(VIA) => Some(format!("{} picked in Via", picks(&self.store.via_pick))),
             Fail::Pick(_) => Some(format!("{} picked in Dev", picks(&self.store.dev_pick))),
@@ -5872,6 +5873,9 @@ mod tests {
         (a.data.models[2].via, a.data.models[2].available) = (vec!["codex".into()], true);
         a.rebuild();
         assert!(!keys(&a).contains(&"llama4"), "nor when a harness has it too");
+        a.store.via_not = vec!["codex".into()];
+        a.rebuild();
+        assert!(keys(&a).contains(&"llama4"), "its harness left out, x still downloads it");
         (a.data.models[2].via, a.data.models[2].available) = (vec![], false);
         a.store.via_not.clear();
         a.rebuild();

@@ -856,21 +856,22 @@ pub fn via_harnesses(m: &Model, any: bool, get: bool) -> Vec<&str> {
 /// Whether `m` is excluded: with `e`, or by the TUI's filters (`left_out_by`). Recommendations
 /// skip it.
 pub fn excluded(m: &Model, store: &Store, any: bool) -> bool {
-    store.is_excluded(&m.key) || left_out_by(m, store, any).is_some()
+    store.is_excluded(&m.key) || left_out_by(m, store, any, false).is_some()
 }
 
 /// What of the TUI's filters excludes `m`: an entry left out of its Dev, Price or Via dropdown,
 /// as `OpenAI left out in Dev`, the entries picked in one, as `≤$2 picked in Price`, or a bound
-/// typed with `>` or `<`, as `Coding≥60`.
-pub fn left_out_by(m: &Model, store: &Store, any: bool) -> Option<String> {
+/// typed with `>` or `<`, as `Coding≥60`. `download` is whether `x` can download `m` (`via_out`).
+pub fn left_out_by(m: &Model, store: &Store, any: bool, download: bool) -> Option<String> {
     if let Some(d) = m.devs().find(|d| store.dev_not.iter().any(|x| x == d)) {
         return Some(format!("{d} left out in Dev"));
     }
     if price_out(m.cost(), store) {
         return Some(format!("{} left out in Price", level_label(store.price_not?)));
     }
-    if via_out(m, store, any) {
-        return Some(format!("{} left out in Via", shown_via(m, any).join(", ")));
+    if via_out(m, store, any, download) {
+        let by = if download { crate::app::DOWNLOAD.to_string() } else { shown_via(m, any).join(", ") };
+        return Some(format!("{by} left out in Via"));
     }
     let picks = |l: &[String]| l.join(", ");
     if !picked(m, any, &store.dev_pick, &[], None, None) {
@@ -968,8 +969,12 @@ pub fn price_out(price: Option<f64>, store: &Store) -> bool {
     store.price_not.is_some_and(|l| price.is_some_and(|v| v <= LEVELS[l]))
 }
 
-/// Whether every harness that has `m` is left out (`Store::via_not`).
-pub fn via_out(m: &Model, store: &Store, any: bool) -> bool {
+/// Whether every harness that has `m` is left out (`Store::via_not`). One `x` can download
+/// (`download`, which only the TUI knows) is out only with "↓ downloadable" left out, whoever else has it.
+pub fn via_out(m: &Model, store: &Store, any: bool, download: bool) -> bool {
+    if download {
+        return left_out(store, crate::app::DOWNLOAD);
+    }
     let v = if store.via_not.is_empty() { vec![] } else { shown_via(m, any) };
     !v.is_empty() && v.iter().all(|h| left_out(store, h))
 }
@@ -1400,8 +1405,9 @@ mod tests {
         assert_eq!(left(crate::data::OLLAMA).as_deref(), Some("fits"), "not the one ollama runs");
         let mut s = Store::default();
         s.via_not = vec![crate::data::OLLAMA.into()];
-        assert!(via_out(&ollama, &s, false), "only ollama has it");
-        assert_eq!(left_out_by(&ollama, &s, false).as_deref(), Some("ollama left out in Via"));
+        assert!(via_out(&ollama, &s, false, false), "only ollama has it");
+        assert!(!via_out(&ollama, &s, false, true), "x can download it");
+        assert_eq!(left_out_by(&ollama, &s, false, false).as_deref(), Some("ollama left out in Via"));
         let mut gpu = Store::default();
         gpu.memory = Some(24.0);
         assert_eq!(memory(&gpu), Some(24 << 30), "a GPU's GB, of 2^30 bytes");

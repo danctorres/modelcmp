@@ -943,7 +943,7 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
         store.toggle_excluded(&m.key);
     }
     store.save()?;
-    match left_out_by(m, store, data.any_available()) {
+    match left_out_by(m, store, data.any_available(), false) {
         // Taken back in the TUI alone: the dropdown's entry, which excludes more than this model.
         Some(by) if rm => println!("{} is still hidden by the TUI's filters: {by}", m.name),
         _ => println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name),
@@ -1420,7 +1420,7 @@ mod tests {
             let c = COLS.iter().position(|c| c.id == col).unwrap();
             on_task(ListOpts { bounds: vec![(c, lo, hi)], ..Default::default() })
         };
-        let why = |s: &Store| left_out_by(&data.models[1], s, false);
+        let why = |s: &Store| left_out_by(&data.models[1], s, false, false);
         let mut store = Store::default();
         store.dev_pick = vec!["openai".into()];
         assert_eq!((line(&store), why(&store)), (vec!["gpt55".to_string()], Some("openai picked in Dev".into())));
@@ -1455,11 +1455,11 @@ mod tests {
         assert_eq!(shown(&store), false);
         store.dev_not = vec!["OpenAI".into()];
         assert_eq!(
-            (shown(&store), left_out_by(&m, &store, false)),
+            (shown(&store), left_out_by(&m, &store, false, false)),
             (true.into(), Some("OpenAI left out in Dev".into()))
         );
         (store.dev_not, store.price_not) = (vec![], Some(4));
-        assert_eq!(left_out_by(&m, &store, false), Some("≤$15 left out in Price".into()));
+        assert_eq!(left_out_by(&m, &store, false, false), Some("≤$15 left out in Price".into()));
     }
 
     /// A favorite is the tier's model whatever the filters, as in the recommend panel.
