@@ -1990,7 +1990,11 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         // Analysis's names deciding the keys.
         let mut data = merge(&models, &parse_aa(api.as_ref().map_err(Failure::clone)?)?, ep.as_ref().ok())?;
         match &ep {
-            Ok(ep) => epoch_named(&mut data.models, ep),
+            // Its $task and the other scores are Epoch's, lent (`Data::borrow`): what Epoch missed is missed here too.
+            Ok(ep) => {
+                epoch_named(&mut data.models, ep);
+                data.missed.clone_from(&ep.missed);
+            }
             // Said, as a favorite or a note on a key that changed is not found until the next refresh.
             Err(e) => {
                 data.warning = Some(format!("epoch.ai's names did not come ({e}): some models go by another key"))
