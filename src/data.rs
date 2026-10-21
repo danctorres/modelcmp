@@ -93,8 +93,9 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// 22: Epoch's task scores are one benchmark's, in percent, where they were fitted in ECI points.
 /// 23: `Model::arena_more`. 24: `Model::aka`, and rows merged by a vendor word, a sold id and a size.
 /// 25: an offer that names no models.dev page votes for the one its id is.
-/// 26: `Model::arena_more` has `ARENA_BOARDS` too. 27: `Data::missed`.
-const FORMAT: u32 = 27;
+/// 26: `Model::arena_more` has `ARENA_BOARDS` too. 27: `Data::missed`. 28: Artificial Analysis's has
+/// Epoch's, and no `Model::task_cost` nor `task_tokens`.
+const FORMAT: u32 = 28;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -1076,7 +1077,9 @@ impl Data {
 
     pub fn stale(&self) -> bool {
         // Dated ahead of the clock, it would never grow old.
-        let unranked = (self.arena_missed || !self.missed.is_empty()) && self.age() > RETRY;
+        // Artificial Analysis's own columns are whole without what Epoch missed: only its dropdowns lack it.
+        let unscored = !self.missed.is_empty() && source() == Source::Epoch;
+        let unranked = (self.arena_missed || unscored) && self.age() > RETRY;
         self.age() > MAX_AGE
             || unranked
             || self.fetched > now()

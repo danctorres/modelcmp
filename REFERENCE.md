@@ -455,7 +455,7 @@ the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
 When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no file
 for it, a warning names it at every start and command, with Artificial Analysis too, whose other
-scores are Epoch's, and the first start or command an hour later downloads it again.
+scores are Epoch's, and with Epoch AI the first start or command an hour later downloads it again.
 
 ## JSON
 

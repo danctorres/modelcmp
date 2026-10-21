@@ -410,6 +410,13 @@ pub fn stored_bench(store: &Store, col: usize) -> Option<&'static str> {
     col_benches(col)?.1.into_iter().find(|x| x == b)
 }
 
+/// Whether `store` picked a benchmark for the column at cursor index `col` that its dropdown no
+/// longer lists, as one Epoch dropped: the bounds typed for it go with it (`set_data`), and are
+/// not put on the column's own value.
+pub fn pick_gone(store: &Store, col: usize) -> bool {
+    numeric(col).is_some_and(|c| store.bench.contains_key(c.id)) && stored_bench(store, col).is_none()
+}
+
 /// The benchmark `store` has picked in task `t`'s column, which ranks its line.
 pub fn task_bench(store: &Store, t: &Task) -> Option<&'static str> {
     stored_bench(store, TEXT + COLS.iter().position(|c| c.id == t.name)?)
@@ -2089,7 +2096,8 @@ impl App {
             }
         }
         self.bounds.clear();
-        let at = |b: &Bound| Some(TEXT + COLS.iter().position(|c| c.id == b.col)?);
+        let at =
+            |b: &Bound| Some(TEXT + COLS.iter().position(|c| c.id == b.col)?).filter(|&c| !pick_gone(&self.store, c));
         let saved = self
             .store
             .bounds

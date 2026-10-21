@@ -43,9 +43,8 @@ jobs:
       - run: cargo run --locked --quiet -- list --all --json --refresh > models.json
       - run: |
           jq '{models: length, eci: map(select(.eci)) | length, coding: map(select(.tasks.coding)) | length,
-               priced: map(select(.price.input_per_mtok)) | length,
-               task_cost: map(select(.task_cost_usd)) | length}' models.json | tee counts.json
-          jq -e '.models >= 900 and .eci >= 140 and .coding >= 90 and .priced >= 850 and .task_cost >= 15' counts.json
+               priced: map(select(.price.input_per_mtok)) | length}' models.json | tee counts.json
+          jq -e '.models >= 900 and .eci >= 140 and .coding >= 90 and .priced >= 850' counts.json
   build:
     needs: check
     if: startsWith(github.ref, 'refs/tags/v')

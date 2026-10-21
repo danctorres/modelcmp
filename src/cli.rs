@@ -1561,10 +1561,16 @@ mod tests {
         assert_eq!(crate::view::bounds_said(&store).collect::<Vec<_>>(), ["FrontierSWE≥65"]);
         let out = data.models.iter().map(|m| excluded(m, &store, false)).collect::<Vec<_>>();
         assert_eq!(out, [true, false], "gpt55 scores 50 on FrontierSWE, 90 on coding");
-        store.bounds.clear();
-        // One no dropdown lists with the source in use ranks nothing.
+        // One no dropdown lists with the source in use ranks nothing, and its bound bounds nothing:
+        // not the task's score, which it was not typed for.
         store.bench.insert("coding".into(), "nope".into());
         assert_eq!(coding(&store)["tiers"]["high"], "gpt55");
+        let out = data.models.iter().map(|m| excluded(m, &store, false)).collect::<Vec<_>>();
+        assert_eq!(
+            (out, crate::view::bounds_said(&store).count()),
+            (vec![false, false], 0),
+            "mini scores 60 on coding"
+        );
     }
 
     #[test]

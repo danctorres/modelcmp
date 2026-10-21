@@ -805,6 +805,7 @@ fn in_bound(m: &Model, b: &crate::store::Bound, store: &Store) -> bool {
     let Some(at) = crate::app::COLS.iter().position(|c| c.id == b.col) else { return true };
     let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
     !crate::app::bound_applies(crate::app::TEXT + at, &store.hide)
+        || crate::app::pick_gone(store, crate::app::TEXT + at)
         || crate::app::col_value(m, at, store).is_some_and(|v| v >= lo && v <= hi)
 }
 
@@ -819,7 +820,8 @@ pub fn bounds_said(store: &Store) -> impl Iterator<Item = String> {
     store.bounds.iter().filter_map(|b| {
         let col = crate::app::TEXT + crate::app::COLS.iter().position(|c| c.id == b.col)?;
         let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
-        crate::app::bound_applies(col, &store.hide).then(|| bound_said_in(store, col, lo, hi))
+        (crate::app::bound_applies(col, &store.hide) && !crate::app::pick_gone(store, col))
+            .then(|| bound_said_in(store, col, lo, hi))
     })
 }
 
