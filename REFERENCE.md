@@ -129,7 +129,7 @@ Arena (its Agent, Text and WebDev leaderboards, no key needed):
 - The column's dropdown (`d`) has Arena's Chat and WebDev ratings, from people's votes in
   its Text and WebDev leaderboards, around 1500 and higher is better. A click on one opens its
   leaderboard. Then the signals the agent score is made of, each as Arena publishes it, in
-  percent: task outcome, tool hallucination, steerability, bash recovery and praise.
+  percent: task outcome, tool hallucination, steerability, bash reliability and praise.
   One that a refresh could not get is empty until the next, and a rating is empty once its
   leaderboard is more than two months old.
 - It shows with either source, and counts toward no task score and no recommendation.
@@ -449,7 +449,7 @@ resets your selection, favorites, exclusions, notes and settings.
 
 The TUI's bottom border always shows the refresh state: `⟳ refreshing 7/9, waiting for opencode` (the downloads
 and harnesses that answered, and the last one or two still awaited), `refresh failed` in red
-with the age of the data still shown, `⚠ refresh had issues` in yellow until a refresh has none
+with the age of the data still shown, `⚠ refresh had issues` in yellow until a refresh has none, else `⚠ no Artificial Analysis key` while Epoch AI is used for want of one
 (each start says them again in the status bar, and `!` or a click on it lists them), or the data age alone, red once it is past 24h. Then
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 

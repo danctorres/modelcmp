@@ -318,6 +318,16 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
         if let Some(w) = warn {
             eprintln!("warning: {w}");
         }
+        // Epoch AI by default for want of a key, which the TUI's frame says too. Not when asked
+        // for, and only where benchmarks are what is shown.
+        if auto && matches!(cmd, Cmd::List { .. } | Cmd::Recommend { .. }) && data::aa_key().is_none() {
+            eprintln!(
+                "warning: no {} API key{} (set {}, or press K in the TUI)",
+                data::Source::Aa.label(),
+                data::FELL_BACK,
+                data::AA_KEY_ENV
+            );
+        }
         if !data.any_available() {
             eprintln!("note: {}", view::NO_ACCESS);
         }

@@ -46,7 +46,7 @@ pub const ARENA_MORE: [(&str, &str); 5] = [
     ("Task outcome", arena_url!("agent_task_outcome_explicit")),
     ("Tool hallucination", arena_url!("agent_tool_hallucination")),
     ("Steerability", arena_url!("agent_steerability")),
-    ("Bash recovery", arena_url!("agent_bash_recovery_steps")),
+    ("Bash reliability", arena_url!("agent_bash_reliability")),
     ("Praise", arena_url!("agent_praise_complaint")),
 ];
 /// Arena's leaderboards of chat and of web development, in the Arena column's dropdown too, rated
@@ -299,6 +299,11 @@ pub fn aa_key() -> Option<String> {
     #[cfg(not(test))]
     let saved = std::fs::read_to_string(aa_key_path()).ok();
     aa_key_env().or_else(|| saved.as_deref().and_then(nonblank))
+}
+
+/// Epoch AI for want of a key to choose Artificial Analysis by.
+pub fn keyless() -> bool {
+    source() == Source::Epoch && aa_key().is_none()
 }
 
 /// The key set in `AA_KEY_ENV`, which a saved one would not replace.
@@ -1077,9 +1082,8 @@ impl Data {
 
     pub fn stale(&self) -> bool {
         // Dated ahead of the clock, it would never grow old.
-        // Artificial Analysis's own columns are whole without what Epoch missed: only its dropdowns lack it.
-        let unscored = !self.missed.is_empty() && source() == Source::Epoch;
-        let unranked = (self.arena_missed || unscored) && self.age() > RETRY;
+        // What Epoch missed is said at every load, with either source, so it is asked for again.
+        let unranked = (self.arena_missed || !self.missed.is_empty()) && self.age() > RETRY;
         self.age() > MAX_AGE
             || unranked
             || self.fetched > now()

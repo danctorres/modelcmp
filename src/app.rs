@@ -411,10 +411,13 @@ pub fn stored_bench(store: &Store, col: usize) -> Option<&'static str> {
 }
 
 /// Whether `store` picked a benchmark for the column at cursor index `col` that its dropdown no
-/// longer lists, as one Epoch dropped: the bounds typed for it go with it (`set_data`), and are
-/// not put on the column's own value.
+/// longer lists, as one Epoch dropped: the bounds typed for it go with it (`load_bounds`), and are
+/// not put on the column's own value. Not one that is now the column's own benchmark, as after a
+/// switch of source: the column shows it.
 pub fn pick_gone(store: &Store, col: usize) -> bool {
-    numeric(col).is_some_and(|c| store.bench.contains_key(c.id)) && stored_bench(store, col).is_none()
+    let own = col_benches(col).map(|b| b.0);
+    numeric(col).and_then(|c| store.bench.get(c.id)).is_some_and(|b| Some(b.as_str()) != own)
+        && stored_bench(store, col).is_none()
 }
 
 /// The benchmark `store` has picked in task `t`'s column, which ranks its line.
@@ -3201,6 +3204,16 @@ impl App {
     }
 
     /// The key the action with the default key `d` is on.
+    /// What `!` lists: what the last refresh warned of, and a missing Artificial Analysis key.
+    pub fn issues(&self) -> Option<String> {
+        let key = crate::data::keyless().then(|| {
+            let aa = crate::data::Source::Aa.label();
+            format!("no {aa} API key, so benchmarks are from Epoch AI: {} takes one", self.key_of('K'))
+        });
+        let all: Vec<String> = self.data.warning.clone().into_iter().chain(key).collect();
+        Some(all.join("; ")).filter(|w| !w.is_empty())
+    }
+
     pub fn key_of(&self, d: char) -> char {
         self.store.keys.get(&d).copied().unwrap_or(d)
     }
@@ -3914,8 +3927,8 @@ impl App {
                     self.view = View::Recommend;
                 }
             }
-            KeyCode::Char('!') if self.view != View::Issues && self.data.warning.is_none() => {
-                self.refuse("the last refresh had no issues");
+            KeyCode::Char('!') if self.view != View::Issues && self.issues().is_none() => {
+                self.refuse("no issues, the last refresh went well");
             }
             KeyCode::Char('!') => {
                 self.view = if self.view == View::Issues { View::Table } else { View::Issues };
@@ -4633,6 +4646,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pick_that_is_now_the_column_s_own_is_not_gone() {
+        let coding = TEXT + COLS.iter().position(|c| c.id == "coding").unwrap();
+        let mut store = Store::default();
+        crate::data::set_source(Source::Epoch);
+        // Picked from Epoch's list under Artificial Analysis, now Coding's own score.
+        store.bench.insert("coding".into(), "WeirdML".into());
+        assert!(!pick_gone(&store, coding), "its bounds stay, on the column's own value");
+        store.bench.insert("coding".into(), "DeepSWE".into());
+        assert!(pick_gone(&store, coding), "one no list has any more is gone");
+    }
 
     /// `>` `<` on Via bound the size of a model's GGUF copy, in GB, and the bound asks the size
     /// of every model with a copy, as one of unknown size is hidden.

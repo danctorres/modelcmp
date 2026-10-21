@@ -1113,7 +1113,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if stale(app) {
                 view.push("r refresh");
             }
-            if app.data.warning.is_some() {
+            if app.issues().is_some() {
                 view.push("! issues");
             }
             // Epoch AI is what no key, or one turned down, leaves.
@@ -1565,12 +1565,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         };
         let source = format!(" models.dev + {} · ", data::source().label());
-        // Epoch AI with no key to choose the other source by: `K` takes one.
-        let keyless = data::source() == data::Source::Epoch && data::aa_key().is_none();
-        let no_key = if keyless { format!("no {} key · ", data::Source::Aa.label()) } else { String::new() };
         // Where the count and what it waits for would run over the version, the count goes alone.
-        let room = usize::from(body.width)
-            .saturating_sub(2 + version.width() + source.chars().count() + no_key.chars().count());
+        let room = usize::from(body.width).saturating_sub(2 + version.width() + source.chars().count());
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
         let (state, color) = match (app.refreshing, app.refresh_failed, stale(app)) {
             (true, ..) if refreshing(&app.progress).chars().count() > room => {
@@ -1581,6 +1577,10 @@ fn draw(app: &mut App, f: &mut Frame) {
             // Until a refresh without any, what it said is in the status bar at each start.
             (_, _, old) if app.data.warning.is_some() => {
                 (format!("⚠ refresh had issues · {age}"), if old { BAD } else { Color::Yellow })
+            }
+            // Epoch AI with no key to choose the other source by: `!` says `K` takes one.
+            (_, _, old) if data::keyless() => {
+                (format!("⚠ no {} key · {age}", data::Source::Aa.label()), if old { BAD } else { Color::Yellow })
             }
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
@@ -1600,11 +1600,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             .title_bottom(version)
             .title_bottom(
                 Line::from_iter(
-                    named
-                        .then(|| [Span::styled(source, fg(MUTED)), Span::styled(no_key, fg(Color::Yellow))])
-                        .into_iter()
-                        .flatten()
-                        .chain([Span::styled(state, fg(color))]),
+                    named.then(|| Span::styled(source, fg(MUTED))).into_iter().chain([Span::styled(state, fg(color))]),
                 )
                 .right_aligned(),
             );
@@ -1678,13 +1674,14 @@ fn draw(app: &mut App, f: &mut Frame) {
             Some(("recommend".to_string(), lines))
         }
         View::Issues => {
-            let said = app.data.warning.as_deref().unwrap_or("none, the last refresh went well");
+            let issues = app.issues();
+            let said = issues.as_deref().unwrap_or("none, the last refresh went well");
             let words = |w: &str| w.split(' ').map(|s| Line::from(s.to_string())).collect();
             let width = (area.width as usize).saturating_sub(4);
             let lines = said.split("; ").flat_map(|w| wrapped(vec![Span::raw("• ")], words(w), &Span::raw(" "), width));
             let (lines, hits) = lit_lines(lines.collect(), &app.overlay_query);
             hit_line = to_hit(app, &hits);
-            Some(("refresh issues".into(), lines))
+            Some(("issues".into(), lines))
         }
         View::Detail(_) => {
             let get = |m| (app.download(m), app.size(m));
@@ -3269,7 +3266,7 @@ fn recommend(
         .into_iter()
         .map(|l| l.style(fg(MUTED))),
     );
-    let keyless = data::source() == data::Source::Epoch && data::aa_key().is_none();
+    let keyless = data::keyless();
     // The keys they name as they are bound now.
     let mut warn: Vec<Line> = words(&UNRATED.replace(" f ", &format!(" {} ", app.key_of('f'))));
     warn.extend(if keyless { words(&MORE_RATED.replace("K ", &format!("{} ", app.key_of('K')))) } else { vec![] });
@@ -3953,7 +3950,7 @@ mod tests {
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
         assert!(
-            lines[3].contains("s sort  d dropdown  % no cache  r refresh  K api key  │  enter details"),
+            lines[3].contains("d dropdown  % no cache  r refresh  ! issues  K api key  │  enter details"),
             "{}",
             lines[3]
         );
@@ -3961,7 +3958,7 @@ mod tests {
         data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
         assert!(
-            lines[3].contains("s sort  d dropdown  % 90% cached  K api key  │"),
+            lines[3].contains("s sort  d dropdown  % 90% cached  ! issues  K api key  │"),
             "off the default, the way back: {}",
             lines[3]
         );
@@ -4455,7 +4452,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
+                "← → column  │  H harness  | columns  / filter  s sort  ! issues  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -5319,7 +5316,7 @@ mod tests {
         );
         assert!(border(&mut a).contains("⚠ refresh had issues ·"), "after the status is cleared too");
         a.refreshed(Ok(Data::default()), (vec![], vec![]));
-        assert!(!border(&mut a).contains("⚠"), "until a refresh without any");
+        assert!(!border(&mut a).contains("⚠ refresh"), "until a refresh without any");
     }
 
     #[test]
@@ -5333,8 +5330,14 @@ mod tests {
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
         };
         let bang = |a: &mut App| a.key(ratatui::crossterm::event::KeyEvent::from(KeyCode::Char('!')));
+        // With no key, Epoch AI is the source and `!` says how to change that.
         bang(&mut a);
-        assert!(a.view == View::Table && a.status == "the last refresh had no issues");
+        assert_eq!(a.view, View::Issues);
+        assert!(screen(&mut a).iter().any(|l| l.contains("• no Artificial Analysis API key")));
+        bang(&mut a);
+        data::save_aa_key("k").unwrap();
+        bang(&mut a);
+        assert!(a.view == View::Table && a.status == "no issues, the last refresh went well");
         a.data.warning = Some("copilot did not list its models; openrouter.ai did not list its models".into());
         let lines = screen(&mut a);
         let x = lines[h as usize - 2][..lines[h as usize - 2].find("⚠").unwrap()].chars().count() as u16;
@@ -5653,8 +5656,8 @@ mod tests {
         a.view = View::Table;
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(bottom.contains("models.dev + Epoch AI · no Artificial Analysis key · data "), "{bottom}");
-        let x = bottom[..bottom.find("no Art").unwrap()].chars().count() as u16;
+        assert!(bottom.contains("models.dev + Epoch AI · ⚠ no Artificial Analysis key · data "), "{bottom}");
+        let x = bottom[..bottom.find("⚠").unwrap()].chars().count() as u16;
         assert_eq!(term.backend().buffer()[(x, 8)].fg, Color::Yellow, "the missing key stands out");
         // With a key, Epoch AI is `--source`'s choice.
         data::save_aa_key("k").unwrap();
