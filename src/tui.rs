@@ -3402,7 +3402,12 @@ fn recommend(
     if let Some((i, sel)) = cur.filter(|c| c.0 < tasks.len()) {
         let t = tasks[i];
         let name = vec![Span::styled(t.0.to_string(), fg(task_color(t.0)).add_modifier(BOLD)), space.clone()];
-        under.extend(wrapped(name, words(t.1), &space, text));
+        // A task ranked by a benchmark picked in its column says so.
+        let about = match TASKS.get(i).and_then(|t| app.task_bench(t)) {
+            Some(b) => format!("{}, ranked by {b}", t.1),
+            None => t.1.to_string(),
+        };
+        under.extend(wrapped(name, words(&about), &space, text));
         under.extend(wrapped(label("  use for: "), words(t.2), &space, text));
         if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
             // The one pick is `high`'s, as in its box.
@@ -3508,7 +3513,7 @@ fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, boxed: 
     let grey = off || out.is_some();
     let price = m.quoted().filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]);
     let rest = match built_in {
-        Some(t) => priced(m, fit::shown(m, t, s), false, false)[m.name.len()..].to_string(),
+        Some(_) => priced(m, s, false, false)[m.name.len()..].to_string(),
         None => format!(" {}", crate::view::price(m)),
     };
     let mut spans = Vec::with_capacity(5);

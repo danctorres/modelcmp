@@ -298,21 +298,18 @@ pub fn add_value(models: &mut [Model]) {
     }
 }
 
-/// Task score if the model qualifies for the task.
-pub fn fit(m: &Model, t: &Task) -> Option<f64> {
-    let ok = match t.need {
+/// Whether the model has what the task needs, tool calling or vision.
+pub fn qualifies(m: &Model, t: &Task) -> bool {
+    match t.need {
         Need::Tools => m.tool_call,
         Need::Vision => m.vision,
         Need::None | Need::Coder => true,
-    };
-    if ok { m.fit.get(t.name).copied() } else { None }
+    }
 }
 
-/// Models ranked for a task, best first; models without data for the task are dropped.
-pub fn rank<'a>(models: impl Iterator<Item = &'a Model>, t: &Task) -> Vec<(&'a Model, f64)> {
-    let mut v: Vec<_> = models.filter_map(|m| Some((m, fit(m, t)?))).collect();
-    v.sort_by(|a, b| b.1.total_cmp(&a.1));
-    v
+/// Task score if the model qualifies for the task.
+pub fn fit(m: &Model, t: &Task) -> Option<f64> {
+    m.fit.get(t.name).copied().filter(|_| qualifies(m, t))
 }
 
 #[cfg(test)]
@@ -343,8 +340,6 @@ mod tests {
             ..Default::default()
         };
         let models = [mk("a", &pa, true), mk("b", &pb, false)];
-        let r = rank(models.iter(), task("coding").unwrap());
-        assert_eq!(r[0].0.key, "b");
         // agentic needs tool calling; b lacks it
         assert!(fit(&models[1], task("agentic").unwrap()).is_none());
 

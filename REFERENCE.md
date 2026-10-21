@@ -107,7 +107,7 @@ With either source a row has no scores when its offers are another release than 
 scored, as a `-latest` id is.
 
 `modelcmp recommend --json` gives the same lists as `benchmarks`. With Artificial Analysis it
-is the one field the score is.
+is the one field the score is. A benchmark picked in the task's column in the TUI takes its place.
 
 [Scores](#scores) says how each of these numbers is obtained.
 
@@ -287,7 +287,9 @@ values from the source in use, hides none and is kept for when the column is bac
 
 `recommend` gives the same picks as the TUI's `R` with no search and the `mine` tab, which the
 TUI does not keep. A pick of `↓ download` in Via is passed over, as only the TUI knows what can
-be downloaded, and so is a bound on a task column showing one of its benchmarks. Prices are at
+be downloaded. A benchmark picked in a task column's dropdown ranks that task in both, and a
+bound on that column is on the benchmark, both kept across restarts until `c`, and the commands
+say on stderr which tasks a pick ranks. Prices are at
 the cache share of each, the TUI's set with `%` or `--cache`, so with different ones a Price level
 or bound can hide different models.
 

@@ -1,6 +1,6 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
-use crate::app::{COLS, Col, TEXT, hidden, launch_cmd, model_id, on_price, shown, unmeasured};
+use crate::app::{COLS, Col, TEXT, col_value, hidden, launch_cmd, model_id, on_price, shown, unmeasured};
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
@@ -315,6 +315,11 @@ fn say_filters(store: &Store, flags: &str) {
         let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace their own, ") };
         eprintln!("note: the TUI's filters hide models: {} ({flags}XX in the TUI takes them back)", on.join(" "));
     }
+    let by: Vec<String> =
+        TASKS.iter().filter_map(|t| Some(format!("{} by {}", t.name, crate::app::task_bench(store, t)?))).collect();
+    if !by.is_empty() {
+        eprintln!("note: benchmarks picked in the TUI rank tasks: {} (c in the TUI takes them back)", by.join(", "));
+    }
 }
 
 /// The models `o` asks for, and how many before `--limit` cut them. `store` is `flagged` for it.
@@ -339,7 +344,7 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
                 // On a task not through ollama or llama.cpp: its copy is no pick on merit (`Model::local`).
                 && (o.via.is_empty()
                     || shown_via(m, any).iter().any(|v| has(&o.via, v) && !(task && crate::data::runs_here(v))))
-                && o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi))
+                && o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| v >= lo && v <= hi))
                 && !(task && excluded(m, store, any))
                 && !o.not.contains(&m.key)
         })
@@ -512,7 +517,8 @@ const NO_MODEL: &str = "no model";
 /// A tier's line in `pick`: your favorite when `o`'s harness has it and its bounds allow it,
 /// else the tier's pick on merit, followed by the favorite's command on the harness that has it.
 fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
-    let allowed = |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| (COLS[c].get)(m).is_some_and(|v| v >= lo && v <= hi));
+    let allowed =
+        |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| v >= lo && v <= hi));
     let said = |m: &Model, id: String| {
         let ctx = COLS.iter().find(|c| c.id == "ctx").and_then(|c| Some((c.show)((c.get)(m)?)));
         let note = store.note(&m.key).map(|n| format!("  note: {n}")).unwrap_or_default();
@@ -1095,11 +1101,11 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             let (line, off) = front(data, store, t);
             let front: Vec<_> = line
                 .iter()
-                .map(|&(m, s)| entry(m, store, fit::shown(m, t, s), !off.contains(&m.key.as_str())))
+                .map(|&(m, s)| entry(m, store, s, !off.contains(&m.key.as_str())))
                 .collect();
             let ((fav, tier_favs), (via, tier_via)) = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
             let tiers = tiers(&line, &off, store, t.name);
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": used_benches(t), "favorite": fav, "tier_favorites": tier_favs, "via": via, "tier_via": tier_via, "tiers": tiers, "frontier": front})
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "favorite": fav, "tier_favorites": tier_favs, "via": via, "tier_via": tier_via, "tiers": tiers, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -1133,12 +1139,14 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         }
     };
     for t in TASKS {
-        println!("{}  {}  (modelcmp list --task {})", t.name, t.about, t.name);
+        // A task ranked by a benchmark picked in its column in the TUI says so, as there.
+        let by = crate::app::task_bench(store, t).map(|b| format!(", ranked by {b}")).unwrap_or_default();
+        println!("{}  {}{by}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
         show(t.name, tier_picks(&line, &off, store, t.name), &|m, s, tier| {
             let fav = store.tier_favorites(t.name, tier).any(|k| k == m.key);
-            let p = priced(m, fit::shown(m, t, s), true, fav);
+            let p = priced(m, s, true, fav);
             if off.contains(&m.key.as_str()) { format!("{p} not recommended") } else { p }
         });
         println!();
@@ -1537,6 +1545,34 @@ mod tests {
         }
         let json = serde_json::to_value(out(&m, &Store::default(), false, true)).unwrap();
         assert_eq!((&json["url"], &json["pages"]["epoch.ai"]), (&Value::from(epoch), &Value::from(epoch)));
+    }
+
+    /// A benchmark picked in a task's column in the TUI ranks the task here too, as there.
+    #[test]
+    fn recommend_follows_a_benchmark_picked_in_the_tui() {
+        let mut data =
+            Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
+        for (m, s) in data.models.iter_mut().zip([0.5, 0.7]) {
+            m.scores.insert("DeepSWE".into(), s);
+        }
+        let mut store = Store::default();
+        let coding = |s: &Store| recommend_json(&data, s).into_iter().find(|t| t["name"] == "coding").unwrap();
+        store.bench.insert("coding".into(), "DeepSWE".into());
+        let t = coding(&store);
+        assert_eq!(t["benchmarks"], serde_json::json!(["DeepSWE"]));
+        let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "mini"});
+        assert_eq!(t["tiers"], tiers, "mini beats gpt55 on DeepSWE for less");
+        assert_eq!(t["frontier"][0]["score"], 70.0, "scored on DeepSWE");
+        // A bound typed on the column is on the benchmark too.
+        store.bounds = vec![crate::store::Bound { col: "coding".into(), min: Some(65.0), max: None }];
+        store.bench.insert("coding".into(), "DeepSWE".into());
+        assert_eq!(crate::view::bounds_said(&store).collect::<Vec<_>>(), ["DeepSWE≥65"]);
+        let out = data.models.iter().map(|m| excluded(m, &store, false)).collect::<Vec<_>>();
+        assert_eq!(out, [true, false], "gpt55 scores 50 on DeepSWE, 90 on coding");
+        store.bounds.clear();
+        // One no dropdown lists with the source in use ranks nothing.
+        store.bench.insert("coding".into(), "nope".into());
+        assert_eq!(coding(&store)["tiers"]["high"], "gpt55");
     }
 
     #[test]

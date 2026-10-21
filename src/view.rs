@@ -408,23 +408,31 @@ pub fn frontier<'m, T: Copy>(
 /// with no score for the task, a favorite's score is NaN, which `priced` shows as `-`, and no
 /// tier picks it on merit.
 /// With the line come the keys on it only for being favorites. `caps` split the levels too, the
-/// tiers' (`Store::tier_cap`), so each tier has the best at its price to pick.
+/// tiers' (`Store::tier_cap`), so each tier has the best at its price to pick. Each entry's
+/// score is as the task's column shows it: the task's (`task_score`), or with `bench`, one
+/// picked in that column, the benchmark's, which then ranks the line.
 pub fn task_frontier<'a>(
     models: impl Iterator<Item = &'a Model>,
     t: &fit::Task,
     favorites: &[&'a Model],
     caps: &[f64],
+    bench: Option<&str>,
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
+    let score = |m: &Model| match bench {
+        Some(b) => m.picked(b).filter(|_| fit::qualifies(m, t)),
+        None => fit::fit(m, t).map(|s| fit::shown(m, t, s)),
+    };
     // Not one only your machine runs, whose scores and context are not that copy's: free, it
     // would take every tier it has the score for. A favorite is still on the line.
-    let ranked = fit::rank(models.filter(|m| !m.local()), t);
+    let mut ranked: Vec<_> = models.filter(|m| !m.local()).filter_map(|m| Some((m, score(m)?))).collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
     // "value" alone leaves out the models far behind the best with a price, on coding, and has
     // no line while coding has no pace: coding per dollar, a weak free model would top it.
     let coder = matches!(t.need, fit::Need::Coder);
     let behind = behind(ranked.iter().map(|e| e.0).filter(|m| m.cost().is_some()), "coding");
     let near = |m: &Model| !coder || behind(m).is_some_and(|b| b <= FLOOR);
     let ranked: Vec<_> = ranked.iter().copied().filter(|(m, _)| near(m)).collect();
-    let mut v = frontier(&ranked, |(m, _)| m, |m| task_score(m, t.name));
+    let mut v = frontier(&ranked, |(m, _)| m, score);
     let fav = |m: &Model| favorites.iter().any(|f| f.key == m.key);
     let dearest =
         |a: &(&Model, f64), b: &(&Model, f64)| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal);
@@ -441,7 +449,7 @@ pub fn task_frontier<'a>(
     let mut off = Vec::new();
     for &f in favorites {
         if !v.iter().any(|(m, _)| m.key == f.key) {
-            v.push((f, fit::fit(f, t).unwrap_or(f64::NAN)));
+            v.push((f, score(f).unwrap_or(f64::NAN)));
             off.push(f.key.as_str());
         }
     }
@@ -450,16 +458,18 @@ pub fn task_frontier<'a>(
     (v, off)
 }
 
-/// `task_frontier` with the favorites `store` has for the task: the ones among `pool`.
+/// `task_frontier` with the favorites `store` has for the task, the ones among `pool`, ranked
+/// by the benchmark picked in the task's column.
 pub fn task_line<'a>(
     models: impl Iterator<Item = &'a Model>,
     pool: impl Iterator<Item = &'a Model>,
     store: &Store,
     t: &fit::Task,
 ) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
+    let bench = crate::app::task_bench(store, t);
     let fav: Vec<&Model> = pool.filter(|m| fav_on_line(store, t.name, m)).collect();
     let caps: Vec<f64> = TIERS.iter().filter(|x| capped(x.0)).map(|x| store.tier_cap(x.0)).collect();
-    task_frontier(models, t, &fav, &caps)
+    task_frontier(models, t, &fav, &caps, bench)
 }
 
 /// The line of a task of your own: the models you gave it and its tiers, the ones among
@@ -786,7 +796,7 @@ pub fn left_out_by(m: &Model, store: &Store, any: bool) -> Option<String> {
     let at = crate::app::COLS.iter().position(|c| c.id == b.col)?;
     let col = crate::app::TEXT + at;
     let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
-    Some(bound_said(crate::app::base_col_name(col), col, lo, hi, None))
+    Some(bound_said_in(store, col, lo, hi))
 }
 
 /// Whether `m` is within a bound typed in the TUI: every model is in one that does not apply
@@ -795,7 +805,13 @@ fn in_bound(m: &Model, b: &crate::store::Bound, store: &Store) -> bool {
     let Some(at) = crate::app::COLS.iter().position(|c| c.id == b.col) else { return true };
     let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
     !crate::app::bound_applies(crate::app::TEXT + at, &store.hide)
-        || (crate::app::COLS[at].get)(m).is_some_and(|v| v >= lo && v <= hi)
+        || crate::app::col_value(m, at, store).is_some_and(|v| v >= lo && v <= hi)
+}
+
+/// `bound_said` for a bound the store keeps, named by the benchmark picked in its column.
+fn bound_said_in(store: &Store, col: usize, lo: f64, hi: f64) -> String {
+    let bench = crate::app::stored_bench(store, col);
+    bound_said(bench.unwrap_or_else(|| crate::app::base_col_name(col)), col, lo, hi, bench)
 }
 
 /// The bounds the store keeps that apply, as the status bar says them.
@@ -803,8 +819,7 @@ pub fn bounds_said(store: &Store) -> impl Iterator<Item = String> {
     store.bounds.iter().filter_map(|b| {
         let col = crate::app::TEXT + crate::app::COLS.iter().position(|c| c.id == b.col)?;
         let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
-        crate::app::bound_applies(col, &store.hide)
-            .then(|| bound_said(crate::app::base_col_name(col), col, lo, hi, None))
+        crate::app::bound_applies(col, &store.hide).then(|| bound_said_in(store, col, lo, hi))
     })
 }
 
@@ -1311,7 +1326,7 @@ mod tests {
         };
         let ms = [model("a", 60.4, 1.0), model("b", 59.8, 1.0), model("weak", 55.0, 1.5), model("top", 90.0, 10.0)];
         fn keys<'a>(ms: &'a [Model], fav: &[&'a Model]) -> (Vec<&'a str>, Vec<&'a str>) {
-            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), fav, &[]);
+            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), fav, &[], None);
             (line.iter().map(|(m, _)| m.key.as_str()).collect(), off)
         }
         let line = |fav: &[usize]| keys(&ms, &fav.iter().map(|&i| &ms[i]).collect::<Vec<_>>());
@@ -1456,11 +1471,11 @@ mod tests {
             ..Default::default()
         };
         fn keys<'a>(ms: &'a [Model], fav: &[&'a Model], task: &str) -> (Vec<&'a str>, Vec<&'a str>) {
-            let (line, off) = task_frontier(ms.iter(), fit::task(task).unwrap(), fav, &[]);
+            let (line, off) = task_frontier(ms.iter(), fit::task(task).unwrap(), fav, &[], None);
             (line.iter().map(|(m, _)| m.key.as_str()).collect(), off)
         }
         let pick = |ms: &[Model], tier| {
-            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), &[], &[]);
+            let (line, off) = task_frontier(ms.iter(), fit::task("coding").unwrap(), &[], &[], None);
             tier_pick(&line, &off, &Store::default(), "coding", tier).unwrap().0.key.clone()
         };
         // a and b share the ≤$2 level, c is beaten: b is the level's best, and low's and mid's.
@@ -1487,7 +1502,7 @@ mod tests {
         assert_eq!(tier_pick(&line, &off, &store, "coding", "low").unwrap().0.key, "b", "not a, the best up to $2");
         // None at low's price: low has none, as free has none with no free model.
         let dear = [model("a", 157.0, 16.0, 8.0), model("top", 165.0, 75.0, 0.0)];
-        let (line, off) = task_frontier(dear.iter(), fit::task("coding").unwrap(), &[], &[]);
+        let (line, off) = task_frontier(dear.iter(), fit::task("coding").unwrap(), &[], &[], None);
         assert!(tier_pick(&line, &off, &Store::default(), "coding", "low").is_none());
         assert_eq!(pick(&dear, "high"), "top");
         // Value goes by your best on coding, 9 months behind the source's, not by the source's.

@@ -417,6 +417,27 @@ fn col_benches(col: usize) -> Option<(&'static str, Vec<&'static str>)> {
     benched(numeric(col)?.id)
 }
 
+/// The benchmark `store` has picked for the column at cursor index `col`, when its dropdown
+/// lists it with the source in use.
+pub fn stored_bench(store: &Store, col: usize) -> Option<&'static str> {
+    let b = store.bench.get(numeric(col)?.id)?;
+    col_benches(col)?.1.into_iter().find(|x| x == b)
+}
+
+/// The benchmark `store` has picked in task `t`'s column, which ranks its line.
+pub fn task_bench(store: &Store, t: &Task) -> Option<&'static str> {
+    stored_bench(store, TEXT + COLS.iter().position(|c| c.id == t.name)?)
+}
+
+/// What `COLS[at]` shows for `m` with `store`'s picks: a benchmark picked in its dropdown, else
+/// its own value. Bounds go by it.
+pub fn col_value(m: &Model, at: usize, store: &Store) -> Option<f64> {
+    match stored_bench(store, TEXT + at) {
+        Some(b) => m.picked(b),
+        None => (COLS[at].get)(m),
+    }
+}
+
 /// What the column at cursor index `col` means.
 pub fn base_col_about(col: usize) -> String {
     match col {
@@ -1305,7 +1326,7 @@ pub struct App {
     pub descending: bool,
     /// (column, min, max) filters set with `>` and `<`.
     pub bounds: Vec<(usize, f64, f64)>,
-    /// Whether `keep_bounds` changed the store's since `take_bounds_changed`.
+    /// Whether `keep_bounds` changed the store's bounds or benchmark picks since `take_bounds_changed`.
     bounds_changed: bool,
     /// What is known of each model's download, by key (`Download`).
     downloads: std::collections::HashMap<String, Download>,
@@ -1486,6 +1507,8 @@ impl App {
         app.cache_on = if start > 0.0 { start } else { crate::data::AGENT_CACHED };
         // ponytail: leaked once per App, which the TUI makes once; hints are &'static str.
         app.cache_hint = Box::leak(format!("% {:.0}% cached", app.cache_on * 100.0).into_boxed_str());
+        // The picks the store has are of the benchmarks the data lends too.
+        crate::data::set_lent(data.lent);
         app.load_bounds();
         app.set_cols();
         app.set_data(data);
@@ -1577,6 +1600,11 @@ impl App {
     /// The benchmark picked for the task column at cursor index `col`, shown in place of its score.
     pub fn col_bench(&self, col: usize) -> Option<&'static str> {
         *self.bench.get(col.checked_sub(TEXT)?)?
+    }
+
+    /// The benchmark picked in the column of task `t`, which ranks its line.
+    pub fn task_bench(&self, t: &Task) -> Option<&'static str> {
+        self.col_bench(TEXT + COLS.iter().position(|c| c.id == t.name)?)
     }
 
     /// The benchmark source the column at cursor index `col` shows the values of: a picked
@@ -2034,17 +2062,17 @@ impl App {
         self.bounds.iter().any(|b| b.0 == VIA)
     }
 
-    /// Whether a bound on column `col` is kept for the CLI: not one typed for a benchmark picked
-    /// on a task column, which lasts as the pick does.
-    fn kept_bound(bench: &[Option<&str>], col: usize) -> bool {
-        col.checked_sub(TEXT).is_some_and(|c| bench.get(c).is_some_and(Option::is_none))
-    }
-
-    /// The bounds into the store, which keeps them for the CLI as the dropdowns' picks, before
-    /// anything reads them there: `rebuild`. `take_bounds_changed` says when to save them.
+    /// The bounds and the benchmarks picked into the store, which keeps them for the CLI as the
+    /// dropdowns' picks, before anything reads them there: `rebuild`. `take_bounds_changed` says
+    /// when to save them.
     fn keep_bounds(&mut self) {
-        let kept = self.bounds.iter().filter(|b| Self::kept_bound(&self.bench, b.0));
-        let bounds: Vec<Bound> = kept
+        let bench: BTreeMap<String, String> =
+            (0..COLS.len()).filter_map(|c| Some((COLS[c].id.to_string(), self.bench[c]?.to_string()))).collect();
+        self.bounds_changed |= bench != self.store.bench;
+        self.store.bench = bench;
+        let bounds: Vec<Bound> = self
+            .bounds
+            .iter()
             .filter_map(|&(c, lo, hi)| {
                 let col = numeric(c)?.id.to_string();
                 Some(Bound { col, min: lo.is_finite().then_some(lo), max: hi.is_finite().then_some(hi) })
@@ -2059,11 +2087,16 @@ impl App {
         std::mem::take(&mut self.bounds_changed)
     }
 
-    /// The bounds the store has, at a start or after it is reloaded, with the ones typed for a
-    /// picked benchmark.
+    /// The bounds and the benchmarks picked the store has, at a start or after it is reloaded.
     pub fn load_bounds(&mut self) {
-        let bench = self.bench;
-        self.bounds.retain(|b| !Self::kept_bound(&bench, b.0));
+        for c in 0..COLS.len() {
+            let pick = stored_bench(&self.store, c + TEXT);
+            if pick != self.bench[c] {
+                self.bench[c] = pick;
+                self.fill_col(c);
+            }
+        }
+        self.bounds.clear();
         let at = |b: &Bound| Some(TEXT + COLS.iter().position(|c| c.id == b.col)?);
         let saved = self
             .store
@@ -4061,8 +4094,6 @@ impl App {
                     return None;
                 };
                 self.task = Some(t);
-                // The line is drawn from the task's score, so its column shows that.
-                self.drop_benches(true);
                 // On the frontier the priciest is the best: each row down is cheaper and scores lower.
                 (self.sort_col, self.descending) = (PRICE, true);
                 self.view = View::Table;
@@ -4076,7 +4107,16 @@ impl App {
                 let best = front.iter().max_by(|a, b| a.1.total_cmp(&b.1));
                 match (best, front.first()) {
                     (Some(a), Some(b)) => self.status = format!("{} best, {} cheapest", a.0.name, b.0.name),
-                    _ => self.refuse(format!("no model has data for {}", t.name)),
+                    _ => match self.task_bench(t) {
+                        Some(b) => {
+                            let c = self.key_of('c');
+                            self.refuse(format!(
+                                "no model has data for {} on {b}, picked in its column: {c} takes it back",
+                                t.name
+                            ))
+                        }
+                        None => self.refuse(format!("no model has data for {}", t.name)),
+                    },
                 }
             }
             KeyCode::Enter if self.view == View::Help => return self.help_enter(),
@@ -5268,7 +5308,7 @@ mod tests {
         a.bounds.push((a.col, 1e9, f64::MAX));
         press(&mut a, "d");
         assert_eq!(menu(&a)[..2], [("WeirdML · Epoch AI", 0), ("FrontierCode · Epoch AI", 2)]);
-        // A task's line is drawn from its score: choosing one shows it again, and no other is picked.
+        // Choosing one shows it again, and no other is picked.
         press(&mut a, "j ");
         assert_eq!(
             menu(&a)[..2],
@@ -5278,10 +5318,11 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.task.is_some(), a.col_name(ECI + 3)), (true, "Coding"));
+        // A task's line is ranked by the pick, so choosing the task keeps it.
+        assert_eq!((a.task.is_some(), a.col_name(ECI + 3)), (true, "FrontierCode"));
         a.col = ECI + 3;
         press(&mut a, "d");
-        assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "Coding"));
+        assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "FrontierCode"));
         assert!((0..NCOLS).all(|c| (TASK_COLS.contains(&c) || c == ARENA_COL) == col_benches(c).is_some()));
         // Leaving the task took its sort along.
         press(&mut a, "cs");
@@ -6346,6 +6387,36 @@ mod tests {
         a.store.dev_not = vec!["openai".into()];
         a.rebuild();
         assert!(a.task_frontier(fit::task("coding").unwrap()).is_empty());
+    }
+
+    /// A benchmark picked in a task's column ranks its line in recommend, as the column shows it.
+    #[test]
+    fn a_benchmark_picked_in_a_task_column_ranks_its_line() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        for (m, s) in data.models.iter_mut().zip([0.5, 0.9, 0.9, 0.7]) {
+            m.scores.insert("DeepSWE".into(), s);
+        }
+        a.set_data(data);
+        let front = |a: &App| {
+            a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, s)| (m.key.clone(), *s)).collect::<Vec<_>>()
+        };
+        assert_eq!(front(&a).len(), 2, "mini and gpt55 by the task's score");
+        let col = TEXT + COLS.iter().position(|c| c.id == "coding").unwrap();
+        let i = col_benches(col).unwrap().1.iter().position(|&b| b == "DeepSWE").unwrap();
+        a.pick_bench(col, i + 1);
+        a.rebuild();
+        let want = [("mini".to_string(), 70.0), ("opus5".to_string(), 90.0)];
+        assert_eq!(front(&a), want, "gpt55 is beaten on DeepSWE for less, opus5 has no coding score but this one");
+        // Kept for the CLI and the next start, which ranks the same.
+        assert!(a.take_bounds_changed(), "to be saved");
+        assert_eq!(a.store.bench.get("coding").map(String::as_str), Some("DeepSWE"));
+        let b = App::new(a.data.clone(), a.store.clone());
+        assert_eq!((b.col_bench(col), front(&b)), (Some("DeepSWE"), want.to_vec()));
+        a.pick_bench(col, 0);
+        a.rebuild();
+        assert_eq!(front(&a).len(), 2, "back to the task's score");
+        assert!(a.store.bench.is_empty());
     }
 
     #[test]

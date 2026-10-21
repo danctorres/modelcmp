@@ -61,6 +61,10 @@ pub struct Store {
     /// The bounds typed with `>` and `<` in the TUI, as `dev_pick`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bounds: Vec<Bound>,
+    /// Column id -> the benchmark picked in its dropdown in the TUI, which the column shows and
+    /// ranks a task's line by, in the TUI as in the CLI.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub bench: BTreeMap<String, String>,
     pub notes: BTreeMap<String, String>,
     /// `slot` -> your favorite model for it: the task's, or one `--tier`'s of it, which `--tier`
     /// picks over the task's and both over the computed one. A key that is no built-in task
