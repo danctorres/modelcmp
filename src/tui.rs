@@ -88,8 +88,8 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     }
     // After the refresh starts, which clears the status: it is your marks and notes that are at
     // stake. The first start keeps it until its key prompt closes, which has the status bar.
-    // What a cache read without a refresh lacks, as one would say.
-    let unscored = rx.is_none().then(|| app.data.unscored()).flatten();
+    // What a cache read without a refresh says.
+    let unscored = rx.is_none().then(|| app.data.said()).flatten();
     if !ask && let Some(w) = app.store.warning.take().or(unscored) {
         app.report(Err(w));
     }
@@ -1570,6 +1570,10 @@ fn draw(app: &mut App, f: &mut Frame) {
             }
             (true, ..) => (refreshing(&app.progress), Color::Yellow),
             (_, true, _) => (format!("refresh failed · {age}"), BAD),
+            // Until a refresh without any, what it said is in the status bar at each start.
+            (_, _, old) if app.data.warning.is_some() => {
+                (format!("⚠ refresh had issues · {age}"), if old { BAD } else { Color::Yellow })
+            }
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
         };
@@ -5286,6 +5290,14 @@ mod tests {
         let line = border(&mut a);
         assert!(line.contains(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{line}");
         assert!(line.contains("· ⟳ refreshing 7/9 ╯"), "{line}");
+        // Done with a warning, the frame keeps saying so, as the next start does from the cache.
+        a.refreshed(
+            Ok(Data { warning: Some("copilot did not list its models".into()), ..Data::default() }),
+            (vec![], vec![]),
+        );
+        assert!(border(&mut a).contains("⚠ refresh had issues ·"), "after the status is cleared too");
+        a.refreshed(Ok(Data::default()), (vec![], vec![]));
+        assert!(!border(&mut a).contains("⚠"), "until a refresh without any");
     }
 
     #[test]

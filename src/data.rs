@@ -999,8 +999,9 @@ pub struct Data {
     #[serde(default)]
     pub missed: Vec<String>,
     pub models: Vec<Model>,
-    /// What went wrong in a refresh that still gave data, for the caller to show.
-    #[serde(skip)]
+    /// What went wrong in a refresh that still gave data, for the caller to show. Cached, so the
+    /// frame says the last refresh had issues until the next one, after a restart too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     /// A harness still asked for its models has no listing, not even the cache's: a refresh's
     /// early data, too soon to say that there is access to no model.
@@ -1109,6 +1110,12 @@ impl Data {
             || self.fetched > now()
             || self.format != FORMAT
             || self.benches != source().benches()
+    }
+
+    /// What a load of the cache says: what its refresh said, as that one's, else what `missed`
+    /// leaves empty.
+    pub fn said(&self) -> Option<String> {
+        self.warning.as_ref().map(|w| format!("last refresh: {w}")).or_else(|| self.unscored())
     }
 
     /// What `missed` leaves empty, said at every load until a refresh brings it.
@@ -1803,6 +1810,22 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     (data.harness, silent) = keep_listed(listed, || was.harness(false));
     let lost;
     (data.kept, lost) = silent.into_iter().partition(|h| data.harness.contains_key(h));
+    let unlisted = |hs: &[String], kept: &str| {
+        (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
+    };
+    let common: Vec<String> = [unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, "")]
+        .into_iter()
+        .chain(unpaged)
+        .chain([unnamed, unranked])
+        .flatten()
+        .chain(uncut)
+        .collect();
+    // Each source's own, then the ones of the whole refresh.
+    let said = |own: [Option<String>; 2]| {
+        let all: Vec<_> = own.into_iter().flatten().chain(common.iter().cloned()).collect();
+        Some(all.join("; ")).filter(|w| !w.is_empty())
+    };
+    data.warning = said([data.warning.take(), data.unscored()]);
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
     // Its own source's file, though a switch may have happened meanwhile.
     // An unwritable cache costs the next start a download, not this one its data.
@@ -1813,25 +1836,15 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let unswitched = other.and_then(|(s, o)| {
         let written = o.and_then(|mut o| {
             (o.latest, o.harness, o.kept) = (data.latest.clone(), data.harness.clone(), data.kept.clone());
+            o.warning = said([o.warning.take(), o.unscored()]);
             let json = serde_json::to_vec(&o).map_err(|e| e.to_string())?;
             Ok(crate::store::write_atomic(&cache_path(s), &json).map_err(|e| e.to_string())?)
         });
         written.err().map(|e: Failure| format!("{}'s data was not refreshed ({e})", s.label()))
     });
-    let unlisted = |hs: &[String], kept: &str| {
-        (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
-    };
-    let renamed = data.warning.take();
-    let warnings = [
-        renamed,
-        data.unscored(),
-        unlisted(&data.kept, ": kept the ones from the last refresh"),
-        unlisted(&lost, ""),
-        uncached,
-    ];
-    let warnings =
-        warnings.into_iter().chain(unpaged).chain([unnamed, unranked, unswitched]).chain(uncut.into_iter().map(Some));
-    data.warning = Some(warnings.flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
+    // What no cache holds, said only now.
+    let all: Vec<_> = data.warning.take().into_iter().chain(uncached).chain(unswitched).collect();
+    data.warning = Some(all.join("; ")).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
@@ -2000,7 +2013,7 @@ pub const FELL_BACK: &str = " · benchmarks from Epoch AI";
 pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
         Some(d) if !force && !d.stale() => {
-            let w = d.unscored();
+            let w = d.said();
             Ok((d, w))
         }
         cached => {
@@ -2008,7 +2021,7 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
             // first and read what it wrote.
             let _held = crate::store::lock(&cache_path(source()));
             if !force && let Some(d) = load_cache().filter(|d| !d.stale()) {
-                let w = d.unscored();
+                let w = d.said();
                 return Ok((d, w));
             }
             // A refresh can take half a minute, which with nothing said looks like a hang.
@@ -4071,6 +4084,11 @@ mod tests {
         assert!(aged(120, true).stale() && !aged(10, true).stale() && !aged(120, false).stale());
         let unscored = Data { missed: vec!["HLE".into()], ..aged(120, false) };
         assert!(unscored.stale() && !Data { fetched: now() - 600, ..unscored.clone() }.stale());
+        // A load says what the refresh did, as its own, cached with the data.
+        assert_eq!(unscored.said().as_deref(), Some("epoch.ai sent no HLE scores"));
+        let warned = Data { warning: Some("copilot did not list its models".into()), ..unscored };
+        let back: Data = serde_json::from_slice(&serde_json::to_vec(&warned).unwrap()).unwrap();
+        assert_eq!(back.said().as_deref(), Some("last refresh: copilot did not list its models"));
         // Not stale yet, yesterday's is still refreshed by the TUI's first start of today.
         assert!(aged(48 * 60, false).of_another_day() && !aged(0, false).of_another_day());
     }

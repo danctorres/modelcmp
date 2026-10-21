@@ -2239,14 +2239,14 @@ impl App {
         self.refreshing = false;
         self.refresh_failed = res.is_err();
         match res {
-            Ok(mut d) => {
+            Ok(d) => {
                 self.old_key = None;
                 // An error still standing, as the start's of an unreadable user.json, is not
                 // replaced by the news that the refresh went well, nor by its warning. Why a
                 // key did nothing is. The news replaces no other message either: what a switch
-                // of source said stays when its download ends.
+                // of source said stays when its download ends. The data keeps it for the frame.
                 let standing = self.failed && !self.refused;
-                match d.warning.take() {
+                match d.warning.clone() {
                     Some(w) if standing => self.status = format!("{}; {w}", self.status),
                     Some(w) => self.report(Err(w)),
                     None if self.status.is_empty() || (self.failed && self.refused) => {
@@ -2369,7 +2369,7 @@ impl App {
         cached.keep_latest(&self.data.latest);
         self.set_data(cached);
         (self.refreshing, self.refresh_failed) = (fetch, false);
-        if let Some(w) = self.data.unscored().filter(|_| !fetch) {
+        if let Some(w) = self.data.said().filter(|_| !fetch) {
             self.report(Err(w));
         }
         fetch
