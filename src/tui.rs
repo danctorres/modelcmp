@@ -835,7 +835,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
                 if items.get(k).is_some_and(|(name, _)| k != 0 && !VIA_KINDS.contains(&name.as_str())));
         return (k < len).then_some(if ex { Mouse::Exclude(k) } else { Mouse::Item(k) });
     }
-    // The frame's ⚠ opens what the last refresh warned of, as `!` does, over a panel too.
+    // The frame's ⚠ opens the issues, as `!` does, over a panel too.
     if plain && m.row == area.bottom() - 2 && app.issues_at.as_ref().is_some_and(|r| r.contains(&m.column)) {
         return Some(Mouse::Key(KeyCode::Char('!')));
     }
@@ -1113,7 +1113,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if stale(app) {
                 view.push("r refresh");
             }
-            if app.issues().is_some() {
+            // A missing key is in `!` too, but `K` says it.
+            if app.data.warning.is_some() {
                 view.push("! issues");
             }
             // Epoch AI is what no key, or one turned down, leaves.
@@ -1675,7 +1676,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
         View::Issues => {
             let issues = app.issues();
-            let said = issues.as_deref().unwrap_or("none, the last refresh went well");
+            let said = issues.as_deref().unwrap_or("none");
             let words = |w: &str| w.split(' ').map(|s| Line::from(s.to_string())).collect();
             let width = (area.width as usize).saturating_sub(4);
             let lines = said.split("; ").flat_map(|w| wrapped(vec![Span::raw("• ")], words(w), &Span::raw(" "), width));
@@ -3950,7 +3951,7 @@ mod tests {
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
         assert!(
-            lines[3].contains("d dropdown  % no cache  r refresh  ! issues  K api key  │  enter details"),
+            lines[3].contains("s sort  d dropdown  % no cache  r refresh  K api key  │  enter details"),
             "{}",
             lines[3]
         );
@@ -3958,7 +3959,7 @@ mod tests {
         data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
         assert!(
-            lines[3].contains("s sort  d dropdown  % 90% cached  ! issues  K api key  │"),
+            lines[3].contains("s sort  d dropdown  % 90% cached  K api key  │"),
             "off the default, the way back: {}",
             lines[3]
         );
@@ -4452,7 +4453,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  H harness  | columns  / filter  s sort  ! issues  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
+                "← → column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -5337,7 +5338,7 @@ mod tests {
         bang(&mut a);
         data::save_aa_key("k").unwrap();
         bang(&mut a);
-        assert!(a.view == View::Table && a.status == "no issues, the last refresh went well");
+        assert!(a.view == View::Table && a.status == "no issues to list");
         a.data.warning = Some("copilot did not list its models; openrouter.ai did not list its models".into());
         let lines = screen(&mut a);
         let x = lines[h as usize - 2][..lines[h as usize - 2].find("⚠").unwrap()].chars().count() as u16;
@@ -5659,6 +5660,12 @@ mod tests {
         assert!(bottom.contains("models.dev + Epoch AI · ⚠ no Artificial Analysis key · data "), "{bottom}");
         let x = bottom[..bottom.find("⚠").unwrap()].chars().count() as u16;
         assert_eq!(term.backend().buffer()[(x, 8)].fg, Color::Yellow, "the missing key stands out");
+        // Chosen with `--source`, it is not for want of a key.
+        data::set_chosen(true);
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
+        assert!(bottom.contains("models.dev + Epoch AI · data "), "{bottom}");
+        data::set_chosen(false);
         // With a key, Epoch AI is `--source`'s choice.
         data::save_aa_key("k").unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();

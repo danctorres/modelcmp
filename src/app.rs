@@ -420,6 +420,21 @@ pub fn pick_gone(store: &Store, col: usize) -> bool {
         && stored_bench(store, col).is_none()
 }
 
+/// Whether `store`'s pick for the column at cursor index `col` is one of the other source's
+/// benchmarks, gone only until that source's data is back (`Data::lent`): the store keeps it
+/// and its bounds meanwhile (`keep_bounds`).
+fn pick_away(store: &Store, col: usize) -> bool {
+    let other = if crate::data::source() == Source::Aa { Source::Epoch } else { Source::Aa };
+    let theirs =
+        |id, b: &str| crate::fit::task(id).is_some_and(|t| t.of(other).0 == Some(b) || t.of(other).1.contains(&b));
+    numeric(col).is_some_and(|c| store.bench.get(c.id).is_some_and(|b| theirs(c.id, b))) && pick_gone(store, col)
+}
+
+/// A bound the store keeps, on the column at cursor index `col`, as `App::bounds` has it.
+fn loaded(col: usize, b: &Bound) -> (usize, f64, f64) {
+    (col, b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY))
+}
+
 /// The benchmark `store` has picked in task `t`'s column, which ranks its line.
 pub fn task_bench(store: &Store, t: &Task) -> Option<&'static str> {
     stored_bench(store, TEXT + COLS.iter().position(|c| c.id == t.name)?)
@@ -477,7 +492,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: overlay, highlight, filter, `S`, `F`, `E`, task"),
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
-            ("!", "what the last refresh warned of, as a click on the frame's ⚠"),
+            ("!", "what the last refresh warned of and a missing key, as a click on the frame's ⚠"),
             ("K", "Artificial Analysis API key, to add or replace it"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
             ("H", "default harness, for `x`, `Y`, --cmd and --id"),
@@ -1544,6 +1559,16 @@ impl App {
                 self.bounds.retain(|b| b.0 != c + TEXT);
             }
         }
+        // A pick that waited in the store for the other source's data is back with it, its bounds too.
+        for (c, id) in COLS.iter().map(|c| c.id).enumerate() {
+            let col = c + TEXT;
+            let Some(pick) = stored_bench(&self.store, col).filter(|_| self.bench[c].is_none()) else { continue };
+            if !self.bounds.iter().any(|b| b.0 == col) {
+                self.bench[c] = Some(pick);
+                let back: Vec<_> = self.store.bounds.iter().filter(|b| b.col == id).map(|b| loaded(col, b)).collect();
+                self.bounds.extend(back);
+            }
+        }
         self.fill();
         // A refresh that could not ask for the newest release leaves nothing to upgrade to.
         if self.input == Input::Upgrade && self.data.update().is_none() {
@@ -1577,6 +1602,8 @@ impl App {
     /// entry is what it shows already.
     fn pick_bench(&mut self, col: usize, i: usize) {
         let Some((c, (_, benches))) = col.checked_sub(TEXT).zip(col_benches(col)) else { return };
+        // One waiting for the other source's data is replaced too.
+        self.bounds_changed |= self.store.bench.remove(COLS[c].id).is_some();
         let pick = i.checked_sub(1).and_then(|i| benches.get(i).copied()).filter(|b| self.bench[c] != Some(b));
         if pick == self.bench[c] {
             return;
@@ -1589,6 +1616,9 @@ impl App {
     /// Every task column back to its task's score, and the bounds typed for a picked benchmark
     /// gone. Without `refill` the values wait for the `set_data` that follows.
     fn drop_benches(&mut self, refill: bool) {
+        // The ones waiting in the store for the other source's data too.
+        self.bounds_changed |= !self.store.bench.is_empty();
+        self.store.bench.clear();
         for c in 0..COLS.len() {
             if self.bench[c].take().is_some() {
                 self.bounds.retain(|b| b.0 != c + TEXT);
@@ -2068,10 +2098,20 @@ impl App {
     /// dropdowns' picks, before anything reads them there: `rebuild`. `take_bounds_changed` says
     /// when to save them.
     fn keep_bounds(&mut self) {
-        let bench: BTreeMap<String, String> =
-            (0..COLS.len()).filter_map(|c| Some((COLS[c].id.to_string(), self.bench[c]?.to_string()))).collect();
+        // A pick of the other source's, while its data is not here, stays with its bounds until
+        // one is typed on its column: a start or a refresh without it does not lose them.
+        let waits = |c: usize| {
+            self.bench[c].is_none() && pick_away(&self.store, c + TEXT) && !self.bounds.iter().any(|b| b.0 == c + TEXT)
+        };
+        let waiting: Vec<&str> = (0..COLS.len()).filter(|&c| waits(c)).map(|c| COLS[c].id).collect();
+        let bench: BTreeMap<String, String> = (0..COLS.len())
+            .filter_map(|c| {
+                let id = COLS[c].id;
+                let pick = self.bench[c].map(str::to_string);
+                Some((id.to_string(), pick.or_else(|| waiting.contains(&id).then(|| self.store.bench[id].clone()))?))
+            })
+            .collect();
         self.bounds_changed |= bench != self.store.bench;
-        self.store.bench = bench;
         let bounds: Vec<Bound> = self
             .bounds
             .iter()
@@ -2079,7 +2119,9 @@ impl App {
                 let col = numeric(c)?.id.to_string();
                 Some(Bound { col, min: lo.is_finite().then_some(lo), max: hi.is_finite().then_some(hi) })
             })
+            .chain(self.store.bounds.iter().filter(|b| waiting.contains(&b.col.as_str())).cloned())
             .collect();
+        self.store.bench = bench;
         self.bounds_changed |= bounds != self.store.bounds;
         self.store.bounds = bounds;
     }
@@ -2101,11 +2143,7 @@ impl App {
         self.bounds.clear();
         let at =
             |b: &Bound| Some(TEXT + COLS.iter().position(|c| c.id == b.col)?).filter(|&c| !pick_gone(&self.store, c));
-        let saved = self
-            .store
-            .bounds
-            .iter()
-            .filter_map(|b| Some((at(b)?, b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY))));
+        let saved = self.store.bounds.iter().filter_map(|b| Some(loaded(at(b)?, b)));
         self.bounds.extend(saved.collect::<Vec<_>>());
     }
 
@@ -2567,6 +2605,9 @@ impl App {
         (self.store.dev_not, self.store.via_not, self.store.price_not) = (vec![], vec![], None);
         (self.store.dev_pick, self.store.via_pick, self.store.price_pick) = (vec![], vec![], None);
         self.bounds.clear();
+        // The ones a pick waiting for the other source's data keeps in the store too.
+        self.bounds_changed |= !self.store.bounds.is_empty();
+        self.store.bounds.clear();
     }
 
     /// Whether `E` shows model `i`: excluded with `e`, or one you could use that the filters
@@ -3203,7 +3244,6 @@ impl App {
         ) || self.open_list().is_some_and(List::idle)
     }
 
-    /// The key the action with the default key `d` is on.
     /// What `!` lists: what the last refresh warned of, and a missing Artificial Analysis key.
     pub fn issues(&self) -> Option<String> {
         let key = crate::data::keyless().then(|| {
@@ -3214,6 +3254,7 @@ impl App {
         Some(all.join("; ")).filter(|w| !w.is_empty())
     }
 
+    /// The key the action with the default key `d` is on.
     pub fn key_of(&self, d: char) -> char {
         self.store.keys.get(&d).copied().unwrap_or(d)
     }
@@ -3928,7 +3969,7 @@ impl App {
                 }
             }
             KeyCode::Char('!') if self.view != View::Issues && self.issues().is_none() => {
-                self.refuse("no issues, the last refresh went well");
+                self.refuse("no issues to list");
             }
             KeyCode::Char('!') => {
                 self.view = if self.view == View::Issues { View::Table } else { View::Issues };
@@ -5445,11 +5486,26 @@ mod tests {
         assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
         assert!(a.col_about(a.col).starts_with("Artificial Analysis, "), "{}", a.col_about(a.col));
         assert_eq!(a.col_source(a.col), Some(Source::Aa), "a double click opens that source's page");
+        a.bounds = vec![(a.col, 20.0, f64::INFINITY)];
+        a.rebuild();
         // Without the other source's data the pick goes, and the column is the task's score again.
         let mut data = std::mem::take(&mut a.data);
         data.lent = false;
         a.set_data(data);
-        assert_eq!((a.col_bench(a.col), a.col_name(a.col)), (None, "Coding"));
+        assert_eq!((a.col_bench(a.col), a.col_name(a.col), a.bounds.len()), (None, "Coding", 0));
+        // The store keeps both until it is back, as at a start without it.
+        let kept = |a: &App| (a.store.bench.get("coding").cloned(), a.store.bounds.len());
+        assert_eq!(kept(&a), (Some("scicode".into()), 1));
+        let mut b = App::new(a.data.clone(), a.store.clone());
+        assert_eq!((b.col_bench(a.col), kept(&b)), (None, (Some("scicode".into()), 1)));
+        let mut data = std::mem::take(&mut b.data);
+        data.lent = true;
+        b.set_data(data);
+        assert_eq!((b.col_bench(a.col), b.bounds.as_slice()), (Some("scicode"), &[(a.col, 20.0, f64::INFINITY)][..]));
+        // A pick of the first entry meanwhile takes it back.
+        a.pick_bench(a.col, 0);
+        a.rebuild();
+        assert_eq!(kept(&a), (None, 0));
     }
 
     #[test]

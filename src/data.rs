@@ -293,17 +293,45 @@ fn nonblank(k: &str) -> Option<String> {
 #[cfg(test)]
 thread_local!(pub static TEST_KEYS: std::cell::RefCell<[Option<String>; 2]> = const { std::cell::RefCell::new([None, None]) });
 
+/// The saved key as last read, the frame asking for it at every draw (`keyless`): read again
+/// after `save_aa_key`.
+// ponytail: one saved by another modelcmp meanwhile is seen at the next start.
+#[cfg(not(test))]
+static SAVED_KEY: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+
+#[cfg(not(test))]
+fn read_aa_key() -> Option<String> {
+    std::fs::read_to_string(aa_key_path()).ok()
+}
+
 pub fn aa_key() -> Option<String> {
     #[cfg(test)]
     let saved = TEST_KEYS.with(|k| k.borrow()[1].clone());
     #[cfg(not(test))]
-    let saved = std::fs::read_to_string(aa_key_path()).ok();
+    let saved = SAVED_KEY.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(read_aa_key).clone();
     aa_key_env().or_else(|| saved.as_deref().and_then(nonblank))
 }
 
-/// Epoch AI for want of a key to choose Artificial Analysis by.
+/// Whether `--source` chose the source, which is then not for want of a key (`keyless`).
+#[cfg(not(test))]
+static CHOSEN: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+thread_local!(static CHOSEN: AtomicBool = const { AtomicBool::new(false) });
+
+pub fn set_chosen(on: bool) {
+    #[cfg(test)]
+    CHOSEN.with(|c| c.store(on, Relaxed));
+    #[cfg(not(test))]
+    CHOSEN.store(on, Relaxed);
+}
+
+/// Epoch AI for want of a key to choose Artificial Analysis by, not because `--source` chose it.
 pub fn keyless() -> bool {
-    source() == Source::Epoch && aa_key().is_none()
+    #[cfg(test)]
+    let chosen = CHOSEN.with(|c| c.load(Relaxed));
+    #[cfg(not(test))]
+    let chosen = CHOSEN.load(Relaxed);
+    !chosen && source() == Source::Epoch && aa_key().is_none()
 }
 
 /// The key set in `AA_KEY_ENV`, which a saved one would not replace.
@@ -323,7 +351,11 @@ pub fn save_aa_key(key: &str) -> std::io::Result<()> {
         Ok(())
     }
     #[cfg(not(test))]
-    crate::store::write_private(&aa_key_path(), key.trim().as_bytes())
+    {
+        let saved = crate::store::write_private(&aa_key_path(), key.trim().as_bytes());
+        *SAVED_KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        saved
+    }
 }
 /// How a harness tells which models it can use.
 enum Probe {

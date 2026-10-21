@@ -249,6 +249,7 @@ fn main() {
     data::set_models_dir(&store.models_dir);
     let source = args.source.as_deref().and_then(data::Source::parse);
     data::set_source(source.unwrap_or_else(data::Source::preferred));
+    data::set_chosen(source.is_some());
     let result = match args.cmd {
         None => {
             // Asked the first time the TUI opens, and not with a key there: Artificial Analysis
@@ -319,8 +320,10 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
             eprintln!("warning: {w}");
         }
         // Epoch AI by default for want of a key, which the TUI's frame says too. Not when asked
-        // for, and only where benchmarks are what is shown.
-        if auto && matches!(cmd, Cmd::List { .. } | Cmd::Recommend { .. }) && data::aa_key().is_none() {
+        // for, and only where benchmarks are what is shown: not for the id or command a script
+        // takes from `$(...)`.
+        let shown = matches!(cmd, Cmd::List { id: false, cmd: false, .. } | Cmd::Recommend { .. });
+        if shown && data::keyless() {
             eprintln!(
                 "warning: no {} API key{} (set {}, or press K in the TUI)",
                 data::Source::Aa.label(),
