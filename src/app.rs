@@ -481,6 +481,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: overlay, highlight, filter, `S`, `F`, `E`, task"),
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
+            ("!", "what the last refresh warned of, as a click on the frame's ⚠"),
             ("K", "Artificial Analysis API key, to add or replace it"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
             ("H", "default harness, for `x`, `Y`, --cmd and --id"),
@@ -675,6 +676,8 @@ pub enum View {
     Compare,
     Help,
     Recommend,
+    /// What the last refresh warned of, one issue a line.
+    Issues,
 }
 
 #[derive(PartialEq, Debug)]
@@ -1386,6 +1389,8 @@ pub struct App {
     pub more: Vec<(u16, u16, Mouse)>,
     /// The box of the open panel as last drawn, for a click outside it to close it.
     pub panel: Option<ratatui::layout::Rect>,
+    /// The columns of the frame's `⚠ refresh had issues` as last drawn, which a click opens.
+    pub issues_at: Option<std::ops::Range<u16>>,
     /// Search of the open panel, compare, help, details or recommend, typed with `/` in any.
     pub overlay_query: String,
     /// The search of the panel details were opened from and the match it was on, for esc to
@@ -1481,6 +1486,7 @@ impl App {
             spots: vec![],
             more: vec![],
             panel: None,
+            issues_at: None,
             overlay_query: String::new(),
             back_query: (String::new(), 0),
             hit: (0, false),
@@ -1723,7 +1729,7 @@ impl App {
 
     /// Whether `/` searches the open panel instead of filtering the table's models.
     pub fn overlay_search(&self) -> bool {
-        matches!(self.view, View::Compare | View::Help | View::Detail(_) | View::Recommend)
+        matches!(self.view, View::Compare | View::Help | View::Detail(_) | View::Recommend | View::Issues)
     }
 
     /// The model under the cursor: the row in the table and details, the column in compare,
@@ -3913,6 +3919,14 @@ impl App {
                     self.rebuild();
                     self.view = View::Recommend;
                 }
+            }
+            KeyCode::Char('!') if self.view != View::Issues && self.data.warning.is_none() => {
+                self.refuse("the last refresh had no issues");
+            }
+            KeyCode::Char('!') => {
+                self.view = if self.view == View::Issues { View::Table } else { View::Issues };
+                self.overlay_query.clear();
+                self.scroll = 0;
             }
             KeyCode::Char('?') => {
                 self.view = if self.view == View::Help { View::Table } else { View::Help };

@@ -457,7 +457,7 @@ resets your selection, favorites, exclusions, notes and settings.
 The TUI's bottom border always shows the refresh state: `⟳ refreshing 7/9, waiting for opencode` (the downloads
 and harnesses that answered, and the last one or two still awaited), `refresh failed` in red
 with the age of the data still shown, `⚠ refresh had issues` in yellow until a refresh has none
-(each start says them again in the status bar), or the data age alone, red once it is past 24h. Then
+(each start says them again in the status bar, and `!` or a click on it lists them), or the data age alone, red once it is past 24h. Then
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
 When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no file

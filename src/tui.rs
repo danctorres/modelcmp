@@ -835,6 +835,10 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
                 if items.get(k).is_some_and(|(name, _)| k != 0 && !VIA_KINDS.contains(&name.as_str())));
         return (k < len).then_some(if ex { Mouse::Exclude(k) } else { Mouse::Item(k) });
     }
+    // The frame's ⚠ opens what the last refresh warned of, as `!` does, over a panel too.
+    if plain && m.row == area.bottom() - 2 && app.issues_at.as_ref().is_some_and(|r| r.contains(&m.column)) {
+        return Some(Mouse::Key(KeyCode::Char('!')));
+    }
     // A click outside the open panel closes it, as one outside a list does, unless it is on a
     // hint or a tab.
     let close = (!extend && app.panel.is_some_and(|r| !r.contains(pos))).then_some(Mouse::Close);
@@ -1109,6 +1113,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if stale(app) {
                 view.push("r refresh");
             }
+            if app.data.warning.is_some() {
+                view.push("! issues");
+            }
             // Epoch AI is what no key, or one turned down, leaves.
             if data::source() == data::Source::Epoch {
                 view.push("K api key");
@@ -1122,6 +1129,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["← → column"], view, actions("enter x o y space f e i"), back]
         }
         View::Detail(_) => vec![vec!["↓ ↑ scroll"], search, actions("x o y space f e i"), BACK.to_vec()],
+        View::Issues => vec![vec!["↓ ↑ scroll"], [&search[..], &["r refresh"]].concat(), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
         View::Help if matches!(app.input, Input::Bind { .. }) => vec![vec!["esc cancel"]],
         View::Help => {
@@ -1579,6 +1587,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         };
         // A state still too long would run over the version: the source goes.
         let named = state.chars().count() <= room;
+        // Last on the bottom border, before its corner.
+        let end = body.right().saturating_sub(1);
+        app.issues_at =
+            state.starts_with('⚠').then(|| end.saturating_sub(Line::from(state.as_str()).width() as u16)..end);
         let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, app.col_name(app.sort_col));
         let sort_w = sort.chars().count();
         let frame = Block::bordered()
@@ -1664,6 +1676,15 @@ fn draw(app: &mut App, f: &mut Frame) {
             (lines, block, pin, text_at) = recommend(app, (area.width as usize).saturating_sub(4), &mut spots);
             // Its cursor goes to a match, the task or model `n` `N` are on, and those alone are underlined.
             Some(("recommend".to_string(), lines))
+        }
+        View::Issues => {
+            let said = app.data.warning.as_deref().unwrap_or("none, the last refresh went well");
+            let words = |w: &str| w.split(' ').map(|s| Line::from(s.to_string())).collect();
+            let width = (area.width as usize).saturating_sub(4);
+            let lines = said.split("; ").flat_map(|w| wrapped(vec![Span::raw("• ")], words(w), &Span::raw(" "), width));
+            let (lines, hits) = lit_lines(lines.collect(), &app.overlay_query);
+            hit_line = to_hit(app, &hits);
+            Some(("refresh issues".into(), lines))
         }
         View::Detail(_) => {
             let get = |m| (app.download(m), app.size(m));
@@ -2525,6 +2546,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::None, View::Help) => ("HELP", Color::Cyan),
         (Input::None, View::Recommend) => ("RECOMMEND", Color::Cyan),
         (Input::None, View::Detail(_)) => ("DETAIL", Color::Cyan),
+        (Input::None, View::Issues) => ("ISSUES", Color::Cyan),
         (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
     }
 }
@@ -5298,6 +5320,39 @@ mod tests {
         assert!(border(&mut a).contains("⚠ refresh had issues ·"), "after the status is cleared too");
         a.refreshed(Ok(Data::default()), (vec![], vec![]));
         assert!(!border(&mut a).contains("⚠"), "until a refresh without any");
+    }
+
+    #[test]
+    fn issues_open_on_a_key_and_on_a_click_of_the_frames_mark() {
+        let (w, h) = (120, 12);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        let mut a = app();
+        let mut screen = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            let buf = term.backend().buffer();
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
+        };
+        let bang = |a: &mut App| a.key(ratatui::crossterm::event::KeyEvent::from(KeyCode::Char('!')));
+        bang(&mut a);
+        assert!(a.view == View::Table && a.status == "the last refresh had no issues");
+        a.data.warning = Some("copilot did not list its models; openrouter.ai did not list its models".into());
+        let lines = screen(&mut a);
+        let x = lines[h as usize - 2][..lines[h as usize - 2].find("⚠").unwrap()].chars().count() as u16;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x + 3,
+            row: h - 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        let got = hit(&a, Rect::new(0, 0, w, h), click);
+        assert_eq!(got, Some(Mouse::Key(KeyCode::Char('!'))));
+        a.mouse(got.unwrap());
+        assert_eq!(a.view, View::Issues);
+        let lines = screen(&mut a);
+        assert!(lines.iter().any(|l| l.contains("• copilot did not list its models")), "one a line");
+        assert!(lines.iter().any(|l| l.contains("• openrouter.ai did not list its models")));
+        bang(&mut a);
+        assert_eq!(a.view, View::Table, "`!` closes it too");
     }
 
     #[test]
