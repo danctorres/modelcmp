@@ -1591,7 +1591,9 @@ fn draw(app: &mut App, f: &mut Frame) {
         let end = body.right().saturating_sub(1);
         app.issues_at =
             state.starts_with('⚠').then(|| end.saturating_sub(Line::from(state.as_str()).width() as u16)..end);
-        let sort = format!(" {} by {} ", if app.descending { "▼" } else { "▲" }, app.col_name(app.sort_col));
+        // Via by the download's size alone says so, as its order is not the column's text.
+        let size = if app.by_size() { " size" } else { "" };
+        let sort = format!(" {} by {}{size} ", if app.descending { "▼" } else { "▲" }, app.col_name(app.sort_col));
         let sort_w = sort.chars().count();
         let frame = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -4381,6 +4383,22 @@ mod tests {
         let tabs = &text(term.backend().buffer())[1];
         assert!(tabs.contains(" mine +1 m "), "{tabs}");
         assert_eq!(tab_ends(&a).next(), Some(13));
+    }
+
+    #[test]
+    fn the_frame_says_a_sort_by_size() {
+        let mut a = app();
+        let top = |a: &mut App| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 12)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            text(term.backend().buffer()).join("\n")
+        };
+        (a.sort_col, a.descending) = (VIA, false);
+        a.rebuild();
+        assert!(top(&mut a).contains(" ▲ by Via "), "{}", top(&mut a));
+        a.store.via_pick = vec![crate::app::DOWNLOAD.into()];
+        a.rebuild();
+        assert!(top(&mut a).contains(" ▲ by Via size "), "{}", top(&mut a));
     }
 
     #[test]

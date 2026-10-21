@@ -2154,6 +2154,14 @@ impl App {
         if col == VIA { self.size(m).map(|b| b as f64 / 1e9) } else { self.val(i, col) }
     }
 
+    /// Whether Via sorts by the size of the download alone: `↓ downloadable` is its only pick,
+    /// so every row is one `x` can download, unless `E` shows the ones it hides.
+    pub fn by_size(&self) -> bool {
+        self.sort_col == VIA
+            && self.only != Some(EXCLUDED)
+            && matches!(self.store.via_pick.as_slice(), [v] if v == DOWNLOAD)
+    }
+
     /// Whether a bound on Via's size is on, which asks the size of every model with a GGUF copy.
     fn size_bound(&self) -> bool {
         self.bounds.iter().any(|b| b.0 == VIA)
@@ -2274,13 +2282,16 @@ impl App {
             });
         } else {
             // By name, or by developer or access with names breaking ties.
+            let by_size = self.by_size();
             let text = |m: &Model| match self.sort_col {
                 1 => m.developer.to_lowercase(),
+                VIA if by_size => String::new(),
                 VIA => self.shown_via(m).into_iter().map(crate::view::short).collect::<Vec<_>>().join(" "),
                 NOTES => self.store.note(&m.key).unwrap_or("").to_lowercase(),
                 _ => String::new(),
             };
-            // Under Via, the ones that read alike go by the size their `↓` says.
+            // Under Via, the ones that read alike go by the size their `↓` says, all of them with
+            // `↓ downloadable` the only pick.
             let marked = |m: &Model| self.sort_col == VIA && getters(m, &self.tools).next().is_some();
             let size = |m: &Model| self.size(m).filter(|_| marked(m));
             // Blanks last either way, as with numbers.
@@ -2540,10 +2551,13 @@ impl App {
         // a screenful at a time.
         let ask = self.size_bound() && !self.awaited();
         let all = self.data.models.iter().filter(move |_| ask);
+        // So does a sort by size, of the rows.
+        let sorting = self.by_size() && !self.awaited();
+        let shown = self.rows.iter().filter(move |_| sorting).map(|&i| &self.data.models[i]);
         // Recommend's tiers weigh the best model your machine can download (`local_best`).
         let local = self.view == View::Recommend && view::room(&self.store).is_some() && !self.awaited();
         let local = self.data.models.iter().filter(move |m| local && view::wants_size(m, &self.store));
-        self.current().into_iter().chain(seen).chain(all).chain(local).filter(new)
+        self.current().into_iter().chain(seen).chain(all).chain(shown).chain(local).filter(new)
     }
 
     /// Whether a size asked for has not come yet.
@@ -7718,6 +7732,12 @@ mod tests {
         a.descending = true;
         a.rebuild();
         assert_eq!(keys(&a), ["llama4", "gpt55", "mini", "opus5"], "and the larger");
+        // With `↓ downloadable` the only pick, by the size alone, whatever else has them.
+        a.store.via_pick = vec![DOWNLOAD.into()];
+        (a.descending, a.page) = (false, 1);
+        a.sized([("opus5", Download::Size(3))]);
+        assert_eq!(keys(&a), ["mini", "gpt55", "opus5", "llama4"], "by size, the unknown last");
+        assert!(a.unsized_models().any(|m| m.key == "llama4"), "and asked for, off screen too");
     }
 
     #[test]
