@@ -1806,12 +1806,19 @@ impl App {
     /// What each tier of recommend's task `i` picks, as `--tier` does, with its score: your
     /// favorite for the tier, else for the task, else on a built-in task the tier's pick of its
     /// frontier. None where the task has no model for the tier.
-    pub fn tier_picks(&self, i: usize) -> [Option<(&Model, f64)>; TIERS.len()] {
+    pub fn tier_picks(&self, i: usize) -> view::Picks<'_> {
+        self.tier_picks_took(i).0
+    }
+
+    /// `tier_picks`, and the tiers the best model your machine runs took (`view::with_local`).
+    pub fn tier_picks_took(&self, i: usize) -> (view::Picks<'_>, [bool; TIERS.len()]) {
         let (name, front, off) = match TASKS.get(i) {
             Some(t) => (t.name, self.task_frontier(t), self.off(t)),
             // A task of your own has no ranking: its models are on its line only as favorites.
             None => {
-                let Some(&name) = self.store.custom_tasks().get(i - TASKS.len()) else { return [None; TIERS.len()] };
+                let Some(&name) = self.store.custom_tasks().get(i - TASKS.len()) else {
+                    return ([None; TIERS.len()], [false; TIERS.len()]);
+                };
                 let (front, off) = view::custom_front(&self.custom_line(name));
                 (name, front, off)
             }
@@ -1820,7 +1827,7 @@ impl App {
         // A task of your own has no ranking for it to beat.
         match TASKS.get(i) {
             Some(t) => view::with_local(picks, self.local_best(t), &self.store, name),
-            None => picks,
+            None => (picks, [false; TIERS.len()]),
         }
     }
 
@@ -1836,25 +1843,24 @@ impl App {
         Some((&self.data.models[i], s))
     }
 
+    /// Among the models recommend ranks, the search, the tab and the filters' (`rebuild`'s pool),
+    /// whatever their reach, as a download is in no harness yet.
     fn set_locals(&mut self) {
-        let ok = |m: &&Model| !view::excluded(m, &self.store, self.any_available);
+        let only = self.only.filter(|&o| o != EXCLUDED);
+        let pool: Vec<usize> = self
+            .filtered_as(usize::MAX, only, false)
+            .filter(|(_, m)| !view::excluded(m, &self.store, self.any_available))
+            .map(|(i, _)| i)
+            .collect();
         let room = view::room(&self.store);
-        let at = |m: &Model| self.data.models.iter().position(|x| std::ptr::eq(x, m));
         self.locals = TASKS
             .iter()
             .map(|t| {
-                let (m, s) =
-                    view::local_best(self.data.models.iter().filter(ok), t, &self.store, |m| self.size(m), room)?;
-                Some((at(m)?, s))
+                let ms = pool.iter().map(|&i| &self.data.models[i]);
+                let (m, s) = view::local_best(ms, t, &self.store, |m| self.size(m), room)?;
+                Some((pool.iter().copied().find(|&i| std::ptr::eq(&self.data.models[i], m))?, s))
             })
             .collect();
-    }
-
-    /// Whether `m`, the pick of tier `col` of task `t`, is the best model your machine runs in
-    /// place of the tier's own pick (`view::or_local`).
-    pub fn local_pick(&self, t: &Task, col: usize, m: &Model) -> bool {
-        let own = view::tier_pick(&self.task_frontier(t), &self.off(t), &self.store, t.name, TIERS[col].0);
-        self.local_best(t).is_some_and(|l| l.0.key == m.key) && own.is_none_or(|o| o.0.key != m.key)
     }
 
     /// The built-in task under recommend's cursor, which runs over `TASKS` and then your own.
@@ -2067,19 +2073,25 @@ impl App {
     /// size, and a task's drops both bounds), so
     /// a dropdown can count what each of its entries would show.
     fn filtered(&self, skip: usize) -> impl Iterator<Item = (usize, &Model)> {
+        self.filtered_as(skip, self.only, true)
+    }
+
+    /// `filtered` with `only` in place of the tab's, and with `reach` false the models out of
+    /// reach too, as a download is.
+    fn filtered_as(&self, skip: usize, only: Option<usize>, reach: bool) -> impl Iterator<Item = (usize, &Model)> {
         // A selected model shows even out of reach, so it can be compared, and `S` `F` `E` show
         // theirs whatever `a`: the same models from mine as from all.
         // `E` shows the ones the filters exclude, so there they are not hidden.
-        let e = self.only == Some(EXCLUDED);
+        let e = only == Some(EXCLUDED);
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
-            (self.only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
+            (!reach || only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
                 && hits(
                     &self.query,
                     [&m.name, &m.developer, &crate::view::via_text(m), self.store.note(&m.key).unwrap_or("")],
                     self.typos,
                 )
                 .is_some()
-                && match self.only {
+                && match only {
                     Some(MARKED) => self.store.is_marked(&m.key),
                     Some(FAV) => self.is_fav(&m.key),
                     Some(EXCLUDED) => self.in_excluded(i, m),
@@ -2517,7 +2529,7 @@ impl App {
         let all = self.data.models.iter().filter(move |_| ask);
         // Recommend's tiers weigh the best model your machine can download (`local_best`).
         let local = self.view == View::Recommend && view::room(&self.store).is_some() && !self.awaited();
-        let local = self.data.models.iter().filter(move |m| local && view::wants_size(m));
+        let local = self.data.models.iter().filter(move |m| local && view::wants_size(m, &self.store));
         self.current().into_iter().chain(seen).chain(all).chain(local).filter(new)
     }
 
@@ -4772,11 +4784,16 @@ mod tests {
         assert_eq!(free(&a).as_deref(), Some("llama4"), "4 GB fits in 8 of 10");
         assert_eq!(a.fits_here(&a.data.models[2]), Some(true), "its size in the text's colour");
         assert_eq!(a.fits_here(&a.data.models[0]), None, "no size known");
-        let llama = &a.data.models[2];
-        assert!(a.local_pick(&TASKS[coding], 0, llama), "marked free, to download");
+        assert_eq!(a.tier_picks_took(coding).1, [true, false, false, false], "marked free, to download");
         assert_eq!(a.tier_picks(coding)[3].unwrap().0.key, "gpt55", "high's own pick scores higher");
         a.sized([("llama4", Download::Size(9_000_000_000))]);
         assert_eq!((free(&a), a.fits_here(&a.data.models[2])), (None, Some(false)), "9 GB does not, grey");
+        // Among the models recommend ranks only: not when the selected ones are, without it.
+        a.sized([("llama4", Download::Size(4_000_000_000))]);
+        a.store.toggle_marked("gpt55");
+        a.only = Some(MARKED);
+        a.rebuild();
+        assert_eq!(free(&a), None, "among ✓ selected, it is not one");
     }
 
     /// `>` `<` on Via bound the size of a model's GGUF copy, in GB, and the bound asks the size

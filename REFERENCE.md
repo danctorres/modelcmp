@@ -404,15 +404,18 @@ Then run `modelcmp --refresh`, which opens the TUI, or `modelcmp list --refresh`
 A tier takes the best model your machine runs when it scores higher than the tier's pick, as it
 is free there: one on it already, or one whose download takes at most 80% of its memory, the rest
 holding the context. `recommend` marks it `↓` with the size when `modelcmp get` or `x` has to
-download it first, and `recommend --json` names it under `local` for each task. The memory is the
-NVIDIA GPUs' (`nvidia-smi`), else the RAM, which a Mac's GPU shares. `modelcmp memory 24` sets it
-by hand, for another GPU or a model split between GPU and RAM, and `modelcmp memory` shows it.
+download it first, and `recommend --json` names it under `local` for each task. `pick` and `--cmd`
+start one on your machine with ollama or llama.cpp, though a harness offers it at a price. The
+memory is the NVIDIA GPUs' (`nvidia-smi`, looked up once a week), else the RAM, which a Mac's GPU
+shares. `modelcmp memory 24` sets it by hand, in GB as a GPU's is said, for another GPU or a model
+split between GPU and RAM, and `modelcmp memory` shows it. The CLI asks Hugging Face for the sizes
+it lacks for up to 15 seconds a run, and for none for an hour after it answers none.
 The TUI shows a download's size in Via, in `x` and in the details grey when it is over that 80%,
 and in the text's colour when it fits, on a greyed row too.
 
 The scores are the full weights', which a quantized copy falls a little short of, and the context
-shown is not the copy's either. `--via ollama` and `--via llama-cli` on a task still pick a copy
-only as your favorite.
+shown is not the copy's either. With `--via` a tier never takes one this way, and `--via ollama`
+and `--via llama-cli` on a task still pick a copy only as your favorite.
 
 `ollama run` and `llama-cli` answer a prompt with text alone. For the model to edit files and run
 commands, as an agent, run it in pi: add your runner to `~/.pi/agent/models.json` as below (for

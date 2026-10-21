@@ -467,11 +467,16 @@ fn line_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> Option<f64> {
 /// What of the memory a model runs in its download may take: the rest holds its context.
 const HEADROOM: f64 = 0.8;
 
-/// The largest download your machine runs, in bytes: `HEADROOM` of the memory you set
-/// (`modelcmp memory`), else of the one found (`data::memory`). None when neither is known.
+/// The memory local models run in, in bytes: the one you set (`modelcmp memory`), in GB as a
+/// GPU's is said, which are 2^30 bytes each, else the one found (`data::memory`).
+pub fn memory(store: &Store) -> Option<u64> {
+    store.memory.map(|gb| (gb * (1u64 << 30) as f64) as u64).or_else(crate::data::memory)
+}
+
+/// The largest download your machine runs, in bytes: `HEADROOM` of its `memory`. None when that
+/// is not known.
 pub fn room(store: &Store) -> Option<u64> {
-    let memory = store.memory.map(|gb| gb * 1e9).or_else(|| Some(crate::data::memory()? as f64))?;
-    Some((memory * HEADROOM) as u64)
+    Some((memory(store)? as f64 * HEADROOM) as u64)
 }
 
 /// The best model for `t` among `models` that your machine runs: one on it already, or one
@@ -494,9 +499,10 @@ pub fn local_best<'a>(
 }
 
 /// Whether `local_best` needs the size of `m`'s download: one not on your machine, with a
-/// Hugging Face repo and a score for a task it ranks.
-pub fn wants_size(m: &Model) -> bool {
-    !m.here() && m.hf_repo().is_some() && fit::TASKS.iter().any(|t| t.name != "value" && fit::fit(m, t).is_some())
+/// Hugging Face repo and a score for a task it ranks, as that task's column shows it.
+pub fn wants_size(m: &Model, store: &Store) -> bool {
+    let scored = |t: &fit::Task| line_score(m, t, crate::app::task_bench(store, t)).is_some();
+    !m.here() && m.hf_repo().is_some() && fit::TASKS.iter().any(|t| t.name != "value" && scored(t))
 }
 
 /// `tier`'s pick, `local` in place of `pick` when it scores higher, as the best model your
@@ -515,14 +521,19 @@ pub fn or_local<'m>(
     }
 }
 
-/// `or_local` for every tier.
+/// Each tier's pick, as `tier_picks` gives them.
+pub type Picks<'m> = [Option<(&'m Model, f64)>; TIERS.len()];
+
+/// `or_local` for every tier, and which tiers `local` took.
 pub fn with_local<'m>(
-    picks: [Option<(&'m Model, f64)>; TIERS.len()],
+    own: Picks<'m>,
     local: Option<(&'m Model, f64)>,
     store: &Store,
     task: &str,
-) -> [Option<(&'m Model, f64)>; TIERS.len()] {
-    std::array::from_fn(|i| or_local(picks[i], local, store, task, TIERS[i].0))
+) -> (Picks<'m>, [bool; TIERS.len()]) {
+    let picks: Picks = std::array::from_fn(|i| or_local(own[i], local, store, task, TIERS[i].0));
+    let took = std::array::from_fn(|i| picks[i].map(|e| &e.0.key) != own[i].map(|e| &e.0.key));
+    (picks, took)
 }
 
 /// `task_frontier` with the favorites `store` has for the task, the ones among `pool`, ranked
@@ -1366,17 +1377,22 @@ mod tests {
         assert_eq!(best(&all, Some(20)).as_deref(), Some("fits"), "not big, whose download is over the room");
         assert_eq!(best(&all, Some(40)).as_deref(), Some("big"));
         assert_eq!(best(&all, None).as_deref(), Some("pulled"), "no memory known: only the one on your machine");
+        let mut gpu = Store::default();
+        gpu.memory = Some(24.0);
+        assert_eq!(memory(&gpu), Some(24 << 30), "a GPU's GB, of 2^30 bytes");
         let value = fit::task("value").unwrap();
         assert!(local_best(all.iter().copied(), value, &store, size, Some(40)).is_none(), "no price to rank it by");
         let front: Vec<(&Model, f64)> = vec![(&ms[0], 30.0), (&ms[1], 50.0)];
         let local = local_best(all.iter().copied(), t, &store, size, Some(20));
         let keys = |s: &Store| {
-            with_local(tier_picks(&front, &[], s, "reasoning"), local, s, "reasoning").map(|p| p.unwrap().0.key.clone())
+            let (picks, took) = with_local(tier_picks(&front, &[], s, "reasoning"), local, s, "reasoning");
+            (picks.map(|p| p.unwrap().0.key.clone()), took)
         };
-        assert_eq!(keys(&store), ["fits", "paid", "paid", "paid"], "free only, as paid scores higher");
+        assert_eq!(keys(&store).0, ["fits", "paid", "paid", "paid"], "free only, as paid scores higher");
+        assert_eq!(keys(&store).1, [true, false, false, false], "the tier it took");
         let mut fav = Store::default();
         fav.set_favorite(&crate::store::slot("reasoning", Some("free")), "hosted", None);
-        assert_eq!(keys(&fav)[0], "hosted", "your favorite stays");
+        assert_eq!(keys(&fav).0[0], "hosted", "your favorite stays");
     }
 
     #[test]

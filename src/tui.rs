@@ -3299,9 +3299,10 @@ fn recommend(
         .map(|t| (t.name, t.about, t.when))
         .chain(own.iter().map(|&t| (t, about(t), CUSTOM_WHEN)))
         .collect();
-    let picks: Vec<_> = (0..tasks.len()).map(|i| app.tier_picks(i)).collect();
-    let (tasks, picks) = (&tasks, &picks);
-    let cells = |i: usize| (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], true));
+    // With the tiers the best model your machine runs took, once a frame.
+    let (picks, took): (Vec<_>, Vec<_>) = (0..tasks.len()).map(|i| app.tier_picks_took(i)).unzip();
+    let (tasks, picks, took) = (&tasks, &picks, &took);
+    let cells = |i: usize| (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], took[i][c], true));
     let w = tasks.iter().map(|t| Span::raw(t.0).width()).max().unwrap_or(0).min(20);
     // One pick is the row's only box, under the tier its price is: `high`'s, the last, as
     // `free` may have none. Every stop past the name is on it. A price nobody lists is under
@@ -3459,7 +3460,8 @@ fn recommend(
             // Wrapped to the panel as the boxes are, so the name and what it says are whole.
             let head = Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED));
             let indent = head.width();
-            let lines = wrap_spans(entry(app, t.0, c, picks[i][c], false), text.saturating_sub(indent), &[]);
+            let lines =
+                wrap_spans(entry(app, t.0, c, picks[i][c], took[i][c], false), text.saturating_sub(indent), &[]);
             for (k, piece) in lines.into_iter().enumerate() {
                 let lead = if k == 0 { head.clone() } else { Span::raw(" ".repeat(indent)) };
                 under.push(Line::from([vec![lead], piece].concat()));
@@ -3539,7 +3541,16 @@ fn wrapped_at(
 /// a ★ in the task's colour when it is your favorite for the tier; grey when that favorite is
 /// not one recommended, or is out of reach as its row in the table, and `-` with no model. Out of
 /// its `boxed` grid the entry says why it is grey.
-fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, boxed: bool) -> Vec<Span<'static>> {
+/// `local`: the pick is the best model your machine runs, in place of the tier's own
+/// (`view::with_local`).
+fn entry(
+    app: &App,
+    task: &str,
+    col: usize,
+    pick: Option<(&Model, f64)>,
+    local: bool,
+    boxed: bool,
+) -> Vec<Span<'static>> {
     let built_in = fit::task(task);
     let Some((m, s)) = pick else {
         let none = if boxed {
@@ -3553,8 +3564,7 @@ fn entry(app: &App, task: &str, col: usize, pick: Option<(&Model, f64)>, boxed: 
     };
     let fav = app.store.tier_favorites(task, TIERS[col].0).any(|k| k == m.key);
     let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
-    // The best model your machine runs, free there, and downloaded by `x` when not on it yet.
-    let local = !fav && built_in.is_some_and(|t| app.local_pick(t, col, m));
+    // The best model your machine runs is free there, and downloaded by `x` when not on it yet.
     let out = out_of_reach(app, m).filter(|_| !local);
     let grey = off || out.is_some();
     let price = match m.quoted() {
@@ -6005,7 +6015,10 @@ mod tests {
         // wider than it where it ends: nothing is cut.
         let text = |l: &Vec<Span>| l.iter().map(|s| &*s.content).collect::<String>();
         let wrap = |w| {
-            wrap_spans(entry(&b, "overall", 2, b.tier_picks(0)[2], true), w, &[]).iter().map(text).collect::<Vec<_>>()
+            wrap_spans(entry(&b, "overall", 2, b.tier_picks(0)[2], false, true), w, &[])
+                .iter()
+                .map(text)
+                .collect::<Vec<_>>()
         };
         assert_eq!(
             (wrap(15), wrap(12), wrap(9)),

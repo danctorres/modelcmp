@@ -530,9 +530,14 @@ const HF_WAIT: Duration = Duration::from_secs(10);
 /// None when it lists no `.gguf` one, so there is nothing to download.
 pub fn gguf_size(repo: &str) -> Result<Option<u64>, String> {
     let manifest = format!("https://huggingface.co/v2/{repo}/manifests/latest");
-    // Asked as llama.cpp is, or the answer is ollama's, which has no file named. Without it,
-    // `gguf_bytes` guesses the file from the list.
-    let chosen = request(&manifest, Some(("User-Agent", "llama-cpp")), HF_WAIT).ok().and_then(|m| gguf_file(&m));
+    // Asked as llama.cpp is, or the answer is ollama's, which has no file named. A repo with
+    // none, refused, has `gguf_bytes` guess the file from the list. No answer is an error: a
+    // guess is the wrong file at times, and a size is kept for good.
+    let chosen = match request(&manifest, Some(("User-Agent", "llama-cpp")), HF_WAIT) {
+        Ok(m) => gguf_file(&m),
+        Err(e) if passing(&e) => return Err(format!("{manifest}: {e}")),
+        Err(_) => None,
+    };
     if let Some((file, size, proj)) = &chosen
         && split_stem(file).is_none()
     {
@@ -550,36 +555,51 @@ pub fn download_size(base: &str, key: &str) -> Result<Option<u64>, String> {
     gguf_repo(base, key)?.map_or(Ok(None), |r| gguf_size(&r))
 }
 
-/// The memory a model runs in on this machine, in bytes, once looked up: the NVIDIA GPUs'
-/// together (`nvidia-smi`), else the RAM, which on a Mac the GPU shares.
+/// The memory a model runs in on this machine, in bytes: the NVIDIA GPUs' together
+/// (`nvidia-smi`), else the RAM, which on a Mac the GPU shares. Kept for `MEMORY_FOR`, as
+/// `nvidia-smi` takes half a second.
 // ponytail: other GPUs (AMD, Intel) count as RAM, and a model split between GPU and RAM runs
 // slower than one that fits: `modelcmp memory` sets it by hand.
 pub fn memory() -> Option<u64> {
     static MEMORY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *MEMORY.get_or_init(|| {
-        let out = |bin: &str, args: &[&str]| {
-            let o = std::process::Command::new(bin).args(args).stderr(std::process::Stdio::null()).output().ok()?;
-            o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
-        };
-        let nvidia = || {
-            let mib = out("nvidia-smi", &["--query-gpu=memory.total", "--format=csv,noheader,nounits"])?;
-            let all: u64 = mib.lines().filter_map(|l| l.trim().parse::<u64>().ok()).sum();
-            (all > 0).then_some(all << 20)
-        };
-        let mac = || out("sysctl", &["-n", "hw.memsize"])?.trim().parse().ok();
-        let linux = || {
-            let info = std::fs::read_to_string("/proc/meminfo").ok()?;
-            let kb = info.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
-            Some(kb.trim().trim_end_matches("kB").trim().parse::<u64>().ok()? << 10)
-        };
         if cfg!(test) {
-            None
-        } else if cfg!(target_os = "macos") {
-            mac()
-        } else {
-            nvidia().or_else(linux)
+            return None;
         }
+        let kept: HashMap<String, u64> = kept(MEMORY_FILE);
+        if let (Some(&bytes), Some(&at)) = (kept.get("bytes"), kept.get("at"))
+            && now().saturating_sub(at) < MEMORY_FOR
+        {
+            return Some(bytes);
+        }
+        let found = find_memory()?;
+        keep(MEMORY_FILE, &HashMap::from([("bytes".to_string(), found), ("at".to_string(), now())]));
+        Some(found)
     })
+}
+
+/// Where `memory` keeps what it found, and for how long, in seconds.
+const MEMORY_FILE: &str = "memory.json";
+const MEMORY_FOR: u64 = 7 * 24 * 3600;
+
+/// `memory`, looked up now.
+fn find_memory() -> Option<u64> {
+    let out = |bin: &str, args: &[&str]| {
+        let o = std::process::Command::new(bin).args(args).stderr(std::process::Stdio::null()).output().ok()?;
+        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let nvidia = || {
+        let mib = out("nvidia-smi", &["--query-gpu=memory.total", "--format=csv,noheader,nounits"])?;
+        let all: u64 = mib.lines().filter_map(|l| l.trim().parse::<u64>().ok()).sum();
+        (all > 0).then_some(all << 20)
+    };
+    let mac = || out("sysctl", &["-n", "hw.memsize"])?.trim().parse().ok();
+    let linux = || {
+        let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb = info.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
+        Some(kb.trim().trim_end_matches("kB").trim().parse::<u64>().ok()? << 10)
+    };
+    if cfg!(target_os = "macos") { mac() } else { nvidia().or_else(linux) }
 }
 
 /// The file Hugging Face's manifest for llama.cpp names, its size and its projector's (0 for
@@ -654,6 +674,19 @@ pub fn save_sizes(sizes: &HashMap<String, u64>) {
 /// The file of `load_sizes`. Not `sizes.json`, whose sizes were of a file guessed from the
 /// repo's list, a draft model's at times (`gguf_size`).
 const SIZES: &str = "gguf-sizes.json";
+
+/// Whether Hugging Face left every size the CLI asked for unanswered within the hour: it asks
+/// none then (`cli::download_sizes`), so an offline run waits on nothing.
+pub fn sizes_failing() -> bool {
+    now().saturating_sub(kept::<u64>(SIZES_FAILED).get("at").copied().unwrap_or(0)) < 3600
+}
+
+/// Hugging Face answered none of the sizes asked just now.
+pub fn sizes_failed() {
+    keep(SIZES_FAILED, &HashMap::from([("at".to_string(), now())]));
+}
+
+const SIZES_FAILED: &str = "gguf-failed.json";
 
 /// How long Hugging Face's "no GGUF copy" of a model is gone by before it is asked again, in
 /// seconds: one may be uploaded since.

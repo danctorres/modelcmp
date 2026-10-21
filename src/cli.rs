@@ -5,9 +5,9 @@ use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot};
 use crate::view::{
-    CUSTOM_ABOUT, CUSTOM_WHEN, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front, custom_line,
-    detail_lines, excluded, fits, left_out_by, one_pick, or_local, over_cap, price, priced, shown_via, task_line,
-    tier_pick, tier_picks, truncate, used_benches, verdict, via, visible, with_local,
+    CUSTOM_ABOUT, CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front,
+    custom_line, detail_lines, excluded, fits, left_out_by, one_pick, or_local, over_cap, price, priced, shown_via,
+    task_line, tier_pick, tier_picks, truncate, used_benches, verdict, via, visible, with_local,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -315,9 +315,8 @@ fn say_filters(store: &Store, flags: &str) {
 }
 
 /// The models `o` asks for, and how many before `--limit` cut them. `store` is `flagged` for it.
-/// With a tier, the size of the download its pick needs, the best model your machine can run
-/// (`local`) when it is not on it yet.
-fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'a Model>, usize, Option<u64>)> {
+/// With a tier, how its pick runs when it is the best model your machine runs (`local`).
+fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'a Model>, usize, Option<Local>)> {
     check("--dev", &o.dev, data.models.iter().flat_map(Model::devs))?;
     // Via as the table shows it, so "not available" can be picked too.
     let any = data.any_available();
@@ -341,7 +340,7 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
                 && !o.not.contains(&m.key)
     };
     let mut models: Vec<&Model> = visible(data, store, o.all, o.selected).map(|(_, m)| m).filter(keep).collect();
-    let mut download = None;
+    let mut ran = None;
     // Your favorites stay on a task's line whatever the filters, as in the recommend panel.
     let pool = || {
         let usable = |m: &&Model| !excluded(m, store, any) && !o.not.contains(&m.key);
@@ -369,13 +368,18 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
                 let mut none = Store::default();
                 none.tiers.clone_from(&store.tiers);
                 let favs = if o.no_fav { &none } else { store };
-                // A download only where the model is said and not started: `pick` says one.
+                // A download only where the model is said and not started: `pick` says one. None
+                // with `--via`, whose harnesses an agent that cannot start another one names, and
+                // where a copy on your machine is picked only as your favorite.
                 let ours = data.models.iter().filter(|m| (!o.selected || store.is_marked(&m.key)) && keep(m));
-                let local = local(data, store, t, ours, !o.id && (!o.cmd || o.prompt));
+                let local = local(data, store, t, ours, !o.id && (!o.cmd || o.prompt)).filter(|_| o.via.is_empty());
                 let pick = tier_pick(&front, &off, favs, t.name, tier);
                 let won = or_local(pick, local, favs, t.name, tier).map(|e| e.0);
-                let fetched = won.filter(|m| !m.here() && pick.is_none_or(|p| p.0.key != m.key));
-                download = fetched.and_then(|m| download_sizes(data, store).get(&m.key).copied());
+                let took = won.filter(|m| pick.is_none_or(|p| p.0.key != m.key));
+                ran = took.and_then(|m| match m.here() {
+                    true => Some(Local::Here),
+                    false => download_sizes(data, store).get(&m.key).map(|&b| Local::Download(b)),
+                });
                 won.into_iter().collect()
             }
             None => front.into_iter().map(|(m, _)| m).collect(),
@@ -388,7 +392,28 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
     if o.limit > 0 {
         models.truncate(o.limit);
     }
-    Ok((models, total, download))
+    Ok((models, total, ran))
+}
+
+/// How a tier's pick runs when the best model your machine runs took the tier (`or_local`).
+#[derive(Clone, Copy)]
+enum Local {
+    /// On your machine already, through ollama or llama.cpp, whoever else offers it.
+    Here,
+    /// Once downloaded, of this many bytes.
+    Download(u64),
+}
+
+/// `launch`, with a model your machine runs taking the tier (`Local::Here`) started on its
+/// runner and not on a harness that runs it in full, at a price.
+fn launch_local(data: &Data, store: &Store, o: &ListOpts, m: &Model, ran: Option<Local>) -> Result<String> {
+    match ran {
+        Some(Local::Here) => {
+            let runner = m.via.iter().filter(|h| crate::data::runs_here(h)).take(1).cloned().collect();
+            launch(data, store, &ListOpts { via: runner, ..o.clone() }, m)
+        }
+        _ => launch(data, store, o, m),
+    }
 }
 
 /// The best model for `t` among `models` that your machine runs (`view::local_best`): with
@@ -409,42 +434,53 @@ fn local<'a>(
 fn download_sizes(data: &Data, store: &Store) -> &'static HashMap<String, u64> {
     static SIZES: std::sync::OnceLock<HashMap<String, u64>> = std::sync::OnceLock::new();
     SIZES.get_or_init(|| {
-        let mut sizes = crate::data::load_sizes();
-        if cfg!(test) || crate::view::room(store).is_none() {
+        // Not your cache's in a test.
+        let mut sizes = if cfg!(test) { HashMap::new() } else { crate::data::load_sizes() };
+        if cfg!(test) || crate::view::room(store).is_none() || crate::data::sizes_failing() {
             return sizes;
         }
         let mut gone = crate::data::load_gone();
-        let new = |m: &&Model| crate::view::wants_size(m) && !sizes.contains_key(&m.key) && !gone.contains_key(&m.key);
+        let new =
+            |m: &&Model| crate::view::wants_size(m, store) && !sizes.contains_key(&m.key) && !gone.contains_key(&m.key);
         let ask: Vec<(&str, &str)> =
             data.models.iter().filter(new).filter_map(|m| Some((m.key.as_str(), m.hf_repo()?))).collect();
         if ask.is_empty() {
             return sizes;
         }
         eprintln!("asking Hugging Face for the size of {} downloads, once...", ask.len());
+        let start = std::time::Instant::now();
         // ponytail: 8 at a time, each two or three requests: fewer if Hugging Face starts refusing (429).
-        let answers: Vec<_> = std::thread::scope(|s| {
-            ask.chunks(8)
-                .flat_map(|chunk| {
-                    let asked: Vec<_> = chunk
-                        .iter()
-                        .map(|&(k, base)| s.spawn(move || (k, crate::data::download_size(base, k))))
-                        .collect();
-                    asked.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
-                })
-                .collect()
-        });
-        for (key, answer) in answers {
-            match answer {
-                Ok(Some(bytes)) => drop(sizes.insert(key.into(), bytes)),
-                Ok(None) => crate::data::save_gone(&mut gone, key),
-                // Asked again next run.
-                Err(_) => {}
+        for chunk in ask.chunks(8) {
+            // The rest next run: a command an agent waits on is not held up for long.
+            if start.elapsed() > SIZES_WAIT {
+                break;
+            }
+            let answers: Vec<_> = std::thread::scope(|s| {
+                let asked: Vec<_> =
+                    chunk.iter().map(|&(k, base)| s.spawn(move || (k, crate::data::download_size(base, k)))).collect();
+                asked.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            // None answered: offline, or refused. None is asked for an hour.
+            if answers.iter().all(|(_, a)| a.is_err()) {
+                crate::data::sizes_failed();
+                break;
+            }
+            for (key, answer) in answers {
+                match answer {
+                    Ok(Some(bytes)) => drop(sizes.insert(key.into(), bytes)),
+                    Ok(None) => crate::data::save_gone(&mut gone, key),
+                    // Asked again next run.
+                    Err(_) => {}
+                }
             }
         }
         crate::data::save_sizes(&sizes);
         sizes
     })
 }
+
+/// How long `download_sizes` goes on asking before it leaves the rest to the next run.
+const SIZES_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// What `pick` and `list --tier` say of a download of `bytes` the pick `m` needs.
 fn download_said(m: &Model, bytes: u64) -> String {
@@ -455,7 +491,11 @@ const NO_HARNESS: &str = "no harness models found";
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     let store = &flagged(store, o);
-    let (models, total, download) = matched(data, store, o)?;
+    let (models, total, ran) = matched(data, store, o)?;
+    let download = match ran {
+        Some(Local::Download(b)) => Some(b),
+        _ => None,
+    };
     say_filters(store, "--dev, --via, --min and --max");
     let any = data.any_available();
     // `--tier` is the one model to use: none is a failure however it is printed, as a script
@@ -480,7 +520,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     }
     if o.id || o.cmd {
         // All or none: a script must not start on the first of two commands.
-        for l in models.iter().map(|m| launch(data, store, o, m)).collect::<Result<Vec<_>>>()? {
+        for l in models.iter().map(|m| launch_local(data, store, o, m, ran)).collect::<Result<Vec<_>>>()? {
             println!("{l}");
         }
         // What an agent checks before it uses a tier's pick, on stderr so a `$(...)` reads
@@ -596,9 +636,12 @@ fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
     };
     // One the bounds allow, with what calls it: an id alone is no command to run.
     let line = |o: &ListOpts| {
-        let (models, _, download) = matched(data, store, o)?;
+        let (models, _, ran) = matched(data, store, o)?;
         let m = models.first().copied();
-        let call = |m: &Model| download.map(|b| download_said(m, b)).or_else(|| launch(data, store, o, m).ok());
+        let call = |m: &Model| match ran {
+            Some(Local::Download(b)) => Some(download_said(m, b)),
+            _ => launch_local(data, store, o, m, ran).ok(),
+        };
         Ok::<_, Exit>((m, m.filter(allowed).and_then(|m| Some(said(m, call(m)?)))))
     };
     let (first, said_first) = line(o)?;
@@ -966,15 +1009,14 @@ pub fn memory(store: &mut Store, gb: Option<f64>, rm: bool) -> Result {
     if gb.is_some() || rm {
         store.save()?;
     }
-    let found = crate::data::memory().map(crate::data::gb);
-    let (memory, whose) = match (store.memory, &found) {
-        (Some(g), _) => (format!("{g} GB"), "yours"),
-        (None, Some(f)) => (f.clone(), "found"),
-        (None, None) => {
-            println!("no memory found, modelcmp memory <GB> sets it");
-            return Ok(());
-        }
+    let Some(bytes) = crate::view::memory(store) else {
+        println!("no memory found, modelcmp memory <GB> sets it");
+        return Ok(());
     };
+    // In GB of 2^30 bytes, as a GPU's is said: 24 GB, not 25.8.
+    let gb = bytes as f64 / (1u64 << 30) as f64;
+    let memory = if (gb - gb.round()).abs() < 0.05 { format!("{gb:.0} GB") } else { format!("{gb:.1} GB") };
+    let whose = if store.memory.is_some() { "yours" } else { "found" };
     let room = crate::view::room(store).map_or("-".into(), crate::data::gb);
     println!("{memory} ({whose}): local models with a download up to {room}");
     Ok(())
@@ -1141,25 +1183,20 @@ fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> (Vec<(&'a Model, f64
     task_line(usable(data, store), usable(data, store), store, t)
 }
 
-/// Each tier's pick, as `tier_picks` gives them.
-type Picks<'a> = [Option<(&'a Model, f64)>; TIERS.len()];
-
 /// Each tier's pick of task `t`, whose line is `front` (`tier_picks`), with the best model your
-/// machine runs or can download in a tier whose pick it beats (`with_local`), and that model.
-/// With them, the tiers it took.
+/// machine runs or can download in a tier whose pick it beats, the tiers it took (`with_local`)
+/// and that model.
 fn local_picks<'a>(
     data: &'a Data,
     store: &Store,
     t: &Task,
     front: &[(&'a Model, f64)],
     off: &[&str],
-) -> (Picks<'a>, Option<&'a Model>, [bool; TIERS.len()]) {
+) -> (Picks<'a>, [bool; TIERS.len()], Option<&'a Model>) {
     let any = data.any_available();
     let local = local(data, store, t, data.models.iter().filter(|m| !excluded(m, store, any)), true);
-    let own = tier_picks(front, off, store, t.name);
-    let picks = with_local(own, local, store, t.name);
-    let key = |p: Option<(&Model, f64)>| p.map(|e| e.0.key.clone());
-    (picks, local.map(|l| l.0), std::array::from_fn(|i| key(picks[i]) != key(own[i])))
+    let (picks, took) = with_local(tier_picks(front, off, store, t.name), local, store, t.name);
+    (picks, took, local.map(|l| l.0))
 }
 
 /// The models you have and can use: only they are recommended.
@@ -1223,7 +1260,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                 .map(|&(m, s)| entry(m, store, s, !off.contains(&m.key.as_str())))
                 .collect();
             let ((fav, tier_favs), (via, tier_via)) = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
-            let (picks, local, _) = local_picks(data, store, t, &line, &off);
+            let (picks, _, local) = local_picks(data, store, t, &line, &off);
             // The best model your machine runs, with the download it needs when it is not on it.
             let local = local.map(|m| {
                 let size = (!m.here()).then(|| download_sizes(data, store).get(&m.key)).flatten();
@@ -1268,7 +1305,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!("{}  {}{by}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
-        let (picks, _, took) = local_picks(data, store, t, &line, &off);
+        let (picks, took, _) = local_picks(data, store, t, &line, &off);
         show(t.name, picks, &|m, s, tier| {
             let fav = store.tier_favorites(t.name, tier).any(|k| k == m.key);
             let p = priced(m, s, true, fav);
@@ -1546,6 +1583,36 @@ mod tests {
             assert_eq!(run(cmd), Some(format!("{QUIET} {said} \"<prompt>\"")));
         }
         assert_eq!(run(&["llama-server", "-hf", "a/b"]), None, "a server runs no prompt");
+    }
+
+    /// A model on your machine that scores higher than the free tier's pick takes it, run on
+    /// its runner though a harness offers it at a price, and not with `--via`.
+    #[test]
+    fn a_tier_runs_your_machine_s_copy_there() {
+        let mut hosted = model("hosted", 50.0, 0.0);
+        (hosted.available, hosted.via, hosted.offers[0].via, hosted.offers[0].available) =
+            (true, vec!["opencode".into()], vec!["opencode".into()], true);
+        let mut pulled = model("pulled", 80.0, 1.0);
+        (pulled.available, pulled.offers[0].via, pulled.offers[0].available) = (true, vec!["opencode".into()], true);
+        let copy = Offer {
+            provider: crate::data::OLLAMA.into(),
+            id: "pulled:4b".into(),
+            local: true,
+            ..pulled.offers[0].clone()
+        };
+        pulled.offers.push(Offer { via: vec![crate::data::OLLAMA.into()], ..copy });
+        pulled.via = vec!["opencode".into(), crate::data::OLLAMA.into()];
+        let data = Data { models: vec![hosted, pulled], ..Default::default() };
+        let t = TASKS.iter().find(|t| t.name == "coding").unwrap();
+        let o = ListOpts { task: Some(t), tier: Some("free".into()), cmd: true, prompt: true, ..Default::default() };
+        let line = |o: &ListOpts| tier_line(&data, &Store::default(), o).ok();
+        assert_eq!(
+            line(&o),
+            Some(format!("{QUIET} ollama run pulled:4b \"<prompt>\"  -")),
+            "not opencode's, at a price"
+        );
+        let pi = ListOpts { via: vec!["opencode".into()], cmd: false, ..o };
+        assert_eq!(line(&pi).as_deref(), Some("p/hosted  -"), "a harness asked for: its own free pick");
     }
 
     #[test]
