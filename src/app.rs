@@ -5,8 +5,8 @@ use crate::data::{Data, FELL_BACK, Failure, Model, Source};
 use crate::fit::{TASKS, Task};
 use crate::store::{Bound, Store};
 use crate::view::{
-    self, LEVELS, NO_ACCESS, NO_SELECTED, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach, level_label,
-    money, score, shown_via, signed, task_line, task_score,
+    self, LEVELS, NO_ACCESS, NO_SELECTED, OUT_OF_REACH, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach,
+    level_label, money, score, shown_via, signed, task_line, task_score,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -2280,8 +2280,7 @@ impl App {
                 NOTES => self.store.note(&m.key).unwrap_or("").to_lowercase(),
                 _ => String::new(),
             };
-            // Under Via, the ones that read alike go by the size their `↓` says, as all do with
-            // `not available` picked.
+            // Under Via, the ones that read alike go by the size their `↓` says.
             let marked = |m: &Model| self.sort_col == VIA && getters(m, &self.tools).next().is_some();
             let size = |m: &Model| self.size(m).filter(|_| marked(m));
             // Blanks last either way, as with numbers.
@@ -2649,10 +2648,10 @@ impl App {
         self.any_available
     }
 
-    /// What the Via dropdown picks `m` by: `shown_via`, then `DOWNLOAD` for one `x` can download
-    /// (`download`).
+    /// What the Via dropdown picks `m` by: its harnesses, then `DOWNLOAD` for one `x` can download
+    /// (`download`). `OUT_OF_REACH` is no entry, as `m` and `a` already split by access.
     fn via_labels<'a>(&self, m: &'a Model) -> Vec<&'a str> {
-        let mut v = self.shown_via(m);
+        let mut v: Vec<&str> = self.shown_via(m).into_iter().filter(|&v| v != OUT_OF_REACH).collect();
         v.extend(self.download(m).map(|_| DOWNLOAD));
         v
     }
@@ -3265,7 +3264,7 @@ impl App {
         } else if col == 1 || col == VIA {
             let by_dev = col == 1;
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            // Via as the table shows it, so "not available" can be picked too, then `DOWNLOAD`.
+            // The harnesses, then `DOWNLOAD`.
             let labels = ms.iter().flat_map(|&(_, m)| if by_dev { m.devs().collect() } else { self.via_labels(m) });
             for l in labels.filter(|l| !l.is_empty()) {
                 *counts.entry(l).or_default() += 1;
@@ -5835,16 +5834,12 @@ mod tests {
             "any drops the picks, not what is left out"
         );
         code(&mut a, KeyCode::Esc);
-        // A selected model you have no access to shows, and is picked, as its Via reads.
+        // A selected model you have no access to shows, but `not available` is no entry.
         a.store.toggle_marked("llama4");
         a.rebuild();
         press(&mut a, "d");
-        assert!(menu(&a).contains(&("not available", 1)), "{:?}", menu(&a));
-        press(&mut a, "/not");
-        code(&mut a, KeyCode::Enter);
-        code(&mut a, KeyCode::Esc);
-        code(&mut a, KeyCode::Esc);
-        assert_eq!(keys(&a), ["llama4"]);
+        let entries: Vec<&str> = menu(&a).into_iter().map(|(e, _)| e).collect();
+        assert!(entries.contains(&"claude") && !entries.contains(&"not available"), "{entries:?}");
     }
 
     #[test]

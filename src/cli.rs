@@ -224,11 +224,12 @@ fn check<'a>(flag: &str, asked: &[String], known: impl Iterator<Item = &'a str>)
     if asked.is_empty() {
         return Ok(());
     }
-    let known: BTreeSet<String> = known.filter(|k| !k.is_empty()).map(str::to_lowercase).collect();
+    // "not available" is no harness to ask for, as --all and its absence split by access.
+    let known: BTreeSet<String> =
+        known.filter(|k| !k.is_empty() && *k != crate::view::OUT_OF_REACH).map(str::to_lowercase).collect();
     match asked.iter().find(|a| !known.contains(&a.to_lowercase())) {
         Some(bad) => {
-            // "not available" can be asked for, but is no harness to name among yours.
-            let known: Vec<_> = known.into_iter().filter(|k| k != crate::view::OUT_OF_REACH).collect();
+            let known: Vec<_> = known.into_iter().collect();
             Err(format!("no model has {flag} '{bad}'; known: {}", known.join(", ")).into())
         }
         None => Ok(()),
@@ -318,7 +319,6 @@ fn say_filters(store: &Store, flags: &str) {
 /// With a tier, how its pick runs when it is the best model your machine runs (`local`).
 fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'a Model>, usize, Option<Local>)> {
     check("--dev", &o.dev, data.models.iter().flat_map(Model::devs))?;
-    // Via as the table shows it, so "not available" can be picked too.
     let any = data.any_available();
     check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, any)))?;
     let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
@@ -1365,7 +1365,7 @@ mod tests {
         store.toggle_marked("llama4");
         let keys = |marked| visible(&data, &store, false, marked).map(|(_, m)| m.key.as_str()).collect::<Vec<_>>();
         assert_eq!(keys(true), ["gpt55"]);
-        // With --all, Via reads "not available" for it, and filters by that too.
+        // With --all, Via reads "not available" for it, but that is no harness to filter by.
         let o = ListOpts {
             task: None,
             custom: None,
@@ -1384,7 +1384,7 @@ mod tests {
             no_fav: false,
             not: vec![],
         };
-        assert!(list(&data, &store, &o).is_ok());
+        assert!(list(&data, &store, &o).is_err());
     }
 
     /// An entry left out of the TUI's Dev or Price dropdown leaves its models out of `recommend`.
