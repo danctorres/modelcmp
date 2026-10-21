@@ -2369,6 +2369,9 @@ impl App {
         cached.keep_latest(&self.data.latest);
         self.set_data(cached);
         (self.refreshing, self.refresh_failed) = (fetch, false);
+        if let Some(w) = self.data.unscored().filter(|_| !fetch) {
+            self.report(Err(w));
+        }
         fetch
     }
 

@@ -88,7 +88,9 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     }
     // After the refresh starts, which clears the status: it is your marks and notes that are at
     // stake. The first start keeps it until its key prompt closes, which has the status bar.
-    if !ask && let Some(w) = app.store.warning.take() {
+    // What a cache read without a refresh lacks, as one would say.
+    let unscored = rx.is_none().then(|| app.data.unscored()).flatten();
+    if !ask && let Some(w) = app.store.warning.take().or(unscored) {
         app.report(Err(w));
     }
     let mut terminal =

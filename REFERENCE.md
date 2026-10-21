@@ -459,6 +459,10 @@ and harnesses that answered, and the last one or two still awaited), `refresh fa
 with the age of the data still shown, or the data age alone, red once it is past 24h. Then
 the status bar says it too, `data 25h old` in red, and hints `r refresh`.
 
+When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no file
+for it, a warning names it at every start and command, with `$task` and `Tok/task` for DeepSWE, and
+the first start or command an hour later downloads it again.
+
 ## JSON
 
 `list`, `show`, `compare` and `recommend` take `--json`. It is indented at a terminal and one line in a pipe.

@@ -73,9 +73,9 @@ const ARENA_PAGE: &str = "https://arena.ai/leaderboard/agent";
 /// fetches none (`newest_release`), so a new version is told at the next start.
 const RELEASE_URL: &str = "https://api.github.com/repos/danctorres/modelcmp/releases/latest";
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
-/// How old a cache without Arena's scores may be when their download did not come
-/// (`Data::arena_missed`): tried again long before `MAX_AGE`.
-const ARENA_RETRY: Duration = Duration::from_secs(3600);
+/// How old a cache without Arena's scores, or some of Epoch's, may be when they did not come
+/// (`Data::arena_missed`, `Data::missed`): tried again long before `MAX_AGE`.
+const RETRY: Duration = Duration::from_secs(3600);
 /// Bumped when the cached fields change meaning, so an older cache refreshes.
 /// 2: `Offer::unpriced`, where a missing price used to read as free. 3: `Model::aa`.
 /// 4: task fit from Epoch's per-benchmark fit instead of mean percentiles. 5: `Model::epoch`.
@@ -93,8 +93,8 @@ const ARENA_RETRY: Duration = Duration::from_secs(3600);
 /// 22: Epoch's task scores are one benchmark's, in percent, where they were fitted in ECI points.
 /// 23: `Model::arena_more`. 24: `Model::aka`, and rows merged by a vendor word, a sold id and a size.
 /// 25: an offer that names no models.dev page votes for the one its id is.
-/// 26: `Model::arena_more` has `ARENA_BOARDS` too.
-const FORMAT: u32 = 26;
+/// 26: `Model::arena_more` has `ARENA_BOARDS` too. 27: `Data::missed`.
+const FORMAT: u32 = 27;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -991,9 +991,13 @@ pub struct Data {
     #[serde(default)]
     pub arena_dates: BTreeMap<String, String>,
     /// huggingface.co did not send the leaderboard and no kept scores stood in: the Arena column
-    /// is empty, and the cache is stale after `ARENA_RETRY`.
+    /// is empty, and the cache is stale after `RETRY`.
     #[serde(default)]
     pub arena_missed: bool,
+    /// The task benchmarks Epoch sent no scores of, as when its index names no file for one:
+    /// their scores are empty, and the cache is stale after `RETRY`.
+    #[serde(default)]
+    pub missed: Vec<String>,
     pub models: Vec<Model>,
     /// What went wrong in a refresh that still gave data, for the caller to show.
     #[serde(skip)]
@@ -1099,12 +1103,19 @@ impl Data {
 
     pub fn stale(&self) -> bool {
         // Dated ahead of the clock, it would never grow old.
-        let unranked = self.arena_missed && self.age() > ARENA_RETRY;
+        let unranked = (self.arena_missed || !self.missed.is_empty()) && self.age() > RETRY;
         self.age() > MAX_AGE
             || unranked
             || self.fetched > now()
             || self.format != FORMAT
             || self.benches != source().benches()
+    }
+
+    /// What `missed` leaves empty, said at every load until a refresh brings it.
+    pub fn unscored(&self) -> Option<String> {
+        let cost = self.missed.iter().any(|b| b == COST_BENCH.0).then_some(", and so no $task or Tok/task");
+        (!self.missed.is_empty())
+            .then(|| format!("epoch.ai sent no {} scores{}", self.missed.join(", "), cost.unwrap_or_default()))
     }
 
     /// Mark offers the user can use, and where: listed by an installed harness. A model ollama
@@ -1811,8 +1822,13 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
     };
     let renamed = data.warning.take();
-    let warnings =
-        [renamed, unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, ""), uncached];
+    let warnings = [
+        renamed,
+        data.unscored(),
+        unlisted(&data.kept, ": kept the ones from the last refresh"),
+        unlisted(&lost, ""),
+        uncached,
+    ];
     let warnings =
         warnings.into_iter().chain(unpaged).chain([unnamed, unranked, unswitched]).chain(uncut.into_iter().map(Some));
     data.warning = Some(warnings.flatten().collect::<Vec<_>>().join("; ")).filter(|w| !w.is_empty());
@@ -1953,6 +1969,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         let ep = ep.as_ref().map_err(Failure::clone)?;
         let mut data = merge(&models, ep, None)?;
         epoch_named(&mut data.models, ep);
+        data.missed.clone_from(&ep.missed);
         Ok(data)
     };
     let by_aa = || -> Result<Data, Failure> {
@@ -1982,13 +1999,17 @@ pub const FELL_BACK: &str = " · benchmarks from Epoch AI";
 /// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
 pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> {
     match load_cache() {
-        Some(d) if !force && !d.stale() => Ok((d, None)),
+        Some(d) if !force && !d.stale() => {
+            let w = d.unscored();
+            Ok((d, w))
+        }
         cached => {
             // One refresh at a time: agents that find the cache stale together wait for the
             // first and read what it wrote.
             let _held = crate::store::lock(&cache_path(source()));
             if !force && let Some(d) = load_cache().filter(|d| !d.stale()) {
-                return Ok((d, None));
+                let w = d.unscored();
+                return Ok((d, w));
             }
             // A refresh can take half a minute, which with nothing said looks like a hang.
             eprintln!("downloading model data, cached for 24h...");
@@ -3155,6 +3176,8 @@ struct Scores {
     cost: HashMap<String, (f64, Option<f64>, Option<f64>)>,
     /// group -> task -> percentile, and the value it shows.
     fit: crate::fit::Fit,
+    /// The task benchmarks no row scored, Epoch's only (`Data::missed`).
+    missed: Vec<String>,
     /// group -> its page on artificialanalysis.ai.
     page: HashMap<String, String>,
     /// group -> (tokens/s, time to first answer token) of that page's setting.
@@ -3475,6 +3498,8 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     for (g, versions) in unscored {
         ep.versions.entry(g).or_insert(versions);
     }
+    let scored = |b: &str| ep.groups.values().any(|g| g.2.contains_key(b));
+    ep.missed = task_benches.iter().filter(|b| !scored(b)).map(ToString::to_string).collect();
     for r in csv_rows(&mut zip, "epoch_capabilities_index/eci_scores.csv").unwrap_or_default() {
         let Some(eci) = col(&r, "eci")?.parse::<f64>().ok().filter(|e| e.is_finite()) else { continue };
         let g = col(&r, "Model")?.to_string();
@@ -4044,6 +4069,8 @@ mod tests {
             ..Default::default()
         };
         assert!(aged(120, true).stale() && !aged(10, true).stale() && !aged(120, false).stale());
+        let unscored = Data { missed: vec!["HLE".into()], ..aged(120, false) };
+        assert!(unscored.stale() && !Data { fetched: now() - 600, ..unscored.clone() }.stale());
         // Not stale yet, yesterday's is still refreshed by the TUI's first start of today.
         assert!(aged(48 * 60, false).of_another_day() && !aged(0, false).of_another_day());
     }
@@ -5380,6 +5407,8 @@ mod tests {
         }
         let ep = parse_epoch(buf.get_ref()).unwrap();
         assert_eq!(ep.alias["flash9"], "flash9jun2025", "the release filed under the bare id, not the newest");
+        let missed = |b: &str| ep.missed.iter().any(|m| m == b);
+        assert!(!missed("DeepSWE") && missed("HLE"), "a task benchmark no row scored, as one with no file");
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
         assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
         assert_eq!(ep.alias["bar3"], "bar3jul2025", "and before a newer one scored on a task");
