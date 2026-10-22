@@ -1312,17 +1312,6 @@ const DEVS: [Color; 7] =
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
-/// The colour tab `i` of `TABS` is on in.
-fn tab_color(i: usize) -> Color {
-    match i {
-        MARKED => MARK,
-        FAV => STAR,
-        EXCLUDED => BAD,
-        _ if i < RECOMMEND => ACCENT,
-        _ => Color::Cyan,
-    }
-}
-
 /// What follows the name of tab `i`: on mine `+N`, the selected models out of reach it shows too.
 fn tab_plus(app: &App, i: usize) -> String {
     if i == MINE && app.marked_out > 0 { format!(" +{}", app.marked_out) } else { String::new() }
@@ -1374,7 +1363,7 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
         }
         let Some(&(name, key, _)) = TABS.get(i) else { break };
         let (style, key_style) = match (on, app.tab_has(i)) {
-            (true, _) => (fg(tab_color(i)).add_modifier(BOLD), fg(KEY).add_modifier(BOLD)),
+            (true, _) => (fg(ACCENT).add_modifier(BOLD), fg(KEY).add_modifier(BOLD)),
             (_, true) => (Style::new(), fg(KEY).add_modifier(BOLD)),
             _ => (fg(MUTED), fg(MUTED)),
         };
@@ -3289,11 +3278,11 @@ fn recommend(
     let text = width.min(130);
     let space = Span::raw(" ");
     // The models it ranks, a tab of the table's each: the one on has the filled dot, bold in the
-    // colour its tab is on in, and one with nothing to show is grey.
+    // accent as a tab that is on, and one with nothing to show is grey.
     let tabs = (0..EXCLUDED).map(|i| {
         let on = i == app.among_on();
         let style = match on {
-            true => fg(tab_color(i)).add_modifier(BOLD),
+            true => fg(ACCENT).add_modifier(BOLD),
             _ if app.tab_has(i) => Style::new(),
             _ => fg(MUTED),
         };
