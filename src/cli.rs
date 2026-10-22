@@ -1212,18 +1212,18 @@ fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> (Vec<(&'a Model, f64
 
 /// Each tier's pick of task `t`, whose line is `front` (`tier_picks`), with the best model your
 /// machine runs or can download in a tier whose pick it beats, the tiers it took (`with_local`)
-/// and that model.
+/// and that model with its score.
 fn local_picks<'a>(
     data: &'a Data,
     store: &Store,
     t: &Task,
     front: &[(&'a Model, f64)],
     off: &[&str],
-) -> (Picks<'a>, [bool; TIERS.len()], Option<&'a Model>) {
+) -> (Picks<'a>, [bool; TIERS.len()], Option<(&'a Model, f64)>) {
     let any = data.any_available();
     let local = local(data, store, t, data.models.iter().filter(|m| !excluded(m, store, any)), true);
     let (picks, took) = with_local(tier_picks(front, off, store, t.name), local, store, t.name);
-    (picks, took, local.map(|l| l.0))
+    (picks, took, local)
 }
 
 /// The models you have and can use: only they are recommended.
@@ -1284,7 +1284,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             let (tier_favs, tier_via) = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
             let (picks, _, local) = local_picks(data, store, t, &line, &off);
             // The best model your machine runs, with the download it needs when it is not on it.
-            let local = local.map(|m| {
+            let local = local.map(|(m, _)| {
                 let size = (!m.here()).then(|| download_sizes(data, store).get(&m.key)).flatten();
                 serde_json::json!({"key": m.key, "here": m.here(), "download": size})
             });
@@ -1327,20 +1327,32 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!("{}  {}{by}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
-        let (picks, took, _) = local_picks(data, store, t, &line, &off);
+        let (picks, took, local) = local_picks(data, store, t, &line, &off);
         let one = one_pick(t.name, &picks);
-        show(t.name, picks, &|m, s, tier| {
-            let fav = crate::view::fav_pick(store, t.name, tier, m, one);
+        // `local_took`: the best model your machine runs took the tier.
+        let said = |m: &Model, s: f64, fav: bool, local_took: bool| {
             let p = priced(m, s, true, fav);
             // Free on your machine, which its price would not say.
             let size = download_sizes(data, store).get(&m.key).filter(|_| !m.here());
             let here = |how: &str| format!("{} [{}] free {how} ({s:.0})", m.name, m.key);
-            match took[TIERS.iter().position(|x| x.0 == tier).unwrap_or(0)] {
+            match local_took {
                 true if m.here() => here("on your machine"),
                 true => here(&size.map_or("to download".into(), |b| format!("↓ {} download", crate::data::gb(*b)))),
                 false if off.contains(&m.key.as_str()) => format!("{p} not recommended"),
                 false => p,
             }
+        };
+        show(t.name, picks, &|m, s, tier| {
+            let fav = crate::view::fav_pick(store, t.name, tier, m, one);
+            let mut text = said(m, s, fav, took[TIERS.iter().position(|x| x.0 == tier).unwrap_or(0)]);
+            // A favorite in place of the tier's own pick, with what it would recommend, as the TUI.
+            if fav {
+                let (rec, rec_local) = crate::view::recommended(&line, &off, store.tier_cap(tier), local);
+                if let Some((r, rs)) = rec.filter(|(r, _)| r.key != m.key) {
+                    text += &format!("\n  {:<17}{}", "recommended:", said(r, rs, false, rec_local));
+                }
+            }
+            text
         });
         println!();
     }

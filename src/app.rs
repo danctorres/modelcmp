@@ -3928,9 +3928,7 @@ impl App {
     /// What `tier` of `t` picks with no favorite, as the grid would, and whether the best model
     /// your machine runs took it.
     pub fn recommended(&self, t: &Task, tier: &str) -> (Option<(&Model, f64)>, bool) {
-        let pick = view::merit_pick(&self.task_frontier(t), &self.off(t), self.store.tier_cap(tier));
-        let best = view::local_over(pick, self.local_best(t));
-        (best, best.map(|e| &e.0.key) != pick.map(|e| &e.0.key))
+        view::recommended(&self.task_frontier(t), &self.off(t), self.store.tier_cap(tier), self.local_best(t))
     }
 
     /// Tier `c`'s cap written on its header, from the one it has.

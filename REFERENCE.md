@@ -539,7 +539,8 @@ with one), the user's `tier_favorites`, and their harnesses as `tier_via`.
 - A favorite that is on the line only as the favorite has `"recommended": false`, and the text
   output marks it `not recommended`.
 - The text output prints each tier's pick as `name [key] $price (value)`, the value being
-  the task's table column, the same as `tasks`.
+  the task's table column, the same as `tasks`. Under a favorite that is not the tier's own
+  pick, a `recommended:` line names that pick, which the JSON leaves out.
 
 A task of your own follows the built-in ones with the same fields and `"custom": true`:
 

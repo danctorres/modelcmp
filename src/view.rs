@@ -534,6 +534,19 @@ pub fn local_over<'m>(pick: Option<(&'m Model, f64)>, local: Option<(&'m Model, 
     }
 }
 
+/// What a tier capped at `cap` picks with no favorite, from a task's `front` less `off`, the best
+/// model your machine runs (`local`) over it when it scores higher, and whether that one took it.
+pub fn recommended<'m>(
+    front: &[(&'m Model, f64)],
+    off: &[&str],
+    cap: f64,
+    local: Option<(&'m Model, f64)>,
+) -> (Option<(&'m Model, f64)>, bool) {
+    let pick = merit_pick(front, off, cap);
+    let best = local_over(pick, local);
+    (best, best.map(|e| &e.0.key) != pick.map(|e| &e.0.key))
+}
+
 /// Each tier's pick, as `tier_picks` gives them.
 pub type Picks<'m> = [Option<(&'m Model, f64)>; TIERS.len()];
 
