@@ -1312,6 +1312,8 @@ const DEVS: [Color; 7] =
 /// Price levels (`view::LEVELS`) from free to the most expensive.
 const LEVEL: [Color; 6] = [Color::Green, Color::Green, Color::Cyan, Color::Yellow, Color::Red, Color::Magenta];
 const BOLD: Modifier = Modifier::BOLD;
+/// The name of a tab that is on: bold in the text colour, its frame telling it from the others.
+const TAB_ON: Style = Style::new().add_modifier(BOLD);
 /// What follows the name of tab `i`: on mine `+N`, the selected models out of reach it shows too.
 fn tab_plus(app: &App, i: usize) -> String {
     if i == MINE && app.marked_out > 0 { format!(" +{}", app.marked_out) } else { String::new() }
@@ -1363,7 +1365,7 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
         }
         let Some(&(name, key, _)) = TABS.get(i) else { break };
         let (style, key_style) = match (on, app.tab_has(i)) {
-            (true, _) => (fg(ACCENT).add_modifier(BOLD), fg(KEY).add_modifier(BOLD)),
+            (true, _) => (TAB_ON, fg(KEY).add_modifier(BOLD)),
             (_, true) => (Style::new(), fg(KEY).add_modifier(BOLD)),
             _ => (fg(MUTED), fg(MUTED)),
         };
@@ -3281,12 +3283,12 @@ fn recommend(
     // The grid takes the whole width, so no name is cut that has room, the text a readable one.
     let text = width.min(130);
     let space = Span::raw(" ");
-    // The models it ranks, a tab of the table's each: the one on has the filled dot, bold in the
-    // accent as a tab that is on, and one with nothing to show is grey.
+    // The models it ranks, a tab of the table's each: the one on has the filled dot, bold
+    // as a tab that is on, and one with nothing to show is grey.
     let tabs = (0..EXCLUDED).map(|i| {
         let on = i == app.among_on();
         let style = match on {
-            true => fg(ACCENT).add_modifier(BOLD),
+            true => TAB_ON,
             _ if app.tab_has(i) => Style::new(),
             _ => fg(MUTED),
         };
@@ -6184,7 +6186,7 @@ mod tests {
         assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..1), "{on:?} {block:?}");
         let mine = top[0].spans.iter().find(|s| s.content == "● mine").unwrap();
         assert!(
-            mine.style == fg(ACCENT).add_modifier(BOLD) && top[0].to_string().ends_with(" (filtered)"),
+            mine.style == TAB_ON && top[0].to_string().ends_with(" (filtered)"),
             "{}",
             top[0]
         );
