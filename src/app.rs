@@ -548,6 +548,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("space", "select the model, `C` compares the selected"),
             ("f", "favorite the model for a task's tier, or a task you name"),
             ("f: r a", "rename a task you named, write what it is about"),
+            ("p", "in recommend, pick the model of a task's tier"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
             ("D", "unfavorite every model, asks first"),
@@ -776,6 +777,8 @@ pub enum Kind {
     Harness,
     /// `|`: the columns the table shows; space or enter ticks one and the list stays open.
     Cols,
+    /// `p` on a tier in recommend: the model it picks, your favorite there or the recommended one.
+    Pick,
 }
 
 /// The cursor and the search of an open list, a dropdown or a choice list.
@@ -1119,6 +1122,9 @@ pub enum Effect {
     Harness(Option<&'static str>),
     /// The column at this cursor index; the `|` chooser's items, applied by `App` itself.
     Col(usize),
+    /// The slot's favorite, or none for the model recommended there; the `p` chooser's items,
+    /// applied by `App` itself.
+    Pick(String, Option<String>),
     /// The source was switched, by the key that came or did not work, and its data must be loaded.
     Source(crate::data::Source),
 }
@@ -3866,6 +3872,60 @@ impl App {
         }
     }
 
+    /// `p` on a tier in recommend: the models it can take, to make one its favorite, best first
+    /// and the pick with none ahead of them, the cursor on the one it has. They are the ones
+    /// recommend ranks at the tier's price or under, scored or not, as a new model may not be yet,
+    /// and the favorite it has whatever the filters and the cap, as the grid keeps it.
+    fn ask_pick(&mut self) {
+        let tier = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps);
+        let own = self.custom_at();
+        let (Some(c), Some(task)) = (tier, self.cur_task().map(|t| t.name).or(own)) else {
+            return self.refuse(format!("{} picks the model of a tier, on one of its boxes", self.key_of('p')));
+        };
+        // A task of one pick shows the favorite of any tier, else high's.
+        let c = match self.current().map(|m| m.key.as_str()) {
+            Some(k) if self.one_pick(self.task_cur) => {
+                (0..BOXES).rev().find(|&c| self.store.favorite(&box_slot(task, c)) == Some(k)).unwrap_or(BOXES - 1)
+            }
+            _ if self.one_pick(self.task_cur) => BOXES - 1,
+            _ => c,
+        };
+        let (slot, x) = (box_slot(task, c), TIERS[c].0);
+        let fav = self.store.favorite(&slot);
+        let t = self.cur_task();
+        let bench = t.and_then(|t| task_bench(&self.store, t));
+        let only = self.only.filter(|&o| o != EXCLUDED);
+        let shown = self.filtered_as(usize::MAX, only, false).map(|e| e.1);
+        let has = self.data.models.iter().filter(|m| fav == Some(m.key.as_str()));
+        let mut ms: Vec<_> = shown
+            .filter(|m| self.usable(m) && view::fits(&self.store, x, m) && fav != Some(m.key.as_str()))
+            .chain(has)
+            .map(|m| (m, t.and_then(|t| view::line_score(m, t, bench))))
+            .collect();
+        ms.sort_by(|a, b| {
+            view::by_value(a.1, b.1, true)
+                .then_with(|| view::by_value(a.0.cost(), b.0.cost(), false))
+                .then_with(|| a.0.name.cmp(&b.0.name))
+        });
+        // What the tier picks with no favorite, as the grid does; a task of your own has nothing to pick.
+        let first = match t {
+            Some(t) => {
+                let pick = view::merit_pick(&self.task_frontier(t), &self.off(t), self.store.tier_cap(x));
+                let pick = view::local_over(pick, self.local_best(t));
+                format!("recommended: {}", pick.map_or("none".into(), |(m, s)| view::priced(m, s, false, false)))
+            }
+            None => "none".to_string(),
+        };
+        let entry = |&(m, s): &(&Model, Option<f64>)| {
+            let label = view::priced(m, s.unwrap_or(f64::NAN), false, fav == Some(m.key.as_str()));
+            (label, Effect::Pick(slot.clone(), Some(m.key.clone())))
+        };
+        let items: Vec<_> =
+            std::iter::once((first, Effect::Pick(slot.clone(), None))).chain(ms.iter().map(entry)).collect();
+        let sel = ms.iter().position(|e| fav == Some(e.0.key.as_str())).map_or(0, |i| i + 1);
+        self.input = Input::choose("which model for this tier?", Kind::Pick, items, sel);
+    }
+
     /// Tier `c`'s cap written on its header, from the one it has.
     fn edit_cap(&mut self, c: usize) {
         let text = self.store.tier_cap(TIERS[c].0).to_string();
@@ -3911,6 +3971,10 @@ impl App {
             }
             (KeyCode::Char('<'), _) if self.view == View::Recommend => {
                 self.ask_cap();
+                return None;
+            }
+            (KeyCode::Char('p'), _) if self.view == View::Recommend => {
+                self.ask_pick();
                 return None;
             }
             // On the tiers' header `h` `l` move over the tiers, and enter writes the cap of `low` or `mid`.
@@ -4724,6 +4788,15 @@ impl App {
                                 self.store.harness = h.unwrap_or("").to_string();
                                 self.report(Ok(format!("default harness: {}", h.unwrap_or("any harness"))));
                                 return Some(Effect::Save);
+                            }
+                            // The one it has keeps its harness, and recommended clears it, as `f` does.
+                            Effect::Pick(slot, key) => {
+                                let had = self.store.favorite(&slot).map(String::from);
+                                return match (key, had) {
+                                    (Some(k), had) if had.as_ref() != Some(&k) => self.fav(&k, &slot),
+                                    (None, Some(h)) => self.fav(&h, &slot),
+                                    _ => None,
+                                };
                             }
                             Effect::Via(key, slot, h) => {
                                 self.store.set_favorite(&slot, &key, h.as_deref());
@@ -7249,6 +7322,57 @@ mod tests {
         assert!(a.caps, "and esc back to the header");
         a.mouse(Mouse::Model(Stop::Cap(2)));
         assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "a click on mid's header");
+    }
+
+    #[test]
+    fn p_in_recommend_picks_a_tiers_model() {
+        let mut a = app();
+        press(&mut a, "Rjjjp");
+        assert!(a.failed && a.input == Input::None, "on a task's name: no tier");
+        press(&mut a, "$");
+        let was = a.current().map(|m| m.key.clone());
+        press(&mut a, "p");
+        let Input::Choose { kind: Kind::Pick, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
+        let Effect::Pick(slot, None) = &items[0].1 else { panic!("{items:?}") };
+        let slot = slot.clone();
+        assert!(slot.ends_with(":high") && items[0].0.starts_with("recommended: "), "{items:?}");
+        assert_eq!(list.sel, 0, "no favorite yet: on the recommended one");
+        let Effect::Pick(_, Some(key)) = &items.last().unwrap().1 else { panic!() };
+        let key = key.clone();
+        assert_ne!(Some(&key), was.as_ref(), "the worst is not the pick");
+        press(&mut a, "G");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((&a.input, a.store.favorite(&slot)), (&Input::None, Some(key.as_str())));
+        assert_eq!(a.current().map(|m| &m.key), Some(&key), "the box has it");
+        press(&mut a, "p");
+        let Input::Choose { items, list, .. } = &a.input else { panic!() };
+        assert_eq!(list.sel, items.len() - 1, "on the favorite");
+        assert!(items[list.sel].0.starts_with('★'));
+        press(&mut a, "gg");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(
+            (a.store.favorite(&slot), a.current().map(|m| m.key.clone())),
+            (None, was),
+            "back to the recommended"
+        );
+    }
+
+    #[test]
+    fn p_keeps_a_favorite_over_the_cap() {
+        let mut a = app();
+        // A cap lowered after it: the grid keeps it, so p lists it, on it, and enter keeps it.
+        a.store.set_favorite("coding:mid", "gpt55", Some("codex"));
+        a.rebuild_in_place();
+        press(&mut a, "Rjj");
+        (a.task_cur, a.task_sel) = (TASKS.iter().position(|t| t.name == "coding").unwrap(), 3);
+        press(&mut a, "p");
+        let Input::Choose { kind: Kind::Pick, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
+        assert!(
+            matches!(&items[list.sel].1, Effect::Pick(s, Some(k)) if s == "coding:mid" && k == "gpt55"),
+            "{items:?}"
+        );
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!((a.store.favorite("coding:mid"), a.store.via("coding:mid")), (Some("gpt55"), Some("codex")));
     }
 
     #[test]

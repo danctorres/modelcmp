@@ -546,7 +546,7 @@ mod tests {
             (r#"{"s": "z", "j": "3", "z": "s", "k": " "}"#, "sz"),
             (r#"{"s": "o"}"#, ""),
             (r#"{"s": "z", "o": "z"}"#, "sz"),
-            (r#"{"s": "z", "o": "z", "c": "s", "j": "p"}"#, "cs jp sz"),
+            (r#"{"s": "z", "o": "z", "c": "s", "j": "P"}"#, "cs jP sz"),
         ] {
             std::fs::write(&p, format!(r#"{{"keys": {keys}}}"#)).unwrap();
             let kept = kept.split_whitespace().map(|w| (w.as_bytes()[0] as char, w.as_bytes()[1] as char));

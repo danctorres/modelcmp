@@ -667,7 +667,8 @@ fn event_loop(
                         | Effect::NewTask(_)
                         | Effect::Theme(_)
                         | Effect::Harness(_)
-                        | Effect::Col(_),
+                        | Effect::Col(_)
+                        | Effect::Pick(..),
                     )
                     | None => {}
                 }
@@ -1159,14 +1160,15 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         View::Recommend if app.current().is_none() => {
             // A tier with no model has nothing for enter either.
             let enter = match (app.task_sel, app.custom_at()) {
-                (1.., _) => vec![],
+                (1.., _) => vec!["p pick"],
                 (_, Some(_)) => vec!["enter your model"],
                 _ => vec!["enter best models first"],
             };
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), cap, BACK.to_vec()]
         }
         View::Recommend => {
-            vec![vec!["↓ ↑ task", "← → 0 $ tier"], search, actions("enter x o y space f e i"), cap, BACK.to_vec()]
+            let view = [&["p pick"], &search[..]].concat();
+            vec![vec!["↓ ↑ task", "← → 0 $ tier"], view, actions("enter x o y space f e i"), cap, BACK.to_vec()]
         }
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
@@ -2549,6 +2551,7 @@ fn mode(app: &App) -> (&'static str, Color) {
                 Kind::Harness => "HARNESS",
                 Kind::Cols => "COLUMNS",
                 Kind::Open => "OPEN",
+                Kind::Pick => "PICK",
             };
             (name, Color::Green)
         }
@@ -2979,7 +2982,7 @@ fn choice_lines(
         Kind::Cols => " ↓ ↑ move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
-        Kind::Harness => " ↓ ↑ move · / search · space enter picks · esc close",
+        Kind::Harness | Kind::Pick => " ↓ ↑ move · / search · space enter picks · esc close",
         Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",
     };

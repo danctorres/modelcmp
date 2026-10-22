@@ -457,7 +457,7 @@ pub fn task_frontier<'a>(
 
 /// A model's score on a task's line, as the task's column shows it: the task's, or with
 /// `bench`, the benchmark picked in that column.
-fn line_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> Option<f64> {
+pub fn line_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> Option<f64> {
     match bench {
         Some(b) => m.picked(b).filter(|_| fit::qualifies(m, t)),
         None => fit::fit(m, t).map(|s| fit::shown(m, t, s)),
@@ -523,8 +523,13 @@ pub fn or_local<'m>(
     tier: &str,
 ) -> Option<(&'m Model, f64)> {
     let fav = pick.is_some_and(|(m, _)| store.tier_favorite(task, tier) == Some(m.key.as_str()));
+    if fav { pick } else { local_over(pick, local) }
+}
+
+/// `local` in place of `pick` when it scores higher, as `or_local` takes a tier with no favorite.
+pub fn local_over<'m>(pick: Option<(&'m Model, f64)>, local: Option<(&'m Model, f64)>) -> Option<(&'m Model, f64)> {
     match local {
-        Some(l) if !fav && pick.is_none_or(|(_, s)| l.1 > s) => Some(l),
+        Some(l) if pick.is_none_or(|(_, s)| l.1 > s) => Some(l),
         _ => pick,
     }
 }
@@ -665,7 +670,13 @@ pub fn tier_pick<'m>(
 ) -> Option<(&'m Model, f64)> {
     let on_line = |k| front.iter().find(|(m, _)| m.key == k && fits(store, tier, m));
     let fav = store.tier_favorite(task, tier).and_then(on_line).copied();
-    fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), store.tier_cap(tier)).copied())
+    fav.or_else(|| merit_pick(front, off, store.tier_cap(tier)))
+}
+
+/// What a tier at `cap` picks on merit, with no favorite: the best entry of the line at its price
+/// or under, not one on it only for being a favorite (`off`).
+pub fn merit_pick<'m>(front: &[(&'m Model, f64)], off: &[&str], cap: f64) -> Option<(&'m Model, f64)> {
+    pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), cap).copied()
 }
 
 /// A task of your own's line as `tier_picks` takes it: no scores, and every model on it only
