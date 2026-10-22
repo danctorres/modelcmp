@@ -3251,17 +3251,13 @@ fn to_hit(app: &mut App, hits: &[usize]) -> Option<usize> {
 }
 
 /// What a box of recommend's grid shows.
-/// `{tiers}` is `view::tiers_said`.
-const TIER_LEGEND: &str = "the best model for each task at each price: {tiers}, \
-                           or ★ your favorite. Each box shows the model's name, its price per 1M tokens and, in parentheses, its score on the task. \
-                           A model free on your machine takes a tier when it scores higher, with ↓ and its size when x has to download it. \
-                           The header shows the price of each tier: k from the first task goes there and enter changes low's or mid's.";
+const TIER_LEGEND: &str = "the best model for each task at each price, or ★ your favorite, as name $ per 1M tokens (score). \
+                           ↓ marks a local model x downloads first.";
 
 /// What recommend leaves out, and how to pick it anyway.
-const UNRATED: &str = "only models with a benchmark score are ranked, so a new model may be missing. \
-                       To pick an unranked model for a task, favorite it with f in the table.";
+const UNRATED: &str = "only models with a benchmark score are ranked, favorite an unranked one with f in the table.";
 /// After `UNRATED` on Epoch AI with no key for the other source.
-const MORE_RATED: &str = "Artificial Analysis scores more models than Epoch AI, K takes its API key.";
+const MORE_RATED: &str = "K adds Artificial Analysis, which scores more models.";
 
 /// A row per task, the built-in ones and then your own, with a box per tier for the model it
 /// picks, as `--tier` does, wrapped to `width`; under the grid, what the cursor's task is, when
@@ -3306,18 +3302,9 @@ fn recommend(
     }
     let among = v.len();
     v.extend(
-        wrapped(
-            vec![],
-            words(
-                &TIER_LEGEND
-                    .replace("{tiers}", &crate::view::tiers_said(&app.store))
-                    .replace(" k ", &format!(" {} ", app.key_of('k'))),
-            ),
-            &space,
-            text,
-        )
-        .into_iter()
-        .map(|l| l.style(fg(MUTED))),
+        wrapped(vec![], words(&TIER_LEGEND.replace(" x ", &format!(" {} ", app.key_of('x')))), &space, text)
+            .into_iter()
+            .map(|l| l.style(fg(MUTED))),
     );
     let keyless = data::keyless();
     // The keys they name as they are bound now.
@@ -6102,13 +6089,7 @@ mod tests {
         );
         let gap = text.iter().position(String::is_empty).unwrap();
         let warn = text.iter().position(|l| l.starts_with("warning: ")).unwrap();
-        assert!(
-            warn > 2
-                && text[1..warn].join(" ")
-                    == TIER_LEGEND.replace("{tiers}", "free, low up to $2, mid up to $5 and high any"),
-            "the legend wraps: {:?}",
-            &text[..warn]
-        );
+        assert!(warn > 2 && text[1..warn].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..warn]);
         // Then what it leaves out, and the other source while there is no key for it.
         let said = text[warn..gap].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
         assert_eq!(said, format!("warning: {UNRATED} {MORE_RATED}"));
