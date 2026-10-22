@@ -726,7 +726,7 @@ pub enum Input {
         cur: usize,
     },
     /// The dropdown under the Dev or $ header: each entry and how many models it would show,
-    /// "any" first.
+    /// "all" first.
     Menu {
         col: usize,
         items: Vec<(String, usize)>,
@@ -868,7 +868,7 @@ impl List {
     /// matches and puts the cursor on the first, ↓ ↑ on the next / previous, as `n` `N` in a
     /// panel: a list's search lasts while it is typed, enter picking. Esc drops it, the cursor
     /// staying, and the rest is typed. `names` are
-    /// the entries'; with `any` the first is never a match, as a dropdown's "any". False when
+    /// the entries'; with `any` the first is never a match, as a dropdown's "all". False when
     /// the key is none of these.
     fn key(&mut self, code: KeyCode, mods: KeyModifiers, names: &[&str], any: bool) -> bool {
         let hits = |q: &str| list_hits(names.iter().copied(), q, any);
@@ -941,7 +941,7 @@ fn names<T>(items: &[(String, T)]) -> Vec<&str> {
     items.iter().map(|e| e.0.as_str()).collect()
 }
 
-/// The entries of a list whose name has `query`, any case, past a dropdown's "any" with `any`:
+/// The entries of a list whose name has `query`, any case, past a dropdown's "all" with `any`:
 /// where a search moves the cursor, every entry staying.
 pub fn list_hits<'a>(names: impl IntoIterator<Item = &'a str>, query: &str, any: bool) -> Vec<usize> {
     let hit = |(i, n): &(usize, &str)| !(any && *i == 0) && !found(n, query).is_empty();
@@ -1723,7 +1723,7 @@ impl App {
                 ((0..items.len()).map(on).collect(), what)
             }
             Input::Menu { col, items, .. } => {
-                // The ticks the dropdown draws: "any" has one while nothing is picked.
+                // The ticks the dropdown draws: "all" has one while nothing is picked.
                 let bench: Vec<String> = self.col_bench(*col).into_iter().map(bench_label).collect();
                 let picked = match *col {
                     1 => &self.store.dev_pick,
@@ -3280,7 +3280,7 @@ impl App {
     }
 
     /// The entries of `col`'s dropdown, each with how many models it would show, and the one
-    /// in effect, counted from the first entry after "any".
+    /// in effect, counted from the first entry after "all".
     fn menu_items(&self, col: usize) -> (Vec<(String, usize)>, Option<usize>) {
         let ms: Vec<(usize, &Model)> = self.filtered(col).collect();
         let benches = col_benches(col);
@@ -3322,7 +3322,7 @@ impl App {
                 .collect();
             (items, self.price_level())
         };
-        items.insert(0, (benches.as_ref().map_or("any".into(), |b| bench_label(b.0)), first));
+        items.insert(0, (benches.as_ref().map_or("all".into(), |b| bench_label(b.0)), first));
         // The entry a task column shows already keeps the bounds on it: it counts what the table shows.
         if benches.is_some() {
             items[picked.map_or(0, |i| i + 1)].1 =
@@ -3878,7 +3878,7 @@ impl App {
     }
 
     /// A price level, entry `i` of the Price dropdown, replaces the Price maximum typed with `<`;
-    /// "any" drops it. The store keeps it for the CLI, as Dev's and Via's picks.
+    /// "all" drops it. The store keeps it for the CLI, as Dev's and Via's picks.
     fn set_price_level(&mut self, i: usize) {
         self.bounds.retain(|&(c, lo, _)| c != PRICE || lo.is_finite());
         self.store.price_pick = i.checked_sub(1);
@@ -4539,7 +4539,7 @@ impl App {
                     // On Dev and Via, space or enter picks the entry under the cursor, or every
                     // entry of the range `v` started, and `e` leaves them out, as space and `e`
                     // act on models: all of them, or none when all already are, which takes them
-                    // back. A picked entry is no longer left out, and the other way round. "any"
+                    // back. A picked entry is no longer left out, and the other way round. "all"
                     // drops the picks when it is alone, and the range ends. While searching,
                     // space is typed. The dropdown stays open.
                     KeyCode::Enter | KeyCode::Char(' ' | 'e')
@@ -4591,7 +4591,7 @@ impl App {
                         return Some(Effect::Save);
                     }
                     KeyCode::Esc if list.visual.is_some() && !list.typing => list.visual = None,
-                    // `c` clears every filter as in the table, the dropdown staying open on "any".
+                    // `c` clears every filter as in the table, the dropdown staying open on "all".
                     KeyCode::Char('c') if list.idle() => {
                         let col = *col;
                         let save = self.clear_filters();
@@ -5667,7 +5667,7 @@ mod tests {
         a.rebuild();
         a.col = 0;
         press(&mut a, "ld");
-        assert_eq!(menu(&a), [("any", 3), ("USA", 3), ("anthropic", 1), ("openai", 2)]);
+        assert_eq!(menu(&a), [("all", 3), ("USA", 3), ("anthropic", 1), ("openai", 2)]);
         press(&mut a, "j ");
         assert_eq!(keys(&a).len(), 3, "every model of a developer from there");
         // With a developer picked too, either one shows a model.
@@ -5683,7 +5683,7 @@ mod tests {
         assert_eq!((&a.input, a.status.as_str()), (&Input::None, "d opens a dropdown on the columns marked ▾"));
         a.col = 0;
         press(&mut a, "ld");
-        assert_eq!(menu(&a), [("any", 3), ("anthropic", 1), ("openai", 2)], "developers A-Z, not by count");
+        assert_eq!(menu(&a), [("all", 3), ("anthropic", 1), ("openai", 2)], "developers A-Z, not by count");
         press(&mut a, "G");
         assert!(matches!(a.input, Input::Menu { list: List { sel: 2, .. }, .. }), "G to the last entry");
         press(&mut a, "gg");
@@ -5699,12 +5699,12 @@ mod tests {
         assert_eq!((a.store.dev_pick.as_slice(), keys(&a)), (&["openai".to_string()][..], vec!["gpt55", "mini"]));
         // Counts follow the developer picked; the price levels are maxima.
         press(&mut a, "lld");
-        assert_eq!(menu(&a), [("any", 2), ("free", 0), ("≤$0.5", 0), ("≤$2", 1), ("≤$5", 1), ("≤$15", 2)]);
+        assert_eq!(menu(&a), [("all", 2), ("free", 0), ("≤$0.5", 0), ("≤$2", 1), ("≤$5", 1), ("≤$15", 2)]);
         press(&mut a, "jjj");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
         assert_eq!(keys(&a), ["mini"]);
-        // Reopening starts on the level in effect; esc leaves it alone, "any" drops it.
+        // Reopening starts on the level in effect; esc leaves it alone, "all" drops it.
         press(&mut a, "d");
         assert!(matches!(a.input, Input::Menu { list: List { sel: 3, .. }, .. }));
         code(&mut a, KeyCode::Esc);
@@ -5837,7 +5837,7 @@ mod tests {
         a.col = VIA;
         assert_eq!(base_col_name(a.col), "Via");
         press(&mut a, "d");
-        assert_eq!(menu(&a), [("any", 3), ("codex", 2), ("opencode", 2), ("claude", 1)]);
+        assert_eq!(menu(&a), [("all", 3), ("codex", 2), ("opencode", 2), ("claude", 1)]);
         press(&mut a, "/cla");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
@@ -5866,12 +5866,12 @@ mod tests {
             (&["codex".to_string()][..], &["claude".to_string()][..])
         );
         press(&mut a, "gge");
-        assert_eq!((a.store.via_not.len(), a.status.as_str()), (1, "any cannot be left out"));
+        assert_eq!((a.store.via_not.len(), a.status.as_str()), (1, "all cannot be left out"));
         press(&mut a, "gg ");
         assert_eq!(
             (a.store.via_not.as_slice(), a.store.via_pick.len()),
             (&["codex".to_string()][..], 0),
-            "any drops the picks, not what is left out"
+            "all drops the picks, not what is left out"
         );
         code(&mut a, KeyCode::Esc);
         // A selected model you have no access to shows, but `not available` is no entry.
@@ -6145,9 +6145,9 @@ mod tests {
         press(&mut a, "gg");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "gg");
-        assert_eq!(on(&a).0, "any");
+        assert_eq!(on(&a).0, "all");
         code(&mut a, KeyCode::Enter);
-        assert!(a.store.dev_pick.is_empty(), "enter on any drops them all");
+        assert!(a.store.dev_pick.is_empty(), "enter on all drops them all");
     }
 
     #[test]
@@ -6238,7 +6238,7 @@ mod tests {
         assert!(!a.store.dev_pick.is_empty() && !a.store.dev_not.is_empty());
         assert_eq!(press(&mut a, "c"), Some(Effect::Save), "the store keeps the picks for the CLI");
         assert!(a.store.dev_pick.is_empty() && a.store.dev_not.is_empty() && keys(&a).len() == 3, "{:?}", keys(&a));
-        assert!(matches!(a.input, Input::Menu { col: 1, list: List { sel: 0, .. }, .. }), "open on any");
+        assert!(matches!(a.input, Input::Menu { col: 1, list: List { sel: 0, .. }, .. }), "open on all");
         // While searching, c is typed.
         press(&mut a, "/c");
         assert!(matches!(&a.input, Input::Menu { list: List { query, .. }, .. } if query == "c"));
@@ -6269,9 +6269,9 @@ mod tests {
         press(&mut a, " ");
         assert_eq!(a.store.dev_pick, ["anthropic", "openai"], "esc ends the search on the match, space toggles it");
         press(&mut a, "kk ");
-        assert!(a.store.dev_pick.is_empty(), "space on any drops them all");
+        assert!(a.store.dev_pick.is_empty(), "space on all drops them all");
         press(&mut a, "]");
-        assert_eq!(a.status, "no other ticked entry is shown", "any is the ticked one with nothing picked");
+        assert_eq!(a.status, "no other ticked entry is shown", "all is the ticked one with nothing picked");
         press(&mut a, "j");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.store.dev_pick, ["anthropic"], "enter toggles one");
@@ -6303,7 +6303,7 @@ mod tests {
             "again on all picked drops them"
         );
         press(&mut a, "kvGe");
-        assert_eq!(a.store.dev_not, [anthropic.clone(), openai], "any in a range is skipped");
+        assert_eq!(a.store.dev_not, [anthropic.clone(), openai], "all in a range is skipped");
         press(&mut a, "vgge");
         assert_eq!((a.store.dev_not.len(), a.status.as_str()), (0, "took back 2 entries"));
         // Space on any alone still drops the picks, and e on it alone still refuses.
@@ -6312,7 +6312,7 @@ mod tests {
         press(&mut a, "gg ");
         assert!(a.store.dev_pick.is_empty());
         press(&mut a, "e");
-        assert_eq!(a.status, "any cannot be left out");
+        assert_eq!(a.status, "all cannot be left out");
         press(&mut a, "v");
         code(&mut a, KeyCode::Esc);
         assert!(matches!(&a.input, Input::Menu { list, .. } if list.visual.is_none()), "esc cancels the range only");
@@ -8047,7 +8047,7 @@ mod tests {
         );
         code(&mut a, KeyCode::Esc);
         a.mouse(Mouse::Exclude(0));
-        assert_eq!(a.status, "any cannot be left out");
+        assert_eq!(a.status, "all cannot be left out");
         a.mouse(Mouse::Row(0));
         assert_eq!((a.input == Input::None, a.store.dev_pick.as_slice()), (true, &["openai".to_string()][..]));
         a.mouse(Mouse::Menu(PRICE));

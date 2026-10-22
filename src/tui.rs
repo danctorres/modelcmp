@@ -2367,7 +2367,7 @@ fn dropdown(
             cursor_ends(buf, rect.x, rect.right() - 1, y);
         }
         // Checkboxes as on the table's marks, in the mark's own colour there too, so a picked
-        // entry does not read as an empty box in the entry's colour; "any" is ticked while
+        // entry does not read as an empty box in the entry's colour; "all" is ticked while
         // nothing is picked, as it is then what applies.
         let on = if i == 0 { picked.is_empty() && not.is_empty() } else { picked.contains(label) };
         let (unmarked, included) = if faint { ("✓ ", "✗") } else { ("☐ ", "·") };
@@ -2387,7 +2387,7 @@ fn dropdown(
         if let Some(t) = tag(col, label) {
             buf.set_stringn(at + label.len() as u16 + 1, y, t, t.len(), fg(MUTED));
         }
-        // "any" is never a match.
+        // "all" is never a match.
         let hits = if i == 0 { vec![] } else { found(label, query) };
         for r in hits.into_iter().map(|r| r.start.min(label_w)..r.end.min(label_w)) {
             buf.set_style(Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(fg(color)));
@@ -4647,8 +4647,8 @@ mod tests {
         let dev = cell(&lines[0], "Dev") as usize - 2;
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭──────────────────╮"), "{}", lines[1]);
-        assert_eq!(&words(&lines[2])[5..10], ["▌", "✓", "any", "2", "▐"], "any is ticked, and has no ✗ box");
-        assert_eq!(cell(&lines[2], "any"), cell(&lines[3], "anthropic"), "the names line up all the same");
+        assert_eq!(&words(&lines[2])[5..10], ["▌", "✓", "all", "2", "▐"], "all is ticked, and has no ✗ box");
+        assert_eq!(cell(&lines[2], "all"), cell(&lines[3], "anthropic"), "the names line up all the same");
         assert_eq!(&words(&lines[3])[5..10], ["│", "☐", "·", "anthropic", "1"]);
         let ex = dev as u16 + 4;
         assert_eq!((buf[(ex, 3)].symbol(), buf[(ex, 3)].fg), ("·", MUTED), "grey until left out");
@@ -4662,12 +4662,12 @@ mod tests {
         let area = Rect::new(0, 0, 172, 12);
         assert_eq!(hit(&a, area, click), Some(Mouse::Exclude(1)), "a click on the ✗ box leaves the entry out");
         assert_eq!(hit(&a, area, MouseEvent { column: ex - 1, ..click }), Some(Mouse::Item(1)), "elsewhere picks it");
-        assert_eq!(hit(&a, area, MouseEvent { row: 5, ..click }), Some(Mouse::Item(0)), "any has no ✗: picked too");
+        assert_eq!(hit(&a, area, MouseEvent { row: 5, ..click }), Some(Mouse::Item(0)), "all has no ✗: picked too");
         a.mouse(Mouse::Exclude(1));
         let (out, _) = render(&mut a, 170, 8);
         assert_eq!((out[(ex, 3)].symbol(), out[(ex, 3)].fg), ("✗", BAD), "red when left out");
         a.mouse(Mouse::Exclude(1));
-        assert_eq!(buf[(dev as u16 + 2, 2)].bg, CURSOR, "any is under the cursor");
+        assert_eq!(buf[(dev as u16 + 2, 2)].bg, CURSOR, "all is under the cursor");
         assert_eq!((buf[(dev as u16 + 2, 2)].fg, buf[(dev as u16 + 2, 3)].fg), (MARK, MUTED), "off, the mark is grey");
         assert_eq!(buf[(dev as u16 + 6, 3)].fg, dev_color("anthropic"), "the name keeps its colour");
         // Where grey shows, off is the mark's own glyph, as on a row of the table.
@@ -4981,7 +4981,7 @@ mod tests {
         assert_eq!(hit(&a, area, alt), Some(Mouse::Cols(-1)), "as alt+wheel does, where shift is the terminal's");
         a.mouse(Mouse::Menu(1));
         let (_, lines) = render(&mut a, w - 2, h - 4);
-        let any = lines[2][..lines[2].find("any").unwrap()].chars().count() as u16 + 1;
+        let any = lines[2][..lines[2].find("all").unwrap()].chars().count() as u16 + 1;
         assert_eq!(hit(&a, area, click(any, 3)), Some(Mouse::Item(0)));
         assert_eq!(hit(&a, area, click(any, 4)), Some(Mouse::Item(1)));
         assert_eq!(hit(&a, area, click(any, 5)), Some(Mouse::Item(2)));
