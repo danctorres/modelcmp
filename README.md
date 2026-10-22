@@ -78,7 +78,7 @@ modelcmp fav coding sonnet-5 --tier mid    # set your favorite for coding's mid 
 modelcmp get gemma-3-4b-it                 # download a model and run it on your machine
 ```
 
-In the TUI, `R` recommends, `p` picks a tier's model there, `space` selects models, `C` compares
+In the TUI, `R` recommends, `d` picks a tier's model there, `space` selects models, `C` compares
 them, `f` sets your favorite for a task's tiers and `/` filters. `enter` shows everything about a
 model, `o` opens its page on a site like OpenRouter and `t` changes the theme. `x` opens a harness
 on the model, or downloads a local model and runs it with ollama or llama.cpp, installing the

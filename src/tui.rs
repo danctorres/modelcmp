@@ -1060,6 +1060,8 @@ const GAP: u16 = 2;
 const NAME_MIN: u16 = 16;
 /// Between two groups of hints in the status bar, drawn muted.
 const SEP: &str = "│";
+/// The cursor's box in recommend ends with it, two cells wide: `d` opens its dropdown.
+const MENU: &str = " ▾";
 /// The actions on one model, in the one order every view shows them in.
 const ACTIONS: [&str; 8] =
     ["enter details", "x launch", "o open", "y copy name", "space select", "f fav", "e exclude", "i note"];
@@ -1160,14 +1162,14 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         View::Recommend if app.current().is_none() => {
             // A tier with no model has nothing for enter either.
             let enter = match (app.task_sel, app.custom_at()) {
-                (1.., _) => vec!["p pick"],
+                (1.., _) => vec!["d dropdown"],
                 (_, Some(_)) => vec!["enter your model"],
                 _ => vec!["enter best models first"],
             };
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), cap, BACK.to_vec()]
         }
         View::Recommend => {
-            let view = [&["p pick"], &search[..]].concat();
+            let view = [&["d dropdown"], &search[..]].concat();
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], view, actions("enter x o y space f e i"), cap, BACK.to_vec()]
         }
     };
@@ -3380,10 +3382,11 @@ fn recommend(
             _ => t.0.to_string(),
         })
         .collect();
+    // Room for the cursor's ▾ in every box, so none widens as the cursor moves.
     let need: Vec<usize> = (0..TIERS.len())
         .map(|c| {
             grid.iter()
-                .map(|r| r[c].iter().map(Span::width).sum())
+                .map(|r| r[c].iter().map(Span::width).sum::<usize>() + 2)
                 .fold(Span::raw(heads[c].as_str()).width(), usize::max)
         })
         .collect();
@@ -3448,9 +3451,14 @@ fn recommend(
             let r = model(c).map_or(vec![], |(m, _)| found(&m.name, &app.overlay_query));
             r.into_iter().map(|r| r.start + star..r.end + star).collect::<Vec<_>>()
         };
+        // The cursor's box ends with a ▾, as a header with a dropdown does: `d` lists its models.
+        let menu = cur.filter(|&(t, sel)| t == i && sel > 0).map(|(_, sel)| one.unwrap_or(sel - 1));
         let row: Vec<_> = (row.into_iter().zip(&room).enumerate())
-            .map(|(c, (cell, &r))| {
+            .map(|(c, (mut cell, &r))| {
                 let hits = hits(c, &cell);
+                if menu == Some(c) {
+                    cell.push(Span::raw(MENU));
+                }
                 wrap_spans(cell, r, &hits)
             })
             .collect();
@@ -3462,6 +3470,15 @@ fn recommend(
             let (x, room) = (w + 2 + room[..c].iter().map(|r| r + 2).sum::<usize>(), room[c]);
             if one.is_none_or(|at| at == c) {
                 let stop = if one.is_some() { 1 } else { c + 1 };
+                // A click on the ▾ opens its dropdown, ahead of the box's own spot.
+                let mark = cell.iter().enumerate().find_map(|(k, line)| {
+                    let at = line.iter().position(|s| s.content.contains('▾'))?;
+                    let before: usize = line[..at].iter().map(Span::width).sum();
+                    Some((k, x + 1 + before + Span::raw(line[at].content.trim_end_matches('▾')).width()))
+                });
+                if let Some((k, at)) = mark.filter(|_| menu == Some(c)) {
+                    spots.push(Spot { lines: y + k..y + k + 1, x: at..at + 1, at: Stop::Menu(i, stop) });
+                }
                 spots.push(Spot { lines: y..y + h, x: x..x + room + 2, at: Stop::Recommend(i, stop) });
             }
             let on = |(row, sel): (usize, usize)| row == i && one.map_or(sel == c + 1, |at| at == c && sel > 0);
@@ -6145,14 +6162,20 @@ mod tests {
         assert_eq!(narrow[1].to_string(), "       (filtered)", "it wraps where the tabs fill the line");
         // On a tier, the cursor is on its box, as wide as its widest entry, and not on the name.
         (b.among, b.query) = (None, String::new());
-        let all = recommend(&b, 200, &mut vec![]).0;
+        let mut spots = vec![];
+        let all = recommend(&b, 200, &mut spots).0;
         let bars: Vec<&str> = all
             .iter()
             .flat_map(|l| l.spans.iter())
             .filter(|s| s.style.bg == Some(CURSOR))
             .map(|s| &*s.content)
             .collect();
-        assert_eq!(bars.concat(), "▌opus $5.0 (150)▐", "mid of overall");
+        assert_eq!(bars.concat(), "▌opus $5.0 (150) ▾▐", "mid of overall, with its dropdown's ▾");
+        // A click on the ▾ opens the dropdown, the box's other cells move the cursor to it.
+        let menu = spots.iter().find(|p| matches!(p.at, Stop::Menu(..))).expect("a spot on the ▾");
+        let line = all[menu.lines.start].to_string();
+        assert_eq!(line.chars().nth(menu.x.start), Some('▾'), "{line}");
+        assert_eq!(spots.iter().filter(|p| matches!(p.at, Stop::Menu(..))).count(), 1, "the cursor's box alone");
         let row = all.iter().map(ToString::to_string).find(|l| l.starts_with(" overall")).unwrap();
         let picks: Vec<&str> = row.split_whitespace().filter(|w| w.ends_with(['s', 'h'])).collect();
         assert_eq!(picks, ["flash", "▌opus", "opus"], "what each tier picks: low, mid and high");

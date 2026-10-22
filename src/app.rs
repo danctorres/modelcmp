@@ -530,7 +530,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("N", "previous match found in a panel, `↑` while typing"),
             (">", "minimum for the column, e.g. `>` 60 `enter`"),
             ("<", "maximum for the column, in recommend a tier's price cap"),
-            ("d", "dropdown on a header with ▾, `space` `enter` toggle, `e` leave out, `v` a range"),
+            ("d", "dropdown on a ▾, a header's or a tier's model in recommend, `space` `enter` toggle"),
             ("|", "columns to show, `space` `enter` toggle"),
             ("a", "all models, including ones you have no access to"),
             ("m", "mine only"),
@@ -548,7 +548,6 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("space", "select the model, `C` compares the selected"),
             ("f", "favorite the model for a task's tier, or a task you name"),
             ("f: r a", "rename a task you named, write what it is about"),
-            ("p", "in recommend, pick the model of a task's tier"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
             ("D", "unfavorite every model, asks first"),
@@ -777,7 +776,7 @@ pub enum Kind {
     Harness,
     /// `|`: the columns the table shows; space or enter ticks one and the list stays open.
     Cols,
-    /// `p` on a tier in recommend: the model it picks, your favorite there or the recommended one.
+    /// `d` on a tier in recommend: the model it picks, your favorite there or the recommended one.
     Pick,
 }
 
@@ -1122,7 +1121,7 @@ pub enum Effect {
     Harness(Option<&'static str>),
     /// The column at this cursor index; the `|` chooser's items, applied by `App` itself.
     Col(usize),
-    /// The slot's favorite, or none for the model recommended there; the `p` chooser's items,
+    /// The slot's favorite, or none for the model recommended there; the `d` list's items,
     /// applied by `App` itself.
     Pick(String, Option<String>),
     /// The source was switched, by the key that came or did not work, and its data must be loaded.
@@ -1207,6 +1206,8 @@ pub enum Stop {
     Among(usize),
     /// The header of tier `i` in recommend, `low` or `mid`: a click writes its price cap.
     Cap(usize),
+    /// The ▾ on stop `i` of task `t` in recommend, as `Recommend`: a click opens its dropdown.
+    Menu(usize, usize),
     /// Row `i` of `HELP` in `?`.
     Help(usize),
 }
@@ -3709,6 +3710,11 @@ impl App {
                     self.edit_cap(c);
                     return None;
                 }
+                (Stop::Menu(t, i), View::Recommend) => {
+                    (self.task_cur, self.task_sel, self.among, self.caps) = (t, i, None, false);
+                    self.ask_pick();
+                    return None;
+                }
                 (Stop::Help(i), View::Help) => self.help_sel = i,
                 _ => return None,
             }
@@ -3872,7 +3878,7 @@ impl App {
         }
     }
 
-    /// `p` on a tier in recommend: the models it can take, to make one its favorite, best first
+    /// `d` on a tier in recommend, its ▾: the models it can take, to make one its favorite, best first
     /// and the pick with none ahead of them, the cursor on the one it has. They are the ones
     /// recommend ranks at the tier's price or under, scored or not, as a new model may not be yet,
     /// and the favorite it has whatever the filters and the cap, as the grid keeps it.
@@ -3880,7 +3886,7 @@ impl App {
         let tier = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps);
         let own = self.custom_at();
         let (Some(c), Some(task)) = (tier, self.cur_task().map(|t| t.name).or(own)) else {
-            return self.refuse(format!("{} picks the model of a tier, on one of its boxes", self.key_of('p')));
+            return self.refuse(format!("{} opens the dropdown of a tier's model, on its box", self.key_of('d')));
         };
         // A task of one pick shows the favorite of any tier, else high's.
         let c = match self.current().map(|m| m.key.as_str()) {
@@ -3978,7 +3984,7 @@ impl App {
                 self.ask_cap();
                 return None;
             }
-            (KeyCode::Char('p'), _) if self.view == View::Recommend => {
+            (KeyCode::Char('d'), _) if self.view == View::Recommend => {
                 self.ask_pick();
                 return None;
             }
@@ -7330,13 +7336,13 @@ mod tests {
     }
 
     #[test]
-    fn p_in_recommend_picks_a_tiers_model() {
+    fn d_in_recommend_picks_a_tiers_model() {
         let mut a = app();
-        press(&mut a, "Rjjjp");
+        press(&mut a, "Rjjjd");
         assert!(a.failed && a.input == Input::None, "on a task's name: no tier");
         press(&mut a, "$");
         let was = a.current().map(|m| m.key.clone());
-        press(&mut a, "p");
+        press(&mut a, "d");
         let Input::Choose { kind: Kind::Pick, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
         let Effect::Pick(slot, None) = &items[0].1 else { panic!("{items:?}") };
         let slot = slot.clone();
@@ -7349,7 +7355,7 @@ mod tests {
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!((&a.input, a.store.favorite(&slot)), (&Input::None, Some(key.as_str())));
         assert_eq!(a.current().map(|m| &m.key), Some(&key), "the box has it");
-        press(&mut a, "p");
+        press(&mut a, "d");
         let Input::Choose { items, list, .. } = &a.input else { panic!() };
         assert_eq!(list.sel, items.len() - 1, "on the favorite");
         assert!(items[list.sel].0.starts_with('★'));
@@ -7360,17 +7366,19 @@ mod tests {
             (None, was),
             "back to the recommended"
         );
+        a.mouse(Mouse::Model(Stop::Menu(a.task_cur, 1)));
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Pick, .. }) && a.task_sel == 1, "a click on free's ▾");
     }
 
     #[test]
-    fn p_keeps_a_favorite_over_the_cap() {
+    fn d_keeps_a_favorite_over_the_cap() {
         let mut a = app();
-        // A cap lowered after it: the grid keeps it, so p lists it, on it, and enter keeps it.
+        // A cap lowered after it: the grid keeps it, so d lists it, on it, and enter keeps it.
         a.store.set_favorite("coding:mid", "gpt55", Some("codex"));
         a.rebuild_in_place();
         press(&mut a, "Rjj");
         (a.task_cur, a.task_sel) = (TASKS.iter().position(|t| t.name == "coding").unwrap(), 3);
-        press(&mut a, "p");
+        press(&mut a, "d");
         let Input::Choose { kind: Kind::Pick, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
         assert!(
             matches!(&items[list.sel].1, Effect::Pick(s, Some(k)) if s == "coding:mid" && k == "gpt55"),
