@@ -2818,7 +2818,7 @@ fn fav_name_w(items: &[(String, Effect)]) -> usize {
 }
 
 /// `f`'s grid: the tiers' heading, a row per task with a box for each tier,
-/// `✓` where the model is the favorite, `●` where another is, `☐` where none and `$` on a tier
+/// `✓` where the model is the favorite, `●` where another is, `☐` where none and `×` on a tier
 /// it is dearer than, which cannot take it (`view::over_cap`), bold where it is the favorite
 /// all the same, a cap lowered after it, the entry that
 /// names a new task, what the box under the cursor holds, and the keys. Read from the store at
@@ -2859,10 +2859,10 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
             let mark = match (app.store.favorite(&slot), &over) {
                 // Its own glyph, not a grey ✓, so it reads without colours too. A favorite a
                 // later cap left there is bold, as a ✓ is, the cursor stopping on it so space
-                // clears it. Over the cap, another model's favorite there is a `$` too: h l skip it.
-                (Some(k), Some(_)) if k == key => Span::styled("$", fg(MARK).add_modifier(BOLD)),
+                // clears it. Over the cap, another model's favorite there is a `×` too: h l skip it.
+                (Some(k), Some(_)) if k == key => Span::styled("×", fg(MARK).add_modifier(BOLD)),
                 (Some(k), _) if k == key => Span::styled("✓", fg(MARK).add_modifier(BOLD)),
-                (_, Some(_)) => Span::styled("$", fg(MUTED)),
+                (_, Some(_)) => Span::styled("×", fg(MUTED)),
                 (Some(_), None) => Span::styled("●", fg(MUTED)),
                 (None, None) => Span::styled("☐", fg(color)),
             };
