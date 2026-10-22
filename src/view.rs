@@ -750,8 +750,12 @@ pub const CUSTOM_WHEN: &str = "work that fits it, even when a built-in task fits
 pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
     let flag = if favorite { "★ " } else { "" };
-    let s = if s.is_nan() { "-".into() } else { format!("{s:.0}") };
-    format!("{flag}{}{key} {} ({s})", m.name, price(m))
+    format!("{flag}{}{key} {} {}", m.name, price(m), scored(s))
+}
+
+/// A score on a task as recommend shows it, `(48)`, or `(-)` for a model with none.
+pub fn scored(s: f64) -> String {
+    format!("({})", score(Some(s).filter(|s| !s.is_nan())))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {

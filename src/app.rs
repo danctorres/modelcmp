@@ -3913,20 +3913,35 @@ impl App {
                 .then_with(|| view::by_value(a.0.cost(), b.0.cost(), false))
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
+        // A line's name, then its price and score, apart to line them up as recommend's boxes do.
+        let parts = |m: &Model, s: f64| (view::price(m), view::scored(s));
         // What the tier picks with no favorite, as the grid does; a task of your own has nothing to pick.
-        let first = match t {
-            Some(t) => {
-                let pick = self.recommended(t, x).0;
-                format!("recommended: {}", pick.map_or("none".into(), |(m, s)| view::priced(m, s, false, false)))
-            }
-            None => "none".to_string(),
+        let first = match t.map(|t| self.recommended(t, x).0) {
+            Some(Some((m, s))) => (format!("recommended: {}", m.name), Some(parts(m, s))),
+            Some(None) => ("recommended: none".to_string(), None),
+            None => ("none".to_string(), None),
         };
-        let entry = |&(m, s): &(&Model, Option<f64>)| {
-            let label = view::priced(m, s.unwrap_or(f64::NAN), false, fav == Some(m.key.as_str()));
-            (label, Effect::Pick(slot.clone(), Some(m.key.clone())))
+        let lines: Vec<_> = std::iter::once((first, None))
+            .chain(ms.iter().map(|&(m, s)| {
+                let star = if fav == Some(m.key.as_str()) { "★ " } else { "" };
+                ((format!("{star}{}", m.name), Some(parts(m, s.unwrap_or(f64::NAN)))), Some(m.key.clone()))
+            }))
+            .collect();
+        // ponytail: padded by chars, as names are ASCII but for the ★, a wide char would shift its line.
+        let most = |f: fn(&str, &(String, String)) -> usize| {
+            lines.iter().filter_map(|((n, p), _)| Some(f(n, p.as_ref()?))).max().unwrap_or(0)
         };
-        let items: Vec<_> =
-            std::iter::once((first, Effect::Pick(slot.clone(), None))).chain(ms.iter().map(entry)).collect();
+        let (named, price, score) =
+            (most(|n, _| n.chars().count()), most(|_, p| p.0.chars().count()), most(|_, p| p.1.chars().count()));
+        let items: Vec<_> = (lines.into_iter())
+            .map(|((name, p), key)| {
+                let label = match p {
+                    Some((c, s)) => format!("{name:<named$} {c:>price$} {s:>score$}"),
+                    None => name,
+                };
+                (label, Effect::Pick(slot.clone(), key))
+            })
+            .collect();
         let sel = ms.iter().position(|e| fav == Some(e.0.key.as_str())).map_or(0, |i| i + 1);
         self.input = Input::choose("which model for this tier?", Kind::Pick, items, sel);
     }
@@ -7347,6 +7362,8 @@ mod tests {
         let Effect::Pick(slot, None) = &items[0].1 else { panic!("{items:?}") };
         let slot = slot.clone();
         assert!(slot.ends_with(":high") && items[0].0.starts_with("recommended: "), "{items:?}");
+        let widths: Vec<_> = items.iter().map(|i| i.0.chars().count()).collect();
+        assert!(widths.iter().all(|&w| w == widths[0]), "prices and scores line up: {items:?}");
         assert_eq!(list.sel, 0, "no favorite yet: on the recommended one");
         let Effect::Pick(_, Some(key)) = &items.last().unwrap().1 else { panic!() };
         let key = key.clone();

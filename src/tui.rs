@@ -3637,7 +3637,7 @@ fn entry(
         _ if local => LEVEL[0],
         q => q.filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]),
     };
-    let score = if s.is_nan() { "(-)".into() } else { format!("({s:.0})") };
+    let score = crate::view::scored(s);
     let (cost, score) = match built_in {
         Some(_) if local => {
             let at = app.size(m).filter(|_| !m.here()).map_or("here".into(), |b| format!("↓ {}", crate::data::gb(b)));
