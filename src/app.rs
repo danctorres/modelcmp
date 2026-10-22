@@ -3910,8 +3910,7 @@ impl App {
         // What the tier picks with no favorite, as the grid does; a task of your own has nothing to pick.
         let first = match t {
             Some(t) => {
-                let pick = view::merit_pick(&self.task_frontier(t), &self.off(t), self.store.tier_cap(x));
-                let pick = view::local_over(pick, self.local_best(t));
+                let pick = self.recommended(t, x).0;
                 format!("recommended: {}", pick.map_or("none".into(), |(m, s)| view::priced(m, s, false, false)))
             }
             None => "none".to_string(),
@@ -3924,6 +3923,14 @@ impl App {
             std::iter::once((first, Effect::Pick(slot.clone(), None))).chain(ms.iter().map(entry)).collect();
         let sel = ms.iter().position(|e| fav == Some(e.0.key.as_str())).map_or(0, |i| i + 1);
         self.input = Input::choose("which model for this tier?", Kind::Pick, items, sel);
+    }
+
+    /// What `tier` of `t` picks with no favorite, as the grid would, and whether the best model
+    /// your machine runs took it.
+    pub fn recommended(&self, t: &Task, tier: &str) -> (Option<(&Model, f64)>, bool) {
+        let pick = view::merit_pick(&self.task_frontier(t), &self.off(t), self.store.tier_cap(tier));
+        let best = view::local_over(pick, self.local_best(t));
+        (best, best.map(|e| &e.0.key) != pick.map(|e| &e.0.key))
     }
 
     /// Tier `c`'s cap written on its header, from the one it has.

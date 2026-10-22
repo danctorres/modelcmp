@@ -3494,13 +3494,22 @@ fn recommend(
             let one = app.one_pick(i);
             let (tier, c) = if one { ("pick", LAST) } else { (TIERS[c].0, c) };
             // Wrapped to the panel as the boxes are, so the name and what it says are whole.
-            let head = Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED));
-            let indent = head.width();
-            let lines =
-                wrap_spans(entry(app, t.0, c, picks[i][c], took[i][c], false, one), text.saturating_sub(indent), &[]);
-            for (k, piece) in lines.into_iter().enumerate() {
-                let lead = if k == 0 { head.clone() } else { Span::raw(" ".repeat(indent)) };
-                under.push(Line::from([vec![lead], piece].concat()));
+            let mut put = |label: &str, spans| {
+                let head = Span::styled(format!("  {:<w$}", format!("{label}:"), w = "recommended: ".len()), fg(MUTED));
+                let indent = head.width();
+                for (k, piece) in wrap_spans(spans, text.saturating_sub(indent), &[]).into_iter().enumerate() {
+                    let lead = if k == 0 { head.clone() } else { Span::raw(" ".repeat(indent)) };
+                    under.push(Line::from([vec![lead], piece].concat()));
+                }
+            };
+            put(tier, entry(app, t.0, c, picks[i][c], took[i][c], false, one));
+            // A favorite in place of the tier's own pick, with what it would recommend.
+            let fav = picks[i][c].filter(|(m, _)| crate::view::fav_pick(&app.store, t.0, TIERS[c].0, m, one));
+            if let (Some((f, _)), Some(task)) = (fav, TASKS.get(i)) {
+                let (rec, local) = app.recommended(task, TIERS[c].0);
+                if let Some((m, s)) = rec.filter(|(m, _)| m.key != f.key) {
+                    put("recommended", entry(app, t.0, c, Some((m, s)), local, false, one));
+                }
             }
         }
     }
@@ -3519,8 +3528,8 @@ fn recommend(
         };
         under.push(Line::from(vec![Span::styled(format!("{}: ", TIERS[c].0), fg(MUTED)), Span::raw(what)]));
     }
-    // Three lines whatever the cursor is on, so the box keeps its height as it moves.
-    under.resize(under.len().max(3), Line::default());
+    // Four lines whatever the cursor is on, so the box keeps its height as it moves.
+    under.resize(under.len().max(4), Line::default());
     v.extend(under);
     let pin = pin..v.len();
     // The header being written stays in view with the cursor's row.
@@ -5124,6 +5133,15 @@ mod tests {
         assert_eq!(spans[star + 1].content, "flash");
         assert_eq!(spans[star + 1].style.fg, Some(MUTED));
         assert_eq!(spans[star + 3].content, " not recommended");
+        // And the line after it names the model the tier would recommend.
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let at = text.iter().position(|l| l.starts_with("  high:") && l.contains("flash")).unwrap();
+        assert!(text[at + 1].starts_with("  recommended: opus"), "{text:?}");
+        // With the recommended one the favorite, no such line.
+        a.store.toggle_favorite("coding:high", "opus");
+        a.rebuild();
+        let text: Vec<String> = recommend(&a, 200, &mut vec![]).0.iter().map(|l| l.to_string()).collect();
+        assert!(!text.iter().any(|l| l.contains("recommended:")), "{text:?}");
     }
 
     #[test]
@@ -5413,7 +5431,7 @@ mod tests {
         assert!(first.contains("the best model for each task"), "{first}");
         // The lines under the grid, which say what the cursor is on, stay under the rows that scroll.
         let top = screen(&mut a, "jj2l");
-        assert!(top.contains("overall") && top.contains("  low:     no data"), "{top}");
+        assert!(top.contains("overall") && top.contains("  low:         no data"), "{top}");
         let last = screen(&mut a, "G");
         assert!(
             last.contains("value") && last.contains("  use for: routine coding") && !last.contains("among:"),
@@ -6120,7 +6138,10 @@ mod tests {
         let under = text.iter().find(|l| l.starts_with("  pick:")).unwrap();
         assert!(under.contains(&b.current().unwrap().name), "{under}");
         (b.task_cur, b.task_sel) = was;
-        assert!(all.iter().any(|l| l.to_string() == "  mid:     opus $5.0 (150)"), "under the grid, the box's model");
+        assert!(
+            all.iter().any(|l| l.to_string() == "  mid:         opus $5.0 (150)"),
+            "under the grid, the box's model"
+        );
         // An entry wider than its box wraps between the name and its price, else between words, and a word
         // wider than it where it ends: nothing is cut.
         let text = |l: &Vec<Span>| l.iter().map(|s| &*s.content).collect::<String>();
@@ -6159,7 +6180,7 @@ mod tests {
         // In a narrow panel the line under the grid wraps too, its name and what it says whole.
         let under: Vec<String> = recommend(&b, 30, &mut vec![]).0.iter().map(ToString::to_string).collect();
         let at = under.iter().position(|l| l.starts_with("  mid:")).unwrap();
-        assert_eq!(under[at..at + 2], ["  mid:     opus $5.0 (150)", "           not available"], "{under:#?}");
+        assert_eq!(under[at..at + 2], ["  mid:         opus $5.0 (150)", "               not available"], "{under:#?}");
         assert!(under[at..].iter().all(|l| Span::raw(l.as_str()).width() <= 30), "{under:#?}");
         // A search underlines in the name, and it wraps where it did.
         let long = || vec![Span::raw("Claude Opus 4.5"), Span::raw(" $5")];
