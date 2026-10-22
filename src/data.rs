@@ -1466,7 +1466,9 @@ fn listing(bin: &str, args: &[&str], stop: &AtomicBool) -> Option<String> {
     let cmd: Vec<String> = std::iter::once(bin).chain(args.iter().copied()).map(String::from).collect();
     let argv = wsl_session(&cmd, None).unwrap_or(cmd);
     let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
-    run(&argv[0], &args, Duration::from_secs(30), stop)
+    // opencode can take longer than the others to list its models.
+    let secs = if bin == "opencode" { 60 } else { 30 };
+    run(&argv[0], &args, Duration::from_secs(secs), stop)
 }
 
 /// What a harness answered: its ids, or none when its listing failed, hung or was cut short.
@@ -2153,7 +2155,7 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
                 let w = d.said();
                 return Ok((d, w));
             }
-            // A refresh can take half a minute, which with nothing said looks like a hang.
+            // A refresh can take up to a minute, which with nothing said looks like a hang.
             eprintln!("downloading model data, cached for 24h...");
             match refresh(&Steps::default(), None::<fn(Data)>) {
                 Ok(mut d) => {
