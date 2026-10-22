@@ -548,6 +548,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("space", "select the model, `C` compares the selected"),
             ("f", "favorite the model for a task's tier, or a task you name"),
             ("f: r a", "rename a task you named, write what it is about"),
+            ("R: D", "delete a task you named, asks first"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
             ("D", "unfavorite every model, asks first"),
@@ -742,6 +743,8 @@ pub enum Input {
     Unfavorite,
     /// `X` asks before unexcluding every model.
     Unexclude,
+    /// `D` on a task of your own in recommend asks before deleting it.
+    DeleteTask(String),
     /// `enter` on `↺` in `?` asks before putting every key back.
     Reset,
     /// Enter on a key in `?` waits for its new key, pressed on its row; `wrong` once one that
@@ -2977,7 +2980,7 @@ impl App {
             }
             What::About(task) => {
                 if e.text.trim().is_empty() {
-                    e.err = Some("a task with no model needs what it is about".into());
+                    e.err = Some("describe it to add it".into());
                     return None;
                 }
                 let task = task.clone();
@@ -2985,7 +2988,7 @@ impl App {
                 self.input = Input::None;
                 self.back_on(Some(task.clone()));
                 self.task_sel = 0;
-                self.report(Ok(format!("{task}: {}, d on a tier gives it a model", self.store.about(&task)?)));
+                self.report(Ok(format!("added {task}, d on a tier picks its model")));
                 Some(Effect::Save)
             }
             _ => None,
@@ -3432,7 +3435,13 @@ impl App {
     fn keys_run(&self) -> bool {
         matches!(
             self.input,
-            Input::None | Input::Quit | Input::Upgrade | Input::Unfavorite | Input::Unexclude | Input::Reset
+            Input::None
+                | Input::Quit
+                | Input::Upgrade
+                | Input::Unfavorite
+                | Input::Unexclude
+                | Input::Reset
+                | Input::DeleteTask(_)
         ) || self.open_list().is_some_and(List::idle)
     }
 
@@ -4258,13 +4267,19 @@ impl App {
             KeyCode::Enter if self.view == View::Recommend && self.among.is_none() && self.on_new_task() => {
                 self.input = Input::Task(Edit::new(What::New, String::new()));
             }
+            KeyCode::Char('D') if self.view == View::Recommend => {
+                match self.custom_at().filter(|_| self.among.is_none() && !self.caps && self.task_sel == 0) {
+                    Some(task) => self.input = Input::DeleteTask(task.to_string()),
+                    None => self.refuse("D on the name of a task of your own deletes it"),
+                }
+            }
             // Enter on a task's name is below; on a tier with no model it has none to show either.
             KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | ' ') | KeyCode::Enter
                 if self.view == View::Recommend && !row && (code != KeyCode::Enter || self.task_sel > 0) =>
             {
                 self.refuse(match (self.among, self.task_sel) {
                     (Some(_), _) => "no model under the cursor: j picks a task",
-                    _ if self.on_new_task() => "no model under the cursor: enter names a new task",
+                    _ if self.on_new_task() => "no model under the cursor: enter adds a task",
                     (_, 0) => "no model under the cursor: l picks a tier",
                     _ => "this tier has no model",
                 });
@@ -4957,6 +4972,17 @@ impl App {
                 if code == KeyCode::Enter {
                     self.store.keys.clear();
                     self.status = "every key is back to its default".into();
+                    return Some(Effect::Save);
+                }
+            }
+            Input::DeleteTask(task) => {
+                let task = task.clone();
+                self.input = Input::None;
+                if code == KeyCode::Char('D') {
+                    self.store.delete_task(&task);
+                    self.rebuild_in_place();
+                    self.task_sel = 0;
+                    self.status = format!("deleted {task}");
                     return Some(Effect::Save);
                 }
             }
@@ -5689,6 +5715,15 @@ mod tests {
         a.paste("x");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.input == Input::None, a.store.custom_tasks()), (true, vec!["bug-hunt"]));
+        // D on it asks, then deletes it. On a built-in task it says it can't.
+        press(&mut a, "GklD");
+        assert!(a.failed && a.input == Input::None, "D on a tier deletes nothing");
+        press(&mut a, "0D");
+        assert_eq!(a.input, Input::DeleteTask("bug-hunt".into()));
+        assert_eq!(press(&mut a, "D"), Some(Effect::Save));
+        assert!(a.store.custom_tasks().is_empty() && a.store.about("bug-hunt").is_none());
+        press(&mut a, "ggjjD");
+        assert!(a.failed && a.input == Input::None);
     }
 
     fn press(app: &mut App, keys: &str) -> Option<Effect> {

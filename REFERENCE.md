@@ -226,6 +226,7 @@ stored as `tool-dispatch`).
   your `debugging` over `coding`.
 - `--about` alone makes one with no model yet, and recommend's `+ new task` in the TUI too. Agents see it only once it has a model.
 - It is gone when its last model and what it is about are cleared.
+- `fav <task> --rm` and then `fav <task> --about ""` delete it, as `D` on its name in recommend does.
 - `--rename` gives it another name, one no task has yet.
 
 ### Sorting and bounds

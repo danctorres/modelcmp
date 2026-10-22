@@ -445,6 +445,12 @@ impl Store {
         v
     }
 
+    /// Delete a task of your own: its models, their harnesses and what it is about.
+    pub fn delete_task(&mut self, task: &str) {
+        task_slots(task).for_each(|s| _ = self.clear_favorite(&s));
+        self.about.remove(task);
+    }
+
     /// Give a task of your own another name, which no task has yet; its models stay.
     pub fn rename_task(&mut self, old: &str, new: &str) -> Result<(), String> {
         if !self.custom_tasks().contains(&old) {

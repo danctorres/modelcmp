@@ -1171,7 +1171,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             // A tier with no model has nothing for enter either.
             let enter = match (app.task_sel, app.custom_at()) {
                 (1.., _) => vec!["d dropdown"],
-                (_, Some(_)) => vec!["enter your model"],
+                (_, Some(_)) => vec!["enter your model", "D delete"],
                 _ => vec!["enter best models first"],
             };
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), cap, BACK.to_vec()]
@@ -1791,6 +1791,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         Input::Quit => Some((key('q'), "quit?".to_string())),
         Input::Upgrade => app.data.update().map(|new| (key('U'), format!("upgrade to v{new}?"))),
         Input::Unfavorite => Some((key('D'), "unfavorite every model?".to_string())),
+        Input::DeleteTask(ref t) => Some((key('D'), format!("delete {t}?"))),
         Input::Reset => Some(("enter".to_string(), "put every key back to its default?".to_string())),
         Input::Unexclude => Some((
             key('X'),
@@ -2540,6 +2541,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Upgrade, _) => ("UPGRADE", Color::Yellow),
         (Input::Unfavorite, _) => ("UNFAVORITE", Color::Red),
         (Input::Unexclude, _) => ("UNEXCLUDE", Color::Red),
+        (Input::DeleteTask(_), _) => ("DELETE", Color::Red),
         (Input::Reset, _) => ("RESET", Color::Red),
         (Input::Bind { .. }, _) => ("BIND", Color::Blue),
         (Input::Choose { kind, .. }, _) => {
@@ -2579,6 +2581,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             | Input::Unfavorite
             | Input::Unexclude
             | Input::Reset
+            | Input::DeleteTask(_)
             | Input::Choose { list: List { typing: false, .. }, .. }
     ) || boxed
     {
@@ -2617,6 +2620,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         | Input::Unfavorite
         | Input::Unexclude
         | Input::Reset
+        | Input::DeleteTask(_)
         | Input::Bind { .. }
         // Written on its header or its row (`recommend`).
         | Input::Cap { .. }
@@ -2801,7 +2805,7 @@ fn via_spans(m: &Model, any: bool, get: bool, said: &str, out: &[String], style:
 fn edit_line(e: &Edit, color: Color, room: usize) -> Line<'static> {
     let prefix = edit_prefix(e);
     let empty = match e.what {
-        What::About(_) => "what it is about",
+        What::About(_) => "a description",
         What::Dir(..) => "a folder",
         What::New | What::Rename(_) => "its name",
     };
@@ -3559,9 +3563,9 @@ fn recommend(
     if cur.is_some_and(|c| c.0 == tasks.len()) {
         let what = match &app.input {
             Input::Task(Edit { what: What::About(_), err: Some(err), .. }) => err.clone(),
-            Input::Task(Edit { what: What::About(t), .. }) => format!("what {t} is about, agents choose it by that"),
-            Input::Task(_) => "its name, lowercase with - for spaces".into(),
-            _ => "enter names a task of your own, d on its tiers then gives it models".into(),
+            Input::Task(Edit { what: What::About(t), .. }) => format!("describe {t}, agents pick it by this"),
+            Input::Task(_) => "name it, then describe it".into(),
+            _ => "enter adds a task of your own".into(),
         };
         under.extend(wrapped(vec![Span::styled(format!("{NEW_TASK}: "), fg(MUTED))], words(&what), &space, text));
     }
@@ -6080,7 +6084,7 @@ mod tests {
         );
         assert_eq!(
             text(What::About("x".into()), "", Some("no")),
-            [" x  what it is about ".to_string(), format!("{:<wide$}", " no")]
+            [" x  a description ".to_string(), format!("{:<wide$}", " no")]
         );
         let new = Edit { what: What::New, text: String::new(), cur: 0, err: None };
         assert_eq!(edit_prefix(&new), " + ");
