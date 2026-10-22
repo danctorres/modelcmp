@@ -1060,7 +1060,7 @@ const GAP: u16 = 2;
 const NAME_MIN: u16 = 16;
 /// Between two groups of hints in the status bar, drawn muted.
 const SEP: &str = "│";
-/// The cursor's box in recommend ends with it, two cells wide: `d` opens its dropdown.
+/// Every box in recommend has it, two cells wide, muted but on the cursor's: `d` opens its dropdown.
 const MENU: &str = " ▾";
 /// The actions on one model, in the one order every view shows them in.
 const ACTIONS: [&str; 8] =
@@ -3368,7 +3368,7 @@ fn recommend(
             _ => t.0.to_string(),
         })
         .collect();
-    // Room for the cursor's ▾ in every box, so none widens as the cursor moves.
+    // Room for the ▾ every box has.
     let need: Vec<usize> = (0..TIERS.len())
         .map(|c| {
             grid.iter()
@@ -3437,15 +3437,31 @@ fn recommend(
             let r = model(c).map_or(vec![], |(m, _)| found(&m.name, &app.overlay_query));
             r.into_iter().map(|r| r.start + star..r.end + star).collect::<Vec<_>>()
         };
-        // The cursor's box ends with a ▾, as a header with a dropdown does: `d` lists its models.
+        // Each box has a ▾, as a header with a dropdown does: `d` lists its models. The
+        // cursor's is bright, the others muted.
         let menu = cur.filter(|&(t, sel)| t == i && sel > 0).map(|(_, sel)| one.unwrap_or(sel - 1));
         let row: Vec<_> = (row.into_iter().zip(&room).enumerate())
-            .map(|(c, (mut cell, &r))| {
+            .map(|(c, (cell, &r))| {
                 let hits = hits(c, &cell);
-                if menu == Some(c) {
-                    cell.push(Span::raw(MENU));
+                let mut lines = wrap_spans(cell.clone(), r, &hits);
+                if one.is_none_or(|at| at == c) {
+                    // On the last line with room for it, so the box takes no more lines, else the
+                    // box wrapped 2 narrower, unless that takes more lines than the ▾ alone on one.
+                    let mark = Span::styled(MENU, if menu == Some(c) { Style::new() } else { fg(MUTED) });
+                    let room = |l: &Vec<Span>| l.iter().map(Span::width).sum::<usize>() + 2 <= r;
+                    if !lines.iter().any(room) {
+                        let narrow = wrap_spans(cell, r.saturating_sub(2), &hits);
+                        if narrow.len() <= lines.len() + 1 {
+                            lines = narrow;
+                        } else {
+                            lines.push(vec![]);
+                        }
+                    }
+                    if let Some(line) = lines.iter_mut().rev().find(|l| room(l)) {
+                        line.push(mark);
+                    }
                 }
-                wrap_spans(cell, r, &hits)
+                lines
             })
             .collect();
         // As many lines as its longest box takes, the name on the first.
@@ -3462,7 +3478,7 @@ fn recommend(
                     let before: usize = line[..at].iter().map(Span::width).sum();
                     Some((k, x + 1 + before + Span::raw(line[at].content.trim_end_matches('▾')).width()))
                 });
-                if let Some((k, at)) = mark.filter(|_| menu == Some(c)) {
+                if let Some((k, at)) = mark {
                     spots.push(Spot { lines: y + k..y + k + 1, x: at..at + 1, at: Stop::Menu(i, stop) });
                 }
                 spots.push(Spot { lines: y..y + h, x: x..x + room + 2, at: Stop::Recommend(i, stop) });
@@ -6185,12 +6201,23 @@ mod tests {
         let menu = spots.iter().find(|p| matches!(p.at, Stop::Menu(..))).expect("a spot on the ▾");
         let line = all[menu.lines.start].to_string();
         assert_eq!(line.chars().nth(menu.x.start), Some('▾'), "{line}");
-        assert_eq!(spots.iter().filter(|p| matches!(p.at, Stop::Menu(..))).count(), 1, "the cursor's box alone");
+        let marks: Vec<&Span> = all.iter().flat_map(|l| l.spans.iter()).filter(|s| s.content.ends_with('▾')).collect();
+        let muted = marks.iter().filter(|s| s.style.fg == Some(MUTED)).count();
+        assert!(marks.len() > 1 && muted == marks.len() - 1, "every box's ▾, muted off the cursor: {marks:?}");
+        assert_eq!(spots.iter().filter(|p| matches!(p.at, Stop::Menu(..))).count(), marks.len(), "each ▾ clicks");
+        // Narrow, the ▾ goes on a line with room for it, so it adds none: overall stays 2 lines.
+        let text: Vec<String> = recommend(&b, 60, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        let at = text.iter().position(|l| l.starts_with(" overall")).unwrap();
+        assert!(text[at].contains("flash ▾") && text[at + 2].starts_with(" coding"), "{text:#?}");
         let row = all.iter().map(ToString::to_string).find(|l| l.starts_with(" overall")).unwrap();
         let picks: Vec<&str> = row.split_whitespace().filter(|w| w.ends_with(['s', 'h'])).collect();
         assert_eq!(picks, ["flash", "▌opus", "opus"], "what each tier picks: low, mid and high");
         let value = all.iter().map(ToString::to_string).find(|l| l.starts_with(" value")).unwrap();
-        assert_eq!(value.split_whitespace().collect::<Vec<_>>(), ["value", "-"], "a rank has one pick, not a tier's");
+        assert_eq!(
+            value.split_whitespace().collect::<Vec<_>>(),
+            ["value", "-", "▾"],
+            "a rank has one pick, not a tier's"
+        );
         // That pick is under the tier its price is, not under `free`.
         let mut data = std::mem::take(&mut b.data);
         for m in &mut data.models {
@@ -6286,7 +6313,8 @@ mod tests {
             OWN.iter().all(|c| !TASK.contains(c) && ![STAR, BAD].contains(c)),
             "and none has a built-in task's, nor the gold ★'s, nor the red ✗'s"
         );
-        let models = |row: &str| row.split("★ ").skip(1).map(|s| s.trim().to_string()).collect::<Vec<_>>();
+        let models =
+            |row: &str| row.split("★ ").skip(1).map(|s| s.trim_end_matches([' ', '▾']).to_string()).collect::<Vec<_>>();
         assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0"], "mid and high");
         assert_eq!(text[own + 3], "debugging finding and fixing a bug");
         assert_eq!(text[own + 4], format!("  use for: {CUSTOM_WHEN}"));
