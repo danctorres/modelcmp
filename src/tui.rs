@@ -17,7 +17,7 @@ use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, compare_rows, detail_rows, hits,
-    level, level_label, priced, short, truncate, verdict, via_names, via_text,
+    level, level_label, short, truncate, verdict, via_names, via_text,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::Show;
@@ -3350,7 +3350,7 @@ fn recommend(
             })
         })
         .collect();
-    let grid: Vec<Vec<_>> = (0..tasks.len())
+    let mut grid: Vec<Vec<_>> = (0..tasks.len())
         .map(|i| {
             let mut row: Vec<_> = cells(i).collect();
             if let Some(at) = ones[i] {
@@ -3361,6 +3361,9 @@ fn recommend(
             row
         })
         .collect();
+    for c in 0..TIERS.len() {
+        align(grid.iter_mut().map(|r| &mut r[c]));
+    }
     // The names' column, then a box per tier as wide as its widest entry, the widest boxes
     // narrowed alike to what `width` leaves, where an entry wraps to more lines, so no name is cut.
     // Each tier's name with its cap, `low ≤$2`, or the one being typed (`<`).
@@ -3617,20 +3620,22 @@ fn entry(
         _ if local => LEVEL[0],
         q => q.filter(|q| !(grey || q.1)).map_or(MUTED, |q| LEVEL[level(q.0.blended())]),
     };
-    let rest = match built_in {
+    let score = if s.is_nan() { "(-)".into() } else { format!("({s:.0})") };
+    let (cost, score) = match built_in {
         Some(_) if local => {
             let at = app.size(m).filter(|_| !m.here()).map_or("here".into(), |b| format!("↓ {}", crate::data::gb(b)));
-            format!(" free {at} ({s:.0})")
+            (format!(" free {at} "), score)
         }
-        Some(_) => priced(m, s, false, false)[m.name.len()..].to_string(),
-        None => format!(" {}", crate::view::price(m)),
+        Some(_) => (format!(" {} ", crate::view::price(m)), score),
+        None => (format!(" {}", crate::view::price(m)), String::new()),
     };
-    let mut spans = Vec::with_capacity(5);
+    let mut spans = Vec::with_capacity(6);
     if fav {
         spans.push(Span::styled("★ ", fg(task_color(task)).add_modifier(BOLD)));
     }
-    // The name and its price apart, for a box too narrow for both to wrap between them.
-    spans.extend([Span::styled(m.name.clone(), fg(price)), Span::styled(rest, fg(price))]);
+    // The name and its price apart, for a box too narrow for both to wrap between them, and the
+    // score apart from the price, so `align` lines both up in a tier's boxes.
+    spans.extend([m.name.clone(), cost, score].map(|t| Span::styled(t, fg(price))));
     if !boxed {
         if off {
             // Both read as a list: "not recommended, not available".
@@ -3640,6 +3645,25 @@ fn entry(
         spans.extend(out);
     }
     spans
+}
+
+/// The entries of a tier's boxes (`entry`) lined up: the names padded alike, the prices and the
+/// scores after them right-aligned, as numbers are in the table. A box with no model is left as it is.
+fn align<'a>(cells: impl Iterator<Item = &'a mut Vec<Span<'static>>>) {
+    // The name with its ★, the price and the score: the last two spans.
+    let parts = |cell: &[Span]| {
+        let n = cell.len().checked_sub(2).filter(|&n| n > 0)?;
+        let w = |s: &[Span]| s.iter().map(Span::width).sum::<usize>();
+        Some((n, w(&cell[..n]), Span::raw(cell[n].content.trim()).width(), cell[n + 1].width()))
+    };
+    let mut cells: Vec<_> = cells.filter_map(|c| Some((parts(c)?, c))).collect();
+    let most = |f: fn(&(usize, usize, usize, usize)) -> usize| cells.iter().map(|c| f(&c.0)).max().unwrap_or(0);
+    let (name, price, score) = (most(|p| p.1), most(|p| p.2), most(|p| p.3));
+    for ((n, nw, pw, sw), cell) in &mut cells {
+        let pad = " ".repeat(name - *nw + price - *pw);
+        let cost = cell[*n].content.trim().to_string();
+        cell[*n].content = format!(" {pad}{cost} {}", " ".repeat(score - *sw)).into();
+    }
 }
 
 /// `spans` in lines of at most `width` cells: broken before a span that starts with a space, as
@@ -5043,6 +5067,23 @@ mod tests {
     }
 
     #[test]
+    fn a_tiers_prices_and_scores_line_up() {
+        let cell = |t: &[&str]| t.iter().map(|&t| Span::raw(t.to_string())).collect::<Vec<_>>();
+        let mut cells = [
+            cell(&["GLM-5.3", " $0.41 ", "(50)"]),
+            cell(&["★ ", "Muse Spark 1.3", " $1.3 ", "(100)"]),
+            cell(&["-"]),
+            cell(&["mine", " $2.0", ""]),
+        ];
+        align(cells.iter_mut());
+        let text: Vec<String> = cells.iter().map(|c| c.iter().map(|s| &*s.content).collect()).collect();
+        assert_eq!(
+            text,
+            ["GLM-5.3          $0.41  (50)", "★ Muse Spark 1.3  $1.3 (100)", "-", "mine              $2.0      "]
+        );
+    }
+
+    #[test]
     fn star_takes_its_tasks_colour() {
         assert_eq!(TASK.len(), TASKS.len(), "a colour per task");
         let mut a = app();
@@ -5132,7 +5173,7 @@ mod tests {
         let star = spans.iter().rposition(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert_eq!(spans[star + 1].content, "flash");
         assert_eq!(spans[star + 1].style.fg, Some(MUTED));
-        assert_eq!(spans[star + 3].content, " not recommended");
+        assert_eq!(spans[star + 4].content, " not recommended");
         // And the line after it names the model the tier would recommend.
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let at = text.iter().position(|l| l.starts_with("  high:") && l.contains("flash")).unwrap();
