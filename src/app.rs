@@ -543,10 +543,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Selected ✓, favorite ★, excluded ✗",
         &[
             ("✓", "selected: your shortlist, kept until you deselect it"),
-            ("★", "favorite: your pick for a task, always in its recommendation"),
+            ("★", "favorite: your pick for a task's tier, always in its recommendation"),
             ("✗", "excluded: you have it but cannot use it, and recommendations skip it"),
             ("space", "select the model, `C` compares the selected"),
-            ("f", "favorite the model for a task, a tier of one, or a task you name"),
+            ("f", "favorite the model for a task's tier, or a task you name"),
             ("f: r a", "rename a task you named, write what it is about"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
@@ -793,7 +793,7 @@ pub struct List {
     pub typing: bool,
     /// The entry under the cursor being written in place, in `f`'s grid.
     pub edit: Option<Edit>,
-    /// The box under the cursor along a row of `f`'s grid: 0 the task's own, then its tiers'.
+    /// The box under the cursor along a row of `f`'s grid: its tier's, in `view::TIERS` order.
     pub col: usize,
     /// Entry where `v` started a range in the Dev or Via dropdown; it runs to the cursor.
     pub visual: Option<usize>,
@@ -962,18 +962,18 @@ pub fn found(s: &str, q: &str) -> Vec<std::ops::Range<usize>> {
 /// The last entry of `f`'s grid: it asks the name of a task of your own.
 const NEW_TASK: &str = "+ new task";
 
-/// The boxes along a row of `f`'s grid: the task's own, then one per tier.
-pub const BOXES: usize = 1 + crate::view::TIERS.len();
+/// The boxes along a row of `f`'s grid: one per tier.
+pub const BOXES: usize = crate::view::TIERS.len();
 
 /// The favorite slot of box `col` on the row of `task`.
 pub fn box_slot(task: &str, col: usize) -> String {
-    crate::store::slot(task, col.checked_sub(1).and_then(|i| crate::view::TIERS.get(i)).map(|x| x.0))
+    crate::store::slot(task, crate::view::TIERS[col.min(BOXES - 1)].0)
 }
 
-/// A slot's task and the box it has on that task's row.
+/// A slot's task and the box it has on that task's row, the first for a task alone.
 fn slot_box(slot: &str) -> (&str, usize) {
     let (task, tier) = slot.split_once(':').map_or((slot, None), |(t, x)| (t, Some(x)));
-    (task, tier.and_then(|x| crate::view::TIERS.iter().position(|t| t.0 == x)).map_or(0, |i| i + 1))
+    (task, tier.and_then(|x| crate::view::TIERS.iter().position(|t| t.0 == x)).unwrap_or(0))
 }
 
 /// The `n`th index after `cur` that `hit` holds for among `len`, before it for a negative `n`:
@@ -1128,7 +1128,8 @@ pub enum Effect {
 pub enum Mouse {
     /// Wheel: rows to move, negative is up.
     Scroll(isize),
-    /// Click on row `n` of the table (an index into `rows`): highlight it.
+    /// Click on row `n` of the table (an index into `rows`): highlight it. On a task's name in
+    /// `f`'s grid: the cursor to its row, ticking nothing.
     Row(usize),
     /// Click on box `col` of row `n` of `f`'s grid: tick it, as space there does.
     Tick(usize, usize),
@@ -1801,7 +1802,7 @@ impl App {
     }
 
     /// What each tier of recommend's task `i` picks, as `--tier` does, with its score: your
-    /// favorite for the tier, else for the task, else on a built-in task the tier's pick of its
+    /// favorite for the tier, else on a built-in task the tier's pick of its
     /// frontier. None where the task has no model for the tier.
     pub fn tier_picks(&self, i: usize) -> view::Picks<'_> {
         self.tier_picks_took(i).0
@@ -2822,23 +2823,27 @@ impl App {
     }
 
     /// `f`'s grid of tasks for the model `key`, starting on the task at hand, so f enter toggles
-    /// it, on the box the model has there, else that of the cursor's tier in recommend; with no
-    /// task at hand, on the first box it has.
+    /// it: on the cursor's tier in recommend, else on the box the model has there, else on the
+    /// first it fits. With no task at hand, on the first box it has.
     fn ask_fav(&mut self, key: &str) {
         let own = if self.view == View::Recommend { self.custom_at() } else { None };
         let at = self.task_at_hand().map(|t| t.name).or(own);
         let favs = self.store.favorite_for(key);
         let fav = favs.iter().find(|s| at.is_none_or(|t| slot_box(s).0 == t));
-        // On a tier in recommend, that tier's box, so f enter is for it alone, unless the model
-        // is there as the favorite of another box of the task.
-        let on_tier = self.view == View::Recommend && self.task_sel > 0 && !self.one_pick(self.task_cur);
-        let tier = at.filter(|_| on_tier).map(|t| box_slot(t, self.task_sel));
-        let slot = match (tier, fav) {
-            (Some(t), Some(f)) if !favs.contains(&t) => f.clone(),
-            (Some(t), _) => t,
-            (None, f) => f.map(String::as_str).or(at).unwrap_or(TASKS[0].name).to_string(),
-        };
+        // On a tier in recommend, that tier's box, so f enter is for it alone. A task of one pick
+        // shows high's.
+        let on_tier = (self.view == View::Recommend && self.task_sel > 0)
+            .then(|| if self.one_pick(self.task_cur) { BOXES - 1 } else { self.task_sel - 1 });
+        let tier = at.zip(on_tier).map(|(t, c)| box_slot(t, c));
+        let on_box = tier.is_some();
+        let slot = tier.unwrap_or_else(|| fav.map(String::as_str).or(at).unwrap_or(TASKS[0].name).to_string());
         self.fav_at(key, &slot);
+        // A tier the model is dearer than, as a download that took it, cannot take it: said, as
+        // the cursor moves to a box that can.
+        let m = self.data.models.iter().find(|m| m.key == key).filter(|_| on_box);
+        if let Some(Err(why)) = m.map(|m| crate::view::can_fav(&self.store, &slot, m)) {
+            self.refuse(why);
+        }
     }
 
     /// Which boxes of the row under `f`'s cursor can be ticked, so `h` `l` skip the others: a tier
@@ -2936,6 +2941,7 @@ impl App {
             *items = fresh;
             *list = List { sel: at, top: list.top, col, edit, ..Default::default() };
         }
+        self.snap_fav_col();
     }
 
     /// Whether an entry of a list is being written, when every key is its text's.
@@ -3041,12 +3047,23 @@ impl App {
             What::New => {
                 // No name names no task.
                 let name = name.ok()?;
-                // A name the model already has would be toggled off.
-                let saved = if self.store.favorite(&name) == Some(key) { None } else { self.fav(key, &name) };
-                // What it is about is asked next, on its entry: agents pick the task by it.
+                // A task there is already is only gone to, on the box the model has there, and its
+                // tiers keep their favorites. A new one has the model at high, which takes any
+                // price, so agents can use it at once.
+                let had = crate::fit::task(&name).is_some() || self.store.custom_tasks().contains(&name.as_str());
+                let slot = if had {
+                    crate::store::task_slots(&name)
+                        .find(|s| self.store.favorite(s) == Some(key))
+                        .unwrap_or(name.clone())
+                } else {
+                    box_slot(&name, BOXES - 1)
+                };
+                let saved = if had { None } else { self.fav(key, &slot) };
+                // What a new one is about is asked next, on its entry: agents pick the task by it.
+                // One gone in this session still has its about until the file is closed.
                 let about = self.store.about(&name).unwrap_or("").to_string();
-                let next = crate::fit::task(&name).is_none().then(|| Edit::new(What::About(name.clone()), about));
-                self.relist(key, &name, next);
+                let next = (!had).then(|| Edit::new(What::About(name.clone()), about));
+                self.relist(key, &slot, next);
                 saved
             }
             What::Rename(was) => {
@@ -3336,11 +3353,12 @@ impl App {
     }
 
     /// `f`'s cursor off a box it cannot tick, where `j` `k` `]` `[` or a cleared favorite leave
-    /// it: to the nearest open one before it, the task's own at worst, which is always open.
+    /// it: to the nearest open one before it, else after it, `high`'s at worst, which is always open.
     fn snap_fav_col(&mut self) {
         let open = self.fav_open();
         if let Input::Choose { kind: Kind::Fav, list, .. } = &mut self.input {
-            list.col = (0..=list.col.min(BOXES - 1)).rev().find(|&c| open[c]).unwrap_or(0);
+            let col = list.col.min(BOXES - 1);
+            list.col = (0..=col).rev().chain(col..BOXES).find(|&c| open[c]).unwrap_or(BOXES - 1);
         }
     }
 
@@ -3629,6 +3647,12 @@ impl App {
                     }
                     self.drop_dead_search();
                     self.input_key(KeyCode::Enter, KeyModifiers::NONE)
+                }
+                Mouse::Row(n) if self.choosing_favs() => {
+                    let (sel, len) = self.list()?;
+                    *sel = n.min(len.saturating_sub(1));
+                    self.snap_fav_col();
+                    None
                 }
                 // The search being typed stays, as a click on the entry leaves it.
                 Mouse::Exclude(n) => {
@@ -5035,7 +5059,7 @@ mod tests {
         a.mouse(Mouse::Tab(5));
         assert_eq!((&a.input, &a.view), (&Input::None, &View::Recommend), "one on another tab leaves it for that tab");
         press(&mut a, "R");
-        a.store.toggle_favorite("coding", "opus5");
+        a.store.toggle_favorite("coding:high", "opus5");
         a.rebuild();
         a.mouse(Mouse::Tab(3));
         assert_eq!((on(&a), a.rows.len()), (vec![3], 1), "a click on ★ leaves ✓ for the favorites, as F does");
@@ -5081,7 +5105,7 @@ mod tests {
         press(&mut a, "aE");
         assert_eq!((a.only == Some(EXCLUDED), a.rows.len()), (true, 1), "and the same from all");
         a.store.toggle_excluded(&out);
-        a.store.toggle_favorite("coding", &out);
+        a.store.toggle_favorite("coding:high", &out);
         a.task = TASKS.iter().find(|t| t.name == "coding");
         press(&mut a, "AF");
         assert_eq!(keys(&a), [out.as_str()], "F shows a picked task's favorite out of reach, off its line");
@@ -5225,7 +5249,9 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "/codi");
         let ticked = |a: &App| match &a.input {
-            Input::Choose { items, list, .. } => (items[list.sel].0.clone(), a.store.favorite("coding").is_some()),
+            Input::Choose { items, list, .. } => {
+                (items[list.sel].0.clone(), crate::store::task_slots("coding").any(|s| a.store.favorite(&s).is_some()))
+            }
             _ => (String::new(), false),
         };
         assert_eq!(ticked(&a), ("coding".into(), false));
@@ -6617,7 +6643,7 @@ mod tests {
     #[test]
     fn a_favorite_a_dropdown_leaves_out_is_not_recommended() {
         let mut a = app();
-        a.store.set_favorite("coding", "mini", None);
+        a.store.set_favorite("coding:high", "mini", None);
         a.store.dev_not = vec!["openai".into()];
         a.rebuild();
         assert!(a.task_frontier(fit::task("coding").unwrap()).is_empty());
@@ -6817,7 +6843,7 @@ mod tests {
         let front = |a: &App| {
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>()
         };
-        a.store.toggle_favorite("coding", "mini");
+        a.store.toggle_favorite("coding:high", "mini");
         a.query = "gpt".into();
         a.rebuild();
         assert_eq!(front(&a), ["mini", "gpt55"], "the filter hides mini from the table, not from recommend");
@@ -6838,7 +6864,7 @@ mod tests {
         a.rebuild();
         assert_eq!(front(&a), ["gpt55"], "an excluded favorite still leaves");
         // opus5 has no coding score: it joins the line all the same, its score shown as `-`.
-        a.store.toggle_favorite("coding", "opus5");
+        a.store.toggle_favorite("coding:high", "opus5");
         a.query.clear();
         a.rebuild();
         assert_eq!(front(&a), ["opus5", "gpt55"]);
@@ -6856,7 +6882,7 @@ mod tests {
         a.rebuild();
         assert_eq!(front(&a), ["mini", "opus5", "gpt55"]);
         assert!(!a.favorite_unrecommended(coding, "mini"), "on the frontier on its own");
-        a.store.toggle_favorite("coding", "gpt55");
+        a.store.toggle_favorite("coding:high", "gpt55");
         a.rebuild();
         assert!(!a.favorite_unrecommended(coding, "gpt55"), "the best model is recommended on its own");
     }
@@ -6864,7 +6890,7 @@ mod tests {
     #[test]
     fn enter_on_a_task_of_your_own_lands_on_its_model_or_says_why() {
         let mut a = app();
-        a.store.toggle_favorite("debugging", "opus5");
+        a.store.toggle_favorite("debugging:high", "opus5");
         a.rebuild();
         // After a built-in task's line, which its model is not on.
         press(&mut a, "R2gg");
@@ -6897,11 +6923,15 @@ mod tests {
             Input::Choose { items, list, .. } => items[list.sel].0.clone(),
             _ => String::new(),
         };
-        let ticked = |a: &App| a.store.favorite("tool-dispatch").is_some();
+        let ticked = |a: &App| crate::store::task_slots("tool-dispatch").any(|s| a.store.favorite(&s).is_some());
         assert_eq!(edit(&a), Some(("New".into(), String::new())));
         a.paste("Tool Dispatch:");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!(a.store.favorite("tool-dispatch"), Some(on.as_str()), "no : in it");
+        assert_eq!(
+            a.store.favorite("tool-dispatch:high"),
+            Some(on.as_str()),
+            "no : in it, on the cheapest tier it fits"
+        );
         // The list is on the new task, where what it is about is written next; left empty,
         // nothing is saved.
         assert_eq!(
@@ -6976,38 +7006,34 @@ mod tests {
         assert!(ticked(&a) && under(&a) == "tool-dispatch");
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.task_cur, a.store.favorite("tool-dispatch")), (TASKS.len() - 1, None));
+        assert_eq!((a.task_cur, ticked(&a)), (TASKS.len() - 1, false));
         // An empty name names no task.
         press(&mut a, "2ggfG");
         code(&mut a, KeyCode::Enter);
         assert_eq!(edit(&a), Some(("New".into(), String::new())));
         assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.custom_tasks().len()), (None, None, 0));
         code(&mut a, KeyCode::Esc);
-        // A tier of it takes a model of its own, as a built-in task's: its boxes follow the
-        // task's on its row, and in recommend its low tier has that model, the others the task's where it fits.
-        a.store.toggle_favorite("tool-dispatch", &on);
+        // Each tier of it takes a model of its own, as a built-in task's: in recommend its low
+        // tier has that model, high the other and the rest none.
+        a.store.toggle_favorite("tool-dispatch:high", &on);
         a.store.toggle_favorite("tool-dispatch:low", "mini");
         a.rebuild();
         press(&mut a, "G02l");
         assert_eq!((&a.view, a.current().map(|m| m.key.as_str())), (&View::Recommend, Some("mini")));
         press(&mut a, "2l");
-        assert_eq!(
-            a.current().map(|m| m.key.clone()),
-            Some(on.clone()),
-            "h l move along its tiers: the task's at high"
-        );
+        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "h l move along its tiers: high's");
         press(&mut a, "fl");
         assert_eq!(
             (under(&a).as_str(), a.open_list().map(|l| l.col)),
-            ("tool-dispatch", Some(4)),
+            ("tool-dispatch", Some(3)),
             "l: past the tiers it is dearer than, to high"
         );
         press(&mut a, "a");
         a.paste(" fast");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!(a.open_list().map(|l| l.col), Some(4), "what it is about leaves the cursor on its box");
-        press(&mut a, "4l5h");
-        assert_eq!(a.open_list().map(|l| l.col), Some(0), "h l stop at the ends of the row");
+        assert_eq!(a.open_list().map(|l| l.col), Some(3), "what it is about leaves the cursor on its box");
+        press(&mut a, "4l");
+        assert_eq!(a.open_list().map(|l| l.col), Some(3), "l stops at the end of the row");
         press(&mut a, "j");
         assert_eq!(under(&a), "+ new task", "after the last task");
         // A task named before it in the order leaves recommend's cursor on its own.
@@ -7015,6 +7041,16 @@ mod tests {
         a.paste("api");
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.store.custom_tasks(), a.custom_at()), (vec!["api", "tool-dispatch"], Some("tool-dispatch")));
+        // One gone in this session is made again with what it was about, kept until the file closes.
+        a.paste("http calls");
+        code(&mut a, KeyCode::Enter);
+        a.store.clear_favorite("api:high");
+        press(&mut a, "G");
+        code(&mut a, KeyCode::Enter);
+        a.paste("api");
+        code(&mut a, KeyCode::Enter);
+        let about = a.open_list().and_then(|l| l.edit.as_ref()).map(|e| e.text.as_str());
+        assert_eq!(about, Some("http calls"), "its about, to keep or change");
     }
 
     #[test]
@@ -7030,87 +7066,97 @@ mod tests {
         };
         press(&mut a, "fjv");
         assert_eq!(kind(&a), Some((Kind::Fav, 1)), "not ticked: no model to run, f's grid stays");
-        assert!(a.status.starts_with("coding is not ticked"), "{}", a.status);
+        assert!(a.status.starts_with("coding:high is not ticked"), "{}", a.status);
         press(&mut a, " v");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == 3), "any, opencode and codex");
         assert_eq!(kind(&a), Some((Kind::Via, 0)), "on any: it has none yet");
         press(&mut a, "j");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!(a.store.via("coding"), Some("opencode"));
+        assert_eq!(a.store.via("coding:high"), Some("opencode"));
         assert_eq!(kind(&a), Some((Kind::Fav, 1)), "back on the task in f's grid");
         press(&mut a, "v");
         assert_eq!(kind(&a), Some((Kind::Via, 1)), "on the one it has");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((kind(&a), a.store.via("coding")), (Some((Kind::Fav, 1)), Some("opencode")), "esc: back, as it was");
+        assert_eq!(
+            (kind(&a), a.store.via("coding:high")),
+            (Some((Kind::Fav, 1)), Some("opencode")),
+            "esc: back, as it was"
+        );
         press(&mut a, "vk");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.store.via("coding"), None, "any: none in particular");
+        assert_eq!(a.store.via("coding:high"), None, "any: none in particular");
         press(&mut a, "vj");
         code(&mut a, KeyCode::Enter);
         press(&mut a, " ");
-        assert_eq!((a.store.favorite("coding"), a.store.via("coding")), (None, None), "gone with the favorite");
+        assert_eq!(
+            (a.store.favorite("coding:high"), a.store.via("coding:high")),
+            (None, None),
+            "gone with the favorite"
+        );
         // A tier is a budget: gpt55, at $10, is no favorite for mid, and a click there says why.
-        assert_eq!(a.mouse(Mouse::Tick(1, 3)), None);
+        assert_eq!(a.mouse(Mouse::Tick(1, 2)), None);
         assert_eq!(
             (a.store.favorite("coding:mid"), a.status.as_str()),
             (None, "gpt55 costs $10 and mid takes models up to $5")
         );
         // h l skip the tiers it is dearer than: free, low and mid.
-        press(&mut a, "4hl");
-        assert_eq!(a.open_list().map(|l| l.col), Some(4), "any, then high");
-        press(&mut a, "h");
-        assert_eq!(a.open_list().map(|l| l.col), Some(0));
+        press(&mut a, "l");
+        assert_eq!(a.open_list().map(|l| l.col), Some(3), "past mid to high");
+        press(&mut a, "4h");
+        assert_eq!(a.open_list().map(|l| l.col), Some(3), "high, the only one open");
         // One a lowered cap left there is still reached, so space can clear it.
         a.store.set_favorite("coding:mid", "gpt55", None);
-        press(&mut a, "l");
-        assert_eq!(a.open_list().map(|l| l.col), Some(3), "its stale favorite");
+        press(&mut a, "h");
+        assert_eq!(a.open_list().map(|l| l.col), Some(2), "its stale favorite");
         press(&mut a, "j");
-        assert_eq!(a.open_list().map(|l| l.col), Some(0), "j: agentic's mid can't take it, so the open box before");
-        press(&mut a, "kl");
-        assert_eq!(a.open_list().map(|l| l.col), Some(3));
+        assert_eq!(a.open_list().map(|l| l.col), Some(3), "j: agentic's mid can't take it, nor a box before, so high");
+        press(&mut a, "kh");
+        assert_eq!(a.open_list().map(|l| l.col), Some(2));
         press(&mut a, " ");
         assert_eq!(a.store.favorite("coding:mid"), None, "cleared");
+        assert_eq!(a.open_list().map(|l| l.col), Some(3), "off the box it can't take now");
         // A tier's box has a harness of its own, and v comes back to that box.
-        press(&mut a, "l vj");
+        press(&mut a, " vj");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.store.via("coding:high"), a.open_list().map(|l| l.col)), (Some("opencode"), Some(4)));
+        assert_eq!((a.store.via("coding:high"), a.open_list().map(|l| l.col)), (Some("opencode"), Some(3)));
     }
 
     #[test]
     fn f_favorites_a_model_for_the_task_at_hand() {
         let mut a = app();
-        // No task in context: f asks which, a row per task with a box for it and for each tier.
+        // No task in context: f asks which, a row per task with a box for each tier, the cursor
+        // on the first the model fits, high's for gpt55 at $10.
         assert_eq!(press(&mut a, "f"), None);
         assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == TASKS.len() + 1));
         press(&mut a, "j");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert!(a.choosing_favs() && a.store.favorite("coding").is_some(), "enter ticks as space does");
+        assert!(a.choosing_favs() && a.store.favorite("coding:high").is_some(), "enter ticks as space does");
         code(&mut a, KeyCode::Esc);
-        assert_eq!(a.store.favorite("coding"), Some("gpt55"), "the second task is coding");
+        assert_eq!(a.store.favorite("coding:high"), Some("gpt55"), "the second task is coding");
         assert!(a.starred("gpt55") && !a.starred("mini"), "★ with no task: favorite to any");
         press(&mut a, "f");
         assert!(
-            matches!(&a.input, Input::Choose { list: List { sel: 1, col: 0, .. }, .. }),
-            "f starts on the task it is the favorite for"
+            matches!(&a.input, Input::Choose { list: List { sel: 1, col: 3, .. }, .. }),
+            "f starts on the box it is the favorite for"
         );
         code(&mut a, KeyCode::Esc);
         // In recommend, f starts on the task under the cursor, on the box its favorite has there.
         press(&mut a, "Rjjj2l");
-        assert_eq!(a.current().unwrap().key, "mini", "the task's favorite, at $10, is not low's");
+        assert_eq!(a.current().unwrap().key, "mini", "high's favorite is not low's");
         press(&mut a, "2l");
         assert_eq!(a.current().unwrap().key, "gpt55", "but high's");
         press(&mut a, "f");
-        assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 0, .. }, .. }));
+        assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 3, .. }, .. }));
         code(&mut a, KeyCode::Esc);
-        a.store.toggle_favorite("coding", "gpt55");
+        a.store.toggle_favorite("coding:high", "gpt55");
         a.rebuild();
         // On a tier's own pick, f starts on that tier's box, so f enter is for the tier alone.
         press(&mut a, "2h");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
-        assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 2, .. }, .. }));
+        assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 1, .. }, .. }));
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!((a.store.favorite("coding:low"), a.store.favorite("coding")), (Some("mini"), None));
+        assert_eq!((a.store.favorite("coding:low"), a.store.favorite("coding:high")), (Some("mini"), None));
         assert!(a.status.starts_with("★ mini"));
         code(&mut a, KeyCode::Esc);
         // Space ticks and keeps the list open, its boxes following.
@@ -7122,18 +7168,18 @@ mod tests {
         assert_eq!((a.store.favorite("coding:low"), a.store.favorite("coding:mid")), (Some("mini"), None));
         assert!(a.status.ends_with("coding:low"));
         // ] [ go round the rows with a tick: coding at 1 and, once ticked, overall at 0. The
-        // box under the cursor stays the tier's from row to row, until h.
+        // box under the cursor stays the tier's from row to row.
         press(&mut a, "]");
         assert!(a.failed && a.status == "no other ticked task is shown", "{}", a.status);
-        press(&mut a, "k2h ");
-        assert_eq!(a.store.favorite("overall"), Some("mini"));
+        press(&mut a, "k ");
+        assert_eq!(a.store.favorite("overall:low"), Some("mini"));
         for (key, sel) in [("]", 1), ("]", 0), ("[", 1), ("2[", 0), ("2]", 1)] {
             press(&mut a, key);
             assert!(matches!(&a.input, Input::Choose { list: List { sel: s, .. }, .. } if *s == sel), "{key} to {sel}");
         }
-        // l skips free, which mini at $1 is dearer than, so lands on low.
-        press(&mut a, "l k2h");
-        assert_eq!((a.store.favorite("coding:low"), a.store.favorite("overall")), (None, Some("mini")));
+        // h skips nothing before low but free, which mini at $1 is dearer than, so stays.
+        press(&mut a, "h k");
+        assert_eq!((a.store.favorite("coding:low"), a.store.favorite("overall:low")), (None, Some("mini")));
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.input, a.store.favorite_for("mini").len()), (&Input::None, 0));
@@ -7141,7 +7187,7 @@ mod tests {
         // in this fixture, so llama4 (40, below the floor) stands in once it is shown with a.
         press(&mut a, "R");
         press(&mut a, "a");
-        a.store.toggle_favorite("coding", "llama4");
+        a.store.toggle_favorite("coding:high", "llama4");
         a.rebuild();
         press(&mut a, "R2gg");
         assert_eq!(a.task_cur, 1, "on coding");
@@ -7154,7 +7200,7 @@ mod tests {
         press(&mut a, "ggf");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save), "f starts on the picked task");
         code(&mut a, KeyCode::Esc);
-        assert_eq!(a.store.favorite("coding"), Some("gpt55"));
+        assert_eq!(a.store.favorite("coding:high"), Some("gpt55"));
         assert_eq!(keys(&a), ["gpt55", "mini"], "llama4 leaves the line with the fav");
     }
 
@@ -7251,8 +7297,9 @@ mod tests {
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Recommend, "mini"), "esc goes back");
         press(&mut a, "0$");
         assert_eq!(a.current().unwrap().key, "gpt55");
-        // j k stay on the tier: the favorite of a task with no ranking is every tier's.
-        a.store.toggle_favorite(TASKS[2].name, "mini");
+        // j k stay on the tier, on a task with no ranking but the favorites of its tiers.
+        let tiers = [crate::store::slot(TASKS[2].name, "low"), crate::store::slot(TASKS[2].name, "high")];
+        tiers.iter().for_each(|s| a.store.toggle_favorite(s, "mini"));
         a.rebuild();
         press(&mut a, "j");
         assert_eq!((a.task_cur, a.task_sel, a.current().unwrap().key.as_str()), (2, TIERS.len(), "mini"));
@@ -7260,7 +7307,7 @@ mod tests {
         assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "gpt55"), "high again");
         press(&mut a, "j02lk");
         assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "mini"), "low of both");
-        a.store.toggle_favorite(TASKS[2].name, "mini");
+        tiers.iter().for_each(|s| a.store.toggle_favorite(s, "mini"));
         a.rebuild();
         press(&mut a, "$");
         press(&mut a, "oG");
@@ -7551,7 +7598,7 @@ mod tests {
             (a.only == Some(FAV), a.status.as_str()),
             (false, "no favorites: f favorites the one under the cursor")
         );
-        a.store.toggle_favorite("coding", "opus5");
+        a.store.toggle_favorite("coding:high", "opus5");
         a.rebuild();
         press(&mut a, "F");
         assert_eq!(keys(&a), ["opus5"], "F shows the favorites only");
@@ -7571,7 +7618,7 @@ mod tests {
         press(&mut a, "F");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only == Some(FAV), a.rows.len()), (false, 3), "and F");
-        a.store.toggle_favorite("coding", "opus5");
+        a.store.toggle_favorite("coding:high", "opus5");
         press(&mut a, "Rjjj");
         code(&mut a, KeyCode::Enter);
         assert!(a.task.is_some());
@@ -7645,11 +7692,11 @@ mod tests {
         assert!(!a.store.is_marked("mini"), "✓ → ☐");
         assert_eq!(a.mouse(Mouse::Star(2)), None);
         assert!(a.choosing_favs() && a.selected() == 2, "the ☆ lists the tasks for its row");
-        assert_eq!(a.mouse(Mouse::Tick(1, 0)), Some(Effect::Save));
-        assert!(a.choosing_favs(), "a click ticks a box and keeps the grid open");
         assert_eq!(a.mouse(Mouse::Tick(1, 3)), Some(Effect::Save));
-        assert_eq!((a.store.favorite("coding"), a.store.favorite("coding:mid")), (Some("opus5"), Some("opus5")));
-        a.mouse(Mouse::Tick(1, 3));
+        assert!(a.choosing_favs(), "a click ticks a box and keeps the grid open");
+        assert_eq!(a.mouse(Mouse::Tick(1, 2)), Some(Effect::Save));
+        assert_eq!((a.store.favorite("coding:high"), a.store.favorite("coding:mid")), (Some("opus5"), Some("opus5")));
+        a.mouse(Mouse::Tick(1, 2));
         code(&mut a, KeyCode::Esc);
         // On a selected row f is for that row alone, the others selected or not.
         a.mouse(Mouse::Box(1));
@@ -8087,7 +8134,17 @@ mod tests {
         assert_eq!((press(&mut a, "l"), a.task_sel), (None, 1));
         assert_eq!((press(&mut a, "l"), a.task_sel), (None, 0), "one box past the name");
         assert_eq!((press(&mut a, "$"), a.task_sel), (None, 1));
-        a.store.toggle_favorite("value:low", "mini");
+        // One model for every tier is still one pick, and f on it is for high's, whose pick it is.
+        for x in ["low", "mid", "high"] {
+            a.store.toggle_favorite(&format!("value:{x}"), "mini");
+        }
+        a.rebuild();
+        press(&mut a, "f");
+        assert!(a.one_pick(value), "the same model at each tier");
+        assert!(matches!(&a.input, Input::Choose { list: List { col, .. }, .. } if *col == BOXES - 1), "high's box");
+        code(&mut a, KeyCode::Esc);
+        ["mid", "high"].iter().for_each(|x| _ = a.store.clear_favorite(&format!("value:{x}")));
+        a.rebuild();
         a.rebuild();
         assert!(!a.one_pick(value), "a tier's favorite gives the tiers models of their own");
         assert_eq!((press(&mut a, "$"), a.task_sel), (None, TIERS.len()));
@@ -8098,7 +8155,7 @@ mod tests {
         let mut a = app();
         assert_eq!((press(&mut a, "D"), &a.input), (None, &Input::None), "no favorites: nothing to ask");
         assert!(a.status.contains("no favorites"), "{}", a.status);
-        a.store.set_favorite("coding", "gpt55", Some("opencode"));
+        a.store.set_favorite("coding:high", "gpt55", Some("opencode"));
         a.store.set_favorite("coding:low", "flash", None);
         a.rebuild();
         press(&mut a, "F");
@@ -8168,15 +8225,66 @@ mod tests {
     }
 
     #[test]
+    fn new_task_with_a_name_there_is_goes_to_it() {
+        let mut a = app();
+        a.store.toggle_favorite("debugging:low", "llama4");
+        a.rebuild();
+        let i = a.rows.iter().position(|&r| a.data.models[r].key == "mini").unwrap();
+        a.select(i);
+        press(&mut a, "fG");
+        code(&mut a, KeyCode::Enter);
+        a.paste("debugging");
+        assert_eq!(code(&mut a, KeyCode::Enter), None, "nothing ticked");
+        let unedited = |a: &App| a.open_list().is_some_and(|l| l.edit.is_none());
+        assert!(unedited(&a) && a.store.favorite("debugging:low") == Some("llama4"), "low keeps its favorite");
+        // A new one has the model at high, whatever it costs, so agents can use it.
+        press(&mut a, "G");
+        code(&mut a, KeyCode::Enter);
+        a.paste("triage");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.store.favorite("triage:low"), a.store.favorite("triage:high")), (None, Some("mini")));
+    }
+
+    /// On a tier in recommend, f is for that tier, though the model is another tier's favorite.
+    #[test]
+    fn f_in_recommend_starts_on_the_cursor_s_tier() {
+        let mut a = app();
+        a.store.toggle_favorite("coding:high", "mini");
+        a.rebuild();
+        press(&mut a, "Rjjj2l");
+        assert_eq!(a.current().unwrap().key, "mini", "low's pick on merit");
+        press(&mut a, "f");
+        assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 1, .. }, .. }), "low's box, not high's");
+    }
+
+    /// A download that took a tier it lists a price above: f says it cannot take it, on the
+    /// next box that can.
+    #[test]
+    fn f_says_a_tier_the_model_is_dearer_than_cannot_take_it() {
+        let mut a = app();
+        a.data.models[2].hf = Some("meta/llama4".into());
+        a.store.memory = Some(10.0);
+        a.set_sizes([("llama4".into(), 4_000_000_000)].into());
+        press(&mut a, "R");
+        let coding = TASKS.iter().position(|t| t.name == "coding").unwrap();
+        (a.among, a.task_cur, a.task_sel) = (None, coding, 1);
+        let m = a.current().unwrap();
+        assert!(m.key == "llama4" && crate::view::over_cap(&a.store, "coding:free", m).is_some());
+        press(&mut a, "f");
+        assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 1, .. }, .. }), "low's box");
+        assert!(a.status.contains("free takes only free models"), "{}", a.status);
+    }
+
+    #[test]
     fn the_fav_list_keeps_its_model_when_the_rows_move() {
         let mut a = app();
-        a.store.toggle_favorite("coding", "opus5");
+        a.store.toggle_favorite("coding:high", "opus5");
         a.task = Some(&TASKS[1]);
         a.rebuild();
         let i = a.rows.iter().position(|&r| a.data.models[r].key == "opus5").unwrap();
         a.select(i);
         // Unfavorited, opus5 leaves the task's line; the second tick is still for it.
         press(&mut a, "f  ");
-        assert_eq!(a.store.favorite("coding"), Some("opus5"));
+        assert_eq!(a.store.favorite("coding:high"), Some("opus5"));
     }
 }

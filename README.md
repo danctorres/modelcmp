@@ -74,12 +74,12 @@ modelcmp list --task coding                # best model per price for coding, ch
 modelcmp compare sonnet-5 gpt-5            # side by side, with a verdict
 modelcmp show sonnet-5                     # everything about one model
 modelcmp open sonnet-5 --on openrouter     # its page there, or on models.dev, Hugging Face, ...
-modelcmp fav coding sonnet-5               # set your favorite for coding
+modelcmp fav coding sonnet-5 --tier mid    # set your favorite for coding's mid tier
 modelcmp get gemma-3-4b-it                 # download a model and run it on your machine
 ```
 
 In the TUI, `R` recommends, `space` selects models, `C` compares them, `f` sets your favorite
-for a task and `/` filters. `enter` shows everything about a model, `o` opens its page on
+for a task's tiers and `/` filters. `enter` shows everything about a model, `o` opens its page on
 a site like OpenRouter and `t` changes the theme. `x` opens a harness on the model, or downloads
 a local model and runs it with ollama or llama.cpp, installing the runner if you have neither.
 Movement uses vim keys (`hjkl`, `gg`, `G`, counts like `3j`), and the arrows and mouse work too.
@@ -94,14 +94,14 @@ cheaper or equally priced model beats. Each tier picks the best of them within i
 
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
 the best up to $2 and `mid` up to $5 per 1M tokens (the tier header in recommend or `modelcmp tier` changes these), and `high`
-the best one. A favorite you set beats that pick in every tier whose price it fits.
+the best one. A favorite you set for a tier beats that pick, at the tier's price or under.
 
 You can add tasks of your own, next to the built-in ones. In the TUI, press `f` on a model and pick
 `+ new task`, or from the command line:
 
 ```sh
-modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"   # a new task, with its model
-modelcmp fav debugging 3.7-flash --tier low                          # a cheaper model for its low tier
+modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"   # a new task, with its model
+modelcmp fav debugging 3.7-flash --tier low                                      # a cheaper model for its low tier
 ```
 
 Agents choose a task by what you wrote in `--about`, and your tasks show up last in recommend.

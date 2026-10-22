@@ -818,15 +818,17 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             return more;
         }
         let k = top + (m.row - inner.y) as usize;
-        // f's grid: a box is ticked, the name ticks the task's own, and the tiers' heading and
-        // what follows the boxes are nothing to click.
+        // f's grid: a box is ticked, the name moves the cursor to its row, and the tiers' heading
+        // and what follows the boxes are nothing to click.
         if let Input::Choose { kind: Kind::Fav, items, .. } = &app.input {
             let row = k.checked_sub(1).filter(|&r| r < len)?;
             if !matches!(items[row].1, Effect::Fav(..)) {
                 return Some(Mouse::Item(row));
             }
             let x = usize::from(m.column.saturating_sub(rect.x + 2));
-            let col = x.saturating_sub(fav_name_w(items) + 2) / BOX_W;
+            let Some(col) = x.checked_sub(fav_name_w(items) + 2).map(|x| x / BOX_W) else {
+                return Some(Mouse::Row(row));
+            };
             return (col < BOXES).then_some(Mouse::Tick(row, col));
         }
         // The ✗ after the ✓, on an entry of Dev, Price or Via that has one, leaves it out.
@@ -2481,7 +2483,10 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     // The tasks the model under the cursor is the favorite for, each ★ in its task's colour:
     // the row's single ★ does not say which.
     if let Some(m) = app.current() {
-        let tasks = app.store.favorite_for(&m.key);
+        // Once per task however many of its tiers it is for, so a few tasks still leave room.
+        let mut tasks: Vec<String> =
+            app.store.favorite_for(&m.key).iter().map(|s| s.split(':').next().unwrap_or(s).to_string()).collect();
+        tasks.dedup();
         if !tasks.is_empty() {
             let spans = tasks.iter().enumerate().map(|(i, t)| {
                 Span::styled(format!("{}★ {t}", if i > 0 { " " } else { "" }), fg(task_color(t)).add_modifier(BOLD))
@@ -2812,7 +2817,7 @@ fn fav_name_w(items: &[(String, Effect)]) -> usize {
     items.iter().map(|(label, _)| Span::raw(label.as_str()).width()).max().unwrap_or(0)
 }
 
-/// `f`'s grid: the tiers' heading, a row per task with a box for the task and for each tier,
+/// `f`'s grid: the tiers' heading, a row per task with a box for each tier,
 /// `✓` where the model is the favorite, `●` where another is, `☐` where none and `$` on a tier
 /// it is dearer than, which cannot take it (`view::over_cap`), bold where it is the favorite
 /// all the same, a cap lowered after it, the entry that
@@ -2821,8 +2826,7 @@ fn fav_name_w(items: &[(String, Effect)]) -> usize {
 fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
     let query = list.query.as_str();
     let w = fav_name_w(items);
-    let tiers = std::iter::once("any").chain(crate::view::TIERS.iter().map(|t| t.0));
-    let head: String = tiers.map(|t| format!(" {t:<0$}", BOX_W - 1)).collect();
+    let head: String = crate::view::TIERS.iter().map(|t| format!(" {:<1$}", t.0, BOX_W - 1)).collect();
     let mut lines = vec![Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED))];
     let mut under = String::new();
     // The grid is for one model: looked up once, not per box.
@@ -3327,7 +3331,10 @@ fn recommend(
     // With the tiers the best model your machine runs took, once a frame.
     let (picks, took): (Vec<_>, Vec<_>) = (0..tasks.len()).map(|i| app.tier_picks_took(i)).unzip();
     let (tasks, picks, took) = (&tasks, &picks, &took);
-    let cells = |i: usize| (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], took[i][c], true));
+    let cells = |i: usize| {
+        let one = crate::view::one_pick(tasks[i].0, &picks[i]);
+        (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], took[i][c], true, one))
+    };
     let w = tasks.iter().map(|t| Span::raw(t.0).width()).max().unwrap_or(0).min(20);
     // One pick is the row's only box, under the tier its price is: `high`'s, the last, as
     // `free` may have none. Every stop past the name is on it. A price nobody lists is under
@@ -3481,12 +3488,13 @@ fn recommend(
         under.extend(wrapped(label("  use for: "), words(t.2), &space, text));
         if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
             // The one pick is `high`'s, as in its box.
-            let (tier, c) = if app.one_pick(i) { ("pick", LAST) } else { (TIERS[c].0, c) };
+            let one = app.one_pick(i);
+            let (tier, c) = if one { ("pick", LAST) } else { (TIERS[c].0, c) };
             // Wrapped to the panel as the boxes are, so the name and what it says are whole.
             let head = Span::styled(format!("  {:<9}", format!("{tier}:")), fg(MUTED));
             let indent = head.width();
             let lines =
-                wrap_spans(entry(app, t.0, c, picks[i][c], took[i][c], false), text.saturating_sub(indent), &[]);
+                wrap_spans(entry(app, t.0, c, picks[i][c], took[i][c], false, one), text.saturating_sub(indent), &[]);
             for (k, piece) in lines.into_iter().enumerate() {
                 let lead = if k == 0 { head.clone() } else { Span::raw(" ".repeat(indent)) };
                 under.push(Line::from([vec![lead], piece].concat()));
@@ -3575,6 +3583,7 @@ fn entry(
     pick: Option<(&Model, f64)>,
     local: bool,
     boxed: bool,
+    one: bool,
 ) -> Vec<Span<'static>> {
     let built_in = fit::task(task);
     let Some((m, s)) = pick else {
@@ -3587,7 +3596,7 @@ fn entry(
         };
         return vec![Span::styled(none, fg(MUTED))];
     };
-    let fav = app.store.tier_favorites(task, TIERS[col].0).any(|k| k == m.key);
+    let fav = crate::view::fav_pick(&app.store, task, TIERS[col].0, m, one);
     let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
     // The best model your machine runs is free there, and downloaded by `x` when not on it yet.
     let out = out_of_reach(app, m).filter(|_| !local);
@@ -4281,7 +4290,7 @@ mod tests {
     #[test]
     fn f_and_e_hint_the_key_that_empties_them() {
         let mut a = app();
-        a.store.toggle_favorite("coding", "flash");
+        a.store.toggle_favorite("coding:high", "flash");
         a.store.toggle_excluded("flash");
         a.rebuild();
         for (tab, hint) in [('F', "D unfavorite all"), ('E', "X unexclude all")] {
@@ -4329,7 +4338,7 @@ mod tests {
         // Marked as well, a favorite and excluded: filled all the same. With the terminal's own
         // colours the fill is solid, so the ★ and the ✗ are black too.
         a.store.marked.push("opus".into());
-        a.store.toggle_favorite("coding", "opus");
+        a.store.toggle_favorite("coding:high", "opus");
         a.store.toggle_excluded("opus");
         let (buf, lines) = render(&mut a, 203, 5);
         assert!(lines[opus as usize].contains('★') && lines[opus as usize].contains('✗'), "{lines:?}");
@@ -4830,7 +4839,7 @@ mod tests {
         assert_eq!((&a.view, a.task_sel), (&View::Recommend, 2), "esc goes back to it");
         a.mouse(Mouse::Open(Stop::Recommend(0, 0)));
         assert_eq!(a.view, View::Table, "a double click on a task ranks by it");
-        a.store.toggle_favorite("debugging", "flash");
+        a.store.toggle_favorite("debugging:high", "flash");
         "RG".chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
         assert!(hints(&a, 200).contains(&"enter your model"), "on a task of your own, enter goes to its model");
     }
@@ -4981,7 +4990,7 @@ mod tests {
         assert_eq!(hit(&a, area, drag(any, 4)), None, "a drag over a list does nothing");
         assert_eq!(hit(&a, area, right(w - 2, 3)), Some(Mouse::Outside), "any click outside closes it");
         assert_eq!(hit(&a, area, click(w - 2, 3)), Some(Mouse::Outside), "outside: closes it");
-        // f's grid: a click on a box ticks it, on the name the task's own, on the heading nothing.
+        // f's grid: a click on a box ticks it, on the name goes to its row, on the heading nothing.
         a.mouse(Mouse::Outside);
         a.mouse(Mouse::Star(0));
         let (within, lines) = chooser(&a, area).unwrap();
@@ -4991,7 +5000,11 @@ mod tests {
         let Input::Choose { items, .. } = &a.input else { panic!("f's grid is open") };
         let boxes = rect.x + 2 + fav_name_w(items) as u16 + 2;
         assert_eq!(hit(&a, area, click(boxes + 2 * BOX_W as u16 + 1, rect.y + 3)), Some(Mouse::Tick(1, 2)));
-        assert_eq!(hit(&a, area, click(rect.x + 3, rect.y + 3)), Some(Mouse::Tick(1, 0)), "the name: the task's");
+        assert_eq!(hit(&a, area, click(rect.x + 3, rect.y + 3)), Some(Mouse::Row(1)), "the name");
+        let favs = a.store.favorite.clone();
+        a.mouse(Mouse::Row(2));
+        assert!(matches!(&a.input, Input::Choose { list, .. } if list.sel == 2), "the cursor to its row");
+        assert_eq!(a.store.favorite, favs, "ticking nothing");
         assert_eq!(hit(&a, area, click(boxes + BOXES as u16 * BOX_W as u16, rect.y + 3)), None, "past the boxes");
         assert_eq!(hit(&a, area, click(boxes, rect.y + 1)), None, "the tiers' heading");
     }
@@ -4999,8 +5012,9 @@ mod tests {
     #[test]
     fn favorite_models_get_a_star() {
         let mut a = app();
-        a.store.toggle_favorite("coding", "opus");
-        a.store.toggle_favorite("agentic", "opus");
+        a.store.toggle_favorite("coding:mid", "opus");
+        a.store.toggle_favorite("coding:high", "opus");
+        a.store.toggle_favorite("agentic:high", "opus");
         let (_, lines) = render(&mut a, 120, 5);
         let row = |m: &str| lines.iter().find(|l| l.contains(m)).unwrap().clone();
         assert!(row("opus").contains("★") && !row("flash").contains("★"), "★ before the favorite model's name");
@@ -5008,6 +5022,7 @@ mod tests {
         for _ in 0..2 {
             let (_, lines) = render(&mut a, 120, 5);
             match a.current().unwrap().key.as_str() {
+                // Once each, for however many tiers.
                 "opus" => assert!(lines[4].contains("★ coding ★ agentic"), "status names the tasks: {}", lines[4]),
                 _ => assert!(!lines[4].contains('★'), "flash is the favorite for nothing: {}", lines[4]),
             }
@@ -5019,8 +5034,8 @@ mod tests {
     fn star_takes_its_tasks_colour() {
         assert_eq!(TASK.len(), TASKS.len(), "a colour per task");
         let mut a = app();
-        a.store.toggle_favorite("coding", "opus");
-        a.store.toggle_favorite("agentic", "flash");
+        a.store.toggle_favorite("coding:high", "opus");
+        a.store.toggle_favorite("agentic:high", "flash");
         a.key(KeyCode::Char('j').into()); // the cursor is on flash, off opus
         let (buf, lines) = render(&mut a, 120, 5);
         // The cell where `pat` starts on line `y`; the lines hold wide glyphs before it.
@@ -5051,7 +5066,7 @@ mod tests {
         assert_eq!(buf[at(4, "★")].fg, task_color("agentic"), "and in the status bar");
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         let name_x = at(opus, "opus").0;
-        a.store.toggle_favorite("reasoning", "opus");
+        a.store.toggle_favorite("reasoning:high", "opus");
         let (_, lines) = render(&mut a, 120, 5);
         assert_eq!(lines[opus].matches('★').count(), 1, "one ★ however many tasks: {}", lines[opus]);
         assert_eq!(at(opus, "opus").0, name_x, "so the names never shift");
@@ -5095,7 +5110,7 @@ mod tests {
         for o in &mut data.models.iter_mut().find(|m| m.key == "flash").unwrap().offers {
             (o.input, o.output) = (6.0, 6.0);
         }
-        a.store.toggle_favorite("coding", "flash");
+        a.store.toggle_favorite("coding:high", "flash");
         a.set_data(data);
         // Under the grid, the box under the cursor says why.
         // High's: at $6 it fits no other tier.
@@ -6107,7 +6122,7 @@ mod tests {
         // wider than it where it ends: nothing is cut.
         let text = |l: &Vec<Span>| l.iter().map(|s| &*s.content).collect::<String>();
         let wrap = |w| {
-            wrap_spans(entry(&b, "overall", 2, b.tier_picks(0)[2], false, true), w, &[])
+            wrap_spans(entry(&b, "overall", 2, b.tier_picks(0)[2], false, true, false), w, &[])
                 .iter()
                 .map(text)
                 .collect::<Vec<_>>()
@@ -6154,9 +6169,10 @@ mod tests {
         // A wide character takes two cells of the box.
         let wide: Vec<String> = wrap_spans(vec![Span::raw("通义千问 Max")], 5, &[]).iter().map(text).collect();
         assert_eq!(wide, ["通义", "千问", "Max"]);
-        // A task of your own is the last row, in a colour of its own, every tier with the model you gave it; under
+        // A task of your own is the last row, in a colour of its own, each tier with the model you gave it; under
         // the grid, what you wrote it is about and that it is picked over a built-in task.
-        a.store.toggle_favorite("debugging", "opus");
+        a.store.toggle_favorite("debugging:mid", "opus");
+        a.store.toggle_favorite("debugging:high", "opus");
         a.store.set_about("debugging", "finding and fixing a bug");
         (a.view, a.task_cur) = (View::Recommend, TASKS.len());
         let lines = recommend(&a, 80, &mut vec![]).0;
@@ -6169,10 +6185,10 @@ mod tests {
             "and none has a built-in task's, nor the gold ★'s, nor the red ✗'s"
         );
         let models = |row: &str| row.split("★ ").skip(1).map(|s| s.trim().to_string()).collect::<Vec<_>>();
-        assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0"], "mid and high: low is up to $2");
+        assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0"], "mid and high");
         assert_eq!(text[own + 2], "debugging finding and fixing a bug");
         assert_eq!(text[own + 3], format!("  use for: {CUSTOM_WHEN}"));
-        // A tier's model is in that tier's box, the task's in the others.
+        // A tier's model is in that tier's box.
         a.store.toggle_favorite("debugging:low", "flash");
         let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();
         assert_eq!(models(&text[own]), ["flash $0.10", "opus $5.0", "opus $5.0"]);

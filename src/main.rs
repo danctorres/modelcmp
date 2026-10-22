@@ -42,7 +42,7 @@ enum Cmd {
         /// Best model per price level for a task (overall, coding, agentic, reasoning, vision, value): cheapest first, each row costing more and scoring higher. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, else for the task, when it costs no more than the tier's cap. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best, none when nothing is at the tier's price. A model your machine runs, or can download (`modelcmp memory`), takes the tier when it scores higher, as it is free there. A task of your own gives the tier's model, else the task's
+        /// One model from the task's list: your favorite for the tier, when it costs no more than the tier's cap. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best, none when nothing is at the tier's price. A model your machine runs, or can download (`modelcmp memory`), takes the tier when it scores higher, as it is free there. A task of your own gives the tier's model
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -210,27 +210,27 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Your favorite model for a task, or for one tier of it at its price or under: --tier picks it and recommend marks it ★. Alone, shows them (`f` in the TUI)
+    /// Your favorite model for one tier of a task, at its price or under: --tier picks it and recommend marks it ★. Alone, shows them (`f` in the TUI)
     Fav {
         /// overall, coding, agentic, reasoning, vision or value. Any other name is a task of your own, e.g. debugging, which has only the models you give it
         #[arg(value_parser = store::task_name)]
         task: Option<String>,
-        #[arg(requires = "task", conflicts_with = "rm")]
+        #[arg(requires_all = ["task", "tier"], conflicts_with = "rm")]
         model: Option<String>,
-        /// Only for `list --tier` with this tier, e.g. a cheap model for low and a strong one for the task
+        /// The tier it is the favorite for, e.g. a cheap model for low and a strong one for high
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// The harness you run it on (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): `list --task --id` prints the id that one takes
         #[arg(long, requires = "model")]
         via: Option<String>,
-        /// Clear the task's favorite, or with --tier the tier's. A task of your own is gone with its last model
+        /// Clear the task's favorites, or with --tier the tier's. A task of your own is gone with its last model
         #[arg(long, requires = "task")]
         rm: bool,
         /// Give a task of your own this name instead. Its models stay
         #[arg(long, value_name = "NAME", requires = "task", conflicts_with_all = ["model", "tier", "rm"], value_parser = store::task_name)]
         rename: Option<String>,
         /// What a task of your own is about, in your words: agents pick the task by it, and over a built-in task that fits too. "" clears it
-        #[arg(long, value_name = "TEXT", requires = "task", conflicts_with_all = ["tier", "rm", "rename"])]
+        #[arg(long, value_name = "TEXT", requires = "task", conflicts_with_all = ["rm", "rename"])]
         about: Option<String>,
     },
     /// The best model per price for each task, what the task measures and when to use it (`R` in the TUI)

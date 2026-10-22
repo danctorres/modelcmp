@@ -522,7 +522,7 @@ pub fn or_local<'m>(
     task: &str,
     tier: &str,
 ) -> Option<(&'m Model, f64)> {
-    let fav = pick.is_some_and(|(m, _)| store.tier_favorites(task, tier).any(|k| k == m.key));
+    let fav = pick.is_some_and(|(m, _)| store.tier_favorite(task, tier) == Some(m.key.as_str()));
     match local {
         Some(l) if !fav && pick.is_none_or(|(_, s)| l.1 > s) => Some(l),
         _ => pick,
@@ -626,7 +626,7 @@ pub fn can_fav(store: &Store, slot: &str, m: &Model) -> Result<(), String> {
     over_cap(store, slot, m).map_or(Ok(()), Err)
 }
 
-/// Whether `m` joins `task`'s line as a favorite: of the task, or of a tier it fits. One a
+/// Whether `m` joins `task`'s line as a favorite, of a tier it fits. One a
 /// lowered cap left dearer than its tier is no tier's pick, so not on the line either.
 fn fav_on_line(store: &Store, task: &str, m: &Model) -> bool {
     crate::store::task_slots(task)
@@ -653,9 +653,9 @@ pub fn pick<'a, 'm: 'a>(front: impl Iterator<Item = &'a (&'m Model, f64)>, cap: 
 }
 
 /// The entry of a task's line (`task_line`) that `tier` picks, as `--tier` does: your favorite
-/// for the tier, else for the task, when at or under its cap (`fits`), beats the pick on merit, which a favorite on the line only
+/// for the tier, when at or under its cap (`fits`), beats the pick on merit, which a favorite on the line only
 /// for being one (`off`) is neither best nor good enough for; one the line lacks gives way to
-/// the next.
+/// it.
 pub fn tier_pick<'m>(
     front: &[(&'m Model, f64)],
     off: &[&str],
@@ -664,7 +664,7 @@ pub fn tier_pick<'m>(
     tier: &str,
 ) -> Option<(&'m Model, f64)> {
     let on_line = |k| front.iter().find(|(m, _)| m.key == k && fits(store, tier, m));
-    let fav = store.tier_favorites(task, tier).find_map(on_line).copied();
+    let fav = store.tier_favorite(task, tier).and_then(on_line).copied();
     fav.or_else(|| pick(front.iter().filter(|(m, _)| !off.contains(&m.key.as_str())), store.tier_cap(tier)).copied())
 }
 
@@ -682,6 +682,13 @@ pub fn tier_picks<'m>(
     task: &str,
 ) -> [Option<(&'m Model, f64)>; TIERS.len()] {
     TIERS.map(|x| tier_pick(front, off, store, task, x.0))
+}
+
+/// Whether `m`, `tier`'s pick of `task`, is your favorite there. With one pick for the task
+/// (`one_pick`), every tier has it, so the favorite of any of them.
+pub fn fav_pick(store: &Store, task: &str, tier: &str, m: &Model, one: bool) -> bool {
+    let is = |x: &str| store.tier_favorite(task, x) == Some(m.key.as_str());
+    if one { TIERS.iter().any(|x| is(x.0)) } else { is(tier) }
 }
 
 /// Whether a task has one pick and not one per tier: "value", a rank with no score for a tier
@@ -1422,7 +1429,7 @@ mod tests {
         assert_eq!(keys(&store).0, ["fits", "paid", "paid", "paid"], "free only, as paid scores higher");
         assert_eq!(keys(&store).1, [true, false, false, false], "the tier it took");
         let mut fav = Store::default();
-        fav.set_favorite(&crate::store::slot("reasoning", Some("free")), "hosted", None);
+        fav.set_favorite(&crate::store::slot("reasoning", "free"), "hosted", None);
         assert_eq!(keys(&fav).0[0], "hosted", "your favorite stays");
     }
 

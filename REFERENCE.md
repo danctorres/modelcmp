@@ -171,13 +171,12 @@ modelcmp select sonnet-5                       # shortlist it, list --selected s
 modelcmp note sonnet-5 "fast enough for refactors"
 modelcmp exclude llama-4-maverick              # have it, can't use it
 modelcmp harness claude                        # your default harness (`H` in the TUI)
-modelcmp fav coding sonnet-5                   # your favorite for a task
-modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier, at its price or under
+modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier of a task, at its price or under
 modelcmp tier mid 8                            # mid takes models up to $8, `modelcmp tier` shows every cap
-modelcmp fav coding opus-5.5 --via claude      # and the harness you run it on
+modelcmp fav coding opus-5.5 --tier high --via claude   # and the harness you run it on
 
 # tasks of your own
-modelcmp fav debugging opus-5.5 --about "finding and fixing a bug"
+modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"
 modelcmp fav debugging --about "bugs and flaky tests"   # rewrite what it is about, "" clears it
 modelcmp fav debugging 3.7-flash --tier low    # its model for one tier
 modelcmp fav debugging --rename triage         # another name, its models stay
@@ -218,9 +217,8 @@ large prompt, bound the context instead: `--min ctx=200`.
 Any other name given to `fav` is a task of your own (`debugging`, and `"Tool Dispatch"` is
 stored as `tool-dispatch`).
 
-- No benchmark ranks it. It has the models you give it, one for the task and one per tier if
-  you like.
-- `--task` lists them, cheapest first. With `--tier` it returns that tier's, else the task's when it fits the tier's cap,
+- No benchmark ranks it. It has the models you give its tiers, and a tier you give none has none.
+- `--task` lists them, cheapest first. With `--tier` it returns that tier's, when it fits the tier's cap,
   leaving out one you excluded or lost access to.
 - `recommend` lists it after the built-in tasks, with what you wrote it is about and the model
   of each tier.
@@ -294,9 +292,9 @@ or bound can hide different models.
 
 ### Favorites
 
-- A model you `fav` for the tier, else for the task, beats the tier's pick when it costs no more
-  than the tier's cap. `fav --tier` refuses a model over it, and a task's favorite skips the
-  tiers it is over.
+- A model you `fav` for a tier beats the tier's pick when it costs no more than the tier's cap.
+  `fav` needs `--tier` with a model and refuses one over the cap. Without `--tier`, `fav <task>`
+  shows the task's favorites and `--rm` clears them all.
 - Every favorite of the task that you have and did not exclude sits on the task's list,
   whatever `--dev`, `--via`, `--min`, `--max` or `--selected` narrow it to.
 - `recommend` marks it `★`, whether or not it is on the frontier or has a score for the task,
@@ -350,7 +348,7 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
   Ling 3.1 Flash is not on claude, start: modelcmp quiet opencode run --model
   opencode/ling-3.1-flash-free "<prompt>")`.
 - `--min` and `--not` leave a favorite out too. A tier's favorite they leave out gives way to
-  the task's, and a task of your own whose model is out says `no model`.
+  the tier's pick, and a task of your own whose model is out says `no model`.
 - A line with a model to download says so in place of the command: `not on your machine, ask
   the user to download it (17.4 GB): modelcmp get qwen3827b`.
 - When no task has a model (`--via ollama`, whose copies are picked only as favorites, or a
@@ -430,7 +428,7 @@ llama.cpp, `llama-server` with its own address), then refresh, and Via shows `pi
 } } }
 ```
 
-`modelcmp fav coding qwen3.5-4b` then makes `pick` start it in pi for that task as any other
+`modelcmp fav coding qwen3.5-4b --tier free` then makes `pick` start it in pi for that task as any other
 model, `modelcmp quiet pi --model ollama/qwen3.5:4b -p "<prompt>"`. The run is a process of its
 own with its own context, so the agent that starts it reads the answer alone.
 
@@ -485,7 +483,7 @@ scores are Epoch's, and with either source the first start or command an hour la
 ```sh
 opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)   # --id prints just provider/model
 modelcmp recommend --json                      # choose the task by its "when"
-modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite for the tier or task when set, else the tier's
+modelcmp list --task coding --tier mid --json  # the one model to use: the user's favorite for the tier when set, else the tier's
 ```
 
 Each model carries these fields:
@@ -499,7 +497,7 @@ Each model carries these fields:
 | `selected` | on your shortlist |
 | `excluded` | you excluded it, or one of the TUI's filters hides it |
 | `note` | your note on it, null when it has none |
-| `favorite_for` | the tasks it is the user's favorite for, and `task:tier` for a tier's |
+| `favorite_for` | the tiers it is the user's favorite for, as `task:tier` |
 | `price` | the offer you'd pay, as below |
 | `context`, `max_output` | in tokens |
 | `tool_call`, `reasoning`, `vision`, `open_weights` | what it can do, true or false |
@@ -534,7 +532,7 @@ Each model carries these fields:
 
 `recommend --json` has a list of tasks, each with its `when`, its `frontier`, the `tiers` the
 TUI's `R` shows (the key each of `free`, `low`, `mid` and `high` picks, or one `pick` for a task
-with one), the user's `favorite` and `tier_favorites`, and their harnesses as `via` and `tier_via`.
+with one), the user's `tier_favorites`, and their harnesses as `tier_via`.
 
 - A frontier entry carries its `context` in tokens, `via` (the harnesses that have the model,
   as in `list --json`), and the user's `note` when the model has one.
@@ -549,6 +547,6 @@ A task of your own follows the built-in ones with the same fields and `"custom":
 |---|---|
 | `about` | what the user wrote, `your own task` when nothing |
 | `when` | says it wins over a built-in task that fits too |
-| `favorite`, `tier_favorites` | the models the user gave it |
-| `via`, `tier_via` | the harnesses they run on when the user chose one, null and `{}` otherwise, as for a built-in task |
+| `tier_favorites` | the models the user gave its tiers |
+| `tier_via` | the harnesses they run on when the user chose one, `{}` otherwise, as for a built-in task |
 | `frontier` | those models, cheapest first, with a null `score` |

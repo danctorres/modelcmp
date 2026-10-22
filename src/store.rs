@@ -66,9 +66,9 @@ pub struct Store {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub bench: BTreeMap<String, String>,
     pub notes: BTreeMap<String, String>,
-    /// `slot` -> your favorite model for it: the task's, or one `--tier`'s of it, which `--tier`
-    /// picks over the task's and both over the computed one. A key that is no built-in task
-    /// is a task of your own (`custom_tasks`).
+    /// `slot` -> your favorite model for it, one `--tier`'s of a task, which `--tier` picks
+    /// over the computed one. A task in a key that is no built-in task is a task of your own
+    /// (`custom_tasks`).
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
     /// `slot` -> the harness you run its favorite on (`fav --via`, `v` in `f`'s grid): `--id`
@@ -112,21 +112,14 @@ pub struct Store {
     extra: BTreeMap<String, serde_json::Value>,
 }
 
-/// The `favorite` key of a task, or of one `--tier` of it: `coding`, `coding:low`.
-pub fn slot(task: &str, tier: Option<&str>) -> String {
-    tier.map_or_else(|| task.to_string(), |x| format!("{task}:{x}"))
+/// The `favorite` key of one `--tier` of a task: `coding:low`.
+pub fn slot(task: &str, tier: &str) -> String {
+    format!("{task}:{tier}")
 }
 
-/// Every favorite slot as (task, tier), in `TASKS` order, each task before its tiers.
-pub fn slots() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
-    crate::fit::TASKS.iter().flat_map(|t| {
-        std::iter::once(None).chain(crate::view::TIERS.iter().map(|x| Some(x.0))).map(move |x| (t.name, x))
-    })
-}
-
-/// The slots of one task: its own, then one per tier.
+/// The slots of one task: one per tier.
 pub fn task_slots(task: &str) -> impl Iterator<Item = String> {
-    std::iter::once(None).chain(crate::view::TIERS.iter().map(|x| Some(x.0))).map(move |x| slot(task, x))
+    crate::view::TIERS.iter().map(move |x| slot(task, x.0))
 }
 
 /// A task's name as `fav` and `--task` take it: lowercase with `-` for spaces, so that it needs
@@ -269,9 +262,9 @@ impl Store {
             }),
         };
         s.pins_to_marks();
-        // A slot of no tier is a task of your own with no model to show, and could not be cleared.
+        // A slot of no tier, a task's own favorite of older versions, is no pick of a tier.
         let tier = |x: &str| crate::view::TIERS.iter().any(|t| t.0 == x);
-        s.favorite.retain(|k, _| k.split_once(':').is_none_or(|(_, x)| tier(x)));
+        s.favorite.retain(|k, _| k.split_once(':').is_some_and(|(_, x)| tier(x)));
         // A cap left by a hand edit on a tier that takes none, or that is no price.
         s.tiers.retain(|t, c| crate::view::capped(t) && c.is_finite() && *c >= 0.0);
         // A harness is its favorite's: one left by a hand edit has no model to run.
@@ -421,24 +414,24 @@ impl Store {
     }
 
     /// The harness of `key` as a favorite of the task: with a tier, the tier's when it is that
-    /// one's favorite, else the task's, as `--tier` picks; with none, of the first slot it has.
+    /// one's favorite, and with none, of the first tier it has.
     pub fn task_via(&self, task: &str, tier: Option<&str>, key: &str) -> Option<&str> {
         let slots: Vec<String> = match tier {
-            Some(x) => vec![slot(task, Some(x)), slot(task, None)],
+            Some(x) => vec![slot(task, x)],
             None => task_slots(task).collect(),
         };
         slots.iter().find(|s| self.favorite(s) == Some(key)).and_then(|s| self.via(s))
     }
 
-    /// What `--tier` tries before the computed pick, in order: the tier's favorite, then the task's.
-    pub fn tier_favorites(&self, task: &str, tier: &str) -> impl Iterator<Item = &str> {
-        [self.favorite(&slot(task, Some(tier))), self.favorite(task)].into_iter().flatten()
+    /// What `--tier` tries before the computed pick: the tier's favorite.
+    pub fn tier_favorite(&self, task: &str, tier: &str) -> Option<&str> {
+        self.favorite(&slot(task, tier))
     }
 
-    /// Your own tasks, by name: the favorites, of the task or a tier of it, of no built-in
+    /// Your own tasks, by name: the favorites, of a tier of a task, of no built-in
     /// task. One has no ranking, only the models you gave it, and is gone when they are cleared.
     pub fn custom_tasks(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.favorite.keys().map(|k| k.split(':').next().unwrap_or(k)).collect();
+        let mut v: Vec<&str> = self.favorite.keys().filter_map(|k| Some(k.split_once(':')?.0)).collect();
         v.retain(|t| crate::fit::task(t).is_none());
         v.sort_unstable();
         v.dedup();
@@ -467,10 +460,10 @@ impl Store {
         Ok(())
     }
 
-    /// Every favorite slot there is: the built-in tasks' in `slots` order, then those of your
-    /// own tasks, each task before its tiers.
+    /// Every favorite slot there is: the built-in tasks' in `TASKS` order, then those of your
+    /// own tasks.
     pub fn all_slots(&self) -> impl Iterator<Item = String> {
-        slots().map(|(t, x)| slot(t, x)).chain(self.custom_tasks().into_iter().flat_map(task_slots))
+        crate::fit::TASKS.iter().map(|t| t.name).chain(self.custom_tasks()).flat_map(task_slots)
     }
 
     /// The slots the model is the favorite for, in `all_slots` order, as its ★s are drawn.
@@ -478,7 +471,7 @@ impl Store {
         self.all_slots().filter(|s| self.favorite(s) == Some(key)).collect()
     }
 
-    /// Whether the model is a favorite of the task or its tiers, or with no task of any.
+    /// Whether the model is a favorite of the task's tiers, or with no task of any.
     pub fn is_favorite(&self, task: Option<&crate::fit::Task>, key: &str) -> bool {
         match task {
             // Asked per row and per frame, so without a list of them.
@@ -598,9 +591,9 @@ mod tests {
         s.toggle_excluded("llama");
         s.set_note("gpt55", "  fast  ");
         s.set_note("x", "");
-        s.toggle_favorite("coding", "gpt55");
-        s.toggle_favorite("agentic", "gpt55");
-        s.toggle_favorite("agentic", "gpt55");
+        s.toggle_favorite("coding:mid", "gpt55");
+        s.toggle_favorite("agentic:mid", "gpt55");
+        s.toggle_favorite("agentic:mid", "gpt55");
         s.seen = "0.1.0".into();
         s.save().unwrap();
         let back = Store::load_from(p.clone());
@@ -608,28 +601,28 @@ mod tests {
         assert_eq!(back.note("gpt55"), Some("fast"));
         assert!(back.is_excluded("llama"));
         assert!(back.note("x").is_none());
-        assert_eq!(back.favorite("coding"), Some("gpt55"));
-        assert_eq!(back.favorite_for("gpt55"), ["coding"], "toggling twice clears it");
-        s.toggle_favorite(&slot("coding", Some("low")), "flash");
-        s.toggle_favorite(&slot("coding", Some("high")), "gpt55");
-        assert_eq!(s.tier_favorites("coding", "low").collect::<Vec<_>>(), ["flash", "gpt55"], "the tier's first");
-        assert_eq!(s.tier_favorites("coding", "mid").collect::<Vec<_>>(), ["gpt55"], "else the task's");
-        assert_eq!(s.favorite_for("gpt55"), ["coding", "coding:high"]);
-        s.set_favorite("coding", "gpt55", Some("codex"));
-        assert_eq!(s.task_via("coding", Some("mid"), "gpt55"), Some("codex"), "the task's harness");
+        assert_eq!(back.favorite("coding:mid"), Some("gpt55"));
+        assert_eq!(back.favorite_for("gpt55"), ["coding:mid"], "toggling twice clears it");
+        s.toggle_favorite(&slot("coding", "low"), "flash");
+        s.toggle_favorite(&slot("coding", "high"), "gpt55");
+        assert_eq!((s.tier_favorite("coding", "low"), s.tier_favorite("coding", "free")), (Some("flash"), None));
+        assert_eq!(s.favorite_for("gpt55"), ["coding:mid", "coding:high"]);
+        s.set_favorite("coding:mid", "gpt55", Some("codex"));
+        assert_eq!(s.task_via("coding", Some("mid"), "gpt55"), Some("codex"), "the tier's harness");
         assert_eq!(s.task_via("coding", Some("high"), "gpt55"), None, "the tier's favorite has none of its own");
-        assert_eq!(s.task_via("coding", Some("low"), "gpt55"), Some("codex"), "the tier's hidden: the task's");
+        assert_eq!(s.task_via("coding", Some("low"), "gpt55"), None, "another model's tier");
         assert_eq!(s.task_via("coding", None, "gpt55"), Some("codex"), "no tier: the slot it is the favorite of");
-        s.toggle_favorite("coding", "flash");
-        assert_eq!(s.via("coding"), None, "another model: the harness goes with the one it was for");
-        // Files written before the renames call favorites "preferred" and pins "favorites".
-        let file = br#"{"preferred":{"coding":"old","debugging":"old","debugging:fast":"x","long-context:low":"x"},"favorites":["old"]}"#;
+        s.toggle_favorite("coding:mid", "flash");
+        assert_eq!(s.via("coding:mid"), None, "another model: the harness goes with the one it was for");
+        // Files written before the renames call favorites "preferred" and pins "favorites", and
+        // older ones have a task's own favorite, of no tier, which no tier picks now.
+        let file = br#"{"preferred":{"coding":"old","coding:low":"old","debugging":"old","debugging:fast":"x","long-context:low":"x"},"via":{"coding":"claude"},"favorites":["old"]}"#;
         std::fs::write(&p, file).unwrap();
         let old = Store::load_from(p.clone());
-        assert!(old.favorite("coding") == Some("old") && old.is_marked("old"));
-        // A task that is not built in is your own, whether its model is the task's or a tier's.
-        assert_eq!(old.custom_tasks(), ["debugging", "long-context"]);
-        assert_eq!(old.favorite_for("old"), ["coding", "debugging"], "after the built-in ones");
+        assert!(old.favorite("coding").is_none() && old.via.is_empty() && old.is_marked("old"));
+        // A task that is not built in is your own.
+        assert_eq!(old.custom_tasks(), ["long-context"]);
+        assert_eq!(old.favorite_for("old"), ["coding:low"]);
         assert_eq!(
             (old.favorite_for("x"), old.favorite("debugging:fast")),
             (vec!["long-context:low".to_string()], None)
@@ -637,17 +630,18 @@ mod tests {
         assert_eq!(task_name(" Tool  Dispatch ").as_deref(), Ok("tool-dispatch"), "typed without quotes");
         // A task of your own takes another name, one no task has; a built-in one keeps its own.
         let mut old = old;
-        assert!(old.rename_task("coding", "code").is_err() && old.rename_task("debugging", "coding").is_err());
-        old.set_about("debugging", " finding and fixing a bug ");
         old.favorite.remove("long-context:low");
         old.toggle_favorite("debugging:low", "flash");
+        old.toggle_favorite("debugging:high", "old");
+        assert!(old.rename_task("coding", "code").is_err() && old.rename_task("debugging", "coding").is_err());
+        old.set_about("debugging", " finding and fixing a bug ");
         assert_eq!(old.rename_task("debugging", "bug-hunt"), Ok(()));
-        assert_eq!((old.custom_tasks(), old.favorite("bug-hunt")), (vec!["bug-hunt"], Some("old")));
-        assert_eq!(old.tier_favorites("bug-hunt", "low").collect::<Vec<_>>(), ["flash", "old"], "its tiers go with it");
+        assert_eq!((old.custom_tasks(), old.favorite("bug-hunt:high")), (vec!["bug-hunt"], Some("old")));
+        assert_eq!(old.tier_favorite("bug-hunt", "low"), Some("flash"), "its tiers go with it");
         old.toggle_favorite("bug-hunt:low", "flash");
         assert_eq!((old.about("bug-hunt"), old.about("debugging")), (Some("finding and fixing a bug"), None));
         // What a task was about goes with it, the next time the file is read.
-        old.toggle_favorite("bug-hunt", "old");
+        old.toggle_favorite("bug-hunt:high", "old");
         old.save().unwrap();
         assert_eq!(Store::load_from(p.clone()).about("bug-hunt"), None);
         assert!(old.rename_task("debugging", "x").is_err(), "gone under its old name");
@@ -726,11 +720,11 @@ mod tests {
         Store::load_from(p.clone());
         assert_eq!(std::fs::read(p.with_extension("json.bad")).unwrap(), b"{not json", "the first is kept");
         // One field of the wrong type: the others are kept, and the file stays with a copy aside.
-        let partly = br#"{"favorite": {"coding": "opus"}, "excluded": ["mini"], "favorites": ["old"], "theme": 7}"#;
+        let partly = br#"{"favorite": {"coding:mid": "opus"}, "excluded": ["mini"], "favorites": ["old"], "theme": 7}"#;
         std::fs::write(&p, partly).unwrap();
         let s = Store::load_from(p.clone());
         assert_eq!(
-            (s.favorite.get("coding").map(String::as_str), s.excluded.len(), s.theme.as_str()),
+            (s.favorite.get("coding:mid").map(String::as_str), s.excluded.len(), s.theme.as_str()),
             (Some("opus"), 1, "")
         );
         assert!(p.exists() && s.warning.is_some_and(|w| w.contains("the rest is kept")));

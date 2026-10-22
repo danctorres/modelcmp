@@ -3,7 +3,7 @@
 use crate::app::{COLS, Col, TEXT, col_value, hidden, launch_cmd, model_id, on_price, shown, unmeasured};
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
-use crate::store::{Store, slot};
+use crate::store::{Store, slot, task_slots};
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front,
     custom_line, detail_lines, excluded, fits, left_out_by, one_pick, or_local, over_cap, price, priced, shown_via,
@@ -325,7 +325,9 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
     // A usage error, as when clap knew every task's name.
     if let Some(c) = o.custom.as_deref().filter(|c| !store.custom_tasks().contains(c)) {
         let tasks = [fit::task_names().collect(), store.custom_tasks()].concat().join(", ");
-        let msg = format!("no task '{c}': there are {tasks}; modelcmp fav {c} <model> makes it one of your own");
+        let msg = format!(
+            "no task '{c}': there are {tasks}; modelcmp fav {c} <model> --tier <tier> makes it one of your own"
+        );
         return Err(Exit { code: 2, msg });
     }
     let task = o.task.is_some() || o.custom.is_some();
@@ -348,14 +350,14 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
     };
     if let Some(c) = &o.custom {
         // A task of your own has no ranking: the models you gave it, or with a tier that
-        // tier's, else the task's.
+        // tier's.
         let line = custom_line(pool(), store, c);
         models = match &o.tier {
             // It has no pick on merit: a built-in task that fits has.
             Some(_) if o.no_fav => vec![],
             Some(tier) => store
-                .tier_favorites(c, tier)
-                .find_map(|k| line.iter().find(|m| m.key == k && fits(store, tier, m)).copied())
+                .tier_favorite(c, tier)
+                .and_then(|k| line.iter().find(|m| m.key == k && fits(store, tier, m)).copied())
                 .into_iter()
                 .collect(),
             None => line,
@@ -648,7 +650,7 @@ fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
     if let Some(l) = said_first {
         return Ok(l);
     }
-    // The tier's favorite ruled out: the task's, then the pick on merit.
+    // The tier's model ruled out: the next it picks, else its pick without your favorites.
     let rest = ListOpts { not: o.not.iter().cloned().chain(first.map(|m| m.key.clone())).collect(), ..o.clone() };
     let merit = match line(&rest)?.1 {
         Some(l) => l,
@@ -1080,7 +1082,15 @@ pub fn fav(
             return Err(format!("{t} is built in: --about is for a task of your own").into());
         }
         if q.is_none() && !store.custom_tasks().contains(&t) {
-            return Err(format!("no task {t} of your own: modelcmp fav {t} <model> --about ... makes it").into());
+            return Err(format!(
+                "no task {t} of your own: modelcmp fav {t} <model> --tier <tier> --about ... makes it"
+            )
+            .into());
+        }
+        // A tier is for a model alone, not for what the task is about.
+        if let (None, Some(x)) = (q, tier) {
+            let msg = format!("--tier needs a model: modelcmp fav {t} <model> --tier {x}");
+            return Err(Exit { code: 2, msg });
         }
         store.set_about(t, text);
         // With a model, saved with it below.
@@ -1090,12 +1100,18 @@ pub fn fav(
             return Ok(());
         }
     }
-    let task = task.map(|t| slot(t, tier));
-    let task = task.as_deref();
+    // The task's tiers, or with --tier the one.
+    let slots: Vec<String> = match (task, tier) {
+        (Some(t), Some(x)) => vec![slot(t, x)],
+        (Some(t), None) => task_slots(t).collect(),
+        (None, _) => vec![],
+    };
+    // What is shown or cleared: the task, or with --tier the one.
+    let what = task.map(|t| tier.map_or(t.to_string(), |x| slot(t, x))).unwrap_or_default();
     let line = |store: &Store, t: &str, k: &str| {
         let m = model(k);
         let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score)" } else { "" };
-        let about = store.about(t).map_or(String::new(), |a| format!("  {a}"));
+        let about = store.about(t.split(':').next().unwrap_or(t)).map_or(String::new(), |a| format!("  {a}"));
         let via = store.via(t).map_or(String::new(), |h| format!("  via {h}"));
         // One a later cap left dearer than its tier: kept for when the cap is raised.
         let over = m.and_then(|m| over_cap(store, t, m)).map_or(String::new(), |w| format!("  (unused: {w})"));
@@ -1104,34 +1120,45 @@ pub fn fav(
     match (task, q, rm) {
         (None, ..) => {
             if store.favorite.is_empty() {
-                println!("no favorites; modelcmp fav <task> <model> sets one");
+                println!("no favorites, modelcmp fav <task> <model> --tier <tier> sets one");
             }
             for (t, k) in &store.favorite {
                 println!("{t:<18} {}", line(store, t, k));
             }
         }
-        (Some(t), None, false) => match store.favorite(t) {
-            Some(k) => println!("{}", line(store, t, k)),
+        (Some(name), None, false) => {
+            let favs: Vec<(&String, &str)> = slots.iter().filter_map(|s| Some((s, store.favorite(s)?))).collect();
             // A model's name where the task goes, or a typo, is no task: not a task with no favorite.
-            None => {
-                let name = t.split(':').next().unwrap_or(t);
-                if fit::task(name).is_none() && !store.custom_tasks().contains(&name) {
-                    let msg = format!("no task '{name}': modelcmp fav {name} <model> makes it one of your own");
-                    return Err(Exit { code: 2, msg });
-                }
-                println!("no favorite for {t}");
+            if favs.is_empty() && fit::task(name).is_none() && !store.custom_tasks().contains(&name) {
+                let msg =
+                    format!("no task '{name}': modelcmp fav {name} <model> --tier <tier> makes it one of your own");
+                return Err(Exit { code: 2, msg });
             }
-        },
+            match (favs.as_slice(), tier) {
+                ([], _) => println!("no favorite for {what}"),
+                ([(s, k)], Some(_)) => println!("{}", line(store, s, k)),
+                _ => favs.iter().for_each(|(s, k)| println!("{s:<18} {}", line(store, s, k))),
+            }
+        }
         // Clearing what is clear already is no failure: a script's reset step runs twice.
-        (Some(t), None, true) => {
-            if !store.clear_favorite(t) {
-                println!("no favorite for {t}");
+        (Some(_), None, true) => {
+            let cleared: Vec<&String> = slots.iter().filter(|s| store.clear_favorite(s)).collect();
+            if cleared.is_empty() {
+                println!("no favorite for {what}");
                 return Ok(());
             }
             store.save()?;
-            println!("cleared {t}");
+            for s in cleared {
+                println!("cleared {s}");
+            }
         }
-        (Some(t), Some((q, via)), _) => {
+        (Some(name), Some((q, via)), _) => {
+            // Clap asks for --tier with a model, and a slot of no tier would be gone on the next load.
+            let Some(x) = tier else {
+                let msg = format!("a model needs --tier: modelcmp fav {name} <model> --tier <tier>");
+                return Err(Exit { code: 2, msg });
+            };
+            let t = &slot(name, x);
             let m = resolve(data, q)?;
             // A harness that cannot run the model would leave `--id` with nothing to give.
             if let Some(h) = via.filter(|h| launch_cmd(m, h, &data.harness).is_none()) {
@@ -1144,7 +1171,7 @@ pub fn fav(
             }
             // A tier is a budget: its favorite fits it.
             if let Err(why) = can_fav(store, t, m) {
-                return Err(format!("{why}: set it for the task, or a dearer tier").into());
+                return Err(format!("{why}: set it for a dearer tier").into());
             }
             // Said, as a mistyped task makes one of your own too.
             let name = t.split(':').next().unwrap_or(t);
@@ -1205,24 +1232,19 @@ fn usable<'a>(data: &'a Data, store: &'a Store) -> impl Iterator<Item = &'a Mode
     visible(data, store, false, false).map(|(_, m)| m).filter(move |m| !excluded(m, store, any))
 }
 
-/// What a task has and each of its tiers: a favorite, or the harness it runs on.
-type Slots<'a> = (Option<&'a str>, BTreeMap<&'static str, &'a str>);
+/// What each tier of a task has: a favorite, or the harness it runs on.
+type Slots<'a> = BTreeMap<&'static str, &'a str>;
 
-/// A task's favorite and its tiers', the ones `on` its line: one excluded or out of reach is
-/// off it, so agents are not pointed at it either. Then the harnesses you run them on, while
-/// they have the model, as `--id` and `--cmd` go by.
+/// A task's tiers' favorites, the ones `on` its line: one excluded or out of reach is off it,
+/// so agents are not pointed at it either. Then the harnesses you run them on, while they have
+/// the model, as `--id` and `--cmd` go by.
 fn favorites<'a>(data: &Data, store: &'a Store, task: &str, on: impl Fn(&str) -> bool) -> (Slots<'a>, Slots<'a>) {
-    // A tier's dearer than the tier is no pick of it either.
-    let in_budget = |s: &str, k: &str| {
-        s.split_once(':')
-            .is_none_or(|(_, tier)| data.models.iter().find(|m| m.key == k).is_none_or(|m| fits(store, tier, m)))
-    };
-    let fav = |s: &str| store.favorite(s).filter(|k| on(k) && in_budget(s, k));
+    // One dearer than the tier is no pick of it either.
+    let in_budget = |tier: &str, k: &str| data.models.iter().find(|m| m.key == k).is_none_or(|m| fits(store, tier, m));
+    let fav = |x: &str| store.tier_favorite(task, x).filter(|k| on(k) && in_budget(x, k));
     let has = |k: &str, h: &str| data.models.iter().any(|m| m.key == k && launch_cmd(m, h, &data.harness).is_some());
-    let via = |s: &str| fav(s).and_then(|k| store.via(s).filter(|h| has(k, h)));
-    let slots = |of: &dyn Fn(&str) -> Option<&'a str>| {
-        (of(task), TIERS.iter().filter_map(|x| Some((x.0, of(&slot(task, Some(x.0)))?))).collect())
-    };
+    let via = |x: &str| fav(x).and_then(|k| store.via(&slot(task, x)).filter(|h| has(k, h)));
+    let slots = |of: &dyn Fn(&str) -> Option<&'a str>| TIERS.iter().filter_map(|x| Some((x.0, of(x.0)?))).collect();
     (slots(&fav), slots(&via))
 }
 
@@ -1246,10 +1268,10 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
     let custom = store.custom_tasks().into_iter().map(|t| {
         let line = custom_line(usable(data, store), store, t);
         let front: Vec<_> = line.iter().map(|m| entry(m, store, f64::NAN, false)).collect();
-        let ((fav, tier_favs), (via, tier_via)) = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
+        let (tier_favs, tier_via) = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
         let (own, off) = custom_front(&line);
         let tiers = tiers(tier_picks(&own, &off, store, t), t);
-        serde_json::json!({"name": t, "custom": true, "about": store.about(t).unwrap_or(CUSTOM_ABOUT), "when": CUSTOM_WHEN, "benchmarks": [], "favorite": fav, "tier_favorites": tier_favs, "via": via, "tier_via": tier_via, "tiers": tiers, "frontier": front})
+        serde_json::json!({"name": t, "custom": true, "about": store.about(t).unwrap_or(CUSTOM_ABOUT), "when": CUSTOM_WHEN, "benchmarks": [], "tier_favorites": tier_favs, "tier_via": tier_via, "tiers": tiers, "frontier": front})
     });
     TASKS
         .iter()
@@ -1259,7 +1281,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                 .iter()
                 .map(|&(m, s)| entry(m, store, s, !off.contains(&m.key.as_str())))
                 .collect();
-            let ((fav, tier_favs), (via, tier_via)) = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
+            let (tier_favs, tier_via) = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
             let (picks, _, local) = local_picks(data, store, t, &line, &off);
             // The best model your machine runs, with the download it needs when it is not on it.
             let local = local.map(|m| {
@@ -1267,7 +1289,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                 serde_json::json!({"key": m.key, "here": m.here(), "download": size})
             });
             let tiers = tiers(picks, t.name);
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "favorite": fav, "tier_favorites": tier_favs, "via": via, "tier_via": tier_via, "tiers": tiers, "local": local, "frontier": front})
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "tier_favorites": tier_favs, "tier_via": tier_via, "tiers": tiers, "local": local, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -1306,8 +1328,9 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
         let (picks, took, _) = local_picks(data, store, t, &line, &off);
+        let one = one_pick(t.name, &picks);
         show(t.name, picks, &|m, s, tier| {
-            let fav = store.tier_favorites(t.name, tier).any(|k| k == m.key);
+            let fav = crate::view::fav_pick(store, t.name, tier, m, one);
             let p = priced(m, s, true, fav);
             // Free on your machine, which its price would not say.
             let size = download_sizes(data, store).get(&m.key).filter(|_| !m.here());
@@ -1489,7 +1512,7 @@ mod tests {
             not: vec![],
         };
         assert!(list(&data, &store, &o).is_err(), "openai has no model for coding");
-        store.set_favorite("coding", "mini", None);
+        store.set_favorite("coding:low", "mini", None);
         assert!(list(&data, &store, &o).is_ok());
     }
 
@@ -1503,6 +1526,15 @@ mod tests {
         assert!(list(&data, &Store::default(), &ListOpts { all: true, ..o }).is_ok());
     }
 
+    /// A favorite is a tier's: one of no tier would be gone on the next load, so it is refused.
+    #[test]
+    fn a_favorite_needs_a_tier() {
+        let data = Data { models: vec![model("mini", 60.0, 1.0)], ..Default::default() };
+        let mut store = Store::default();
+        let e = fav(&data, &mut store, Some("coding"), None, Some(("mini", None)), false, None).unwrap_err();
+        assert_eq!((e.code, store.favorite.is_empty()), (2, true), "{}", e.msg);
+    }
+
     /// `--id --via pi` is the id pi takes: a favorite pi lacks is an error, not opencode's id.
     #[test]
     fn the_id_is_the_one_the_harness_asked_for_takes() {
@@ -1511,7 +1543,7 @@ mod tests {
             (m.available, m.via, m.offers[0].via) = (true, vec![h.into()], vec![h.into()]);
         }
         let mut store = Store::default();
-        store.set_favorite("coding", "mini", None);
+        store.set_favorite("coding:low", "mini", None);
         let mut o = ListOpts {
             task: fit::task("coding"),
             custom: None,
@@ -1557,14 +1589,6 @@ mod tests {
         data.models[1].context = 1_000_000;
         o.bounds = vec![(COLS.iter().position(|c| c.id == "ctx").unwrap(), 600.0, f64::INFINITY)];
         assert_eq!(line(&data, &store, &o), Some(format!("{QUIET} pi --model p/gpt55 -p \"<prompt>\"  1M")));
-        // The tier's favorite ruled out: the task's is next, before the pick on merit.
-        data.models.push(model("big", 10.0, 2.0));
-        let big = data.models.last_mut().unwrap();
-        (big.available, big.context, big.via, big.offers[0].via) =
-            (true, 2_000_000, vec!["pi".into()], vec!["pi".into()]);
-        store.set_favorite("coding:low", "mini", None);
-        store.set_favorite("coding", "big", None);
-        assert_eq!(line(&data, &store, &o), Some(format!("{QUIET} pi --model p/big -p \"<prompt>\"  2M")));
         let run = |cmd: &[&str]| one_shot(cmd.iter().map(|s| s.to_string()).collect());
         let runs = [
             (&["codex", "--model", "gpt55"][..], "codex exec --sandbox workspace-write --model gpt55"),
@@ -1790,19 +1814,7 @@ mod tests {
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(
             keys(&t),
-            [
-                "about",
-                "benchmarks",
-                "favorite",
-                "frontier",
-                "local",
-                "name",
-                "tier_favorites",
-                "tier_via",
-                "tiers",
-                "via",
-                "when"
-            ]
+            ["about", "benchmarks", "frontier", "local", "name", "tier_favorites", "tier_via", "tiers", "when"]
         );
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "gpt55"});
         assert_eq!(t["tiers"], tiers, "as recommend's grid in the TUI");
@@ -1821,34 +1833,24 @@ mod tests {
         let mut data = data;
         data.models[1].offers[0].via = vec!["pi".into()];
         let t = coding(&recommend_json(&data, &store));
-        assert_eq!((&t["via"], &t["tier_via"]), (&Value::Null, &serde_json::json!({"low": "pi"})), "its harness");
+        assert_eq!(t["tier_via"], serde_json::json!({"low": "pi"}), "its harness");
         store.toggle_excluded("mini");
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(names(&t), ["gpt55"]);
         assert_eq!(t["tier_favorites"], serde_json::json!({}), "nor as a favorite");
-        store.toggle_favorite("coding", "gone");
-        assert_eq!(coding(&recommend_json(&data, &store))["favorite"], Value::Null, "nor one you do not have");
+        store.toggle_favorite("coding:high", "gone");
+        let t = coding(&recommend_json(&data, &store));
+        assert_eq!(t["tier_favorites"], serde_json::json!({}), "nor one you do not have");
         // A task of your own comes last, in a built-in one's shape, with the model you gave it.
-        store.toggle_favorite("debugging", "gpt55");
+        store.toggle_favorite("debugging:high", "gpt55");
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();
-        let fields = [
-            "about",
-            "benchmarks",
-            "custom",
-            "favorite",
-            "frontier",
-            "name",
-            "tier_favorites",
-            "tier_via",
-            "tiers",
-            "via",
-            "when",
-        ];
+        let fields =
+            ["about", "benchmarks", "custom", "frontier", "name", "tier_favorites", "tier_via", "tiers", "when"];
         assert_eq!((keys(own), all.len()), (fields.to_vec(), TASKS.len() + 1));
         assert_eq!(
-            (&own["name"], &own["favorite"], names(own)),
-            (&"debugging".into(), &"gpt55".into(), vec!["gpt55".into()])
+            (&own["name"], &own["tier_favorites"], names(own)),
+            (&"debugging".into(), &serde_json::json!({"high": "gpt55"}), vec!["gpt55".into()])
         );
         assert_eq!(own["frontier"][0]["score"], Value::Null, "no benchmark scores it");
         // What it is about is yours to write; agents pick it over a built-in task that fits too.
@@ -1862,19 +1864,21 @@ mod tests {
         let own = all.last().unwrap();
         assert_eq!(
             (names(own), &own["tier_favorites"]),
-            (vec!["mini".into(), "gpt55".into()], &serde_json::json!({"low": "mini"}))
+            (vec!["mini".into(), "gpt55".into()], &serde_json::json!({"low": "mini", "high": "gpt55"}))
         );
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": null, "high": "gpt55"});
-        assert_eq!(own["tiers"], tiers, "the tier it is for, the task's for the rest it fits");
+        assert_eq!(own["tiers"], tiers, "each tier the model it is given, none for the rest");
         // One dearer than its tier, as a cap lowered after it leaves it, points no agent at it.
         store.set_favorite("debugging:mid", "gpt55", None);
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();
-        assert_eq!((&own["tier_favorites"], &own["tiers"]), (&serde_json::json!({"low": "mini"}), &tiers));
+        let favs = serde_json::json!({"low": "mini", "high": "gpt55"});
+        assert_eq!((&own["tier_favorites"], &own["tiers"]), (&favs, &tiers));
         store.clear_favorite("debugging:mid");
         store.toggle_excluded("gpt55");
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();
-        assert_eq!((&own["favorite"], names(own)), (&Value::Null, vec!["mini".into()]), "excluded");
+        let favs = serde_json::json!({"low": "mini"});
+        assert_eq!((&own["tier_favorites"], names(own)), (&favs, vec!["mini".into()]), "excluded");
     }
 }
