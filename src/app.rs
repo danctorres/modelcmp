@@ -3982,7 +3982,8 @@ impl App {
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
         // A line's name, then its price and score, apart to line them up as recommend's boxes do.
-        let parts = |m: &Model, s: f64| (view::price(m), view::scored(s));
+        // A task of your own has no score.
+        let parts = |m: &Model, s: f64| (view::price(m), t.map_or(String::new(), |_| view::scored(s)));
         // What the tier picks with no favorite, as the grid does; a task of your own has nothing to pick.
         let first = match t.map(|t| self.recommended(t, x).0) {
             Some(Some((m, s))) => (format!("recommended: {}", m.name), Some(parts(m, s))),
@@ -4004,7 +4005,9 @@ impl App {
         let items: Vec<_> = (lines.into_iter())
             .map(|((name, p), key)| {
                 let label = match p {
-                    Some((c, s)) => format!("{name:<named$} {c:>price$} {s:>score$}"),
+                    // The dots lined up, the numbers after them right-aligned.
+                    Some((c, s)) if s.is_empty() => format!("{name:<named$} · {c:>price$}"),
+                    Some((c, s)) => format!("{name:<named$} · {c:>price$} · {s:>score$}"),
                     None => name,
                 };
                 (label, Effect::Pick(slot.clone(), key))
@@ -7114,7 +7117,7 @@ mod tests {
         a.rebuild();
         assert_eq!(front(&a), ["opus5", "gpt55"]);
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
-        assert!(crate::view::priced(m, s, false, true).ends_with("(-)"));
+        assert!(crate::view::priced(m, s, false, true).ends_with("· -"));
         assert_eq!(
             crate::view::pick([(m, s)].iter(), f64::INFINITY).map(|e| e.0.key.as_str()),
             Some("opus5"),

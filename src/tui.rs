@@ -2980,6 +2980,16 @@ fn choice_lines(
                 let at = 1 + if matches!(effect, Effect::Col(_)) { 2 } else { 0 };
                 return lit_at(Line::from(spans), &label_hits(at));
             }
+            // A tier's model with its dots grey, as in recommend's boxes.
+            if matches!(effect, Effect::Pick(..)) {
+                let mut spans = vec![Span::raw(" ")];
+                for (i, part) in label.split(" · ").enumerate() {
+                    spans.extend((i > 0).then(|| Span::styled(" · ", fg(MUTED))));
+                    spans.push(Span::raw(part.to_string()));
+                }
+                spans.push(Span::raw(" "));
+                return lit_at(Line::from(spans), &label_hits(1));
+            }
             lit_at(Line::from(format!(" {label} ")).style(fg(color)), &label_hits(1))
         })
         .collect();
@@ -3256,7 +3266,7 @@ fn to_hit(app: &mut App, hits: &[usize]) -> Option<usize> {
 }
 
 /// What a box of recommend's grid shows.
-const TIER_LEGEND: &str = "the best model for each task at each price, or ★ your favorite, as name $ per 1M tokens (score). \
+const TIER_LEGEND: &str = "the best model for each task at each price, or ★ your favorite, as name · $ per 1M tokens · score. \
                            ↓ marks a local model x downloads first.";
 
 /// What recommend leaves out, and how to pick it anyway.
@@ -3639,7 +3649,7 @@ fn wrapped_at(
     (lines, at)
 }
 
-/// What tier `col` of `task` picks, for its box of recommend's grid: `name $price (score)` in
+/// What tier `col` of `task` picks, for its box of recommend's grid: `name · $price · score` in
 /// its price level's colour as in the Price column, with no score on a task of your own, after
 /// a ★ in the task's colour when it is your favorite for the tier; grey when that favorite is
 /// not one recommended, or is out of reach as its row in the table, and `-` with no model. Out of
@@ -3688,9 +3698,18 @@ fn entry(
     if fav {
         spans.push(Span::styled("★ ", fg(task_color(task)).add_modifier(BOLD)));
     }
-    // The name and its price apart, for a box too narrow for both to wrap between them, and the
-    // score apart from the price, so `align` lines both up in a tier's boxes.
-    spans.extend([m.name.clone(), cost, score].map(|t| Span::styled(t, fg(price))));
+    // The name, its dot, the price, then the score with its dot, apart for a box too narrow for
+    // them all to wrap between the name and the price, and so `align` lines them up in a tier's
+    // boxes. The dots are grey, only marking them off, the score's after it a no-break space, so
+    // the dot stays with its number.
+    let dot = if score.is_empty() { "" } else { "·\u{a0}" };
+    spans.extend([
+        Span::styled(m.name.clone(), fg(price)),
+        Span::styled(" ·", fg(MUTED)),
+        Span::styled(cost, fg(price)),
+        Span::styled(dot, fg(MUTED)),
+        Span::styled(score, fg(price)),
+    ]);
     if !boxed {
         if off {
             // Both read as a list: "not recommended, not available".
@@ -3705,25 +3724,35 @@ fn entry(
 /// The entries of a tier's boxes (`entry`) lined up: the names padded alike, the prices and the
 /// scores after them right-aligned, as numbers are in the table. A box with no model is left as it is.
 fn align<'a>(cells: impl Iterator<Item = &'a mut Vec<Span<'static>>>) {
-    // The name with its ★, the price and the score: the last two spans.
+    // The name with its ★, then its dot, the price and the score with its dot: the last four spans.
     let parts = |cell: &[Span]| {
-        let n = cell.len().checked_sub(2).filter(|&n| n > 0)?;
+        let n = cell.len().checked_sub(4).filter(|&n| n > 0)?;
         let w = |s: &[Span]| s.iter().map(Span::width).sum::<usize>();
-        Some((n, w(&cell[..n]), Span::raw(cell[n].content.trim()).width(), cell[n + 1].width()))
+        Some((n, w(&cell[..n]), Span::raw(cell[n + 1].content.trim()).width(), w(&cell[n + 2..])))
     };
     let mut cells: Vec<_> = cells.filter_map(|c| Some((parts(c)?, c))).collect();
     let most = |f: fn(&(usize, usize, usize, usize)) -> usize| cells.iter().map(|c| f(&c.0)).max().unwrap_or(0);
     let (name, price, score) = (most(|p| p.1), most(|p| p.2), most(|p| p.3));
     for ((n, nw, pw, sw), cell) in &mut cells {
-        let pad = " ".repeat(name - *nw + price - *pw);
-        let cost = cell[*n].content.trim().to_string();
-        cell[*n].content = format!(" {pad}{cost} {}", " ".repeat(score - *sw)).into();
+        let (pad, ppad) = (" ".repeat(name - *nw), " ".repeat(price - *pw));
+        let cost = cell[*n + 1].content.trim().to_string();
+        // The dots lined up and the prices and scores after them right-aligned. The padding is
+        // where a wrap drops it: before the price, and the score's in no-break spaces after its
+        // dot, as `entry` keeps them. A box with no score is padded after its price instead.
+        cell[*n].content = format!(" {pad}·").into();
+        if cell[*n + 2].content.is_empty() {
+            cell[*n + 1].content = format!(" {ppad}{cost} {}", " ".repeat(score - *sw)).into();
+        } else {
+            cell[*n + 1].content = format!(" {ppad}{cost} ").into();
+            cell[*n + 2].content = format!("·{}", "\u{a0}".repeat(1 + score - *sw)).into();
+        }
     }
 }
 
 /// `spans` in lines of at most `width` cells: broken before a span that starts with a space, as
 /// a price after its name, then between words, and a word longer than a line where it reaches the
-/// end, so nothing is cut. Each piece keeps its span's style. The chars `hits` covers in the
+/// end, so nothing is cut. A part that is a lone dot marks off the part after it: it goes on
+/// that part's line, and is dropped where that part starts one. Each piece keeps its span's style. The chars `hits` covers in the
 /// first part, where a search found the model name of a box, are drawn as hits, which leaves
 /// where it wraps as it was.
 fn wrap_spans(spans: Vec<Span<'static>>, width: usize, hits: &[Range<usize>]) -> Vec<Vec<Span<'static>>> {
@@ -3776,13 +3805,27 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize, hits: &[Range<usize>]) ->
         }
         true
     };
+    let mut dot = None;
     for part in &parts {
         let start = part.iter().position(|c| c.0 != ' ').unwrap_or(part.len());
         let end = part.iter().rposition(|c| c.0 != ' ').map_or(start, |e| e + 1);
-        if put(&mut lines, &part[start..end]) {
+        let piece = &part[start..end];
+        if let [('·', _)] = piece {
+            dot = Some(piece);
             continue;
         }
-        for word in part[start..end].split(|c| c.0 == ' ').filter(|w| !w.is_empty()) {
+        if let Some(d) = dot.take() {
+            let w = cells(lines.last().unwrap());
+            if w > 0 && w + 1 + cells(d) + 1 + cells(piece) <= width {
+                put(&mut lines, d);
+            } else if w > 0 {
+                lines.push(vec![]);
+            }
+        }
+        if put(&mut lines, piece) {
+            continue;
+        }
+        for word in piece.split(|c| c.0 == ' ').filter(|w| !w.is_empty()) {
             if put(&mut lines, word) {
                 continue;
             }
@@ -4904,7 +4947,7 @@ mod tests {
         a.key(KeyCode::Char('R').into());
         // Overall's row: none for free, flash for low, then opus for mid and high.
         assert_eq!(
-            (at(&mut a, "opus $", none), at(&mut a, "flash $", none)),
+            (at(&mut a, "opus · $", none), at(&mut a, "flash · $", none)),
             (Some(Mouse::Open(Stop::Recommend(0, 3))), Some(Mouse::Open(Stop::Recommend(0, 2))))
         );
         assert_eq!(at(&mut a, "✓ selected", none), Some(Mouse::Open(Stop::Among(MARKED))), "a tab of the among line");
@@ -5125,17 +5168,26 @@ mod tests {
     fn a_tiers_prices_and_scores_line_up() {
         let cell = |t: &[&str]| t.iter().map(|&t| Span::raw(t.to_string())).collect::<Vec<_>>();
         let mut cells = [
-            cell(&["GLM-5.3", " $0.41 ", "(50)"]),
-            cell(&["★ ", "Muse Spark 1.3", " $1.3 ", "(100)"]),
+            cell(&["GLM-5.3", " ·", " $0.41 ", "·\u{a0}", "50"]),
+            cell(&["★ ", "Muse Spark 1.3", " ·", " $1.3 ", "·\u{a0}", "100"]),
             cell(&["-"]),
-            cell(&["mine", " $2.0", ""]),
+            cell(&["mine", " ·", " $2.0", "", ""]),
         ];
         align(cells.iter_mut());
         let text: Vec<String> = cells.iter().map(|c| c.iter().map(|s| &*s.content).collect()).collect();
         assert_eq!(
             text,
-            ["GLM-5.3          $0.41  (50)", "★ Muse Spark 1.3  $1.3 (100)", "-", "mine              $2.0      "]
+            [
+                "GLM-5.3          · $0.41 ·\u{a0}\u{a0}50",
+                "★ Muse Spark 1.3 ·  $1.3 ·\u{a0}100",
+                "-",
+                "mine             ·  $2.0      "
+            ]
         );
+        // Wrapped, a box drops the padding with the dot before its price.
+        let lines: Vec<String> =
+            wrap_spans(cells[1].clone(), 12, &[]).iter().map(|l| Line::from(l.clone()).to_string()).collect();
+        assert_eq!(lines, ["★ Muse Spark", "1.3", "$1.3 ·\u{a0}100"]);
     }
 
     #[test]
@@ -5228,7 +5280,7 @@ mod tests {
         let star = spans.iter().rposition(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert_eq!(spans[star + 1].content, "flash");
         assert_eq!(spans[star + 1].style.fg, Some(MUTED));
-        assert_eq!(spans[star + 4].content, " not recommended");
+        assert_eq!(spans[star + 6].content, " not recommended");
         // And the line after it names the model the tier would recommend.
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let at = text.iter().position(|l| l.starts_with("  high:") && l.contains("flash")).unwrap();
@@ -6185,11 +6237,7 @@ mod tests {
         let on: Vec<&Span> = top.iter().flat_map(|l| l.spans.iter()).filter(|s| s.style.bg == Some(CURSOR)).collect();
         assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..1), "{on:?} {block:?}");
         let mine = top[0].spans.iter().find(|s| s.content == "● mine").unwrap();
-        assert!(
-            mine.style == TAB_ON && top[0].to_string().ends_with(" (filtered)"),
-            "{}",
-            top[0]
-        );
+        assert!(mine.style == TAB_ON && top[0].to_string().ends_with(" (filtered)"), "{}", top[0]);
         let narrow = recommend(&b, 60, &mut vec![]).0;
         assert_eq!(narrow[1].to_string(), "       (filtered)", "it wraps where the tabs fill the line");
         // On a tier, the cursor is on its box, as wide as its widest entry, and not on the name.
@@ -6202,7 +6250,7 @@ mod tests {
             .filter(|s| s.style.bg == Some(CURSOR))
             .map(|s| &*s.content)
             .collect();
-        assert_eq!(bars.concat(), "▌opus $5.0 (150) ▾▐", "mid of overall, with its dropdown's ▾");
+        assert_eq!(bars.concat(), "▌opus · $5.0 ·\u{a0}150 ▾▐", "mid of overall, with its dropdown's ▾");
         // A click on the ▾ opens the dropdown, the box's other cells move the cursor to it.
         let menu = spots.iter().find(|p| matches!(p.at, Stop::Menu(..))).expect("a spot on the ▾");
         let line = all[menu.lines.start].to_string();
@@ -6246,7 +6294,7 @@ mod tests {
         assert!(under.contains(&b.current().unwrap().name), "{under}");
         (b.task_cur, b.task_sel) = was;
         assert!(
-            all.iter().any(|l| l.to_string() == "  mid:         opus $5.0 (150)"),
+            all.iter().any(|l| l.to_string() == "  mid:         opus · $5.0 ·\u{a0}150"),
             "under the grid, the box's model"
         );
         // An entry wider than its box wraps between the name and its price, else between words, and a word
@@ -6259,14 +6307,15 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            (wrap(15), wrap(12), wrap(9)),
+            (wrap(17), wrap(12), wrap(9)),
             (
-                vec!["opus $5.0 (150)".to_string()],
-                vec!["opus".into(), "$5.0 (150)".into()],
-                vec!["opus $5.0".into(), "(150)".into()]
-            )
+                vec!["opus · $5.0 ·\u{a0}150".to_string()],
+                vec!["opus".into(), "$5.0 ·\u{a0}150".into()],
+                vec!["opus".into(), "$5.0".into(), "·\u{a0}150".into()]
+            ),
+            "the dot before the price dropped where the price starts a line"
         );
-        assert_eq!(wrap(3), ["opu", "s", "$5.", "0", "(15", "0)"]);
+        assert_eq!(wrap(3), ["opu", "s", "$5.", "0", "·\u{a0}1", "50"], "nothing cut");
         // In a narrow grid the row takes more lines, every name whole.
         let narrow: Vec<String> = recommend(&b, 40, &mut vec![]).0.iter().map(ToString::to_string).collect();
         assert!(
@@ -6283,12 +6332,16 @@ mod tests {
         let of = |n: &str| all.iter().flat_map(|l| l.spans.iter()).find(|s| s.content == n).unwrap().style;
         assert!(of("opus").fg == Some(MUTED) && of("flash").fg != Some(MUTED), "{:?} {:?}", of("opus"), of("flash"));
         let said = |n: &str| all.iter().any(|l| l.to_string().contains(&format!("{n} not available")));
-        assert!(said("(150)") && !said("(120)"), "opus says so, flash does not");
+        assert!(said("·\u{a0}150") && !said("·\u{a0}120"), "opus says so, flash does not");
         // In a narrow panel the line under the grid wraps too, its name and what it says whole.
-        let under: Vec<String> = recommend(&b, 30, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        let under: Vec<String> = recommend(&b, 32, &mut vec![]).0.iter().map(ToString::to_string).collect();
         let at = under.iter().position(|l| l.starts_with("  mid:")).unwrap();
-        assert_eq!(under[at..at + 2], ["  mid:         opus $5.0 (150)", "               not available"], "{under:#?}");
-        assert!(under[at..].iter().all(|l| Span::raw(l.as_str()).width() <= 30), "{under:#?}");
+        assert_eq!(
+            under[at..at + 2],
+            ["  mid:         opus · $5.0 ·\u{a0}150", "               not available"],
+            "{under:#?}"
+        );
+        assert!(under[at..].iter().all(|l| Span::raw(l.as_str()).width() <= 32), "{under:#?}");
         // A search underlines in the name, and it wraps where it did.
         let long = || vec![Span::raw("Claude Opus 4.5"), Span::raw(" $5")];
         let lit = wrap_spans(long(), 12, &found("Claude Opus 4.5", "claude"));
@@ -6321,13 +6374,13 @@ mod tests {
         );
         let models =
             |row: &str| row.split("★ ").skip(1).map(|s| s.trim_end_matches([' ', '▾']).to_string()).collect::<Vec<_>>();
-        assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0"], "mid and high");
+        assert_eq!(models(&text[own]), ["opus · $5.0", "opus · $5.0"], "mid and high");
         assert_eq!(text[own + 3], "debugging finding and fixing a bug");
         assert_eq!(text[own + 4], format!("  use for: {CUSTOM_WHEN}"));
         // A tier's model is in that tier's box.
         a.store.toggle_favorite("debugging:low", "flash");
         let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();
-        assert_eq!(models(&text[own]), ["flash $0.10", "opus $5.0", "opus $5.0"]);
+        assert_eq!(models(&text[own]), ["flash · $0.10", "opus · $5.0", "opus · $5.0"]);
         // The key the warning names asks for it over the panel.
         a.key(KeyCode::Char('K').into());
         assert!(a.input != Input::None && a.view == View::Recommend, "{:?}", a.input);

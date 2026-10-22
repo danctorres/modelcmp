@@ -1333,7 +1333,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
             let p = priced(m, s, true, fav);
             // Free on your machine, which its price would not say.
             let size = download_sizes(data, store).get(&m.key).filter(|_| !m.here());
-            let here = |how: &str| format!("{} [{}] free {how} ({s:.0})", m.name, m.key);
+            let here = |how: &str| format!("{} [{}] · free {how} · {}", m.name, m.key, crate::view::scored(s));
             match local_took {
                 true if m.here() => here("on your machine"),
                 true => here(&size.map_or("to download".into(), |b| format!("↓ {} download", crate::data::gb(*b)))),

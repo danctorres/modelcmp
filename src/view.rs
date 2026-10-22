@@ -736,7 +736,7 @@ pub fn price(m: &Model) -> String {
 /// What a tier's line of `modelcmp recommend` shows, as recommend's grid in the TUI picks them.
 /// `{tiers}` is `tiers_said`.
 pub const RECOMMEND_LEGEND: &str = "the best model for each task at each price: {tiers}, \
-     or ★ your favorite, as name [key] $/1M tokens (score on the task), marked not recommended when the favorite is not one. \
+     or ★ your favorite, as name [key] · $/1M tokens · score on the task, marked not recommended when the favorite is not one. \
      A model free on your machine takes a tier when it scores higher, with ↓ and its size when it needs a download (modelcmp memory)";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
@@ -745,17 +745,17 @@ pub const CUSTOM_ABOUT: &str = "your own task";
 /// When a task of your own is the one to pick, where a built-in one has its `when`.
 pub const CUSTOM_WHEN: &str = "work that fits it, even when a built-in task fits too";
 
-/// `name $price (score)` for a frontier entry, `name [key] $price (score)` with `keyed`,
-/// `★ name ...` when it is your favorite for the task, `(-)` for a favorite with no score.
+/// `name · $price · score` for a frontier entry, `name [key] · $price · score` with `keyed`,
+/// `★ name ...` when it is your favorite for the task, `· -` for a favorite with no score.
 pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
     let flag = if favorite { "★ " } else { "" };
-    format!("{flag}{}{key} {} {}", m.name, price(m), scored(s))
+    format!("{flag}{}{key} · {} · {}", m.name, price(m), scored(s))
 }
 
-/// A score on a task as recommend shows it, `(48)`, or `(-)` for a model with none.
+/// A score on a task as recommend shows it, `48`, or `-` for a model with none.
 pub fn scored(s: f64) -> String {
-    format!("({})", score(Some(s).filter(|s| !s.is_nan())))
+    score(Some(s).filter(|s| !s.is_nan()))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
