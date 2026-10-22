@@ -224,7 +224,8 @@ stored as `tool-dispatch`).
   of each tier.
 - It is the task to pick for work that fits it, even when a built-in task fits too: for a bug,
   your `debugging` over `coding`.
-- It is gone when its last model is cleared.
+- `--about` alone makes one with no model yet, and recommend's `+ new task` in the TUI too. Agents see it only once it has a model.
+- It is gone when its last model and what it is about are cleared.
 - `--rename` gives it another name, one no task has yet.
 
 ### Sorting and bounds

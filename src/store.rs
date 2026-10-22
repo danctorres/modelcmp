@@ -88,6 +88,7 @@ pub struct Store {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<f64>,
     /// What each task of your own is about, in your words, by its name: agents choose it by that.
+    /// One with no model yet is a task by it alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub about: BTreeMap<String, String>,
     /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
@@ -270,10 +271,6 @@ impl Store {
         // A harness is its favorite's: one left by a hand edit has no model to run.
         let Store { favorite, via, .. } = &mut s;
         via.retain(|k, _| favorite.contains_key(k));
-        // A task gone with its models leaves what it was about, in case one comes back before
-        // the file is closed; no longer than that.
-        let tasks: Vec<String> = s.custom_tasks().into_iter().map(String::from).collect();
-        s.about.retain(|t, _| tasks.contains(t));
         // A price level left by a hand edit that is none would hide nothing, yet show as left out.
         s.price_not = s.price_not.filter(|&l| l < crate::view::LEVELS.len());
         s.price_pick = s.price_pick.filter(|&l| l < crate::view::LEVELS.len());
@@ -428,13 +425,23 @@ impl Store {
         self.favorite(&slot(task, tier))
     }
 
-    /// Your own tasks, by name: the favorites, of a tier of a task, of no built-in
-    /// task. One has no ranking, only the models you gave it, and is gone when they are cleared.
+    /// Your own tasks, by name: the favorites, of a tier of a task, and the abouts of no
+    /// built-in task. One has no ranking, only the models you gave it, and is gone when they
+    /// and what it is about are cleared.
     pub fn custom_tasks(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.favorite.keys().filter_map(|k| Some(k.split_once(':')?.0)).collect();
+        let favs = self.favorite.keys().filter_map(|k| Some(k.split_once(':')?.0));
+        let mut v: Vec<&str> = favs.chain(self.about.keys().map(String::as_str)).collect();
         v.retain(|t| crate::fit::task(t).is_none());
         v.sort_unstable();
         v.dedup();
+        v
+    }
+
+    /// Your own tasks agents see: the ones with a model, as one with none yet has nothing
+    /// for them to run.
+    pub fn tasks_with_models(&self) -> Vec<&str> {
+        let mut v = self.custom_tasks();
+        v.retain(|t| task_slots(t).any(|s| self.favorite.contains_key(&s)));
         v
     }
 
@@ -640,10 +647,12 @@ mod tests {
         assert_eq!(old.tier_favorite("bug-hunt", "low"), Some("flash"), "its tiers go with it");
         old.toggle_favorite("bug-hunt:low", "flash");
         assert_eq!((old.about("bug-hunt"), old.about("debugging")), (Some("finding and fixing a bug"), None));
-        // What a task was about goes with it, the next time the file is read.
+        // With no model it is a task by what it is about, and gone with that.
         old.toggle_favorite("bug-hunt:high", "old");
         old.save().unwrap();
-        assert_eq!(Store::load_from(p.clone()).about("bug-hunt"), None);
+        assert_eq!(Store::load_from(p.clone()).custom_tasks(), ["bug-hunt"]);
+        old.set_about("bug-hunt", "");
+        assert!(old.custom_tasks().is_empty());
         assert!(old.rename_task("debugging", "x").is_err(), "gone under its old name");
         assert!(task_name(" ").is_err() && task_name("a:b").is_err());
         // Pins were dropped: they load as marks, once each, and are not written back.

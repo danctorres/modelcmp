@@ -223,13 +223,13 @@ enum Cmd {
         /// The harness you run it on (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): `list --task --id` prints the id that one takes
         #[arg(long, requires = "model")]
         via: Option<String>,
-        /// Clear the task's favorites, or with --tier the tier's. A task of your own is gone with its last model
+        /// Clear the task's favorites, or with --tier the tier's. A task of your own is gone with its last model, unless it has an about, which --about "" clears
         #[arg(long, requires = "task")]
         rm: bool,
         /// Give a task of your own this name instead. Its models stay
         #[arg(long, value_name = "NAME", requires = "task", conflicts_with_all = ["model", "tier", "rm"], value_parser = store::task_name)]
         rename: Option<String>,
-        /// What a task of your own is about, in your words: agents pick the task by it, and over a built-in task that fits too. "" clears it
+        /// What a task of your own is about, in your words: agents pick the task by it, and over a built-in task that fits too. It makes a new task with no model yet, which agents see only once it has one, and "" clears it
         #[arg(long, value_name = "TEXT", requires = "task", conflicts_with_all = ["rm", "rename"])]
         about: Option<String>,
     },

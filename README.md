@@ -97,8 +97,8 @@ Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best 
 the best up to $2 and `mid` up to $5 per 1M tokens (the tier header in recommend or `modelcmp tier` changes these), and `high`
 the best one. A favorite you set for a tier beats that pick, at the tier's price or under.
 
-You can add tasks of your own, next to the built-in ones. In the TUI, press `f` on a model and pick
-`+ new task`, or from the command line:
+You can add tasks of your own, next to the built-in ones. In the TUI, pick `+ new task` in recommend,
+or press `f` on a model and pick it there, or from the command line:
 
 ```sh
 modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"   # a new task, with its model

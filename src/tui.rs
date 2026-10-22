@@ -9,8 +9,8 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
-    Mouse, NCOLS, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys, box_slot,
-    found, got, group_starts, help_rows, hidden, on_price, shown,
+    Mouse, NCOLS, NEW_TASK, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys,
+    box_slot, found, got, group_starts, help_rows, hidden, on_price, shown,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -1084,7 +1084,10 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     // A panel's search, and once it has found something the keys to go from match to match.
     let search = if app.overlay_query.is_empty() { vec!["/ search"] } else { vec!["/ search", "n N match"] };
     // On a box of `low` or `mid` in recommend, `<` writes its cap.
-    let tier = app.task_sel.checked_sub(1).filter(|_| app.among.is_none() && !app.caps && !app.one_pick(app.task_cur));
+    let tier = app
+        .task_sel
+        .checked_sub(1)
+        .filter(|_| app.among.is_none() && !app.caps && !app.one_pick(app.task_cur) && !app.on_new_task());
     let cap = if tier.is_some_and(|c| crate::view::capped(TIERS[c].0)) { vec!["< price cap"] } else { vec![] };
     let groups: Vec<Vec<&'static str>> = match app.view {
         View::Table if app.selecting() => {
@@ -1151,13 +1154,18 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         View::Compare => vec![vec!["↓ ↑ scroll", "← → 0 $ model"], search, actions("enter x o y f e i"), BACK.to_vec()],
         // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
         // On the `among` line, the models it ranks.
-        View::Recommend if matches!(app.input, Input::Cap { .. }) => vec![vec!["enter apply", "esc cancel"]],
+        View::Recommend if matches!(app.input, Input::Cap { .. } | Input::Task(_)) => {
+            vec![vec!["enter apply", "esc cancel"]]
+        }
         View::Recommend if app.among.is_none() && app.caps => {
             let enter = if crate::view::capped(TIERS[app.cap_col()].0) { vec!["enter price cap"] } else { vec![] };
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), BACK.to_vec()]
         }
         View::Recommend if app.among.is_some() => {
             vec![vec!["↓ ↑ task", "← → 0 $ which models"], [&["enter pick"], &search[..]].concat(), BACK.to_vec()]
+        }
+        View::Recommend if app.on_new_task() => {
+            vec![vec!["↓ ↑ task"], [&["enter new task"], &search[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.current().is_none() => {
             // A tier with no model has nothing for enter either.
@@ -1749,7 +1757,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 let (shown, len) = (rows - under, lines.len() - under);
                 // No cursor goes to the lines above the first row and under the last: they
                 // show with it, where they fit.
-                let (first, last) = (app.task_cur == 0, app.task_cur + 1 >= app.task_count());
+                let (first, last) = (app.task_cur == 0, app.on_new_task());
                 let (start, end) = (
                     if first && end <= shown { 0 } else { start },
                     if last && len - start <= shown { len } else { end },
@@ -2536,6 +2544,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Key { .. }, _) => ("KEY", Color::Blue),
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Cap { .. }, _) => ("TIER", Color::Yellow),
+        (Input::Task(_), _) => ("TASK", Color::Yellow),
         (Input::Menu { list, .. }, _) if list.visual.is_some() => ("HIGHLIGHT", Color::Yellow),
         (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
         (Input::Quit, _) => ("QUIT", Color::Red),
@@ -2620,8 +2629,9 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         | Input::Unexclude
         | Input::Reset
         | Input::Bind { .. }
-        // Written on its header (`recommend`).
+        // Written on its header or its row (`recommend`).
         | Input::Cap { .. }
+        | Input::Task(_)
         | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
@@ -3483,6 +3493,27 @@ fn recommend(
         }
         v.extend(lines.into_iter().map(Line::from));
     }
+    // `+ new task` after the last, where enter writes the name of one of your own and then what
+    // it is about.
+    let y = v.len();
+    let row = match &app.input {
+        Input::Task(e) => {
+            let (room, prefix) = (width.saturating_sub(2), Span::raw(edit_prefix(e)).width());
+            let start = scrolled(prefix, &e.text, e.cur, room);
+            text_at = Some((y, 1 + prefix + Span::raw(&e.text[start..e.cur]).width()));
+            let line = edit_line(e, Color::Reset, room);
+            cursor(true, line.spans)
+        }
+        _ => {
+            let on = cur.is_some_and(|c| c.0 == tasks.len());
+            cursor(on, vec![Span::styled(format!("{NEW_TASK:w$}"), fg(MUTED))])
+        }
+    };
+    spots.push(Spot { lines: y..y + 1, x: 0..width, at: Stop::Recommend(tasks.len(), 0) });
+    if cur.is_some_and(|c| c.0 == tasks.len()) {
+        block = Some(y..y + 1);
+    }
+    v.push(Line::from(row));
     let pin = v.len();
     v.push(Line::default());
     let mut under = Vec::new();
@@ -3519,6 +3550,15 @@ fn recommend(
                 }
             }
         }
+    }
+    if cur.is_some_and(|c| c.0 == tasks.len()) {
+        let what = match &app.input {
+            Input::Task(Edit { what: What::About(_), err: Some(err), .. }) => err.clone(),
+            Input::Task(Edit { what: What::About(t), .. }) => format!("what {t} is about, agents choose it by that"),
+            Input::Task(_) => "its name, lowercase with - for spaces".into(),
+            _ => "enter names a task of your own, d on its tiers then gives it models".into(),
+        };
+        under.extend(wrapped(vec![Span::styled(format!("{NEW_TASK}: "), fg(MUTED))], words(&what), &space, text));
     }
     // On the tiers' header, or while a cap is written, what the tier picks and how to change it.
     if on_caps || editing.is_some() {
@@ -4880,7 +4920,7 @@ mod tests {
         a.mouse(Mouse::Open(Stop::Recommend(0, 0)));
         assert_eq!(a.view, View::Table, "a double click on a task ranks by it");
         a.store.toggle_favorite("debugging:high", "flash");
-        "RG".chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
+        "RGk".chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
         assert!(hints(&a, 200).contains(&"enter your model"), "on a task of your own, enter goes to its model");
     }
 
@@ -5471,13 +5511,13 @@ mod tests {
             (0..16).map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
         };
         let last = screen(&mut a, "RG");
-        assert!(last.contains("  use for: "), "{last}");
+        assert!(last.contains("+ new task: "), "{last}");
         let first = screen(&mut a, "gg");
         assert!(first.contains("the best model for each task"), "{first}");
         // The lines under the grid, which say what the cursor is on, stay under the rows that scroll.
         let top = screen(&mut a, "jj2l");
         assert!(top.contains("overall") && top.contains("  low:         no data"), "{top}");
-        let last = screen(&mut a, "G");
+        let last = screen(&mut a, "Gk");
         assert!(
             last.contains("value") && last.contains("  use for: routine coding") && !last.contains("among:"),
             "{last}"
@@ -6103,10 +6143,10 @@ mod tests {
             ["free", "low", "≤$2", "mid", "≤$5", "high"],
             "a box per tier, with its cap"
         );
-        // A row per task, the cursor on the cursor task's name alone.
+        // A row per task and + new task, the cursor on the cursor task's name alone.
         let names: Vec<&str> = text[head + 1..].iter().map_while(|l| l.split_whitespace().next()).collect();
         let bare: Vec<&str> = names.iter().map(|n| n.trim_matches(['▌', '▐'])).collect();
-        assert_eq!(bare, TASKS.iter().map(|t| t.name).collect::<Vec<_>>());
+        assert_eq!(bare, TASKS.iter().map(|t| t.name).chain(["+"]).collect::<Vec<_>>());
         assert_eq!(names.iter().filter(|n| n.starts_with('▌')).collect::<Vec<_>>(), [&"▌vision▐"]);
         let cursor = &lines[head + 1 + a.task_cur].spans[1];
         assert_eq!(
@@ -6114,7 +6154,7 @@ mod tests {
             ("vision", Some(TASK[a.task_cur]), Some(CURSOR))
         );
         // Under the grid, what that task is and when to use it.
-        let under = head + 1 + TASKS.len() + 1;
+        let under = head + 1 + TASKS.len() + 2;
         assert!(text[under].starts_with("vision image input"), "{}", text[under]);
         assert!(text[under + 1].starts_with("  use for: screenshots"), "{}", text[under + 1]);
         let long: Vec<&String> = text.iter().filter(|l| l.chars().count() > 60).collect();
@@ -6247,7 +6287,11 @@ mod tests {
         let lines = recommend(&a, 80, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         let own = text.iter().position(|l| l.starts_with("▌debugging▐")).unwrap();
-        assert_eq!((lines[own].spans[1].style.fg, text[own + 1].as_str()), (Some(task_color("debugging")), ""));
+        assert_eq!(
+            (lines[own].spans[1].style.fg, text[own + 1].trim(), text[own + 2].as_str()),
+            (Some(task_color("debugging")), "+ new task", ""),
+            "+ new task after it"
+        );
         assert_ne!(task_color("debugging"), task_color("docs"), "tasks of your own can differ in colour");
         assert!(
             OWN.iter().all(|c| !TASK.contains(c) && ![STAR, BAD].contains(c)),
@@ -6255,8 +6299,8 @@ mod tests {
         );
         let models = |row: &str| row.split("★ ").skip(1).map(|s| s.trim().to_string()).collect::<Vec<_>>();
         assert_eq!(models(&text[own]), ["opus $5.0", "opus $5.0"], "mid and high");
-        assert_eq!(text[own + 2], "debugging finding and fixing a bug");
-        assert_eq!(text[own + 3], format!("  use for: {CUSTOM_WHEN}"));
+        assert_eq!(text[own + 3], "debugging finding and fixing a bug");
+        assert_eq!(text[own + 4], format!("  use for: {CUSTOM_WHEN}"));
         // A tier's model is in that tier's box.
         a.store.toggle_favorite("debugging:low", "flash");
         let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();

@@ -547,7 +547,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     Ok(())
 }
 
-/// For an agent, in one call: every task with what it is for, yours last, and under it the
+/// For an agent, in one call: every task with what it is for, yours with a model last, and under it the
 /// model of each tier as `--tier` picks it, with its context and your note. With `via` the id
 /// that harness takes, else the command that starts the harness you run the model on. Tiers
 /// with the same model share a line, and tasks with the same lines share them (`grouped`).
@@ -563,7 +563,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     if !data.any_available() {
         return Err(format!("{NO_HARNESS}: choose no model, tell the user").into());
     }
-    let own = store.custom_tasks();
+    let own = store.tasks_with_models();
     let own = own.iter().map(|&c| (c, None, format!("the user's own task, {}", store.about(c).unwrap_or(CUSTOM_WHEN))));
     let tasks: Vec<_> = TASKS.iter().map(|t| (t.name, Some(t), t.when.to_string())).chain(own).collect();
     // One task, or one tier, for an agent that chose it already.
@@ -1081,22 +1081,21 @@ pub fn fav(
         if fit::task(t).is_some() {
             return Err(format!("{t} is built in: --about is for a task of your own").into());
         }
-        if q.is_none() && !store.custom_tasks().contains(&t) {
-            return Err(format!(
-                "no task {t} of your own: modelcmp fav {t} <model> --tier <tier> --about ... makes it"
-            )
-            .into());
-        }
         // A tier is for a model alone, not for what the task is about.
         if let (None, Some(x)) = (q, tier) {
             let msg = format!("--tier needs a model: modelcmp fav {t} <model> --tier {x}");
             return Err(Exit { code: 2, msg });
         }
+        let new = !store.custom_tasks().contains(&t);
         store.set_about(t, text);
         // With a model, saved with it below.
         if q.is_none() {
             store.save()?;
             println!("{t}: {}", store.about(t).unwrap_or("no about"));
+            // A typo of a task's name makes one too, so it is said.
+            if new && store.about(t).is_some() {
+                println!("new task {t}: agents see it once it has a model, modelcmp fav {t} <model> --tier <tier>");
+            }
             return Ok(());
         }
     }
@@ -1262,10 +1261,10 @@ fn entry(m: &Model, store: &Store, score: f64, recommended: bool) -> serde_json:
     e
 }
 
-/// `recommend --json`: what agents read to choose a task and its model. Your own tasks come
-/// after the built-in ones, in their shape and marked `custom`.
+/// `recommend --json`: what agents read to choose a task and its model. Your own tasks with a
+/// model come after the built-in ones, in their shape and marked `custom`.
 fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
-    let custom = store.custom_tasks().into_iter().map(|t| {
+    let custom = store.tasks_with_models().into_iter().map(|t| {
         let line = custom_line(usable(data, store), store, t);
         let front: Vec<_> = line.iter().map(|m| entry(m, store, f64::NAN, false)).collect();
         let (tier_favs, tier_via) = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
@@ -1356,7 +1355,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         });
         println!();
     }
-    for t in store.custom_tasks() {
+    for t in store.tasks_with_models() {
         println!("{t}  {}  (modelcmp list --task {t})", store.about(t).unwrap_or(CUSTOM_ABOUT));
         println!("  use for:         {CUSTOM_WHEN}");
         let line = custom_line(usable(data, store), store, t);
@@ -1853,6 +1852,9 @@ mod tests {
         store.toggle_favorite("coding:high", "gone");
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(t["tier_favorites"], serde_json::json!({}), "nor one you do not have");
+        // One with no model yet is not shown: agents would have nothing to run.
+        store.set_about("bug-hunt", "finding bugs");
+        assert_eq!(recommend_json(&data, &store).len(), TASKS.len());
         // A task of your own comes last, in a built-in one's shape, with the model you gave it.
         store.toggle_favorite("debugging:high", "gpt55");
         let all = recommend_json(&data, &store);
