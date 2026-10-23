@@ -1295,7 +1295,9 @@ fn getters<'a>(m: &'a Model, (have, install): &'a Tools) -> impl Iterator<Item =
     let got = lacking.map(|h| (*h, "download and run"));
     // Not for one a runner here has: nothing is installed for a model that already runs.
     let new = install.iter().filter(|_| !m.here()).map(|h| (*h, "install, download and run"));
-    got.chain(new).filter(|_| m.hf_repo().is_some())
+    // Looked for once, not for each runner, as the frame asks it of every row.
+    let repo = m.hf_repo().is_some();
+    got.chain(new).filter(move |_| repo)
 }
 
 /// The runners installed here, ollama then llama.cpp, and the ones that are not and can be

@@ -1264,9 +1264,12 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
             (fmt(lo) != fmt(hi)).then_some(if higher { (hi, lo) } else { (lo, hi) })
         });
         let cells: Vec<String> = vals.iter().map(|v| v.map_or("-".into(), &fmt)).collect();
-        // A value that reads as the best or the worst is coloured as it.
-        let snap = |v: f64| ext.and_then(|(b, w)| [b, w].into_iter().find(|&e| fmt(e) == fmt(v))).unwrap_or(v);
-        let vals = vals.into_iter().map(|v| v.map(snap)).collect();
+        // A value that reads as the best or the worst is coloured as it. Read off its cell, as
+        // formatting is slow and the frame asks it of every value.
+        let read = ext.map(|(b, w)| [(fmt(b), b), (fmt(w), w)]);
+        let snap =
+            |v: f64, cell: &String| read.as_ref().and_then(|r| r.iter().find(|e| e.0 == *cell)).map_or(v, |e| e.1);
+        let vals = vals.into_iter().zip(&cells).map(|(v, cell)| v.map(|v| snap(v, cell))).collect();
         Row { label: label.into(), cells, vals, ext, higher, ..Default::default() }
     }
     // A list price, yours having none, after a `~` as in the table, and as there neither the
