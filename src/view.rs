@@ -648,8 +648,11 @@ pub fn can_fav(store: &Store, slot: &str, m: &Model) -> Result<(), String> {
 /// Whether `m` joins `task`'s line as a favorite, of a tier it fits. One a
 /// lowered cap left dearer than its tier is no tier's pick, so not on the line either.
 fn fav_on_line(store: &Store, task: &str, m: &Model) -> bool {
-    crate::store::task_slots(task)
-        .any(|s| store.favorite(&s) == Some(m.key.as_str()) && over_cap(store, &s, m).is_none())
+    // Asked of every model, so through the few favorites rather than a slot made for each tier.
+    let of_task = |s: &str| {
+        s.strip_prefix(task).and_then(|s| s.strip_prefix(':')).is_some_and(|tier| TIERS.iter().any(|x| x.0 == tier))
+    };
+    store.favorite.iter().any(|(s, k)| *k == m.key && of_task(s) && over_cap(store, s, m).is_none())
 }
 
 /// How far behind your best on coding a model makes "value"'s line, in months of progress (`fit::add_lag`).
