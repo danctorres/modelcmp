@@ -1770,7 +1770,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             }
         }
         let under = pinned(lines.len(), body.height.saturating_sub(2) as usize, &pin);
-        let (text, above, below) = overlay(buf, body, &title, lines, &mut app.scroll, Color::Reset, (0, 0, pin));
+        let (text, above, below) = overlay(buf, body, &title, lines, &mut app.scroll, (0, 0, pin));
         if let Some((l, x)) = text_at {
             let y = l.checked_sub(app.scroll as usize).filter(|&y| y < text.height as usize);
             cursor = y.map(|y| ((text.x + x as u16).min(text.right().saturating_sub(1)), text.y + y as u16));
@@ -1821,15 +1821,15 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some((key, title)) = ask {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0, Color::Reset, (0, 0, 0..0));
+        overlay(buf, body, &title, lines, &mut 0, (0, 0, 0..0));
     }
-    // The first start's question, under the wordmark, its border muted as the table's frame.
+    // The first start's question, under the wordmark.
     // The key is typed in it, on its own line.
     if let (Some((_, within)), Input::Key { text, cur, .. }) = (splash, &app.input) {
         let lines = key_lines(text.chars().count());
         let rect = overlay_rect(within, KEY_TITLE, &lines);
         let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + text[..*cur].chars().count()) as u16;
-        overlay(buf, within, KEY_TITLE, lines, &mut 0, MUTED, (0, 0, 0..0));
+        overlay(buf, within, KEY_TITLE, lines, &mut 0, (0, 0, 0..0));
         cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
         // At the bottom of the screen, with a blank row at least under the box.
         if within.bottom() + 3 < bar.y {
@@ -1860,7 +1860,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         let from = if *sel + 1 >= rows || list.edit.is_some() { lines.len().saturating_sub(shown) } else { *top };
         let mut scroll = list_top(from, *sel + head, shown) as u16;
         let ends = (head, lines.len() - rows - head, 0..0);
-        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, Color::Reset, ends);
+        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, ends);
         *top = usize::from(scroll);
         // On the bottom border, as a dropdown says it, so it shows however the list scrolls.
         if none {
@@ -2364,7 +2364,7 @@ fn dropdown(
     let footer = if none { " no match ".to_string() } else { footer };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(fg(Color::Reset))
+        .border_style(fg(MUTED))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     let inner = block.inner(rect);
     Clear.render(rect, buf);
@@ -3133,18 +3133,17 @@ struct Spot {
     at: Stop,
 }
 
-/// A centred rounded box in `border`, its title bold in the text's colour, showing `lines` from
-/// `scroll` on, which is clamped to the content: the accent is left to the table's headers and
-/// the cursor. The lines `pin`, which say what the cursor is on, stay at the bottom of a box
-/// too short for every line (`pinned`). Returns where the lines went, and whether some are
-/// scrolled off above and below.
+/// A centred rounded box, its border muted as the table's frame so its title, bold in the text's
+/// colour, stands out, showing `lines` from `scroll` on, which is clamped to the content: the
+/// accent is left to the table's headers and the cursor. The lines `pin`, which say what the
+/// cursor is on, stay at the bottom of a box too short for every line (`pinned`). Returns where
+/// the lines went, and whether some are scrolled off above and below.
 fn overlay(
     buf: &mut Buffer,
     area: Rect,
     title: &str,
     mut lines: Vec<Line<'static>>,
     scroll: &mut u16,
-    border: Color,
     (head, tail, pin): (usize, usize, Lines),
 ) -> (Rect, bool, bool) {
     let rect = overlay_rect(area, title, &lines);
@@ -3163,7 +3162,7 @@ fn overlay(
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(fg(border))
+        .border_style(fg(MUTED))
         .title_top(Line::from(format!(" {title} ")).style(Style::new().add_modifier(BOLD)))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     // Inside the border, a cell of padding either side.
@@ -6021,19 +6020,19 @@ mod tests {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
         let mut scroll = 99;
-        overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, (0, 0, 0..0));
         assert_eq!(buf[(0, 0)].symbol(), "╭");
-        assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box over the table has the text's colour");
+        assert_eq!(buf[(0, 0)].fg, MUTED, "a box's border is muted as the table's frame, so its title stands out");
         assert_eq!(scroll as usize, help(&app()).0.len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
-        overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, Color::Reset, (0, 0, 0..0));
+        overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, (0, 0, 0..0));
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
         // A grid's heading is no row: the border counts the rows under it, 20 here in a box of 4 lines.
         let grid = |scroll: &mut u16| {
             let mut buf = Buffer::empty(area);
             let lines = (0..22).map(|i| Line::from(format!("{i:<20}"))).collect();
-            overlay(&mut buf, area, "f", lines, scroll, Color::Reset, (1, 1, 0..0));
+            overlay(&mut buf, area, "f", lines, scroll, (1, 1, 0..0));
             (0..30).map(|x| buf[(x, 5)].symbol()).collect::<String>()
         };
         assert!(grid(&mut 0).contains(" 1-3 of 20 "), "{}", grid(&mut 0));
