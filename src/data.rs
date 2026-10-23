@@ -1949,7 +1949,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     // Each source's own, then the ones of the whole refresh.
     let said = |own: [Option<String>; 2]| {
         let all: Vec<_> = own.into_iter().flatten().chain(common.iter().cloned()).collect();
-        Some(all.join("; ")).filter(|w| !w.is_empty())
+        Some(all.join(SEP)).filter(|w| !w.is_empty())
     };
     data.warning = said([data.warning.take(), data.unscored()]);
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
@@ -1970,7 +1970,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     });
     // What no cache holds, said only now.
     let all: Vec<_> = data.warning.take().into_iter().chain(uncached).chain(unswitched).collect();
-    data.warning = Some(all.join("; ")).filter(|w| !w.is_empty());
+    data.warning = Some(all.join(SEP)).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
@@ -2142,6 +2142,8 @@ pub const FELL_BACK: &str = " · benchmarks from Epoch AI";
 
 /// What a warning from the cached data's refresh starts with (`Data::said`).
 pub const LAST_REFRESH: &str = "last refresh: ";
+/// Between the warnings of a refresh, which `!` and `modelcmp` split on to list them.
+pub const SEP: &str = " · ";
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
 /// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.

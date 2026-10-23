@@ -304,10 +304,10 @@ fn main() {
     }
 }
 
-/// One line per warning: a refresh joins its warnings with "; ", which the TUI lists as bullets.
+/// One line per warning: a refresh joins its warnings with `data::SEP`, which the TUI lists as bullets.
 fn warn(w: &str) {
     let (from, w) = w.strip_prefix(data::LAST_REFRESH).map_or(("", w), |w| (data::LAST_REFRESH, w));
-    for one in w.split("; ") {
+    for one in w.split(data::SEP) {
         eprintln!("warning: {from}{one}");
     }
 }

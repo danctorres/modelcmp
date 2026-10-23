@@ -3453,7 +3453,7 @@ impl App {
             format!("no {aa} API key, so benchmarks are from Epoch AI: {} takes one", self.key_of('K'))
         });
         let all: Vec<String> = self.data.warning.clone().into_iter().chain(key).collect();
-        Some(all.join("; ")).filter(|w| !w.is_empty())
+        Some(all.join(crate::data::SEP)).filter(|w| !w.is_empty())
     }
 
     /// The key the action with the default key `d` is on.
@@ -4661,7 +4661,7 @@ impl App {
                     let cap = match text.parse::<f64>() {
                         _ if text.is_empty() => Ok(None),
                         Ok(c) => Ok(Some(c)),
-                        Err(_) => Err(format!("{text} is not a price")),
+                        Err(_) => Err(format!("{text} is not a valid price")),
                     };
                     match cap.and_then(|c| self.store.set_tier_cap(TIERS[*tier].0, c)) {
                         Ok(()) => {
@@ -4701,7 +4701,7 @@ impl App {
                             }
                         }
                         None if text.is_empty() => {}
-                        None => self.report(Err(format!("{text} is not a value for {}", self.col_name(col)))),
+                        None => self.report(Err(format!("{text} is not a valid value for {}", self.col_name(col)))),
                     }
                     self.rebuild();
                 }
@@ -6732,7 +6732,7 @@ mod tests {
         press(&mut a, ">2026.60");
         code(&mut a, KeyCode::Enter);
         assert!(a.failed && a.bounds.len() == 1, "{}", a.status);
-        assert_eq!(a.status, "2026.60 is not a value for Released");
+        assert_eq!(a.status, "2026.60 is not a valid value for Released");
     }
 
     #[test]
@@ -7230,7 +7230,7 @@ mod tests {
         let err = |a: &App| a.open_list().and_then(|l| l.edit.as_ref()?.err.clone());
         assert_eq!(
             (err(&a).as_deref(), edit(&a).unwrap().1.as_str()),
-            (Some("there is a task coding already"), "coding")
+            (Some("a task named coding already exists"), "coding")
         );
         ctrl(&mut a, 'u');
         a.paste("Dispatch");

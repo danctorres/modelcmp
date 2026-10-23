@@ -464,7 +464,7 @@ impl Store {
             return Err(format!("{old} is not a task of your own"));
         }
         if crate::fit::task(new).is_some() || self.custom_tasks().contains(&new) {
-            return Err(format!("there is a task {new} already"));
+            return Err(format!("a task named {new} already exists"));
         }
         for (from, to) in task_slots(old).zip(task_slots(new)) {
             if let Some(via) = self.via.remove(&from) {

@@ -353,7 +353,7 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
   commands (tests, builds) without asking, as opencode, pi and omp do.
 - With `--via` the model is named by the id that harness takes. A favorite the harness lacks
   is shown after the tier's own pick, with the command that starts it where it runs: `(★ favorite
-  Ling 3.1 Flash is not on claude, start: modelcmp quiet opencode run --model
+  Ling 3.1 Flash is not on claude, run it with: modelcmp quiet opencode run --model
   opencode/ling-3.1-flash-free "<prompt>")`.
 - `--min` and `--not` leave a favorite out too. A tier's favorite they leave out gives way to
   the tier's pick, and a task of your own whose model is out says `no model`.

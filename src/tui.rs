@@ -1696,7 +1696,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             let said = issues.as_deref().unwrap_or("none");
             let words = |w: &str| w.split(' ').map(|s| Line::from(s.to_string())).collect();
             let width = (area.width as usize).saturating_sub(4);
-            let lines = said.split("; ").flat_map(|w| wrapped(vec![Span::raw("• ")], words(w), &Span::raw(" "), width));
+            let lines =
+                said.split(data::SEP).flat_map(|w| wrapped(vec![Span::raw("• ")], words(w), &Span::raw(" "), width));
             let (lines, hits) = lit_lines(lines.collect(), &app.overlay_query);
             hit_line = to_hit(app, &hits);
             Some(("issues".into(), lines))
@@ -5652,7 +5653,7 @@ mod tests {
         data::save_aa_key("k").unwrap();
         bang(&mut a);
         assert!(a.view == View::Table && a.status == "no issues to list");
-        a.data.warning = Some("copilot did not list its models; openrouter.ai did not list its models".into());
+        a.data.warning = Some("copilot did not list its models · openrouter.ai did not list its models".into());
         let lines = screen(&mut a);
         let x = lines[h as usize - 2][..lines[h as usize - 2].find("⚠").unwrap()].chars().count() as u16;
         let click = MouseEvent {
