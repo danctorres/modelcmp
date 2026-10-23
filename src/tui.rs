@@ -3482,7 +3482,7 @@ fn recommend(
                     spots.push(Spot { lines: head_y..head_y + 1, x: x..x + r + 2, at: Stop::Cap(c) });
                 }
                 let on = on_caps && app.cap_col() == c;
-                head.extend(cursor(on, vec![Span::styled(piece.content, if on { Style::new() } else { fg(MUTED) })]));
+                head.extend(cursor(on, vec![piece]));
             }
         }
     }
