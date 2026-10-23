@@ -2368,7 +2368,9 @@ impl App {
         } else {
             &rows
         };
-        self.fronts = TASKS.iter().map(|t| self.front(t, pool)).collect();
+        // Once for every task, as it is slow to find.
+        let usable: Vec<bool> = self.data.models.iter().map(|m| self.usable(m)).collect();
+        self.fronts = TASKS.iter().map(|t| self.front(t, pool, &usable)).collect();
         self.set_locals();
         let ms = &self.data.models;
         // `F` and `E` keep theirs off the line too: one out of reach or excluded is on none.
@@ -2649,12 +2651,12 @@ impl App {
     }
 
     /// `task_frontier` and the favorites on it only for being favorites, computed from `shown`,
-    /// the models the filters let through.
-    fn front(&self, t: &Task, shown: &[usize]) -> Front {
-        let usable = |m: &&Model| self.usable(m);
+    /// the models the filters let through, and `usable`, of each model whether it is `usable`.
+    fn front(&self, t: &Task, shown: &[usize], usable: &[bool]) -> Front {
         // Ranked only when the filters show them, so a hidden favorite drops no shown model.
-        let shown = shown.iter().map(|&i| &self.data.models[i]).filter(usable);
-        let (line, off) = task_line(shown, self.data.models.iter().filter(usable), &self.store, t);
+        let shown = shown.iter().filter(|&&i| usable[i]).map(|&i| &self.data.models[i]);
+        let pool = self.data.models.iter().zip(usable).filter(|p| *p.1).map(|p| p.0);
+        let (line, off) = task_line(shown, pool, &self.store, t);
         let at = |m: &Model| self.data.models.iter().position(|x| std::ptr::eq(x, m)).unwrap_or(0);
         let off = line.iter().filter(|(m, _)| off.contains(&m.key.as_str())).map(|&(m, _)| at(m)).collect();
         (line.into_iter().map(|(m, s)| (at(m), s)).collect(), off)
