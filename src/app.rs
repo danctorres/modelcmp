@@ -1883,7 +1883,7 @@ impl App {
     /// Among the models recommend ranks, the search, the tab and the filters' (`rebuild`'s pool),
     /// whatever their reach, as a download is in no harness yet.
     fn set_locals(&mut self) {
-        let only = self.only.filter(|&o| o != EXCLUDED);
+        let only = self.only.filter(|&o| o < FAV);
         let pool: Vec<usize> =
             self.filtered_as(usize::MAX, only, false).filter(|(_, m)| !self.excluded(m)).map(|(i, _)| i).collect();
         let room = view::room(&self.store);
@@ -2327,11 +2327,11 @@ impl App {
         if matches!(self.input, Input::Task(_)) {
             self.task_cur = self.task_count();
         }
-        // Before a task keeps only its line: the models every task's line is drawn from. `E`
-        // narrows none, as an excluded model is never recommended, and its exact matches come
-        // before the typos the table's rows took.
+        // Before a task keeps only its line: the models every task's line is drawn from. `F` and
+        // `E` narrow none, as a favorite already takes its own tier and an excluded model is never
+        // recommended, and their exact matches come before the typos the table's rows took.
         let mut unnarrowed;
-        let pool = if self.only == Some(EXCLUDED) {
+        let pool = if let Some(only @ (FAV | EXCLUDED)) = self.only {
             let typos = std::mem::take(&mut self.typos);
             self.only = None;
             unnarrowed = matching(self);
@@ -2339,7 +2339,7 @@ impl App {
                 self.typos = true;
                 unnarrowed = matching(self);
             }
-            (self.only, self.typos) = (Some(EXCLUDED), typos);
+            (self.only, self.typos) = (Some(only), typos);
             &unnarrowed
         } else {
             &rows
@@ -2839,11 +2839,11 @@ impl App {
         self.store.is_excluded(&m.key) || !self.accessible(m)
     }
 
-    /// The tab of the models recommend ranks, the one on in its `from` line: `E` aside, as it
-    /// narrows none.
+    /// The tab of the models recommend ranks, the one on in its `from` line: `F` and `E` aside,
+    /// as they narrow none.
     pub fn among_on(&self) -> usize {
         match self.only {
-            Some(i) if i != EXCLUDED => i,
+            Some(i) if i < FAV => i,
             _ if self.all || self.no_access() => ALL,
             _ => MINE,
         }
@@ -2869,7 +2869,7 @@ impl App {
     fn among_by(&mut self, mut i: usize, n: isize) {
         for _ in 0..n.unsigned_abs() {
             loop {
-                i = step(i, n.signum(), EXCLUDED);
+                i = step(i, n.signum(), FAV);
                 if self.tab_has(i) {
                     break;
                 }
@@ -4033,7 +4033,7 @@ impl App {
         let fav = self.store.favorite(&slot);
         let t = self.cur_task();
         let bench = t.and_then(|t| task_bench(&self.store, t));
-        let only = self.only.filter(|&o| o != EXCLUDED);
+        let only = self.only.filter(|&o| o < FAV);
         let shown = self.filtered_as(usize::MAX, only, false).map(|e| e.1);
         let has = self.data.models.iter().filter(|m| fav == Some(m.key.as_str()));
         let mut ms: Vec<_> = shown
@@ -4169,7 +4169,7 @@ impl App {
                 return None;
             }
             (KeyCode::Char('0' | '_'), Some(_)) => {
-                self.among_by(EXCLUDED - 1, 1);
+                self.among_by(FAV - 1, 1);
                 return None;
             }
             (KeyCode::Char('$'), Some(_)) => {
@@ -7097,7 +7097,10 @@ mod tests {
         press(&mut a, "l");
         assert_eq!((a.among, a.all), (Some(ALL), false), "moving picks none");
         press(&mut a, "l");
-        assert_eq!(a.among, Some(MINE), "nothing selected, no favorite: past them, round the end");
+        assert_eq!(a.among, Some(MINE), "nothing selected: past it, round the end");
+        a.only = Some(FAV);
+        assert_eq!(a.among_on(), MINE, "F narrows none, as E");
+        a.only = None;
         press(&mut a, "$");
         code(&mut a, KeyCode::Enter);
         assert_eq!((&a.view, a.among_on(), a.all), (&View::Recommend, ALL, true));

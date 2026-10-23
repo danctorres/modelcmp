@@ -3369,7 +3369,7 @@ fn recommend(
     let space = Span::raw(" ");
     // The models it ranks, a tab of the table's each: the one on has the filled dot, bold
     // as a tab that is on, and one with nothing to show is grey.
-    let tabs = (0..EXCLUDED).map(|i| {
+    let tabs = (0..FAV).map(|i| {
         let on = i == app.among_on();
         let style = match on {
             true => TAB_ON,
@@ -6471,7 +6471,7 @@ mod tests {
         let lines = recommend(&a, 60, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(
-            text[0], "from: ● mine · ○ all · ○ ✓ selected · ○ ★ favorites ",
+            text[0], "from: ● mine · ○ all · ○ ✓ selected ",
             "the models it ranks come first, the dot on the ones in use"
         );
         let gap = text.iter().position(String::is_empty).unwrap();
@@ -6522,7 +6522,7 @@ mod tests {
         assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..1), "{on:?} {block:?}");
         let mine = top[0].spans.iter().find(|s| s.content == "● mine").unwrap();
         assert!(mine.style == TAB_ON && top[0].to_string().ends_with(" (filtered)"), "{}", top[0]);
-        let narrow = recommend(&b, 60, &mut vec![]).0;
+        let narrow = recommend(&b, 44, &mut vec![]).0;
         assert_eq!(narrow[1].to_string(), "      (filtered)", "it wraps where the tabs fill the line");
         // On a tier, the cursor is on its box, as wide as its widest entry, and not on the name.
         (b.among, b.query) = (None, String::new());
