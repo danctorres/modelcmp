@@ -431,8 +431,10 @@ and leaving out `↓ downloadable` does the same for the ones to download, in `r
 too.
 
 `ollama run` and `llama-cli` answer a prompt with text alone. For the model to edit files and run
-commands, as an agent, run it in pi: add your runner to `~/.pi/agent/models.json` as below (for
-llama.cpp, `llama-server` with its own address), then refresh, and Via shows `pi` beside `oll`.
+commands, as an agent, run it in pi, opencode or omp. Add your runner to the harness's config
+under the provider `ollama` (`llama-cli` for llama.cpp, with `llama-server` and its own address),
+as modelcmp knows the model by that name alone. For pi, that is `~/.pi/agent/models.json` as
+below, then refresh, and Via shows `pi` beside `oll`.
 
 ```json
 { "providers": { "ollama": {
