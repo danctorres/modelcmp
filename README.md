@@ -112,7 +112,7 @@ To get a local model, press `a` in the TUI to list every model, then `x` on one 
 `download and run` entry, or run `modelcmp get <model>`. Via shows how big each download is, and
 `<` `8` on Via hides the models over 8 GB. Models on your machine show as free, and
 [run as agents in pi](REFERENCE.md#models-on-your-machine) once you add your runner to it.
-A model that fits your GPU takes a tier in recommend when it scores higher, marked `↓` with its size.
+A model that fits your GPU takes a tier in recommend when it scores higher, marked `↓` with its size when it needs a download.
 
 ## For agents
 
@@ -139,9 +139,9 @@ local model from ollama or llama.cpp that you made your favorite.
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions,
   chat and web development (the Arena column), and it needs no API key.
 
-When the TUI is first started, it prompts the user for an Artificial Analysis API key.
-If a key is provided, the recommended models are based on Artificial Analysis benchmarks, else Epoch AI is used.
-Artificial Analysis provides more information (including performance metrics) and covers more models than Epoch AI.
+The first time you start the TUI, it asks for an Artificial Analysis API key.
+With a key, recommendations use Artificial Analysis benchmarks, otherwise Epoch AI's.
+Artificial Analysis covers more models than Epoch AI and also measures speed.
 Data is cached for 24 hours.
 
 ## More

@@ -305,7 +305,7 @@ fn flagged(store: &Store, o: &ListOpts) -> Store {
 fn say_filters(store: &Store, flags: &str) {
     let on: Vec<String> = crate::view::picks_said(store).into_iter().chain(crate::view::bounds_said(store)).collect();
     if !on.is_empty() {
-        let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace their own, and ") };
+        let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace the matching ones, and ") };
         eprintln!("note: filters set in the TUI hide some models: {} ({flags}c in the TUI clears them)", on.join(" "));
     }
     let by: Vec<String> =
@@ -326,7 +326,7 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
     if let Some(c) = o.custom.as_deref().filter(|c| !store.custom_tasks().contains(c)) {
         let tasks = [fit::task_names().collect(), store.custom_tasks()].concat().join(", ");
         let msg = format!(
-            "no task '{c}': the tasks are {tasks}, and modelcmp fav {c} <model> --tier <tier> makes it one of your own"
+            "no task '{c}': the tasks are {tasks}. To make it a task of your own, run modelcmp fav {c} <model> --tier <tier>"
         );
         return Err(Exit { code: 2, msg });
     }
@@ -951,7 +951,7 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     store.save()?;
     match left_out_by(m, store, data.any_available(), false) {
         // Taken back in the TUI alone: the dropdown's entry, which excludes more than this model.
-        Some(by) if rm => println!("included {}, but the TUI's filters still exclude it: {by}", m.name),
+        Some(by) if rm => println!("included {}, but the TUI's filters still hide it: {by}", m.name),
         _ => println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name),
     }
     Ok(())
@@ -1024,7 +1024,7 @@ pub fn memory(store: &mut Store, gb: Option<f64>, rm: bool) -> Result {
     // In GB of 2^30 bytes, as a GPU's is said: 24 GB, not 25.8.
     let gb = bytes as f64 / (1u64 << 30) as f64;
     let memory = if (gb - gb.round()).abs() < 0.05 { format!("{gb:.0} GB") } else { format!("{gb:.1} GB") };
-    let whose = if store.memory.is_some() { "set by you" } else { "found" };
+    let whose = if store.memory.is_some() { "set by you" } else { "found on this machine" };
     let room = crate::view::room(store).map_or("-".into(), crate::data::gb);
     println!("{memory} ({whose}): fits local models with a download of up to {room}");
     Ok(())
@@ -1136,7 +1136,7 @@ pub fn fav(
             // A model's name where the task goes, or a typo, is no task: not a task with no favorite.
             if favs.is_empty() && fit::task(name).is_none() && !store.custom_tasks().contains(&name) {
                 let msg =
-                    format!("no task '{name}': modelcmp fav {name} <model> --tier <tier> makes it one of your own");
+                    format!("no task '{name}'. To make it a task of your own, run modelcmp fav {name} <model> --tier <tier>");
                 return Err(Exit { code: 2, msg });
             }
             match (favs.as_slice(), tier) {

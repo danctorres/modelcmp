@@ -736,10 +736,11 @@ pub fn price(m: &Model) -> String {
 /// What a tier's line of `modelcmp recommend` shows, as recommend's grid in the TUI picks them.
 /// `{tiers}` is `tiers_said`.
 pub const RECOMMEND_LEGEND: &str = "The best model for each task at each price: {tiers}. \
-     Each line reads name [key] · $ per 1M tokens · score on the task. ★ marks your favorite, \
-     with \"not recommended\" when it is not among the task's best models, and under it the tier's own pick when that differs. \
+     Each line shows name [key] · $ per 1M tokens · score on the task. ★ marks your favorite, \
+     with \"not recommended\" when it is not among the task's best models. \
+     Under a favorite, recommended: names the model the tier would pick without it. \
      A model that runs free on your machine takes a tier when it scores higher, \
-     with ↓ and its size when it needs a download (modelcmp memory).";
+     and ↓ with its size means it needs a download first (modelcmp memory).";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
 pub const CUSTOM_ABOUT: &str = "your own task";
@@ -1158,7 +1159,7 @@ pub fn detail_rows(
     let mut other = m.scores.iter().filter(|(b, _)| !used.contains(&b.as_str())).peekable();
     if other.peek().is_some() {
         v.push(String::new());
-        v.push(format!("  other benchmarks ({}, best effort setting):", source.label()));
+        v.push(format!("  other benchmarks ({}, best reasoning setting):", source.label()));
         v.extend(other.map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
     }
     v.push(String::new());

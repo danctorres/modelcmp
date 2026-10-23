@@ -12,9 +12,9 @@ use cli::Exit;
 use store::Store;
 
 /// Pick the right LLM: prices from models.dev and benchmarks from Epoch AI or Artificial Analysis,
-/// for the models you can already use. Those are the ones your harnesses list: what opencode, pi and
-/// omp list, their own provider's models for claude, codex and gemini, the models your Copilot plan
-/// includes, and the ones ollama and llama-cli have on your machine. The Via column shows which
+/// for the models you can already use. Those are the models opencode, pi and omp list, Anthropic's
+/// for claude, OpenAI's for codex, Google's for gemini, the ones your Copilot plan includes, and the
+/// ones ollama and llama-cli have on your machine. The Via column shows which
 /// harness has each model. Run without a command for the interactive TUI.
 #[derive(Parser)]
 #[command(
@@ -40,10 +40,10 @@ enum Cmd {
     /// List the models you have access to (every model with --all), filtered, sorted or ranked for a task
     #[command(alias = "ls")]
     List {
-        /// The best model at each price level for a task (overall, coding, agentic, reasoning, vision, value), cheapest first: each row costs more and scores higher than the one before. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (see `fav`) lists the favorites you gave it
+        /// The best model at each price level for a task (overall, coding, agentic, reasoning, vision, value), cheapest first: each row costs more and scores higher than the one before (`R` then `enter` on a task in the TUI). Excluded models are left out. A task of your own (see `fav`) lists the favorites you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// Print one model from the task's list: your favorite for the tier, if it costs no more than the tier's cap. Otherwise the best model the tier allows: free = only free models, low = up to $2 per 1M tokens, mid = up to $5 (`modelcmp tier` changes these), high = any price. It fails when no model fits the tier. A model your machine runs or can download (`modelcmp memory`) replaces a pick that is not your favorite when it scores higher, since it runs for free. A task of your own gives the tier's favorite
+        /// Print one model from the task's list: your favorite for the tier, if it costs no more than the tier's cap. Otherwise the best model the tier allows: free = only free models, low = up to $2 per 1M tokens, mid = up to $5 (`modelcmp tier` changes these), high = any price. It fails when no model fits the tier. When that model is not your favorite, a model your machine runs or can download (`modelcmp memory`) replaces it if it scores higher, since it runs for free. A task of your own gives the tier's favorite
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -52,7 +52,7 @@ enum Cmd {
         /// Keep models at or above a value, e.g. --min coding=60. It takes the columns --sort takes. ctx is in thousands of tokens (or in tokens from 10000 up) and release is a date (2026-06). Repeatable. It replaces a `>` bound set in the TUI on the same column
         #[arg(long, value_parser = |s: &str| bound(s, false))]
         min: Vec<(usize, f64)>,
-        /// Keep models at or below a value, e.g. --max price=2. A release date includes its whole month or year. Repeatable. It replaces a `<` bound set in the TUI on the same column, and --max price the Price level picked there
+        /// Keep models at or below a value, e.g. --max price=2. A release date includes its whole month or year. Repeatable. It replaces a `<` bound set in the TUI on the same column, and --max price also replaces the Price level picked there
         #[arg(long, value_parser = |s: &str| bound(s, true))]
         max: Vec<(usize, f64)>,
         /// Include models you have no access to

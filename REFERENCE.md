@@ -192,8 +192,8 @@ modelcmp pick --via claude --min ctx=600       # only models that hold a 600,000
 modelcmp pick --not opus-5.5                   # without a model, as one your note rules out
 ```
 
-`--rm` undoes `select`, `note`, `exclude`, `harness`, `models-dir`, `memory` and `fav`. Alone, `harness`,
-`models-dir`, `memory` and `fav` show what is set, and `note <model>` without text shows the note. Agents
+`--rm` undoes `select`, `note`, `exclude`, `harness`, `tier`, `models-dir`, `memory` and `fav`. Alone, `harness`,
+`tier`, `models-dir`, `memory` and `fav` show what is set, and `note <model>` without text shows the note. Agents
 weigh a note when choosing.
 
 - `open` without `--on` opens the first site to have a page for the model.
@@ -207,7 +207,7 @@ weigh a note when choosing.
 | Flag | What it does |
 |---|---|
 | `--refresh` | re-downloads the data first |
-| `--cache PERCENT` | how much of the input Price reads from the prompt cache, 90 by default |
+| `--cache PERCENT` | the percent of input tokens read from the prompt cache, for Price. 90 by default |
 | `--source epoch\|aa` | the benchmarks for this run. The default is `aa` when its key is there and works, else `epoch` |
 | `--all` | on `list`, includes the models you have no access to. On `show`, adds the price at providers you have no harness for |
 | `--json` | on `list`, `show`, `compare` and `recommend`, as [JSON](#json) says |
@@ -560,7 +560,7 @@ with one), the user's `tier_favorites`, and their harnesses as `tier_via`.
   as in `list --json`), and the user's `note` when the model has one.
 - A favorite that is on the line only as the favorite has `"recommended": false`, and the text
   output marks it `not recommended`.
-- The text output prints each tier's pick as `name [key] · $price · value`, the value being
+- The text output prints each tier's pick as `name [key] · $price · score`, the score being
   the task's table column, the same as `tasks`. Under a favorite that is not the tier's own
   pick, a `recommended:` line names that pick, which the JSON leaves out.
 
