@@ -269,13 +269,16 @@ pub fn months(date: &str) -> Option<f64> {
 // months counts its models as closer than they are. The best score at each date if it bites.
 pub fn add_lag(models: &mut [Model], now: f64) {
     let now = now / 86400.0 / 30.436_875;
+    // Read once, not once a task.
+    let released: Vec<Option<f64>> = models.iter().map(|m| months(&m.release)).collect();
     for t in TASKS.iter().filter(|t| t.name != "value") {
         let score = |m: &Model| if ECI_TASKS.contains(&t.name) { m.eci } else { m.shown.get(t.name).copied() };
-        let first = models.iter().filter(|m| score(m).is_some()).filter_map(|m| months(&m.release)).fold(now, f64::min);
+        let dated = || models.iter().zip(&released);
+        let first = dated().filter(|(m, _)| score(m).is_some()).filter_map(|(_, r)| *r).fold(now, f64::min);
         let window = (now - first).min(WINDOW);
         let best = |old: bool| {
-            let scores = models.iter().filter(|m| !old || months(&m.release).is_some_and(|r| r <= now - window));
-            scores.filter_map(score).fold(f64::NEG_INFINITY, f64::max)
+            let scores = dated().filter(|(_, r)| !old || r.is_some_and(|r| r <= now - window));
+            scores.filter_map(|(m, _)| score(m)).fold(f64::NEG_INFINITY, f64::max)
         };
         let (best, old) = (best(false), best(true));
         let rate = (best - old) / window;
