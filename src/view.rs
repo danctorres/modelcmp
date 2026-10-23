@@ -793,6 +793,9 @@ pub fn hits<const N: usize>(q: &str, fields: [&str; N], typos: bool) -> Option<[
 /// after a space or punctuation, or where letters turn to digits or back ("Qwen3", "4o").
 /// With `typo`, what it covers is instead one slip away from `t`, see `one_typo`.
 fn word_hit(s: &str, t: &str, typo: bool) -> Option<Range<usize>> {
+    if !typo {
+        return exact_hit(s, t);
+    }
     // `s` normalized, the char index in `s` of each of its bytes, and where its words start.
     let (mut n, mut pos, mut starts, mut prev) = (String::new(), vec![], vec![], ' ');
     for (i, c) in s.chars().enumerate() {
@@ -806,18 +809,40 @@ fn word_hit(s: &str, t: &str, typo: bool) -> Option<Range<usize>> {
         }
         prev = c;
     }
-    let (at, len) = if typo {
-        let (n, t) = (n.as_bytes(), t.as_bytes());
-        starts.into_iter().find_map(|k| {
-            [t.len(), t.len() + 1, t.len() - 1]
-                .into_iter()
-                .find(|&l| k + l <= n.len() && one_typo(&n[k..k + l], t))
-                .map(|l| (k, l))
-        })?
-    } else {
-        (starts.into_iter().find(|&k| n[k..].starts_with(t))?, t.len())
-    };
+    let (n, t) = (n.as_bytes(), t.as_bytes());
+    let (at, len) = starts.into_iter().find_map(|k| {
+        [t.len(), t.len() + 1, t.len() - 1]
+            .into_iter()
+            .find(|&l| k + l <= n.len() && one_typo(&n[k..k + l], t))
+            .map(|l| (k, l))
+    })?;
     Some(pos[at]..pos[at + len - 1] + 1)
+}
+
+/// `word_hit` with no slip, which a search asks of every field of every model at each key: read
+/// in place from each word start, punctuation skipped, rather than from a normalized copy.
+fn exact_hit(s: &str, t: &str) -> Option<Range<usize>> {
+    let mut prev = ' ';
+    for (i, (b, c)) in s.char_indices().enumerate() {
+        let start =
+            c.is_ascii_alphanumeric() && (!prev.is_ascii_alphanumeric() || prev.is_ascii_digit() != c.is_ascii_digit());
+        prev = c;
+        if !start {
+            continue;
+        }
+        let (mut rest, mut end) = (s[b..].chars().zip(i..).filter(|(c, _)| c.is_ascii_alphanumeric()), i);
+        let hit = t.bytes().all(|w| match rest.next() {
+            Some((c, j)) if c.to_ascii_lowercase() as u8 == w => {
+                end = j;
+                true
+            }
+            _ => false,
+        });
+        if hit {
+            return Some(i..end + 1);
+        }
+    }
+    None
 }
 
 /// `a` is `b` with one letter wrong, missing, extra, or swapped with the next.
@@ -1607,6 +1632,8 @@ mod tests {
         assert!(!matches("laude", opus) && !matches("opus sonnet", opus));
         assert_eq!(hits("4.5 anthropic", opus, false), Some([vec![12..15], vec![0..9]]), "the dot sits inside the hit");
         assert_eq!(hits("a22b", qwen, false), Some([vec![11..15], vec![]]));
+        assert_eq!(hits("qwen3235", qwen, false), Some([vec![0..9], vec![]]), "across the dash");
+        assert_eq!(hits("turbo", ["Kimi — Turbo", ""], false), Some([vec![7..12], vec![]]), "in chars, not bytes");
     }
 
     #[test]
