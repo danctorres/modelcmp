@@ -3270,7 +3270,7 @@ const TIER_LEGEND: &str = "the best model for each task at each price, or ★ yo
                            ↓ marks a local model x downloads first.";
 
 /// What recommend leaves out, and how to pick it anyway.
-const UNRATED: &str = "only models with a benchmark score are ranked, favorite an unranked one with f in the table.";
+const UNRATED: &str = "models without a benchmark score aren't recommended, but you can still pick one with d on a tier.";
 /// After `UNRATED` on Epoch AI with no key for the other source.
 const MORE_RATED: &str = "K adds Artificial Analysis, which scores more models.";
 
@@ -3323,7 +3323,7 @@ fn recommend(
     );
     let keyless = data::keyless();
     // The keys they name as they are bound now.
-    let mut warn: Vec<Line> = words(&UNRATED.replace(" f ", &format!(" {} ", app.key_of('f'))));
+    let mut warn: Vec<Line> = words(&UNRATED.replace(" d ", &format!(" {} ", app.key_of('d'))));
     warn.extend(if keyless { words(&MORE_RATED.replace("K ", &format!("{} ", app.key_of('K')))) } else { vec![] });
     let warning = vec![Span::styled("warning: ", fg(Color::Yellow))];
     v.extend(wrapped(warning, warn, &space, text).into_iter().map(|l| l.style(fg(MUTED))));
@@ -6198,7 +6198,7 @@ mod tests {
         assert_eq!(said, format!("warning: {UNRATED} {MORE_RATED}"));
         data::save_aa_key("k").unwrap();
         let keyed = recommend(&a, 60, &mut vec![]).0.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" ");
-        assert!(keyed.contains("in the table.") && !keyed.contains("API key"), "{keyed}");
+        assert!(keyed.contains("pick one with d on a") && !keyed.contains("API key"), "{keyed}");
         data::save_aa_key("").unwrap();
         let head = gap + 1;
         assert_eq!(
