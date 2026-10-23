@@ -54,7 +54,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // Run by an agent or a script there is no terminal to draw on: say so before any download or
     // harness is started, not after.
     if !std::io::stdout().is_terminal() {
-        return Err("the TUI needs a terminal; see modelcmp --help".into());
+        return Err("the TUI needs a terminal, see modelcmp --help".into());
     }
     // The first start of a version, so the first ever or the first after an upgrade, plays the
     // intro. Noted now, while the store is fresh from the file.
@@ -94,7 +94,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
         app.report(Err(w));
     }
     let mut terminal =
-        ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}); see modelcmp --help"))?;
+        ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}), see modelcmp --help"))?;
     // ratatui's panic hook restores the terminal but leaves mouse reporting on, and bracketed
     // paste, which keeps pasted text (ctrl+v in some terminals) from arriving as keys. And the
     // cursor hidden, which only its terminal's drop shows again: a release build aborts instead.
@@ -150,14 +150,22 @@ fn upgrade(cmds: &[Vec<String>]) -> Result<(), String> {
     // and says so here, where starting the same modelcmp again would wipe it off the screen.
     let version = Command::new(&name).arg("--version").output().map(|o| o.stdout).unwrap_or_default();
     if String::from_utf8_lossy(&version).trim() == concat!("modelcmp ", env!("CARGO_PKG_VERSION")) {
-        return Err(concat!("still modelcmp v", env!("CARGO_PKG_VERSION"), ": try again in a while").into());
+        return Err(concat!(
+            "still modelcmp v",
+            env!("CARGO_PKG_VERSION"),
+            " after the upgrade, try again in a few minutes"
+        )
+        .into());
     }
     let mut new = Command::new(name);
     new.args(args);
     #[cfg(unix)]
-    return Err(format!("upgraded, but could not start it: {}", std::os::unix::process::CommandExt::exec(&mut new)));
+    return Err(format!(
+        "upgraded, but could not start the new version: {}",
+        std::os::unix::process::CommandExt::exec(&mut new)
+    ));
     #[cfg(not(unix))]
-    new.status().map(|_| ()).map_err(|e| format!("upgraded, but could not start it: {e}"))
+    new.status().map(|_| ()).map_err(|e| format!("upgraded, but could not start the new version: {e}"))
 }
 
 /// The terminal's background colour, for a marked row's faint fill with the terminal's own
@@ -614,7 +622,7 @@ fn event_loop(
                         // Not Homebrew's nor cargo's to replace: the release's page has the binaries.
                         let url = format!("{REPO}/releases/latest");
                         app.report(match open::that_detached(&url) {
-                            Ok(()) => Ok(format!("installed by hand: opening {url}")),
+                            Ok(()) => Ok(format!("installed by hand, opening {url} for the new version")),
                             Err(e) => Err(format!("could not open {url}: {e}")),
                         });
                     }
@@ -679,7 +687,7 @@ fn event_loop(
                     // The start's warning, kept while the question was open, is said once it
                     // closes, however it does, after an error the closing gave.
                     if let Some(w) = app.store.warning.take() {
-                        app.report(Err(if app.failed { format!("{}; {w}", app.status) } else { w }));
+                        app.report(Err(if app.failed { format!("{} · {w}", app.status) } else { w }));
                     }
                 }
             }
@@ -1006,7 +1014,7 @@ fn launch(app: &mut App, cmd: &[String], dir: Option<&str>) {
     app.report(match new_terminal(cmd, dir) {
         Ok(()) => Ok(format!("opened {line} in a new terminal{at}")),
         Err(e) => {
-            let hint = if e.kind() == std::io::ErrorKind::NotFound { "; set $TERMINAL" } else { "" };
+            let hint = if e.kind() == std::io::ErrorKind::NotFound { ", set $TERMINAL" } else { "" };
             Err(format!("could not open a terminal for {line}: {e}{hint}"))
         }
     });
@@ -1019,7 +1027,10 @@ fn new_terminal(cmd: &[String], dir: Option<&str>) -> std::io::Result<()> {
     // downloaded data: one holding a `;` would start a second command there. No real id has one.
     // A folder is refused where it is written (`App::edit_key`), and here once more under WSL.
     if cmd.iter().any(|a| a.contains(';')) || dir.is_some_and(data::splits) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "a model id holding ';' is refused"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a ';' in the command or folder is not allowed",
+        ));
     }
     let mut term = if let Some(session) = data::wsl_session(cmd, dir) {
         let mut c = Command::new("wt.exe");
@@ -1705,7 +1716,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             let key = |k: String| Span::styled(k, fg(KEY).add_modifier(BOLD));
             let n = app.marked_shown;
             let lines = vec![
-                Line::from(format!("compare needs 2 or more selected models, {n} now")),
+                Line::from(format!("compare needs 2 or more selected models, you have {n}")),
                 Line::from(""),
                 Line::from(vec![key("esc".into()), Span::raw(" back to the table, then")]),
                 Line::from(vec![key("space".into()), Span::raw(" selects the model under the cursor, or")]),
@@ -1798,7 +1809,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         Input::Unexclude => Some((
             key('X'),
             if app.filters_exclude() {
-                "unexclude every model, the hidden ones too?"
+                "unexclude every model, hidden ones included?"
             } else {
                 "unexclude every model?"
             }
@@ -2438,7 +2449,7 @@ fn vmarks(buf: &mut Buffer, x: u16, top: u16, bottom: u16, above: bool, below: b
 
 /// The API key prompt's label: it names the site a key comes from, which is its link.
 fn key_ask(wrong: bool) -> String {
-    let (ask, site) = (if wrong { "key rejected, another" } else { "API key" }, data::Source::Aa.site());
+    let (ask, site) = (if wrong { "key rejected, try another" } else { "API key" }, data::Source::Aa.site());
     format!("{ask} from {site} (or set {}): ", data::AA_KEY_ENV)
 }
 
@@ -2459,7 +2470,7 @@ fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) ->
 fn parts(app: &App) -> Vec<Line<'static>> {
     let scope = match (app.all, app.any_available()) {
         (false, true) => "available",
-        (false, false) => "all (no access found)",
+        (false, false) => "all (none available)",
         (true, _) => "all",
     };
     let part = |s: String, c: Color| Line::styled(s, fg(c));
@@ -2506,7 +2517,7 @@ fn parts(app: &App) -> Vec<Line<'static>> {
         parts.push(part(format!("/{}", app.query), Color::Yellow));
     }
     if let Some(t) = app.task {
-        parts.push(part(format!("best {} per price", t.name), Color::Yellow));
+        parts.push(part(format!("best for {} per price", t.name), Color::Yellow));
     }
     // What the filters exclude, as the CLI's note says it: the bounds the TUI's own, as one on a
     // benchmark picked is.
@@ -2809,7 +2820,7 @@ fn edit_line(e: &Edit, color: Color, room: usize) -> Line<'static> {
     let empty = match e.what {
         What::About(_) => "a description",
         What::Dir(..) => "a folder",
-        What::New | What::Rename(_) => "its name",
+        What::New | What::Rename(_) => "a name",
     };
     let text = match e.text.is_empty() {
         true => Span::styled(format!("{empty} "), fg(MUTED)),
@@ -2886,7 +2897,7 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
                     (Some(k), _, Some(why)) if k == key => format!("{slot}: unused, {why}, space clears it"),
                     (Some(k), Some(h), _) if k == key => format!("{slot}: {}, via {h}", name(k)),
                     (Some(k), ..) if k == key => format!("{slot}: {}", name(k)),
-                    (Some(k), ..) => format!("{slot}: now {}", name(k)),
+                    (Some(k), ..) => format!("{slot}: the favorite is {}", name(k)),
                     (None, _, Some(why)) => format!("{slot}: {why}"),
                     (None, _, None) => format!("{slot}: no favorite"),
                 };
@@ -3207,7 +3218,7 @@ pub fn help(app: &App) -> (Vec<Line<'static>>, Vec<usize>) {
                 });
             }
             spans.push(match (waiting, d) {
-                (Some(true), _) => Span::styled("  a letter or a sign, esc cancels", fg(BAD)),
+                (Some(true), _) => Span::styled("  press a letter or a symbol, esc cancels", fg(BAD)),
                 (Some(false), _) => Span::styled("  press its new key", fg(MUTED)),
                 (None, Some(d)) if app.key_of(d) != d => Span::styled(format!(" (default {d})"), fg(MUTED)),
                 _ => Span::raw(""),
@@ -3218,7 +3229,7 @@ pub fn help(app: &App) -> (Vec<Line<'static>>, Vec<usize>) {
         }
         v.push(Line::default());
     }
-    v.push(Line::from("Columns: described in the top border; green the best shown, red the worst").style(fg(MUTED)));
+    v.push(Line::from("Columns: see the top border. Green is the best shown, red the worst").style(fg(MUTED)));
     v.push(Line::from(format!("Saved in {}", crate::store::path().display())).style(fg(MUTED)));
     v.push(Line::from("Every key: github.com/danctorres/modelcmp/blob/main/KEYS.md").style(fg(MUTED)));
     v.push(Line::from("CLI: modelcmp --help").style(fg(MUTED)));
@@ -3266,11 +3277,12 @@ fn to_hit(app: &mut App, hits: &[usize]) -> Option<usize> {
 }
 
 /// What a box of recommend's grid shows.
-const TIER_LEGEND: &str = "the best model for each task at each price, or ★ your favorite, as name · $ per 1M tokens · score. \
-                           ↓ marks a local model x downloads first.";
+const TIER_LEGEND: &str = "the best model for each task at each price, or ★ your favorite, shown as name · $ per 1M tokens · score. \
+                           ↓ marks a local model that x downloads first.";
 
 /// What recommend leaves out, and how to pick it anyway.
-const UNRATED: &str = "models without a benchmark score aren't recommended, but you can still pick one with d on a tier.";
+const UNRATED: &str =
+    "models without a benchmark score aren't recommended, but you can still pick one with d on a tier.";
 /// After `UNRATED` on Epoch AI with no key for the other source.
 const MORE_RATED: &str = "K adds Artificial Analysis, which scores more models.";
 
@@ -3575,7 +3587,7 @@ fn recommend(
     if cur.is_some_and(|c| c.0 == tasks.len()) {
         let what = match &app.input {
             Input::Task(Edit { what: What::About(_), err: Some(err), .. }) => err.clone(),
-            Input::Task(Edit { what: What::About(t), .. }) => format!("describe {t}, agents pick it by this"),
+            Input::Task(Edit { what: What::About(t), .. }) => format!("describe {t} so agents know when to use it"),
             Input::Task(_) => "name it, then describe it".into(),
             _ => "enter adds a task of your own".into(),
         };
@@ -3587,9 +3599,11 @@ fn recommend(
         let what = match TIERS[c].0 {
             t if crate::view::capped(t) => {
                 let def = Store::default().tier_cap(t);
-                let how =
-                    if editing.is_some() { "nothing typed puts back" } else { "enter changes it, empty puts back" };
-                format!("the best model up to ${} per 1M tokens, {how} ${def}", app.store.tier_cap(t))
+                let how = match editing {
+                    Some(_) => format!("clear it for the default ${def}"),
+                    None => format!("enter changes it (default ${def})"),
+                };
+                format!("the best model up to ${} per 1M tokens, {how}", app.store.tier_cap(t))
             }
             "free" => "the best free model".into(),
             _ => "the best model at any price".into(),
@@ -3670,7 +3684,7 @@ fn entry(
         let none = if boxed {
             "-"
         } else if built_in.is_some() {
-            "no data"
+            "no model"
         } else {
             "no favorite"
         };
@@ -4632,7 +4646,7 @@ mod tests {
         a.set_data(data);
         let (buf, lines) = render(&mut a, 120, 6);
         assert!(lines[2].contains(NO_ACCESS) && buf[(cell(&lines[2], "no harness"), 2)].fg == Color::Yellow);
-        assert!(lines[3].contains("opus") && lines[5].starts_with(" NORMAL  2 all (no access found)"), "{lines:?}");
+        assert!(lines[3].contains("opus") && lines[5].starts_with(" NORMAL  2 all (none available)"), "{lines:?}");
         a.key(KeyCode::Char('a').into());
         assert!(!a.all && a.status == NO_ACCESS, "and the key says so: {}", a.status);
         // The clicks on the rows start under it too; the tabs and the frame put them three lines further down.
@@ -4856,8 +4870,8 @@ mod tests {
             let lit = buf.content().iter().filter(|c| c.modifier.contains(Modifier::UNDERLINED)).count();
             (lit, text(buf).join("\n"))
         };
-        a.overlay_query = "described".into();
-        assert_eq!(screen(&mut a).0, 0, "the footer says described, but n stops on no footer");
+        a.overlay_query = "see the top".into();
+        assert_eq!(screen(&mut a).0, 0, "the footer says see the top, but n stops on no footer");
         a.overlay_query = "column".into();
         assert!(screen(&mut a).0 > 0, "a key's row is underlined");
         // A key named in what a row does, and the box `q` opens, are drawn as bound.
@@ -5579,7 +5593,7 @@ mod tests {
         assert!(first.contains("the best model for each task"), "{first}");
         // The lines under the grid, which say what the cursor is on, stay under the rows that scroll.
         let top = screen(&mut a, "jj2l");
-        assert!(top.contains("overall") && top.contains("  low:         no data"), "{top}");
+        assert!(top.contains("overall") && top.contains("  low:         no model"), "{top}");
         let last = screen(&mut a, "Gk");
         assert!(
             last.contains("value") && last.contains("  use for: routine coding") && !last.contains("among:"),
