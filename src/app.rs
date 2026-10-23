@@ -1219,7 +1219,7 @@ pub enum Stop {
     CompareCol(usize),
     /// Stop `i` of task `t` in recommend: 0 its name and the rest of its row, else its tier `i - 1`.
     Recommend(usize, usize),
-    /// Tab `i` on recommend's `among` line.
+    /// Tab `i` on recommend's `from` line.
     Among(usize),
     /// The header of tier `i` in recommend, `low` or `mid`: a click writes its price cap.
     Cap(usize),
@@ -1375,7 +1375,7 @@ pub struct App {
     /// `task_sel - 1` of `TIERS`.
     pub task_cur: usize,
     pub task_sel: usize,
-    /// The cursor on recommend's `among` line instead, the models it ranks: on the tab `among`,
+    /// The cursor on recommend's `from` line instead, the models it ranks: on the tab `among`,
     /// one of mine, all, selected and favorites.
     pub among: Option<usize>,
     /// The cursor on recommend's tier header, under `among`, on tier `task_sel - 1` (`cap_col`):
@@ -2839,7 +2839,7 @@ impl App {
         self.store.is_excluded(&m.key) || !self.accessible(m)
     }
 
-    /// The tab of the models recommend ranks, the one on in its `among` line: `E` aside, as it
+    /// The tab of the models recommend ranks, the one on in its `from` line: `E` aside, as it
     /// narrows none.
     pub fn among_on(&self) -> usize {
         match self.only {
@@ -2854,7 +2854,7 @@ impl App {
         !self.query.trim().is_empty() || self.filters_exclude()
     }
 
-    /// Recommend ranks the models of tab `i`, picked on its `among` line: the table's tab too,
+    /// Recommend ranks the models of tab `i`, picked on its `from` line: the table's tab too,
     /// and an empty one says why, as its key does there, the cursor staying off it as `h` `l` do.
     fn pick_among(&mut self, i: usize) -> Option<Effect> {
         if self.tab_has(i) {
@@ -2865,7 +2865,7 @@ impl App {
         effect
     }
 
-    /// The `among` line's cursor `n` tabs along, round its ends, past the ones with nothing to show.
+    /// The `from` line's cursor `n` tabs along, round its ends, past the ones with nothing to show.
     fn among_by(&mut self, mut i: usize, n: isize) {
         for _ in 0..n.unsigned_abs() {
             loop {
@@ -3248,7 +3248,7 @@ impl App {
         } else if self.view == View::Compare {
             self.compare_sel = go(self.compare_sel, self.marked_shown);
         } else if self.view == View::Recommend {
-            // The `among` line comes before the tiers' header, and that before the first task,
+            // The `from` line comes before the tiers' header, and that before the first task,
             // `+ new task` after the last.
             let at = if self.among.is_some() {
                 0
@@ -3313,7 +3313,7 @@ impl App {
         let Some(last) = stops.len().checked_sub(1) else {
             return self.refuse(format!("no task or model matches {}", self.overlay_query));
         };
-        // From the `among` line, before the first task, `n` goes to the first and `N` the last.
+        // On the `from` line, before the first task, `n` goes to the first and `N` the last.
         let cur = (self.among.is_none() && !self.caps).then_some((self.task_cur, self.task_sel));
         let at = match (n, cur) {
             (0, _) | (1.., None) => 0,
@@ -3658,7 +3658,7 @@ impl App {
             KeyCode::Char('d') if ctrl => self.move_by(n * half, false),
             KeyCode::Char('u') if ctrl => self.move_by(-n * half, false),
             KeyCode::Char('g') if count > 0 => self.go_to(count - 1),
-            // Recommend's top is its `among` line, as `k` from the first task; `1gg` is that task.
+            // Recommend's top is its `from` line, as `k` from the first task; `1gg` is that task.
             KeyCode::Home | KeyCode::Char('g') if self.view == View::Recommend && !list => {
                 self.among = Some(self.among_on());
             }
@@ -4120,7 +4120,7 @@ impl App {
         // its column cursor.
         let across = self.view == View::Recommend;
         let compare = self.view == View::Compare;
-        // On recommend's `among` line the cursor runs over the tabs, and enter or space picks one.
+        // On recommend's `from` line the cursor runs over the tabs, and enter or space picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
         let caps = self.view == View::Recommend && among.is_none() && self.caps;
         match (code, among) {
@@ -4177,7 +4177,7 @@ impl App {
                 return None;
             }
             (KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y'), Some(_)) => {
-                self.refuse("the cursor is on the among line, not a model, j moves down to a task");
+                self.refuse("the cursor is on the from line, not a model, j moves down to a task");
                 return None;
             }
             _ => {}
@@ -4342,7 +4342,7 @@ impl App {
             }
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
-                // It opens on its `among` line, the models it ranks.
+                // It opens on its `from` line, the models it ranks.
                 (self.task_sel, self.among) = (0, Some(self.among_on()));
                 self.scroll = 0;
                 self.overlay_query.clear();
@@ -6687,7 +6687,7 @@ mod tests {
         press(&mut a, "R");
         press(&mut a, "n");
         assert!(a.status.contains("/ searches first"), "{}", a.status);
-        // A task's name, typed: the cursor goes to it from the `among` line.
+        // A task's name, typed: the cursor leaves the `from` line for it.
         let reasoning = TASKS.iter().position(|t| t.name == "reasoning").unwrap();
         press(&mut a, "/reason");
         assert_eq!((a.among, a.task_cur, a.task_sel), (None, reasoning, 0), "on the first match as it is typed");
@@ -7090,7 +7090,7 @@ mod tests {
         press(&mut a, "E/mini");
         code(&mut a, KeyCode::Enter);
         assert!(a.filtered_too());
-        // Recommend opens on its `among` line, before the first task: h l run over the tabs with
+        // Recommend opens on its `from` line, before the first task: h l run over the tabs with
         // something to show, and enter picks the models it ranks, the panel staying open.
         press(&mut a, "cR");
         assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "on the one in use");
@@ -7109,13 +7109,13 @@ mod tests {
         );
         assert_eq!(a.among, Some(ALL), "and the cursor stays off it");
         press(&mut a, "f");
-        assert!(a.status.starts_with("the cursor is on the among line"), "{}", a.status);
+        assert!(a.status.starts_with("the cursor is on the from line"), "{}", a.status);
         a.mouse(Mouse::Model(Stop::Among(MINE)));
         assert_eq!((&a.view, a.among_on()), (&View::Recommend, MINE), "a click picks too");
         press(&mut a, "j");
         assert_eq!((a.among, a.task_cur), (None, 0), "j is back on the first task");
         press(&mut a, "Ggg");
-        assert_eq!(a.among, Some(MINE), "gg is the top, the among line");
+        assert_eq!(a.among, Some(MINE), "gg is the top, the from line");
         press(&mut a, "1gg");
         assert_eq!((a.among, a.task_cur), (None, 0), "1gg is the first task");
         // A tab's key leaves recommend for it, as a click on the tab does.
@@ -7678,7 +7678,7 @@ mod tests {
     fn recommend_moves_a_model_cursor_that_the_row_keys_act_on() {
         let mut a = app();
         press(&mut a, "R");
-        assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "the cursor starts on the among line");
+        assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "the cursor starts on the from line");
         press(&mut a, "jjj");
         let front: Vec<String> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
@@ -7738,7 +7738,7 @@ mod tests {
         press(&mut a, "j");
         assert_eq!((a.task_cur, a.task_sel, a.current().is_none()), (2, TIERS.len(), true), "j k stay on the tier");
         press(&mut a, "RR");
-        assert_eq!((a.among, a.task_sel), (Some(MINE), 0), "reopening starts on the among line");
+        assert_eq!((a.among, a.task_sel), (Some(MINE), 0), "reopening starts on the from line");
     }
 
     #[test]

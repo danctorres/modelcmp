@@ -1167,7 +1167,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["↓ ↑ model", "← → 0 $ column", "s sort"], search, actions("enter x o y f e i"), BACK.to_vec()]
         }
         // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
-        // On the `among` line, the models it ranks.
+        // On the `from` line, the models it ranks.
         View::Recommend if matches!(app.input, Input::Cap { .. } | Input::Task(_)) => {
             vec![vec!["enter apply", "esc cancel"]]
         }
@@ -3379,13 +3379,13 @@ fn recommend(
         let text = format!("{} {}", if on { "●" } else { "○" }, TABS[i].0);
         Line::from(cursor(app.among == Some(i), vec![Span::styled(text, style)]))
     });
-    let (mut v, at) = wrapped_at(label("among:"), tabs.collect(), &Span::styled("·", fg(MUTED)), text);
+    let (mut v, at) = wrapped_at(label("from:"), tabs.collect(), &Span::styled("·", fg(MUTED)), text);
     spots.extend(at.into_iter().enumerate().map(|(i, (l, x))| Spot { lines: l..l + 1, x, at: Stop::Among(i) }));
     if app.filtered_too() {
         let note = Span::styled(" (filtered)", fg(MUTED));
         // On a line of its own under the tabs when the last has no room for it.
         if v.last().unwrap().width() + note.width() > text {
-            v.push(Line::from(" ".repeat("among:".len())));
+            v.push(Line::from(" ".repeat("from:".len())));
         }
         v.last_mut().unwrap().push_span(note);
     }
@@ -5141,7 +5141,7 @@ mod tests {
             (at(&mut a, "opus · $", none), at(&mut a, "flash · $", none)),
             (Some(Mouse::Open(Stop::Recommend(0, 3))), Some(Mouse::Open(Stop::Recommend(0, 2))))
         );
-        assert_eq!(at(&mut a, "✓ selected", none), Some(Mouse::Open(Stop::Among(MARKED))), "a tab of the among line");
+        assert_eq!(at(&mut a, "✓ selected", none), Some(Mouse::Open(Stop::Among(MARKED))), "a tab of the from line");
         let name = Some(Mouse::Open(Stop::Recommend(1, 0)));
         assert_eq!(at(&mut a, TASKS[1].name, none), name, "a task's name is its task");
         let empty = Some(Mouse::Open(Stop::Recommend(TASKS.len() - 1, 1)));
@@ -5849,7 +5849,7 @@ mod tests {
         assert!(top.contains("overall") && top.contains("  low:         no model"), "{top}");
         let last = screen(&mut a, "Gk");
         assert!(
-            last.contains("value") && last.contains("  use for: routine coding") && !last.contains("among:"),
+            last.contains("value") && last.contains("  use for: routine coding") && !last.contains("from:"),
             "{last}"
         );
         // f's hints fit a terminal 80 columns wide, with a task of your own too.
@@ -6471,7 +6471,7 @@ mod tests {
         let lines = recommend(&a, 60, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(
-            text[0], "among: ● mine · ○ all · ○ ✓ selected · ○ ★ favorites ",
+            text[0], "from: ● mine · ○ all · ○ ✓ selected · ○ ★ favorites ",
             "the models it ranks come first, the dot on the ones in use"
         );
         let gap = text.iter().position(String::is_empty).unwrap();
@@ -6515,7 +6515,7 @@ mod tests {
         }
         b.set_data(data);
         (b.view, b.task_sel) = (View::Recommend, 3);
-        // On the `among` line it is on a tab alone, the one in use bold, and "(filtered)" says a search narrows them.
+        // On the `from` line it is on a tab alone, the one in use bold, and "(filtered)" says a search narrows them.
         (b.among, b.query) = (Some(1), "o".into());
         let (top, block, ..) = recommend(&b, 200, &mut vec![]);
         let on: Vec<&Span> = top.iter().flat_map(|l| l.spans.iter()).filter(|s| s.style.bg == Some(CURSOR)).collect();
@@ -6523,7 +6523,7 @@ mod tests {
         let mine = top[0].spans.iter().find(|s| s.content == "● mine").unwrap();
         assert!(mine.style == TAB_ON && top[0].to_string().ends_with(" (filtered)"), "{}", top[0]);
         let narrow = recommend(&b, 60, &mut vec![]).0;
-        assert_eq!(narrow[1].to_string(), "       (filtered)", "it wraps where the tabs fill the line");
+        assert_eq!(narrow[1].to_string(), "      (filtered)", "it wraps where the tabs fill the line");
         // On a tier, the cursor is on its box, as wide as its widest entry, and not on the name.
         (b.among, b.query) = (None, String::new());
         let mut spots = vec![];
