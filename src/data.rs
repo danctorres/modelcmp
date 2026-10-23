@@ -1255,8 +1255,19 @@ impl Data {
         let repos = REPOS.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap_or_default();
         let tags = |h: &str| Some(local_tags(self.harness.get(h)?, &keys, &repos));
         let local: Vec<_> = LOCAL.iter().filter_map(|(h, name)| Some((*h, *name, tags(h)?))).collect();
-        let harness: Vec<(&str, HashSet<String>)> =
-            self.harness.iter().map(|(h, ids)| (h.as_str(), ids.iter().map(|i| canonical(h, i)).collect())).collect();
+        // Each id listed, `provider/*` too, with the harnesses that list it: one search per offer,
+        // not one per harness.
+        let mut listing: HashMap<String, Vec<&str>> = HashMap::new();
+        for (h, ids) in &self.harness {
+            for i in ids {
+                let on = listing.entry(canonical(h, i)).or_default();
+                if on.last() != Some(&h.as_str()) {
+                    on.push(h);
+                }
+            }
+        }
+        let on = |id: &str| listing.get(id).map_or(&[][..], Vec::as_slice);
+        let mut id = String::new();
         for m in &mut self.models {
             m.via.clear();
             // Made anew each time, as the cache does not hold it.
@@ -1269,11 +1280,18 @@ impl Data {
                 m.offers.push(Offer { provider, provider_name, id, local: true, ..Default::default() });
             }
             for o in &mut m.offers {
-                let (id, all) = (format!("{}/{}", o.provider, o.id), format!("{}/*", o.provider));
-                o.via = harness
-                    .iter()
-                    .filter(|(_, ids)| ids.contains(id.as_str()) || ids.contains(all.as_str()))
-                    .map(|(h, _)| h.to_string())
+                id.clear();
+                id.extend([o.provider.as_str(), "/", o.id.as_str()]);
+                let named = on(&id);
+                id.truncate(o.provider.len() + 1);
+                id.push('*');
+                let all = on(&id);
+                // In the harnesses' order, as one listing it both ways counts once.
+                o.via = self
+                    .harness
+                    .keys()
+                    .filter(|h| named.contains(&h.as_str()) || all.contains(&h.as_str()))
+                    .cloned()
                     .collect();
                 o.available = !o.via.is_empty();
                 for v in &o.via {
