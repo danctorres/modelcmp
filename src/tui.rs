@@ -1663,6 +1663,115 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
     }
     let buf = f.buffer_mut();
+    // Help shows over the panel it was opened from, as every box over what is behind it.
+    if app.view == View::Help {
+        app.under_help(|app| {
+            panel(app, buf, area, body);
+        });
+    }
+    let text = panel(app, buf, area, body);
+    // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
+    // After the panel's lines, as finding its search's match says so there.
+    let mut cursor = status(buf, bar, app, splash.is_some()).map(|x| (x, bar.y));
+    if let Some(at) = text {
+        cursor = at;
+    }
+    // `q`, `U`, `D`, `X` and `↺` ask first: the same box, confirmed by the same key again, each
+    // as it is bound now.
+    let key = |k: char| app.key_of(k).to_string();
+    let ask = match app.input {
+        Input::Quit => Some((key('q'), "quit?".to_string())),
+        Input::Upgrade => app.data.update().map(|new| (key('U'), format!("upgrade to v{new}?"))),
+        Input::Unfavorite => Some((key('D'), "unfavorite every model?".to_string())),
+        Input::DeleteTask(ref t) => Some((key('D'), format!("delete {t}?"))),
+        Input::Reset => Some(("enter".to_string(), "put every key back to its default?".to_string())),
+        Input::Unexclude => Some((
+            key('X'),
+            if app.filters_exclude() {
+                "unexclude every model, hidden ones included?"
+            } else {
+                "unexclude every model?"
+            }
+            .to_string(),
+        )),
+        _ => None,
+    };
+    if let Some((key, title)) = ask {
+        let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
+        let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
+        overlay(buf, body, &title, lines, &mut 0, (0, 0, 0..0));
+    }
+    // The first start's question, under the wordmark.
+    // The key is typed in it, on its own line.
+    if let (Some((_, within)), Input::Key { text, cur, .. }) = (splash, &app.input) {
+        let lines = key_lines(text.chars().count());
+        let rect = overlay_rect(within, KEY_TITLE, &lines);
+        let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + text[..*cur].chars().count()) as u16;
+        overlay(buf, within, KEY_TITLE, lines, &mut 0, (0, 0, 0..0));
+        cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
+        // At the bottom of the screen, with a blank row at least under the box.
+        if within.bottom() + 3 < bar.y {
+            for (hint, y) in try_lines(&app.store.keys).iter().zip(bar.y - 3..) {
+                let w = hint.width() as u16;
+                buf.set_line(within.x + within.width.saturating_sub(w) / 2, y, hint, w);
+            }
+        }
+    }
+    let chooser = chooser(app, area);
+    if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
+        let rect = overlay_rect(within, title, &lines);
+        let rows = items.len();
+        // f's grid has its tiers' heading over the rows, and its cursor on a box, drawn with it;
+        // a row being written has no box, so the cursor is the row's, as in every list.
+        // ponytail: the heading scrolls off with the rows in a box too short for them all; pin
+        // it if a dozen tasks of your own on a short terminal turn out to be a thing.
+        let grid = *kind == Kind::Fav;
+        let head = usize::from(grid);
+        let none = list.no_match(items.iter().map(|e| e.0.as_str()), false);
+        let (sel, top) = (&list.sel, &mut list.top);
+        let shown = usize::from(rect.height.saturating_sub(2));
+        // At the last entry every line to the end, so the key hint below them shows too, unless
+        // that would scroll the cursor's line off. And at an entry being written, whose keys or
+        // error that line has.
+        // ponytail: an entry more than a box's height from the end keeps it out of view; the
+        // error on the line under the entry if it bites.
+        let from = if *sel + 1 >= rows || list.edit.is_some() { lines.len().saturating_sub(shown) } else { *top };
+        let mut scroll = list_top(from, *sel + head, shown) as u16;
+        let ends = (head, lines.len() - rows - head, 0..0);
+        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, ends);
+        *top = usize::from(scroll);
+        // On the bottom border, as a dropdown says it, so it shows however the list scrolls.
+        if none {
+            buf.set_stringn(rect.x + 2, rect.bottom() - 1, " no match ", usize::from(rect.width / 2), fg(MUTED));
+        }
+        if rows > 0 {
+            // The cursor runs through the box's border, as in the table, and the marks go over
+            // its bar, as there.
+            let y = (rect.y + 1 + (*sel + head) as u16 - scroll).min(rect.bottom() - 1);
+            if !grid || list.edit.is_some() {
+                cursor_ends(buf, rect.x, rect.right() - 1, y);
+            }
+            // An entry being written has the text cursor, after what `edit_line` draws before it.
+            if let Some(e) = &list.edit {
+                let prefix = Span::raw(edit_prefix(e)).width();
+                let start = scrolled(prefix, &e.text, e.cur, edit_room(within));
+                let before = prefix + Span::raw(&e.text[start..e.cur]).width();
+                cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
+            }
+            let inner = rect.inner(Margin::new(1, 1));
+            vmarks(buf, rect.x, inner.y, inner.bottom() - 1, above, below);
+        }
+    }
+    if let Some(at) = cursor {
+        f.set_cursor_position(at);
+    }
+}
+
+/// The open panel's box over the table in `body`, and the text cursor recommend has on a cap
+/// being written: `None` leaves the status bar's cursor, `Some(None)` hides it, the cap's line
+/// being scrolled off.
+fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Option<(u16, u16)>> {
+    let mut cursor = None;
     // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
     let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
     // The line of a panel's search `n` `N` are on, which has the cursor.
@@ -1770,9 +1879,6 @@ fn draw(app: &mut App, f: &mut Frame) {
             Some(("compare".into(), c.lines))
         }
     };
-    // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
-    // After the panel's lines, as finding its search's match says so there.
-    let mut cursor = status(buf, bar, app, splash.is_some()).map(|x| (x, bar.y));
     app.spots.clear();
     app.panel = lines.as_ref().map(|(title, lines)| overlay_rect(body, title, lines));
     if let Some((title, lines)) = lines {
@@ -1797,7 +1903,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         let (text, above, below) = overlay(buf, body, &title, lines, &mut app.scroll, (0, 0, pin));
         if let Some((l, x)) = text_at {
             let y = l.checked_sub(app.scroll as usize).filter(|&y| y < text.height as usize);
-            cursor = y.map(|y| ((text.x + x as u16).min(text.right().saturating_sub(1)), text.y + y as u16));
+            cursor = Some(y.map(|y| ((text.x + x as u16).min(text.right().saturating_sub(1)), text.y + y as u16)));
         }
         // The cursor runs through the box's border, as in a list, and the marks go over its bar.
         if let Some(y) = hit_line.and_then(|l| l.checked_sub(app.scroll as usize)).filter(|&y| y < text.height as usize)
@@ -1822,95 +1928,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             })
             .collect();
     }
-    // `q`, `U`, `D`, `X` and `↺` ask first: the same box, confirmed by the same key again, each
-    // as it is bound now.
-    let key = |k: char| app.key_of(k).to_string();
-    let ask = match app.input {
-        Input::Quit => Some((key('q'), "quit?".to_string())),
-        Input::Upgrade => app.data.update().map(|new| (key('U'), format!("upgrade to v{new}?"))),
-        Input::Unfavorite => Some((key('D'), "unfavorite every model?".to_string())),
-        Input::DeleteTask(ref t) => Some((key('D'), format!("delete {t}?"))),
-        Input::Reset => Some(("enter".to_string(), "put every key back to its default?".to_string())),
-        Input::Unexclude => Some((
-            key('X'),
-            if app.filters_exclude() {
-                "unexclude every model, hidden ones included?"
-            } else {
-                "unexclude every model?"
-            }
-            .to_string(),
-        )),
-        _ => None,
-    };
-    if let Some((key, title)) = ask {
-        let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
-        let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
-        overlay(buf, body, &title, lines, &mut 0, (0, 0, 0..0));
-    }
-    // The first start's question, under the wordmark.
-    // The key is typed in it, on its own line.
-    if let (Some((_, within)), Input::Key { text, cur, .. }) = (splash, &app.input) {
-        let lines = key_lines(text.chars().count());
-        let rect = overlay_rect(within, KEY_TITLE, &lines);
-        let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + text[..*cur].chars().count()) as u16;
-        overlay(buf, within, KEY_TITLE, lines, &mut 0, (0, 0, 0..0));
-        cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
-        // At the bottom of the screen, with a blank row at least under the box.
-        if within.bottom() + 3 < bar.y {
-            for (hint, y) in try_lines(&app.store.keys).iter().zip(bar.y - 3..) {
-                let w = hint.width() as u16;
-                buf.set_line(within.x + within.width.saturating_sub(w) / 2, y, hint, w);
-            }
-        }
-    }
-    let chooser = chooser(app, area);
-    if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
-        let rect = overlay_rect(within, title, &lines);
-        let rows = items.len();
-        // f's grid has its tiers' heading over the rows, and its cursor on a box, drawn with it;
-        // a row being written has no box, so the cursor is the row's, as in every list.
-        // ponytail: the heading scrolls off with the rows in a box too short for them all; pin
-        // it if a dozen tasks of your own on a short terminal turn out to be a thing.
-        let grid = *kind == Kind::Fav;
-        let head = usize::from(grid);
-        let none = list.no_match(items.iter().map(|e| e.0.as_str()), false);
-        let (sel, top) = (&list.sel, &mut list.top);
-        let shown = usize::from(rect.height.saturating_sub(2));
-        // At the last entry every line to the end, so the key hint below them shows too, unless
-        // that would scroll the cursor's line off. And at an entry being written, whose keys or
-        // error that line has.
-        // ponytail: an entry more than a box's height from the end keeps it out of view; the
-        // error on the line under the entry if it bites.
-        let from = if *sel + 1 >= rows || list.edit.is_some() { lines.len().saturating_sub(shown) } else { *top };
-        let mut scroll = list_top(from, *sel + head, shown) as u16;
-        let ends = (head, lines.len() - rows - head, 0..0);
-        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, ends);
-        *top = usize::from(scroll);
-        // On the bottom border, as a dropdown says it, so it shows however the list scrolls.
-        if none {
-            buf.set_stringn(rect.x + 2, rect.bottom() - 1, " no match ", usize::from(rect.width / 2), fg(MUTED));
-        }
-        if rows > 0 {
-            // The cursor runs through the box's border, as in the table, and the marks go over
-            // its bar, as there.
-            let y = (rect.y + 1 + (*sel + head) as u16 - scroll).min(rect.bottom() - 1);
-            if !grid || list.edit.is_some() {
-                cursor_ends(buf, rect.x, rect.right() - 1, y);
-            }
-            // An entry being written has the text cursor, after what `edit_line` draws before it.
-            if let Some(e) = &list.edit {
-                let prefix = Span::raw(edit_prefix(e)).width();
-                let start = scrolled(prefix, &e.text, e.cur, edit_room(within));
-                let before = prefix + Span::raw(&e.text[start..e.cur]).width();
-                cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
-            }
-            let inner = rect.inner(Margin::new(1, 1));
-            vmarks(buf, rect.x, inner.y, inner.bottom() - 1, above, below);
-        }
-    }
-    if let Some(at) = cursor {
-        f.set_cursor_position(at);
-    }
+    cursor
 }
 
 /// Column layout relative to the table's left edge. A numeric column is as wide as its header
@@ -6124,6 +6142,26 @@ mod tests {
         assert!(a.status.contains("/ searches first") && a.input == Input::None, "{}", a.status);
         a.key(KeyCode::Char('i').into());
         assert!(matches!(a.input, Input::Note { .. }), "i writes a note");
+    }
+
+    #[test]
+    fn help_shows_over_the_panel_it_was_opened_from() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 30)).unwrap();
+        let mut frame = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            (term.backend().buffer().clone(), a.panel.expect("a box"))
+        };
+        let mut a = app();
+        a.key(KeyCode::Char('R').into());
+        let (before, rec) = frame(&mut a);
+        a.key(KeyCode::Char('?').into());
+        let (after, help) = frame(&mut a);
+        let behind: Vec<_> = rec.positions().filter(|p| !help.contains(*p)).collect();
+        assert!(!behind.is_empty(), "{rec:?} is under {help:?}");
+        assert!(behind.iter().all(|&p| after[p].symbol() == before[p].symbol()), "recommend is behind help");
+        assert!(after[behind[0]].modifier.contains(Modifier::DIM), "and dimmed");
+        a.key(KeyCode::Char('?').into());
+        assert_eq!(frame(&mut a).0, before, "closing help leaves recommend as it was");
     }
 
     #[test]

@@ -3566,6 +3566,23 @@ impl App {
         (self.view, self.scroll, self.overlay_query, self.hit.0) = (view, scroll, query, hit);
     }
 
+    /// `f` on what help was opened over, as it was, for drawing it behind help, which stays open.
+    pub fn under_help(&mut self, f: impl FnOnce(&mut Self)) {
+        let Some(mut back) = self.help_back.take() else { return };
+        // A match help's search jumps to is help's to scroll to.
+        let jump = std::mem::replace(&mut self.hit.1, false);
+        let swap = |a: &mut Self, b: &mut (View, u16, String, isize)| {
+            std::mem::swap(&mut a.view, &mut b.0);
+            std::mem::swap(&mut a.scroll, &mut b.1);
+            std::mem::swap(&mut a.overlay_query, &mut b.2);
+            std::mem::swap(&mut a.hit.0, &mut b.3);
+        };
+        swap(self, &mut back);
+        f(self);
+        swap(self, &mut back);
+        (self.hit.1, self.help_back) = (jump, Some(back));
+    }
+
     /// Enter on the row of `?` under the cursor: a key waits for its new one, `↺` puts every key
     /// back, and one that keeps its key says so.
     fn help_enter(&mut self) -> Option<Effect> {
