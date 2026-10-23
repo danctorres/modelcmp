@@ -1322,7 +1322,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     let show = |task: &str, picks: [Option<(&Model, f64)>; TIERS.len()], text: &dyn Fn(&Model, f64, &str) -> String| {
         let one = one_pick(task, &picks);
         for (t, p) in TIERS.iter().zip(picks).skip(if one { TIERS.len() - 1 } else { 0 }) {
-            let label = format!("{}:", if one { "pick" } else { t.0 });
+            let label = format!("{}:", if one { "all tiers" } else { t.0 });
             println!("  {label:<17}{}", p.map_or("-".into(), |(m, s)| text(m, s, t.0)));
         }
     };

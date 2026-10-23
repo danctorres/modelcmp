@@ -1183,7 +1183,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             let enter = match (app.task_sel, app.custom_at()) {
                 (1.., _) => vec!["d dropdown"],
                 (_, Some(_)) => vec!["enter your model", "D delete"],
-                _ => vec!["enter best models first"],
+                _ => vec!["enter best per price"],
             };
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), cap, BACK.to_vec()]
         }
@@ -3564,7 +3564,7 @@ fn recommend(
         if let Some(c) = sel.checked_sub(1).filter(|&c| c < TIERS.len()) {
             // The one pick is `high`'s, as in its box.
             let one = app.one_pick(i);
-            let (tier, c) = if one { ("pick", LAST) } else { (TIERS[c].0, c) };
+            let (tier, c) = if one { ("all tiers", LAST) } else { (TIERS[c].0, c) };
             // Wrapped to the panel as the boxes are, so the name and what it says are whole.
             let mut put = |label: &str, spans| {
                 let head = Span::styled(format!("  {:<w$}", format!("{label}:"), w = "recommended: ".len()), fg(MUTED));
@@ -4888,7 +4888,7 @@ mod tests {
     fn a_click_on_a_hint_presses_its_key() {
         use ratatui::crossterm::event::KeyModifiers;
         assert_eq!(split_hint("← → 0 $ model"), ("← → 0 $", " model"));
-        assert_eq!(split_hint("enter best models first"), ("enter", " best models first"));
+        assert_eq!(split_hint("enter best per price"), ("enter", " best per price"));
         // Under a list, each part's keys in their colour and the rest muted.
         let line = key_line(" ↓ ↑ move · esc t close · ctrl+c quits", &BTreeMap::new());
         assert_eq!(line.to_string(), " ↓ ↑ move · esc t close · ctrl+c quits");
@@ -6305,7 +6305,7 @@ mod tests {
         let was = (b.task_cur, b.task_sel);
         (b.task_cur, b.task_sel) = (TASKS.len() - 1, 1);
         let text: Vec<String> = recommend(&b, 200, &mut vec![]).0.iter().map(ToString::to_string).collect();
-        let under = text.iter().find(|l| l.starts_with("  pick:")).unwrap();
+        let under = text.iter().find(|l| l.starts_with("  all tiers:")).unwrap();
         assert!(under.contains(&b.current().unwrap().name), "{under}");
         (b.task_cur, b.task_sel) = was;
         assert!(

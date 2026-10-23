@@ -219,7 +219,9 @@ pub const COLS: [Col; 15] = [
     col("Reason", "reasoning", "", |m| task_score(m, "reasoning")),
     Col {
         price: true,
-        ..col("Value", "value", "Coding score per dollar of Price, ranked 0-100", |m| m.fit.get("value").copied())
+        ..col("Value", "value", "coding score per dollar of Price, as a percentile (0-100)", |m| {
+            m.fit.get("value").copied()
+        })
     },
     Col {
         only: Some(Source::Aa),
@@ -492,7 +494,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: close the panel, then drop the highlight, filter, `S` `F` `E`, task"),
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
-            ("!", "list the last refresh's warnings and a missing key, or click the ⚠"),
+            ("!", "list warnings from the last refresh or a missing key, or click the ⚠"),
             ("K", "add or replace the Artificial Analysis API key"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
             ("H", "choose the default harness, used by `x`, `Y`, --cmd and --id"),
@@ -501,18 +503,18 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Move",
         &[
-            ("j", "down, as `↓`, a count repeats it, `3j` goes down 3 rows"),
-            ("k", "up, as `↑`"),
-            ("h", "column left, as `←`, previous model or tier in compare and recommend"),
-            ("l", "column right, as `→`"),
-            ("_", "first column, as `0`"),
+            ("j", "down (or `↓`), a count repeats it, `3j` goes down 3 rows"),
+            ("k", "up (or `↑`)"),
+            ("h", "column left (or `←`), previous model or tier in compare and recommend"),
+            ("l", "column right (or `→`)"),
+            ("_", "first column (or `0`)"),
             ("$", "last column"),
             ("w", "next group of columns"),
             ("b", "previous group of columns"),
             ("g", "`gg` goes to the top, `3gg` to row 3"),
             ("G", "bottom"),
-            ("(", "half a page up, as `^u`"),
-            (")", "half a page down, as `^d`"),
+            ("(", "half a page up (or `^u`)"),
+            (")", "half a page down (or `^d`)"),
             ("]", "next selected model, or the next ticked entry in a list"),
             ("[", "previous selected model, or the previous ticked entry in a list"),
             ("}", "next available model"),
@@ -535,7 +537,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("a", "all models, including ones you have no access to"),
             ("m", "mine only"),
             ("tab", "next tab, `shift+tab` back"),
-            ("%", "switch Price between no input cached and the share it started with"),
+            ("%", "switch Price between no input cached and the share modelcmp started with"),
             ("c", "clear filters, bounds, dropdowns, task and `S` `F` `E`, selected models stay"),
         ],
     ),
@@ -3223,8 +3225,7 @@ impl App {
     /// for a negative `n`, round again past either end, and 0 to the first.
     fn next_hit(&mut self, n: isize) {
         if !self.overlay_search() {
-            return self
-                .refuse("n and N move between matches in a panel, the table's / already shows only the matches");
+            return self.refuse("n and N move between matches in a panel, the table's / filter shows only matches");
         }
         if self.overlay_query.is_empty() {
             return self.refuse("no search yet, / searches first");
@@ -3450,7 +3451,7 @@ impl App {
     pub fn issues(&self) -> Option<String> {
         let key = crate::data::keyless().then(|| {
             let aa = crate::data::Source::Aa.label();
-            format!("no {aa} API key, so benchmarks are from Epoch AI: {} takes one", self.key_of('K'))
+            format!("no {aa} API key, so benchmarks are from Epoch AI, {} adds one", self.key_of('K'))
         });
         let all: Vec<String> = self.data.warning.clone().into_iter().chain(key).collect();
         Some(all.join(crate::data::SEP)).filter(|w| !w.is_empty())
@@ -3476,11 +3477,11 @@ impl App {
         } else if keys == "↺" {
             self.input = Input::Reset;
         } else if keys.chars().count() == 1 {
-            self.refuse(format!("{keys} is a mark the table shows, not a key"));
+            self.refuse(format!("{keys} is a symbol the table shows, not a key"));
         } else if keys.split(' ').any(|w| bindable(w.trim_end_matches(':')).is_some()) {
             self.refuse(format!("to change {keys}, change each key on its own row"));
         } else {
-            self.refuse(format!("{keys} cannot be changed, only a key of one letter or sign can"));
+            self.refuse(format!("{keys} cannot be changed, only a letter or symbol key can"));
         }
         None
     }
@@ -3943,7 +3944,7 @@ impl App {
         let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && !one && (self.caps || !self.on_new_task()));
         match tier.filter(|&c| view::capped(TIERS[c].0)) {
             Some(c) => self.edit_cap(c),
-            None => self.refuse("< sets the price cap of the low or mid tier, put the cursor on one of them"),
+            None => self.refuse("< sets a price cap, put the cursor on the low or mid tier first"),
         }
     }
 
@@ -3956,7 +3957,7 @@ impl App {
         let own = self.custom_at();
         let (Some(c), Some(task)) = (tier, self.cur_task().map(|t| t.name).or(own)) else {
             return self.refuse(format!(
-                "{} on a tier lists the models to choose from, put the cursor on a tier first",
+                "{} lists a tier's models to choose from, put the cursor on a tier first",
                 self.key_of('d')
             ));
         };
@@ -4114,7 +4115,7 @@ impl App {
                 return None;
             }
             (KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y'), Some(_)) => {
-                self.refuse("the cursor is on the tabs, not a model, j moves down to a task");
+                self.refuse("the cursor is on the among line, not a model, j moves down to a task");
                 return None;
             }
             _ => {}
@@ -4163,7 +4164,7 @@ impl App {
                 self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
             }
             KeyCode::Char('>' | '<') if table => {
-                self.refuse("> and < only bound a column of numbers, or Via by download size")
+                self.refuse("> and < work on a column of numbers, and on Via by download size")
             }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the columns marked ▾"),
@@ -4302,7 +4303,7 @@ impl App {
                 if let [key] = &keys[..] {
                     self.ask_fav(key);
                 } else if let n @ 2.. = keys.len() {
-                    self.refuse(format!("a task has one favorite: f takes one model, {n} are highlighted"));
+                    self.refuse(format!("a tier has one favorite, so f takes one model, not the {n} highlighted"));
                 }
             }
             KeyCode::Char('V') if table && !self.any_marked() => self.refuse(NO_SELECTED),
@@ -4878,7 +4879,7 @@ impl App {
                         if crate::fit::task(&task).is_some() {
                             self.refuse(format!("{task} is built in, r and a only work on a task you added"));
                         } else if !self.store.custom_tasks().contains(&task.as_str()) {
-                            self.refuse(format!("{task} has no model now, tick it again first"));
+                            self.refuse(format!("{task} has no favorite left, tick one of its tiers first"));
                         } else {
                             let edit = if c == 'r' {
                                 Edit::new(What::Rename(task.clone()), task)
@@ -5533,7 +5534,7 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         let mark = a.help_sel;
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.status, "✓ is a mark the table shows, not a key");
+        assert_eq!(a.status, "✓ is a symbol the table shows, not a key");
         press(&mut a, "/selected");
         code(&mut a, KeyCode::Enter);
         assert!(a.help_sel < mark, "a new search starts from the top, as in recommend, ✓'s row matching too");
@@ -6588,7 +6589,7 @@ mod tests {
     fn n_goes_from_match_to_match_in_recommend() {
         let mut a = app();
         press(&mut a, "n");
-        assert!(a.status.contains("the table's / already shows only the matches"), "{}", a.status);
+        assert!(a.status.contains("the table's / filter shows only matches"), "{}", a.status);
         press(&mut a, "R");
         press(&mut a, "n");
         assert!(a.status.contains("/ searches first"), "{}", a.status);
@@ -6696,7 +6697,11 @@ mod tests {
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
         assert_eq!(about("coding"), "Epoch AI, WeirdML v3 score (0-100), blank = not tested");
         assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100), blank = not tested");
-        assert_eq!(about("value"), "Coding score per dollar of Price, ranked 0-100", "no benchmarks of its own");
+        assert_eq!(
+            about("value"),
+            "coding score per dollar of Price, as a percentile (0-100)",
+            "no benchmarks of its own"
+        );
         crate::data::set_source(Source::Aa);
         assert_eq!(
             about("agentic"),
@@ -7010,7 +7015,7 @@ mod tests {
         );
         assert_eq!(a.among, Some(ALL), "and the cursor stays off it");
         press(&mut a, "f");
-        assert!(a.status.starts_with("the cursor is on the tabs"), "{}", a.status);
+        assert!(a.status.starts_with("the cursor is on the among line"), "{}", a.status);
         a.mouse(Mouse::Model(Stop::Among(MINE)));
         assert_eq!((&a.view, a.among_on()), (&View::Recommend, MINE), "a click picks too");
         press(&mut a, "j");
@@ -7217,7 +7222,10 @@ mod tests {
         a.store.set_about("tool-dispatch", "");
         assert_eq!((a.store.custom_tasks().len(), under(&a).as_str()), (0, "tool-dispatch"));
         press(&mut a, "r");
-        assert_eq!((edit(&a), a.status.as_str()), (None, "tool-dispatch has no model now, tick it again first"));
+        assert_eq!(
+            (edit(&a), a.status.as_str()),
+            (None, "tool-dispatch has no favorite left, tick one of its tiers first")
+        );
         press(&mut a, " ");
         assert!(ticked(&a) && under(&a) == "tool-dispatch");
         // r writes another name on it, starting from its own; one a task has is said under the
@@ -8019,7 +8027,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         // A task has one favorite: with several highlighted, f says so and asks nothing.
         assert_eq!((press(&mut a, "Vf"), a.choosing_favs()), (None, false));
-        assert_eq!(a.status, "a task has one favorite: f takes one model, 2 are highlighted");
+        assert_eq!(a.status, "a tier has one favorite, so f takes one model, not the 2 highlighted");
         // e on a selected row excludes that row alone, and Ve every selected one.
         code(&mut a, KeyCode::Esc);
         press(&mut a, "e");
@@ -8029,7 +8037,7 @@ mod tests {
         press(&mut a, "Ve");
         assert!(a.store.excluded.is_empty());
         press(&mut a, "ggvjf");
-        assert!(!a.choosing_favs() && a.status.ends_with("2 are highlighted"), "{}", a.status);
+        assert!(!a.choosing_favs() && a.status.ends_with("not the 2 highlighted"), "{}", a.status);
         a.mouse(Mouse::Star(2));
         assert!(a.choosing_favs(), "a click on the ☆ is for its row alone");
         code(&mut a, KeyCode::Esc);
