@@ -3601,7 +3601,7 @@ fn recommend(
         }
         _ => {
             let on = cur.is_some_and(|c| c.0 == tasks.len());
-            cursor(on, vec![Span::styled(format!("{NEW_TASK:w$}"), fg(MUTED))])
+            cursor(on, vec![Span::raw(format!("{NEW_TASK:w$}"))])
         }
     };
     spots.push(Spot { lines: y..y + 1, x: 0..width, at: Stop::Recommend(tasks.len(), 0) });
