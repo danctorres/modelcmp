@@ -988,7 +988,7 @@ pub fn box_slot(task: &str, col: usize) -> String {
 }
 
 /// A slot's task and the box it has on that task's row, the first for a task alone.
-fn slot_box(slot: &str) -> (&str, usize) {
+pub fn slot_box(slot: &str) -> (&str, usize) {
     let (task, tier) = slot.split_once(':').map_or((slot, None), |(t, x)| (t, Some(x)));
     (task, tier.and_then(|x| crate::view::TIERS.iter().position(|t| t.0 == x)).unwrap_or(0))
 }
