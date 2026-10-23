@@ -350,7 +350,8 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
   harness's steps), so the agent reads only the answer. When the run fails, it prints the last
   20 lines of stderr instead and exits with the command's exit code.
 - The command has the flags that let claude, codex, gemini or copilot edit files and run
-  commands (tests, builds) without asking, as opencode, pi and omp do.
+  commands (tests, builds) without asking, as opencode, pi and omp do. `ollama run` gets
+  `--nowordwrap --hidethinking`, so it prints the answer alone.
 - With `--via` the model is named by the id that harness takes. A favorite the harness lacks
   is shown after the tier's own pick, with the command that starts it where it runs: `(★ favorite
   Ling 3.1 Flash is not on claude, run it with: modelcmp quiet opencode run --model

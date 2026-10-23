@@ -748,7 +748,8 @@ fn one_shot(mut cmd: Vec<String>) -> Option<String> {
         "claude" => (&[], &["--permission-mode", "acceptEdits", "--allowedTools", "Bash", "-p"]),
         "gemini" => (&[], &["--approval-mode", "yolo", "-p"]),
         "copilot" => (&[], &["--allow-all-tools", "-p"]),
-        crate::data::OLLAMA => (&[], &[]),
+        // Its answer alone: no thinking, and no line wrapping's terminal codes.
+        crate::data::OLLAMA => (&[], &["--nowordwrap", "--hidethinking"]),
         // By name, as `launch_cmd` put it there: no search of `PATH` for each line of `pick`.
         crate::data::LLAMA | "llama" => (&[], &["-st", "-p"]),
         // pi, omp
@@ -1616,7 +1617,7 @@ mod tests {
             ),
             (&["gemini", "--model", "flash"], "gemini --model flash --approval-mode yolo -p"),
             (&["copilot", "--model", "gpt55"], "copilot --model gpt55 --allow-all-tools -p"),
-            (&["ollama", "run", "qwen"], "ollama run qwen"),
+            (&["ollama", "run", "qwen"], "ollama run qwen --nowordwrap --hidethinking"),
             (&["llama-cli", "-hf", "a/b"], "llama-cli -hf a/b -st -p"),
             (&["llama-cli", "-m", "/my models/a.gguf"], "llama-cli -m '/my models/a.gguf' -st -p"),
             (&["llama-cli", "-m", "/it's/a;b.gguf"], "llama-cli -m '/it'\\''s/a;b.gguf' -st -p"),
@@ -1650,7 +1651,7 @@ mod tests {
         let line = |o: &ListOpts| tier_line(&data, &Store::default(), o).ok();
         assert_eq!(
             line(&o),
-            Some(format!("{QUIET} ollama run pulled:4b \"<prompt>\"  -")),
+            Some(format!("{QUIET} ollama run pulled:4b --nowordwrap --hidethinking \"<prompt>\"  -")),
             "not opencode's, at a price"
         );
         let pi = ListOpts { via: vec!["opencode".into()], cmd: false, ..o };
