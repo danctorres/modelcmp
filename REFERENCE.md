@@ -369,7 +369,7 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
 
 Model names match by substring, among the models you have first. The shortest match wins only
 when every other contains it (`opus-4.5` over its `-thinking` variant), else the name is
-ambiguous.
+ambiguous. An id as a harness takes it matches too, `pick`'s `llama-cli -hf` repo included.
 
 | Exit code | When |
 |---|---|

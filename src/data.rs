@@ -1300,12 +1300,13 @@ impl Data {
         }
         // By key, or by a provider's id for it, bare or as `list --id` prints it:
         // "granite-4.0-h-micro" or "openrouter/ibm-granite/granite-4.0-h-micro" is "Granite 4.0 Micro".
-        // Or as pi and omp name the provider, which is the id `pick` prints for them.
+        // Or as pi and omp name the provider, which is the id `pick` prints for them, or whole
+        // as llama-cli's `-hf` takes it: "unsloth/Qwen3.8-GGUF:Q8_0".
         let pi = norm(&canonical("pi", query));
         let by_id = |m: &&Model| {
             m.offers.iter().any(|o| {
                 let full = norm(&format!("{}/{}", o.provider, o.id));
-                norm(&slug(&o.id)) == q || full == q || full == pi
+                norm(&slug(&o.id)) == q || norm(&o.id) == q || full == q || full == pi
             })
         };
         // Or by the name shown, which says more than the key when it is Epoch's: "Kimi K2 (Sep 2025)".
@@ -4966,6 +4967,7 @@ mod tests {
             "granite40micro",
             "as list --id prints"
         );
+        assert_eq!(d.find("ibm-granite/granite-4.0-h-micro").unwrap().key, "granite40micro", "as llama-cli -hf takes");
         assert!(d.find("nope").unwrap_err().is_empty());
         let d5 = Data { models: vec![mk("claudesonnet55"), mk("claudesonnet5")], ..Default::default() };
         assert_eq!(d5.find("sonnet-5").unwrap().key, "claudesonnet5");
