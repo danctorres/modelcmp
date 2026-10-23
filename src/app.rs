@@ -1440,6 +1440,8 @@ pub struct App {
     /// The search of the panel details were opened from and the match it was on, for esc to
     /// bring back.
     back_query: (String, isize),
+    /// What help was opened over, its scroll, search and match, for closing help to go back to.
+    help_back: Option<(View, u16, String, isize)>,
     /// Which match of a panel's search `n` `N` are on, and whether the renderer has yet to
     /// scroll to it, as it alone knows which lines match. Recommend moves its own cursor.
     pub hit: (isize, bool),
@@ -1537,6 +1539,7 @@ impl App {
             issues_at: None,
             overlay_query: String::new(),
             back_query: (String::new(), 0),
+            help_back: None,
             hit: (0, false),
             search_from: SearchFrom::default(),
             page: 20,
@@ -2078,6 +2081,10 @@ impl App {
             let effect = self.table_key(key, 1);
             if let Some(held) = held {
                 (self.visual, self.picked) = held;
+            }
+            // Help's tab goes back to the panel it was opened from, as `?` does.
+            if let (View::Help, Some(back)) = (&self.view, &mut self.help_back) {
+                back.0 = view;
             }
             return effect;
         }
@@ -3509,6 +3516,12 @@ impl App {
         keys.iter().find(|&(_, &k)| k == c).map(|(&d, _)| d).or((!keys.contains_key(&c)).then_some(c))
     }
 
+    /// Close help for what it was opened over, at its scroll and search.
+    fn close_help(&mut self) {
+        let (view, scroll, query, hit) = self.help_back.take().unwrap_or((View::Table, 0, String::new(), 0));
+        (self.view, self.scroll, self.overlay_query, self.hit.0) = (view, scroll, query, hit);
+    }
+
     /// Enter on the row of `?` under the cursor: a key waits for its new one, `↺` puts every key
     /// back, and one that keeps its key says so.
     fn help_enter(&mut self) -> Option<Effect> {
@@ -4293,6 +4306,8 @@ impl App {
                 } else if let View::Detail(Back::Recommend(scroll)) = self.view {
                     (self.view, self.scroll) = (View::Recommend, scroll);
                     (self.overlay_query, self.hit.0) = std::mem::take(&mut self.back_query);
+                } else if self.view == View::Help {
+                    self.close_help();
                 } else if !table {
                     self.view = View::Table;
                 } else if self.selecting() {
@@ -4318,9 +4333,11 @@ impl App {
                 self.overlay_query.clear();
                 self.scroll = 0;
             }
+            KeyCode::Char('?') if self.view == View::Help => self.close_help(),
             KeyCode::Char('?') => {
-                self.view = if self.view == View::Help { View::Table } else { View::Help };
-                self.overlay_query.clear();
+                let view = std::mem::replace(&mut self.view, View::Help);
+                let query = std::mem::take(&mut self.overlay_query);
+                self.help_back = Some((view, self.scroll, query, self.hit.0));
                 self.scroll = 0;
             }
             KeyCode::Char('R') => {
@@ -5272,6 +5289,27 @@ mod tests {
             };
         }
         App::new(Data { fetched: 0, models, ..Default::default() }, Store::default())
+    }
+
+    #[test]
+    fn closing_help_goes_back_to_the_panel_it_was_opened_over() {
+        let mut a = app();
+        press(&mut a, "R");
+        a.scroll = 3;
+        press(&mut a, "?");
+        assert_eq!((&a.view, a.scroll), (&View::Help, 0));
+        press(&mut a, "?");
+        assert_eq!((&a.view, a.scroll), (&View::Recommend, 3), "? closes it for recommend");
+        press(&mut a, "?");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Recommend, "and so does esc");
+        a.mouse(Mouse::Tab(HELP_TAB));
+        a.mouse(Mouse::Close);
+        assert_eq!(a.view, View::Recommend, "and from help's tab, a click outside");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "?");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Table, "from the table, back to it");
     }
 
     #[test]
@@ -7119,7 +7157,7 @@ mod tests {
         assert!(!shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
         assert_eq!(a.selected(), at.min(a.rows.len() - 1));
         // In details the model stays on screen until you are back on the table, however.
-        for leave in [&[KeyCode::Esc][..], &[KeyCode::Char('?'), KeyCode::Char('?')]] {
+        for leave in [&[KeyCode::Esc][..], &[KeyCode::Char('?'), KeyCode::Char('?'), KeyCode::Esc]] {
             a.store.toggle_marked("llama4");
             a.rebuild();
             a.select(at);
