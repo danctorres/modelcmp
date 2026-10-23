@@ -1371,13 +1371,17 @@ fn cache_path(src: Source) -> PathBuf {
 
 pub fn load_cache() -> Option<Data> {
     load_repos();
-    let bytes = std::fs::read(cache_path(source())).ok()?;
-    // One written in another format reads wrong here (a missing price as free), so it is no fallback.
-    let mut d = serde_json::from_slice::<Data>(&bytes).ok().filter(|d| d.format == FORMAT)?;
-    // The other source's, unless fetched more than a day apart: its numbers would be older
-    // than the table says.
-    let other = std::fs::read(cache_path(source().other())).ok();
-    let other = other.and_then(|b| serde_json::from_slice::<LentData>(&b).ok());
+    // The other source's, read beside this one's: each is milliseconds of parsing.
+    let other_path = cache_path(source().other());
+    let (d, other) = std::thread::scope(|s| {
+        let other = s.spawn(|| serde_json::from_slice::<LentData>(&std::fs::read(other_path).ok()?).ok());
+        let bytes = std::fs::read(cache_path(source())).ok();
+        // One written in another format reads wrong here (a missing price as free), so it is no fallback.
+        let d = bytes.and_then(|b| serde_json::from_slice::<Data>(&b).ok()).filter(|d| d.format == FORMAT);
+        (d, other.join().ok().flatten())
+    });
+    let mut d = d?;
+    // Unless fetched more than a day apart: its numbers would be older than the table says.
     let other = other.filter(|o| o.format == FORMAT && o.fetched.abs_diff(d.fetched) <= MAX_AGE.as_secs());
     d.borrow(source(), other.map(|o| o.models));
     // Value is derived here from cached fields, so a change to the formula applies without a re-download.
