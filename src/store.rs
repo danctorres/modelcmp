@@ -488,6 +488,10 @@ impl Store {
 
     /// The slots the model is the favorite for, in `all_slots` order, as its ★s are drawn.
     pub fn favorite_for(&self, key: &str) -> Vec<String> {
+        // Most models are no favorite: no slot names to make for them.
+        if !self.favorite.values().any(|k| k == key) {
+            return vec![];
+        }
         self.all_slots().filter(|s| self.favorite(s) == Some(key)).collect()
     }
 
