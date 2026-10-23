@@ -457,7 +457,7 @@ pub fn base_col_about(col: usize) -> String {
         VIA => "harnesses listing it (↓ can be downloaded, grey if too big for your memory)".into(),
         NOTES => "your own note on the model".into(),
         PRICE => format!(
-            "{}, {:.0}% of the input cached, ~ list price when yours has none",
+            "{}, {:.0}% of the input cached, ~ = list price where your providers list none",
             COLS[PRICE - TEXT].about,
             crate::data::cached() * 100.0
         ),
@@ -487,34 +487,34 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "General",
         &[
-            ("?", "these keys: `enter` on one gives it another, `/` finds one"),
-            ("↺", "every key back to its default, with `enter`"),
-            ("esc", "back: overlay, highlight, filter, `S`, `F`, `E`, task"),
+            ("?", "this list of keys, `enter` on one sets a new key for it, `/` finds one"),
+            ("↺", "`enter` here puts every key back to its default"),
+            ("esc", "back: close the panel, then drop the highlight, filter, `S` `F` `E`, task"),
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at start after 24h)"),
-            ("!", "what the last refresh warned of and a missing key, as a click on the frame's ⚠"),
-            ("K", "Artificial Analysis API key, to add or replace it"),
+            ("!", "list the last refresh's warnings and a missing key, or click the ⚠"),
+            ("K", "add or replace the Artificial Analysis API key"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
-            ("H", "default harness, for `x`, `Y`, --cmd and --id"),
+            ("H", "choose the default harness, used by `x`, `Y`, --cmd and --id"),
         ],
     ),
     (
         "Move",
         &[
-            ("j", "down, as `↓`, and a count repeats, as in `3j`"),
+            ("j", "down, as `↓`, a count repeats it, `3j` goes down 3 rows"),
             ("k", "up, as `↑`"),
-            ("h", "column left, as `←`. In compare a model, in recommend a tier or the task"),
+            ("h", "column left, as `←`, previous model or tier in compare and recommend"),
             ("l", "column right, as `→`"),
             ("_", "first column, as `0`"),
             ("$", "last column"),
             ("w", "next group of columns"),
             ("b", "previous group of columns"),
-            ("g", "top as `gg`, row 3 as `3gg`"),
+            ("g", "`gg` goes to the top, `3gg` to row 3"),
             ("G", "bottom"),
             ("(", "half a page up, as `^u`"),
             (")", "half a page down, as `^d`"),
-            ("]", "next selected model, or ticked entry"),
-            ("[", "previous selected model, or ticked entry"),
+            ("]", "next selected model, or the next ticked entry in a list"),
+            ("[", "previous selected model, or the previous ticked entry in a list"),
             ("}", "next available model"),
             ("{", "previous available model"),
             ("v", "highlight a range, `space` `e` `C` act on all of it"),
@@ -524,31 +524,31 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Filter and sort",
         &[
-            ("s", "sort by the column, again reverses"),
-            ("/", "filter models, find in a panel or a list"),
-            ("n", "next match found in a panel, `↓` while typing"),
-            ("N", "previous match found in a panel, `↑` while typing"),
+            ("s", "sort by the column, press again to reverse"),
+            ("/", "filter the models, or search in a panel or a list"),
+            ("n", "next match in a panel, also `↓` while typing"),
+            ("N", "previous match in a panel, also `↑` while typing"),
             (">", "minimum for the column, e.g. `>` 60 `enter`"),
-            ("<", "maximum for the column, in recommend a tier's price cap"),
-            ("d", "dropdown on a ▾, a header's or a tier's model in recommend, `space` `enter` toggle"),
+            ("<", "maximum for the column, or a tier's price cap in recommend"),
+            ("d", "dropdown on a ▾ header or a recommend tier, `space` `enter` toggle"),
             ("|", "columns to show, `space` `enter` toggle"),
             ("a", "all models, including ones you have no access to"),
             ("m", "mine only"),
             ("tab", "next tab, `shift+tab` back"),
-            ("%", "Price with none of the input cached, or back to --cache"),
-            ("c", "clear filters, bounds, task, `S`, `F`, `E` and the dropdowns' entries, the selection stays"),
+            ("%", "switch Price between no input cached and the share it started with"),
+            ("c", "clear filters, bounds, dropdowns, task and `S` `F` `E`, selected models stay"),
         ],
     ),
     (
         "Selected ✓, favorite ★, excluded ✗",
         &[
             ("✓", "selected: your shortlist, kept until you deselect it"),
-            ("★", "favorite: your pick for a task's tier, always in its recommendation"),
+            ("★", "favorite: your choice for a task's tier, always in its recommendation"),
             ("✗", "excluded: you have it but cannot use it, and recommendations skip it"),
             ("space", "select the model, `C` compares the selected"),
-            ("f", "favorite the model for a task's tier, or a task you name"),
-            ("f: r a", "rename a task you named, write what it is about"),
-            ("R: D", "delete a task you named, asks first"),
+            ("f", "favorite the model for a task's tier, or for a task you add"),
+            ("f: r a", "in `f`, rename a task you added or write what it is about"),
+            ("R: D", "delete a task you added, asks first"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
             ("D", "unfavorite every model, asks first"),
@@ -561,7 +561,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Model under the cursor",
         &[
-            ("i", "note for the model, agents read it"),
+            ("i", "write a note on the model, agents read it"),
             ("y", "copy the model name"),
             ("Y", "copy the model id"),
             ("o", "open the model's page on a site"),
@@ -573,7 +573,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("enter", "details: every benchmark, price per provider"),
             ("C", "compare the selected models"),
-            ("R", "recommend: the model each tier picks for each task"),
+            ("R", "recommend: the model for each task at each price tier"),
             ("t", "theme"),
         ],
     ),
@@ -2397,7 +2397,7 @@ impl App {
                 // of source said stays when its download ends. The data keeps it for the frame.
                 let standing = self.failed && !self.refused;
                 match d.warning.clone() {
-                    Some(w) if standing => self.status = format!("{}; {w}", self.status),
+                    Some(w) if standing => self.status = format!("{}, {w}", self.status),
                     Some(w) => self.report(Err(w)),
                     None if self.status.is_empty() || (self.failed && self.refused) => {
                         self.report(Ok("data refreshed".into()));
@@ -2905,8 +2905,8 @@ impl App {
         self.store.toggle_favorite(task, key);
         self.back_on(on);
         self.report(Ok(match self.store.favorite(task) == Some(key) {
-            true => format!("★ {name} favorite for {task}"),
-            false => format!("{name} no longer the favorite for {task}"),
+            true => format!("★ {name} is the favorite for {task}"),
+            false => format!("{name} is no longer the favorite for {task}"),
         }));
         self.rebuild_in_place();
         Some(Effect::Save)
@@ -2930,14 +2930,14 @@ impl App {
     /// has a model to run.
     fn ask_via(&mut self, key: &str, slot: &str) {
         if self.store.favorite(slot) != Some(key) {
-            return self.refuse(format!("{slot} is not ticked: a harness is for its favorite"));
+            return self.refuse(format!("tick {slot} first, only a favorite has a harness to run on"));
         }
         let Some(m) = self.data.models.iter().find(|m| m.key == key) else { return };
         // With its harness: llama.cpp's command starts with the binary this machine has, which is not its name.
         let cmds: Vec<_> =
             crate::data::vias().filter_map(|h| Some((h, launch_cmd(m, h, &self.data.harness)?))).collect();
         if cmds.is_empty() {
-            return self.refuse(format!("no harness has {}; Via shows where you have access", m.name));
+            return self.refuse(format!("no harness has {}, Via shows where you have access", m.name));
         }
         let via = |h: Option<String>| Effect::Via(key.to_string(), slot.to_string(), h);
         let items: Vec<_> = std::iter::once(("any harness".to_string(), via(None)))
@@ -2972,7 +2972,7 @@ impl App {
                     self.input = Input::None;
                     self.task_to(at);
                     self.task_sel = 0;
-                    self.report(Err(format!("there is a task {name} already")));
+                    self.report(Err(format!("a task named {name} already exists")));
                     return None;
                 }
                 *e = Edit::new(What::About(name), String::new());
@@ -2980,7 +2980,7 @@ impl App {
             }
             What::About(task) => {
                 if e.text.trim().is_empty() {
-                    e.err = Some("describe it to add it".into());
+                    e.err = Some("write what the task is about to add it".into());
                     return None;
                 }
                 let task = task.clone();
@@ -2988,7 +2988,7 @@ impl App {
                 self.input = Input::None;
                 self.back_on(Some(task.clone()));
                 self.task_sel = 0;
-                self.report(Ok(format!("added {task}, d on a tier picks its model")));
+                self.report(Ok(format!("added {task}, press d on a tier to choose its model")));
                 Some(Effect::Save)
             }
             _ => None,
@@ -3159,7 +3159,7 @@ impl App {
                     return None;
                 }
                 self.report(Ok(if now.is_empty() {
-                    format!("{task} has no about now")
+                    format!("{task} has no description now")
                 } else {
                     format!("{task}: {now}")
                 }));
@@ -3223,10 +3223,11 @@ impl App {
     /// for a negative `n`, round again past either end, and 0 to the first.
     fn next_hit(&mut self, n: isize) {
         if !self.overlay_search() {
-            return self.refuse("n N go to the next / previous match in a panel, the table's / leaves only them");
+            return self
+                .refuse("n and N move between matches in a panel, the table's / already shows only the matches");
         }
         if self.overlay_query.is_empty() {
-            return self.refuse("n N go to the next / previous match: / searches first");
+            return self.refuse("no search yet, / searches first");
         }
         // `?`'s are its rows, as drawn, which are what is underlined.
         if self.view == View::Help {
@@ -3326,7 +3327,7 @@ impl App {
     fn open_menu(&mut self) {
         // A task's line is drawn from its score, so its columns show that.
         if self.task.is_some() && TASK_COLS.contains(&self.col) {
-            return self.refuse("a task shows its own scores: c leaves the task");
+            return self.refuse("a task is in use, so this column shows its score, c clears the task");
         }
         let (items, picked) = self.menu_items(self.col);
         self.input = Input::Menu { col: self.col, items, list: List::at(picked.map_or(0, |i| i + 1)) };
@@ -3477,9 +3478,9 @@ impl App {
         } else if keys.chars().count() == 1 {
             self.refuse(format!("{keys} is a mark the table shows, not a key"));
         } else if keys.split(' ').any(|w| bindable(w.trim_end_matches(':')).is_some()) {
-            self.refuse(format!("{keys} change with the rows of those keys"));
+            self.refuse(format!("to change {keys}, change each key on its own row"));
         } else {
-            self.refuse(format!("{keys} keeps its keys: only a key of one letter or sign changes"));
+            self.refuse(format!("{keys} cannot be changed, only a key of one letter or sign can"));
         }
         None
     }
@@ -3942,7 +3943,7 @@ impl App {
         let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && !one && (self.caps || !self.on_new_task()));
         match tier.filter(|&c| view::capped(TIERS[c].0)) {
             Some(c) => self.edit_cap(c),
-            None => self.refuse("< sets the price cap of low or mid, on one of their boxes"),
+            None => self.refuse("< sets the price cap of the low or mid tier, put the cursor on one of them"),
         }
     }
 
@@ -3954,7 +3955,10 @@ impl App {
         let tier = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps);
         let own = self.custom_at();
         let (Some(c), Some(task)) = (tier, self.cur_task().map(|t| t.name).or(own)) else {
-            return self.refuse(format!("{} opens the dropdown of a tier's model, on its box", self.key_of('d')));
+            return self.refuse(format!(
+                "{} on a tier lists the models to choose from, put the cursor on a tier first",
+                self.key_of('d')
+            ));
         };
         // A task of one pick shows the favorite of any tier, else high's.
         let c = match self.current().map(|m| m.key.as_str()) {
@@ -4089,7 +4093,7 @@ impl App {
                 return None;
             }
             (KeyCode::Char(' ' | 'e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y'), None) if caps => {
-                self.refuse("the cursor is on the tiers' prices: j goes to a task");
+                self.refuse("the cursor is on the tier prices, not a model, j moves down to a task");
                 return None;
             }
             (KeyCode::Enter | KeyCode::Char(' '), Some(i)) => return self.pick_among(i),
@@ -4110,7 +4114,7 @@ impl App {
                 return None;
             }
             (KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y'), Some(_)) => {
-                self.refuse("the cursor is on the models to rank: j goes to a task");
+                self.refuse("the cursor is on the tabs, not a model, j moves down to a task");
                 return None;
             }
             _ => {}
@@ -4158,7 +4162,9 @@ impl App {
             KeyCode::Char(c @ ('>' | '<')) if table && (numeric(self.col).is_some() || self.col == VIA) => {
                 self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
             }
-            KeyCode::Char('>' | '<') if table => self.refuse("> and < bound a column of numbers or Via's size"),
+            KeyCode::Char('>' | '<') if table => {
+                self.refuse("> and < only bound a column of numbers, or Via by download size")
+            }
             KeyCode::Char('d') if table && has_menu(self.col) => self.open_menu(),
             KeyCode::Char('d') if table => self.refuse("d opens a dropdown on the columns marked ▾"),
             // The next tab with something to show, past the last back to the first.
@@ -4215,7 +4221,7 @@ impl App {
             KeyCode::Char('q') => self.ask_quit(),
             KeyCode::Char('U') if self.data.update().is_some() => self.input = Input::Upgrade,
             KeyCode::Char('U') if self.data.latest.is_empty() => {
-                self.refuse("the newest version is not known: r asks again");
+                self.refuse("could not check for a newer version, r refreshes and checks again");
             }
             KeyCode::Char('U') => {
                 self.status = concat!("no newer version: this is modelcmp v", env!("CARGO_PKG_VERSION")).into();
@@ -4273,7 +4279,7 @@ impl App {
             KeyCode::Char('D') if self.view == View::Recommend => {
                 match self.custom_at().filter(|_| self.among.is_none() && !self.caps && self.task_sel == 0) {
                     Some(task) => self.input = Input::DeleteTask(task.to_string()),
-                    None => self.refuse("D on the name of a task of your own deletes it"),
+                    None => self.refuse("D deletes a task you added, put the cursor on its name"),
                 }
             }
             // Enter on a task's name is below; on a tier with no model it has none to show either.
@@ -4281,9 +4287,9 @@ impl App {
                 if self.view == View::Recommend && !row && (code != KeyCode::Enter || self.task_sel > 0) =>
             {
                 self.refuse(match (self.among, self.task_sel) {
-                    (Some(_), _) => "no model under the cursor: j picks a task",
-                    _ if self.on_new_task() => "no model under the cursor: enter adds a task",
-                    (_, 0) => "no model under the cursor: l picks a tier",
+                    (Some(_), _) => "no model under the cursor, j moves down to a task",
+                    _ if self.on_new_task() => "no model under the cursor, enter adds a task",
+                    (_, 0) => "no model under the cursor, l moves to a tier",
                     _ => "this tier has no model",
                 });
             }
@@ -4359,7 +4365,7 @@ impl App {
                     && items.iter().any(|i| got(&i.1).is_some()))
                 .then(|| (m.key.clone(), m.hf_repo().unwrap_or("").to_string()));
                 if items.is_empty() {
-                    let none = format!("no harness has {}; Via shows where you have access", m.name);
+                    let none = format!("no harness has {}, Via shows where you have access", m.name);
                     // A download was all there was to offer.
                     let why = if gone && !get_items(m, "", &self.tools).is_empty() { no_copy(&m.name) } else { none };
                     self.refuse(why);
@@ -4434,11 +4440,13 @@ impl App {
                     let row = key.and_then(|k| self.rows.iter().position(|&i| self.data.models[i].key == k));
                     let said = self.custom_at().map(|task| match (&first, row) {
                         (Some((_, m)), Some(_)) => Ok(format!("{m}, your model for {task}")),
-                        (Some((_, m)), None) => Err(format!("{m}, your model for {task}, is filtered out: c clears")),
-                        _ if crate::store::task_slots(task).all(|s| self.store.favorite(&s).is_none()) => {
-                            Err(format!("{task} has no model yet: d on a tier gives it one"))
+                        (Some((_, m)), None) => {
+                            Err(format!("{m}, your model for {task}, is hidden by a filter, c clears the filters"))
                         }
-                        (None, _) => Err(format!("the model of {task} is not one you can use")),
+                        _ if crate::store::task_slots(task).all(|s| self.store.favorite(&s).is_none()) => {
+                            Err(format!("{task} has no model yet, press d on a tier to choose one"))
+                        }
+                        (None, _) => Err(format!("{task} has no model you can use")),
                     });
                     self.view = View::Table;
                     if let Some(n) = row {
@@ -4468,7 +4476,7 @@ impl App {
                         Some(b) => {
                             let c = self.key_of('c');
                             self.refuse(format!(
-                                "no model has data for {} on {b}, picked in its column: {c} takes it back",
+                                "no model has data for {} on {b}, the benchmark picked in its column, {c} clears it",
                                 t.name
                             ))
                         }
@@ -4509,9 +4517,9 @@ impl App {
                 crate::data::set_cached(if off { 0.0 } else { self.cache_on });
                 self.reprice();
                 self.status = if off {
-                    "no input cached, as a one-off prompt".into()
+                    "Price now has no input cached, as for a one-off prompt".into()
                 } else {
-                    format!("{:.0}% of the input cached", self.cache_on * 100.0)
+                    format!("Price now has {:.0}% of the input cached", self.cache_on * 100.0)
                 };
             }
             _ => {}
@@ -4608,7 +4616,7 @@ impl App {
                     {
                         self.refreshing = false;
                         let effect = self.refresh();
-                        self.report(Err(format!("{}, the one before is back", Failure::BadKey)));
+                        self.report(Err(format!("{}, so the previous key is back", Failure::BadKey)));
                         return effect;
                     }
                     // `K` asked: what was there stays.
@@ -4620,7 +4628,7 @@ impl App {
                     let effect = self.switch(Source::Epoch);
                     if wrong {
                         self.report(Err(match crate::data::save_aa_key("") {
-                            Ok(()) => format!("{}, now removed{FELL_BACK}", Failure::BadKey),
+                            Ok(()) => format!("{}, so it was removed{FELL_BACK}", Failure::BadKey),
                             Err(e) => format!("could not remove the key: {e}{FELL_BACK}"),
                         }));
                     }
@@ -4653,7 +4661,7 @@ impl App {
                     let cap = match text.parse::<f64>() {
                         _ if text.is_empty() => Ok(None),
                         Ok(c) => Ok(Some(c)),
-                        Err(_) => Err(format!("{text} is no price")),
+                        Err(_) => Err(format!("{text} is not a price")),
                     };
                     match cap.and_then(|c| self.store.set_tier_cap(TIERS[*tier].0, c)) {
                         Ok(()) => {
@@ -4708,7 +4716,7 @@ impl App {
                     // `v` starts a range on Dev and Via, as in the table, and again cancels it.
                     KeyCode::Char('v') if list.idle() => {
                         if !matches!(*col, 1 | VIA) {
-                            self.refuse("v takes a range in the Dev and Via dropdowns");
+                            self.refuse("v highlights a range only in the Dev and Via dropdowns");
                             return None;
                         }
                         list.visual = match list.visual {
@@ -4868,9 +4876,9 @@ impl App {
                         let Some((_, Effect::Fav(_, task))) = items.get(at?) else { return None };
                         let task = task.clone();
                         if crate::fit::task(&task).is_some() {
-                            self.refuse(format!("{task} is built in: r and a are for a task of your own"));
+                            self.refuse(format!("{task} is built in, r and a only work on a task you added"));
                         } else if !self.store.custom_tasks().contains(&task.as_str()) {
-                            self.refuse(format!("{task} has no model: tick a box of it first"));
+                            self.refuse(format!("{task} has no model now, tick it again first"));
                         } else {
                             let edit = if c == 'r' {
                                 Edit::new(What::Rename(task.clone()), task)
@@ -5335,7 +5343,7 @@ mod tests {
         crate::data::set_cached(0.5);
         let mut a = app();
         press(&mut a, "%%");
-        assert_eq!((crate::data::cached(), a.status.as_str()), (0.5, "50% of the input cached"));
+        assert_eq!((crate::data::cached(), a.status.as_str()), (0.5, "Price now has 50% of the input cached"));
         press(&mut a, "%");
         assert_eq!(a.cache_hint, "% 50% cached", "the hint names it");
     }
@@ -5509,7 +5517,7 @@ mod tests {
         assert_eq!(a.input, Input::Bind { key: 's', wrong: true }, "a digit is a count, and not taken");
         assert_eq!(press(&mut a, "o"), Some(Effect::Save));
         assert_eq!(a.store.keys, BTreeMap::from([('o', 's'), ('s', 'o')]), "open's page takes s, as in a game");
-        assert_eq!(a.status, "o: sort by the column, again reverses, and s: open the model's page on a site");
+        assert_eq!(a.status, "o: sort by the column, press again to reverse, and s: open the model's page on a site");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         let was = a.descending;
@@ -5520,7 +5528,7 @@ mod tests {
         press(&mut a, "?gg");
         press(&mut a, "jj");
         code(&mut a, KeyCode::Enter);
-        assert!(a.status.starts_with("esc keeps its keys"), "{}", a.status);
+        assert!(a.status.starts_with("esc cannot be changed"), "{}", a.status);
         press(&mut a, "/✓");
         code(&mut a, KeyCode::Enter);
         let mark = a.help_sel;
@@ -5532,7 +5540,7 @@ mod tests {
         press(&mut a, "/f: r");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.status, "f: r a change with the rows of those keys");
+        assert_eq!(a.status, "to change f: r a, change each key on its own row");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "ggj");
         assert_eq!((code(&mut a, KeyCode::Enter), &a.input), (None, &Input::Reset), "↺ asks first");
@@ -6573,14 +6581,14 @@ mod tests {
         assert_eq!(a.input, Input::None, "a click outside closes it with a range too");
         press(&mut a, "lld");
         press(&mut a, "v");
-        assert_eq!(a.status, "v takes a range in the Dev and Via dropdowns");
+        assert_eq!(a.status, "v highlights a range only in the Dev and Via dropdowns");
     }
 
     #[test]
     fn n_goes_from_match_to_match_in_recommend() {
         let mut a = app();
         press(&mut a, "n");
-        assert!(a.status.contains("the table's / leaves only them"), "{}", a.status);
+        assert!(a.status.contains("the table's / already shows only the matches"), "{}", a.status);
         press(&mut a, "R");
         press(&mut a, "n");
         assert!(a.status.contains("/ searches first"), "{}", a.status);
@@ -7002,7 +7010,7 @@ mod tests {
         );
         assert_eq!(a.among, Some(ALL), "and the cursor stays off it");
         press(&mut a, "f");
-        assert!(a.status.starts_with("the cursor is on the models to rank"), "{}", a.status);
+        assert!(a.status.starts_with("the cursor is on the tabs"), "{}", a.status);
         a.mouse(Mouse::Model(Stop::Among(MINE)));
         assert_eq!((&a.view, a.among_on()), (&View::Recommend, MINE), "a click picks too");
         press(&mut a, "j");
@@ -7151,7 +7159,7 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         press(&mut a, "RGk");
         code(&mut a, KeyCode::Enter);
-        assert!(a.failed && a.status.contains("filtered out"), "{}", a.status);
+        assert!(a.failed && a.status.contains("hidden by a filter"), "{}", a.status);
         // Compare with one selected shows no model, so a model's keys act on none.
         let mut a = app();
         press(&mut a, "j ggC");
@@ -7209,7 +7217,7 @@ mod tests {
         a.store.set_about("tool-dispatch", "");
         assert_eq!((a.store.custom_tasks().len(), under(&a).as_str()), (0, "tool-dispatch"));
         press(&mut a, "r");
-        assert_eq!((edit(&a), a.status.as_str()), (None, "tool-dispatch has no model: tick a box of it first"));
+        assert_eq!((edit(&a), a.status.as_str()), (None, "tool-dispatch has no model now, tick it again first"));
         press(&mut a, " ");
         assert!(ticked(&a) && under(&a) == "tool-dispatch");
         // r writes another name on it, starting from its own; one a task has is said under the
@@ -7312,7 +7320,7 @@ mod tests {
         };
         press(&mut a, "fjv");
         assert_eq!(kind(&a), Some((Kind::Fav, 1)), "not ticked: no model to run, f's grid stays");
-        assert!(a.status.starts_with("coding:high is not ticked"), "{}", a.status);
+        assert!(a.status.starts_with("tick coding:high first"), "{}", a.status);
         press(&mut a, " v");
         assert!(matches!(&a.input, Input::Choose { items, .. } if items.len() == 3), "any, opencode and codex");
         assert_eq!(kind(&a), Some((Kind::Via, 0)), "on any: it has none yet");
@@ -7575,7 +7583,7 @@ mod tests {
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, best last");
         assert!(a.current().is_none(), "j k land on the name");
         assert!(press(&mut a, "o").is_none() && a.failed, "where the row keys have no model");
-        assert_eq!(a.status, "no model under the cursor: l picks a tier");
+        assert_eq!(a.status, "no model under the cursor, l moves to a tier");
         press(&mut a, "l");
         assert!(a.current().is_none(), "free has no model here");
         press(&mut a, "l");
@@ -8151,7 +8159,7 @@ mod tests {
         a.refreshed(Ok(Data::default()), tools());
         assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");
         a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }), tools());
-        assert_eq!(a.status, "user.json is not valid; pi did not list its models", "nor by a warning");
+        assert_eq!(a.status, "user.json is not valid, pi did not list its models", "nor by a warning");
         // Why a key did nothing is red too, and no error: the refresh's outcome replaces it.
         press(&mut a, "u");
         assert!(a.failed && a.status.starts_with("no selected models"));
@@ -8411,7 +8419,7 @@ mod tests {
     fn upgrade_only_to_a_newer_release() {
         let mut a = app();
         assert_eq!((press(&mut a, "U"), &a.input), (None, &Input::None), "nothing newer: nothing to ask");
-        assert!(a.status.contains("not known"), "{}", a.status);
+        assert!(a.status.contains("could not check"), "{}", a.status);
         a.data.latest = env!("CARGO_PKG_VERSION").into();
         press(&mut a, "U");
         assert!(a.status.contains("no newer version"), "{}", a.status);
