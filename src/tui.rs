@@ -19,7 +19,7 @@ use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, detail_rows, hits, level,
     level_label, short, truncate, verdict, via_names, via_text,
 };
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode,
@@ -29,7 +29,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Widget};
+use ratatui::widgets::{Block, BorderType, Widget};
 use ratatui::{DefaultTerminal, Frame};
 use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
@@ -1539,6 +1539,27 @@ const fn fg(c: Color) -> Style {
     Style::new().fg(c)
 }
 
+/// Each cell of `r` in `buf`, a row at a time: several times quicker than cell by cell, as
+/// `Buffer::set_style` and `Clear` go.
+fn cells(buf: &mut Buffer, r: Rect, mut f: impl FnMut(&mut Cell)) {
+    let r = r.intersection(buf.area);
+    if r.is_empty() {
+        return;
+    }
+    for y in r.top()..r.bottom() {
+        let i = buf.index_of(r.x, y);
+        buf.content[i..i + usize::from(r.width)].iter_mut().for_each(&mut f);
+    }
+}
+
+/// `Buffer::set_style`, quicker (`cells`).
+fn restyle(buf: &mut Buffer, r: Rect, style: impl Into<Style>) {
+    let style = style.into();
+    cells(buf, r, |c| {
+        c.set_style(style);
+    });
+}
+
 /// A developer's or harness's colour, as a placeholder `recolor` resolves to one of the theme's
 /// accents: a Via name's place in `data::vias`, so no two share one, else the name's byte sum mod
 /// 210, which keeps it mod 7, 10 and 14 (`DEVS`, `Palette::accents`). omp, a fork of pi, has
@@ -2201,7 +2222,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         let tint = |c: Color| if solid { base } else { fg(c) };
         let text = if dim { tint(MUTED) } else { base };
         let soft = |c: Color| if dim { text } else { tint(c) };
-        buf.set_style(Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
+        restyle(buf, Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
         if on && area.x > 0 {
             cursor_ends(buf, area.x - 1, area.right(), y);
         }
@@ -2318,14 +2339,14 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             for (field, ranges) in [Some((name_x, nw)), Some((dev_x, dw)), via, note].into_iter().zip(hits) {
                 let Some((x, w)) = field else { continue };
                 for r in ranges.into_iter().map(|r| r.start.min(w)..r.end.min(w)) {
-                    buf.set_style(Rect::new(x + r.start as u16, y, r.len() as u16, 1), style);
+                    restyle(buf, Rect::new(x + r.start as u16, y, r.len() as u16, 1), style);
                 }
             }
         }
     }
     if let Some((x, w)) = cur {
         let drawn = app.rows.len().saturating_sub(top).min(height) as u16;
-        buf.set_style(Rect::new(x, area.y + head, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
+        restyle(buf, Rect::new(x, area.y + head, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
     }
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
     let bench = if let Input::Menu { col, .. } = &app.input { app.col_bench(*col) } else { None };
@@ -2409,8 +2430,8 @@ fn dropdown(
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     let inner = block.inner(rect);
     // What is behind the box fades, as behind every box.
-    buf.set_style(area, Style::new().add_modifier(Modifier::DIM));
-    Clear.render(rect, buf);
+    restyle(buf, area, Style::new().add_modifier(Modifier::DIM));
+    cells(buf, rect, Cell::reset);
     block.render(rect, buf);
     for (i, (label, n)) in items.iter().enumerate().skip(top).take(shown) {
         let y = inner.y + (i - top) as u16;
@@ -2449,7 +2470,7 @@ fn dropdown(
         // "all" is never a match.
         let hits = if i == 0 { vec![] } else { found(label, query) };
         for r in hits.into_iter().map(|r| r.start.min(label_w)..r.end.min(label_w)) {
-            buf.set_style(Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(fg(color)));
+            restyle(buf, Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(fg(color)));
         }
         buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, fg(MUTED));
     }
@@ -2459,7 +2480,7 @@ fn dropdown(
 /// The cursor on row `y`: its fill from the column `left` to `right`, and its two bars at those,
 /// the borders of the frame or the box, which the bars take the place of.
 fn cursor_ends(buf: &mut Buffer, left: u16, right: u16, y: u16) {
-    buf.set_style(Rect::new(left, y, right - left + 1, 1), FILL);
+    restyle(buf, Rect::new(left, y, right - left + 1, 1), FILL);
     for (x, bar) in [(left, "▌"), (right, "▐")] {
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_symbol(bar).set_style(EDGE);
@@ -2732,7 +2753,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         // Underlined as a link: a click on it opens the page (`hit`).
         if let Some(link) = key_link(app) {
             let w = (link.end.min(hx)).saturating_sub(link.start);
-            buf.set_style(Rect::new(link.start, area.y, w, 1), self::link());
+            restyle(buf, Rect::new(link.start, area.y, w, 1), self::link());
         }
         if fits {
             // Its keys in their colour, as in the hints of the table's bar.
@@ -3263,8 +3284,8 @@ fn overlay(
     // Inside the border, a cell of padding either side.
     let text = rect.inner(ratatui::layout::Margin::new(2, 1));
     // What is behind the box fades, so the box is what shows.
-    buf.set_style(area, Style::new().add_modifier(Modifier::DIM));
-    Clear.render(rect, buf);
+    restyle(buf, area, Style::new().add_modifier(Modifier::DIM));
+    cells(buf, rect, Cell::reset);
     block.render(rect, buf);
     let (above, below) = (*scroll > 0, *scroll as usize + shown < lines.len());
     for (line, y) in lines.into_iter().skip(top).take(shown).chain(pin).zip(text.y..text.bottom()) {
