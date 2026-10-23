@@ -25,15 +25,15 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | Value | Coding score per dollar of Price, ranked 0-100 |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
-| Via | the harnesses that have the model, by a [short name](#what-you-have), and `↓` with its download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, in `x`, the details and compare too |
+| Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare |
 | Notes | your note on it |
 
-One table shows the columns of both sources. The ones of the source not in use show when both
-are cached, which takes an Artificial Analysis key, and were fetched within a day of each other.
-In the TUI AAII, Tok/s and TTFT show without that data too, empty, and their descriptions say
-they need a key, or a refresh with one. A sort or a bound on an empty one is refused.
-ECI and AAII keep their places, and the table starts sorted by the one of the source in use.
-The task scores, Value and the recommendations stay with that source. In the TUI,
+One table shows the columns of both sources. The columns of the source not in use show when
+both sources are cached, which takes an Artificial Analysis key, and were fetched within a day of
+each other. In the TUI, AAII, Tok/s and TTFT show even without that data, empty, and their
+descriptions say they need a key, or a refresh with one. A sort or a bound on an empty column is
+refused. ECI and AAII keep their places, and the table starts sorted by the index of the source in
+use. The task scores, Value and the recommendations always come from that source. In the TUI,
 `|` picks the columns to show.
 
 The source in use is Artificial Analysis when its key is there and works, else Epoch AI.
@@ -43,11 +43,12 @@ The source in use is Artificial Analysis when its key is there and works, else E
   of that screen names keys to try on the next one: `o`, `x`, `R` and `?`.
 - The key is `ARTIFICIAL_ANALYSIS_API_KEY`, else the one saved in `aa_key` next to `user.json`,
   readable by you alone. `K` in the TUI asks for one later, to add it or replace the saved
-  one, as `modelcmp --source aa` does with none saved.
-- A saved key that Artificial Analysis rejects is asked for again, and `esc` there leaves
-  Epoch AI and removes the saved key. One rejected from the environment leaves Epoch AI at
-  once, and a message says so. The command line does the same, unless `--source aa` asked
-  for Artificial Analysis, which is then an error when no cached data is left to show.
+  one. `modelcmp --source aa` asks for one when none is saved.
+- When Artificial Analysis rejects a saved key, modelcmp asks for it again, and `esc` there
+  removes the saved key and stays on Epoch AI. A rejected key from the environment falls back
+  to Epoch AI at once, with a message saying so. The command line does the same, unless
+  `--source aa` asked for Artificial Analysis. Then it is an error when no cached data is left
+  to show.
 
 ### Price
 
@@ -55,7 +56,7 @@ The source in use is Artificial Analysis when its key is there and works, else E
   agent session. `%` in the TUI or `--cache` changes the share.
 - A provider without a cache price pays full input.
 - A provider that charges more past a context size is priced as at 100k tokens.
-- A price after a `~` is the list price of other providers, yours listing none.
+- A price after a `~` is other providers' list price, as yours lists none.
 
 ### Task columns
 
@@ -85,8 +86,9 @@ Its scores and speed follow these rules:
 With either source a row has no scores when its offers are another release than the one
 scored, as a `-latest` id is.
 
-`modelcmp recommend --json` gives the same lists as `benchmarks`. With Artificial Analysis it
-is the one field the score is. A benchmark picked in the task's column in the TUI takes its place.
+`modelcmp recommend --json` names each task's benchmark in `benchmarks`: one of the above, or
+with Artificial Analysis the field the score is, as `hle`. A benchmark picked in the task's column
+in the TUI takes its place.
 
 [Scores](#scores) says how each of these numbers is obtained.
 
@@ -99,9 +101,9 @@ What a refresh downloads:
 - Both sources, Artificial Analysis only with its key.
 - Each source's sitemap, with or without a key, to link the models that have a page there (`o`).
 - OpenRouter's list of models, for the Hugging Face repo it names for each.
-- For an open model OpenRouter names no repo for, the repo Hugging Face has under an id a
-  provider gives it. Hugging Face is asked after the early data, 400 ids a refresh, and an id
-  with no repo again a month later.
+- For an open model OpenRouter names no repo for, the Hugging Face repo under an id a provider
+  gives it. Hugging Face is asked once the early data is in, for up to 400 ids a refresh, and an
+  id with no repo is asked about again a month later.
 
 Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
 
@@ -133,9 +135,9 @@ Arena (its Agent, Text and WebDev leaderboards, no key needed):
   One that a refresh could not get is empty until the next, and a rating is empty once its
   leaderboard is more than two months old.
 - It shows with either source, and counts toward no task score and no recommendation.
-- A refresh that cannot reach it keeps the scores of the last one, and with none to keep it
-  leaves the column empty, and the first start or command an hour later tries again. The
-  column is empty once Arena's newest leaderboard is more than two months old.
+- A refresh that cannot reach it keeps the last refresh's scores. With none to keep, the
+  column is empty, and the first start or command an hour later tries again. The column is
+  also empty once Arena's newest leaderboard is more than two months old.
 - The TUI shows the table before Arena has answered, with the last refresh's scores until then.
 
 With either source:
@@ -195,8 +197,9 @@ modelcmp pick --not opus-5.5                   # without a model, as one your no
 weigh a note when choosing.
 
 - `open` without `--on` opens the first site to have a page for the model.
-- `get` downloads the copy from Hugging Face and runs it with ollama or `llama-cli`, the one you have without `--via`. With
-  neither it installs one first, if you agree. It says the size of the download first.
+- `get` downloads the model's copy from Hugging Face and runs it with ollama or `llama-cli`:
+  the one `--via` names, else the one you have. With neither, it installs one first if you
+  agree. It says the size of the download before it starts.
 - `models-dir` is read at the next `--refresh`.
 
 ### Common flags
@@ -218,13 +221,14 @@ Any other name given to `fav` is a task of your own (`debugging`, and `"Tool Dis
 stored as `tool-dispatch`).
 
 - No benchmark ranks it. It has the models you give its tiers, and a tier you give none has none.
-- `--task` lists them, cheapest first. With `--tier` it returns that tier's, when it fits the tier's cap,
-  leaving out one you excluded or lost access to.
+- `--task` lists them, cheapest first. With `--tier` it returns that tier's model when it fits
+  the tier's cap, unless you excluded it or lost access to it.
 - `recommend` lists it after the built-in tasks, with what you wrote it is about and the model
   of each tier.
 - It is the task to pick for work that fits it, even when a built-in task fits too: for a bug,
   your `debugging` over `coding`.
-- `--about` alone makes one with no model yet, and recommend's `+ new task` in the TUI too. Agents see it only once it has a model.
+- `--about` alone makes one with no model yet, as recommend's `+ new task` does in the TUI.
+  Agents see it only once it has a model.
 - It is gone when its last model and what it is about are cleared.
 - `fav <task> --rm` and then `fav <task> --about ""` delete it, as `D` on its name in recommend does.
 - `--rename` gives it another name, one no task has yet.
@@ -246,26 +250,27 @@ stored as `tool-dispatch`).
 A column of the source not in use needs both sources cached, as in the [table](#columns).
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
-excluded models marked `✗` and your selection `✓`. `--task`, `pick` and `recommend` leave
+excluded models marked `✗` and your selected ones `✓`. `--task`, `pick` and `recommend` leave
 excluded models out.
 
-Excluded counts the models the TUI's filters hide, which it keeps across restarts and only it
-takes back, with `XX` or `c`: an entry left out of its Dev, Price or Via dropdown, the entries
-picked in one, which hide the models of the others, and a bound typed with `>` or `<`.
-`exclude --rm` on such a model says which one it is, as `Coding≥60`, and the commands that
-leave them out say them on stderr. `--dev`, `--via`, `--min` and `--max` each replace their
-own: `--dev` the Dev pick, `--max price` the Price level and `--min coding` a `>` on Coding.
-`--via ollama` or `--via llama-cli` on a task keeps a model's local copy off the ranking, which
-the TUI's pick of it does not. A bound or the Price level on a column hidden with `|`, or with no
-values from the source in use, hides none and is kept for when the column is back.
+Excluded also counts the models the TUI's filters hide. The TUI keeps those filters across
+restarts, and only it takes them back, with `XX` or `c`. They are an entry left out of the Dev,
+Price or Via dropdown, the entries picked in one, which hide the models of the others, and a
+bound typed with `>` or `<`. `exclude --rm` on such a model says which filter hides it, as
+`Coding≥60`, and the commands that leave those models out name the filters on stderr. `--dev`,
+`--via`, `--min` and `--max` each replace their own: `--dev` the Dev pick, `--max price` the
+Price level and `--min coding` a `>` on Coding. `--via ollama` or `--via llama-cli` on a task
+keeps a model's local copy off the ranking, which picking them in the TUI's Via dropdown does not.
+A bound or the Price level on a column hidden with `|`, or on one with no values from the source
+in use, hides nothing and is kept for when the column is back.
 
-`recommend` gives the same picks as the TUI's `R` with no search and the `mine` tab, which the
-TUI does not keep. A pick of `↓ downloadable` in Via is passed over, as only the TUI knows what can
-be downloaded, and leaving it out only keeps the downloads off the tiers. A benchmark picked in a task column's dropdown ranks that task in both, and a
-bound on that column is on the benchmark, both kept across restarts until `c`, and the commands
-say on stderr which tasks a pick ranks. Prices are at
-the cache share of each, the TUI's set with `%` or `--cache`, so with different ones a Price level
-or bound can hide different models.
+`recommend` gives the same picks as the TUI's `R` on the `mine` tab with no search, as the TUI
+keeps neither its tab nor its search. The commands ignore a pick of `↓ downloadable` in Via, as
+only the TUI knows what can be downloaded, and leaving it out only keeps the downloads off the
+tiers. A benchmark picked in a task column's dropdown ranks that task in both, and a bound on that
+column is on the benchmark. Both are kept across restarts until `c`, and the commands say on stderr
+which tasks a pick ranks. Each prices at its own cache share, the TUI's set with `%` or
+`--cache`, so with different shares a Price level or bound can hide different models.
 
 ### Tiers
 
@@ -277,16 +282,17 @@ or bound can hide different models.
 | `free` | the best free model, and none when the list has no free one |
 | `low` | the best up to $2 per 1M tokens |
 | `mid` | the best up to $5 |
-| `high` | your best. It is the best to the whole point: of two models a fraction of a point apart, the cheaper |
+| `high` | the best at any price. Scores count in whole points, so of two models with the same rounded score it takes the cheaper |
 
-- `modelcmp tier low 1` or `modelcmp tier mid 8` changes a cap, `--rm` puts it back to its
-  default, as `enter` on the tier's header in the TUI's recommend does. `low` can't cost more than `mid`. The list splits at the caps too, so a tier picks the best model up to its cap.
-- Two tiers pick the same model when none dearer that the next may take is better. A tier
-  never takes a worse model to differ from the next.
+- `modelcmp tier low 1` or `modelcmp tier mid 8` changes a cap, and `--rm` puts it back to its
+  default, as `enter` on the tier's header in the TUI's recommend does. `low` can't cost more
+  than `mid`. The list splits at the caps too, so a tier picks the best model up to its cap.
+- Two tiers pick the same model when the higher tier's cap lets in no better one. A tier never
+  takes a worse model just to differ from the next.
 - A model your machine runs, or can download, takes a tier when it scores higher than the
   tier's pick, as it is free there. See [models on your machine](#models-on-your-machine).
-- A tier never holds a model dearer than its cap, your favorite included. With none at its
-  price it has none, as `free` has none with no free model, and `pick` says `no model` there.
+- A tier never holds a model dearer than its cap, your favorite included. With no model at its
+  price it has none, as `free` does when there is no free model, and `pick` says `no model` there.
 - `value` lists the models within 8 months of progress of your best on coding. A month of
   progress is a twelfth of what the best coding score rose in the last year, among the models
   listed here that the source scored. A benchmark scored for 6 to 12 months is measured over
@@ -303,7 +309,7 @@ or bound can hide different models.
   which then shows as `-`.
 - `--tier` with `--no-fav` gives the tier's pick without your favorites, for when a favorite is
   on no harness you can start (`--tier mid --via claude --no-fav --id`). A task of your own
-  has none.
+  has no pick without your favorites.
 
 ### `--id` and `--cmd`
 
@@ -326,8 +332,8 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
 - With `--tier`, `--id` or `--cmd`, no match is an error (exit code 1), so a harness is never
   started on an empty model. Without them `list` says `no models match` and exits with 0.
 - With `--tier`, `--id` and `--cmd` also say the model's context and your note on stderr
-  (`Claude Opus 5.5: context 1000000, note: slow`), which an agent checks and a `$(...)` does
-  not read.
+  (`Claude Opus 5.5: context 1000000, note: slow`), where an agent sees them and a `$(...)`
+  does not capture them.
 
 ### `pick`
 
@@ -340,13 +346,13 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
   `--cmd` goes by (`modelcmp quiet opencode run --model opencode/ling-3.1-flash-free
   "<prompt>"`, `modelcmp quiet pi --model ... -p "<prompt>"`), so an agent in one harness
   reaches a model only another has.
-- `modelcmp quiet <command>` runs the command with what it prints on stderr (the harness's
-  steps) left out, and says the last 20 lines of it when the run fails, with the command's
-  exit code, so the agent reads the answer alone, or the error.
+- `modelcmp quiet <command>` runs the command and hides what it prints on stderr (the
+  harness's steps), so the agent reads only the answer. When the run fails, it prints the last
+  20 lines of stderr instead and exits with the command's exit code.
 - The command has the flags that let claude, codex, gemini or copilot edit files and run
   commands (tests, builds) without asking, as opencode, pi and omp do.
 - With `--via` the model is named by the id that harness takes. A favorite the harness lacks
-  follows the tier's own pick, with the command that starts it where it runs: `(★ favorite
+  is shown after the tier's own pick, with the command that starts it where it runs: `(★ favorite
   Ling 3.1 Flash is not on claude, start: modelcmp quiet opencode run --model
   opencode/ling-3.1-flash-free "<prompt>")`.
 - `--min` and `--not` leave a favorite out too. A tier's favorite they leave out gives way to
@@ -354,7 +360,8 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
 - A line with a model to download says so in place of the command: `not on your machine, ask
   the user to download it (17.4 GB): modelcmp get qwen3827b`.
 - When no task has a model (`--via ollama`, whose copies are picked only as favorites, or a
-  `--min` nothing meets), `pick` fails and says to choose none.
+  `--min` nothing meets), `pick` fails and tells the agent to choose no model and tell the
+  user.
 - `--task` and `--tier` print only that task or tier, for an agent that chose it already.
 
 ### Naming a model
@@ -402,22 +409,25 @@ llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`,
 Then run `modelcmp --refresh`, which opens the TUI, or `modelcmp list --refresh` in a script.
 
 A tier takes the best model your machine runs when it scores higher than the tier's pick, as it
-is free there: one on it already, or one whose download takes at most 80% of its memory, the rest
-holding the context. `recommend` marks it `↓` with the size when `modelcmp get` or `x` has to
-download it first, and `recommend --json` names it under `local` for each task. `pick` and `--cmd`
-start one on your machine with ollama or llama.cpp, though a harness offers it at a price. The
-memory is the NVIDIA GPUs' (`nvidia-smi`, looked up once a week), else the RAM, which a Mac's GPU
-shares. `modelcmp memory 24` sets it by hand, in GB as a GPU's is said, for another GPU or a model
-split between GPU and RAM, and `modelcmp memory` shows it. The CLI asks Hugging Face for the sizes
-it lacks for up to 15 seconds a run, and for none for an hour after it answers none.
-The TUI shows a download's size in Via, in `x` and in the details grey when it is over that 80%,
-and in the text's colour when it fits, on a greyed row too.
+is free there. That is a model already on your machine, or one whose download takes at most 80% of
+its memory, leaving the rest for the context. `recommend` marks it `↓` with the size when
+`modelcmp get` or `x` has to download it first, and `recommend --json` names it under `local` for
+each task. `pick` and `--cmd` start such a model on your machine with ollama or llama.cpp, even
+when a harness offers it at a price.
 
-The scores are the full weights', which a quantized copy falls a little short of, and the context
-shown is not the copy's either. With `--via` a tier never takes one this way, and `--via ollama`
-and `--via llama-cli` on a task still pick a copy only as your favorite. Leaving out `ollama` and
-`llama-cli` in the TUI's Via dropdown keeps the models on your machine off the tiers, and `↓ downloadable`
-the ones to download, for `recommend` and `pick` too.
+The memory is that of the NVIDIA GPUs (`nvidia-smi`, looked up once a week), else the RAM, which a
+Mac's GPU shares. `modelcmp memory 24` sets it by hand, in GB as a GPU's memory is given, for
+another GPU or a model split between GPU and RAM, and `modelcmp memory` shows it. The CLI asks
+Hugging Face for the sizes it lacks for up to 15 seconds a run. When none of its requests get an
+answer, it asks for no sizes for an hour. The TUI shows a download's size in Via, in `x` and in the
+details, grey when it is over that 80% and in the text colour when it fits, on a greyed row too.
+
+The scores are those of the full weights, which a quantized copy falls a little short of, and the
+context shown is not the copy's either. With `--via` a tier never takes a local model this way, and
+`--via ollama` and `--via llama-cli` on a task pick a copy only as your favorite. Leaving out
+`ollama` and `llama-cli` in the TUI's Via dropdown keeps the models on your machine off the tiers,
+and leaving out `↓ downloadable` does the same for the ones to download, in `recommend` and `pick`
+too.
 
 `ollama run` and `llama-cli` answer a prompt with text alone. For the model to edit files and run
 commands, as an agent, run it in pi: add your runner to `~/.pi/agent/models.json` as below (for
@@ -448,35 +458,45 @@ A repo that repeats the developer in its name (`bartowski/Qwen_Qwen3.5-4B-GGUF`)
 `modelcmp get <model>` finds the most downloaded GGUF copy of the model's Hugging Face repo and
 starts `llama-cli -hf <repo>` or `ollama run hf.co/<repo>`, which download it. Both say the size
 of the download first, as `2.5 GB`. With neither installed it asks before installing one:
-llama.cpp with Homebrew, else ollama with its own script on Linux. A model with no repo on
-Hugging Face has no such option, and it does not check that the model fits your machine. In
-the TUI, `x` on a model and `download and run` does the same, with each runner you have, and
-`install, download and run` with each one you lack that it can install, for a model no runner here has.
+llama.cpp with Homebrew, else ollama with its own script on Linux. It cannot get a model with no
+repo on Hugging Face, and it does not check that the model fits your machine. In the TUI, `x` on
+a model and then `download and run` does the same, with an entry for each runner you have. For a
+model no runner here has, there is also an `install, download and run` entry for each runner you
+lack that it can install.
 
 ## Files
 
-The data is downloaded on first run, which a command says on stderr as it can take up to a minute, and cached for 24 hours under `~/.cache/modelcmp/` on Linux
-(`~/Library/Caches/modelcmp/` on macOS). The TUI's first start of a day refreshes it too, behind the table. A download that fails is asked for up to three times, unless the
-site says the request itself is wrong. Your selection, favorites, exclusions, notes and settings live in
+The data is downloaded on the first run, which can take up to a minute, so a command says so on
+stderr. It is cached for 24 hours under `~/.cache/modelcmp/` on Linux (`~/Library/Caches/modelcmp/`
+on macOS). The TUI's first start of a day also refreshes it, in the background behind the table. A
+failed download is tried again up to three times, unless the site says the request itself is
+wrong. Your selected models, favorites, exclusions, notes and settings live in
 `~/.config/modelcmp/user.json` (`~/Library/Application Support/modelcmp/` on macOS), and the `?`
-help shows the path. Each refresh and each start
-of the TUI also asks GitHub for the latest release, to say when a new version is out, and `UU` in the TUI
-upgrades to it.
+help shows the path. Each refresh and each start of the TUI also asks GitHub for the latest
+release, to say when a new version is out, and `UU` in the TUI upgrades to it.
 
 Both are safe to delete: the cache is downloaded again on the next run, and removing `user.json`
-resets your selection, favorites, exclusions, notes and settings.
+resets your selected models, favorites, exclusions, notes and settings.
 
 ## Data age
 
-The TUI's bottom border always shows the refresh state: `⟳ refreshing 7/9, waiting for opencode` (the downloads
-and harnesses that answered, and the last one or two still awaited), `refresh failed` in red
-with the age of the data still shown, `⚠ refresh had issues` in yellow until a refresh has none, else `⚠ no Artificial Analysis key` while Epoch AI is used for want of one
-(each start says them again in the status bar, and `!` or a click on it lists them), or the data age alone, red once it is past 24h. Then
-the status bar says it too, `data 25h old` in red, and hints `r refresh`.
+The TUI's bottom border always shows the refresh state, one of these:
 
-When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no file
-for it, a warning names it at every start and command, with Artificial Analysis too, whose other
-scores are Epoch's, and with either source the first start or command an hour later downloads it again.
+- `⟳ refreshing 7/9, waiting for opencode`: how many downloads and harnesses have answered, and
+  the last one or two still awaited.
+- `refresh failed` in red, with the age of the data still shown.
+- `⚠ refresh had issues` in yellow, until a refresh has none.
+- `⚠ no Artificial Analysis key`, when there are no other issues and Epoch AI is used for lack of
+  a key.
+- The data age alone, red once it is past 24h. The status bar then says it too, as `data 25h old`
+  in red, with the hint `r refresh`.
+
+Each start repeats the issues in the status bar, and `!` or a click on the `⚠` lists them.
+
+When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no
+file for it, a warning names the benchmark at every start and command. It does so with Artificial
+Analysis as the source too, since the Epoch AI benchmarks in the dropdowns still come from Epoch
+AI. With either source, the first start or command an hour later downloads the data again.
 
 ## JSON
 

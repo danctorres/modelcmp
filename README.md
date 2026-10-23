@@ -94,11 +94,12 @@ Recommendations come from each task's Pareto frontier of price and score: the mo
 cheaper or equally priced model beats. Each tier picks the best of them within its price.
 
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
-the best up to $2 and `mid` up to $5 per 1M tokens (the tier header in recommend or `modelcmp tier` changes these), and `high`
-the best one. A favorite you set for a tier beats that pick, at the tier's price or under.
+the best up to $2 per 1M tokens, `mid` the best up to $5 and `high` the best at any price. The tier
+header in recommend, or `modelcmp tier`, changes these caps. A favorite you set for a tier beats
+its pick when it costs no more than the cap.
 
-You can add tasks of your own, next to the built-in ones. In the TUI, pick `+ new task` in recommend,
-or press `f` on a model and pick it there, or from the command line:
+You can add tasks of your own next to the built-in ones. In the TUI, pick `+ new task` in
+recommend or in the grid `f` opens on a model, or use the command line:
 
 ```sh
 modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"   # a new task, with its model
@@ -135,8 +136,8 @@ local model from ollama or llama.cpp that you made your favorite.
 - [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks, and it needs no API key.
 - [Artificial Analysis](https://artificialanalysis.ai): benchmarks and speed, and it needs a
   free API key.
-- [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models rank in real agent sessions,
-  chat and web development, the Arena column, and it needs no API key.
+- [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions,
+  chat and web development (the Arena column), and it needs no API key.
 
 When the TUI is first started, it prompts the user for an Artificial Analysis API key.
 If a key is provided, the recommended models are based on Artificial Analysis benchmarks, else Epoch AI is used.
