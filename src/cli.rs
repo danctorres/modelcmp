@@ -317,7 +317,13 @@ fn say_filters(store: &Store, flags: &str) {
 
 /// The models `o` asks for, and how many before `--limit` cut them. `store` is `flagged` for it.
 /// With a tier, how its pick runs when it is the best model your machine runs (`local`).
-fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'a Model>, usize, Option<Local>)> {
+/// `lines` keeps each task's line and best local model for the next tier `pick` asks.
+fn matched<'a>(
+    data: &'a Data,
+    store: &'a Store,
+    o: &ListOpts,
+    lines: Option<&Lines<'a>>,
+) -> Result<(Vec<&'a Model>, usize, Option<Local>)> {
     check("--dev", &o.dev, data.models.iter().flat_map(Model::devs))?;
     let any = data.any_available();
     check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, any)))?;
@@ -341,18 +347,18 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
                 && !(task && excluded(m, store, any))
                 && !o.not.contains(&m.key)
     };
-    let mut models: Vec<&Model> = visible(data, store, o.all, o.selected).map(|(_, m)| m).filter(keep).collect();
+    let filtered = || visible(data, store, o.all, o.selected).map(|(_, m)| m).filter(keep);
     let mut ran = None;
     // Your favorites stay on a task's line whatever the filters, as in the recommend panel.
     let pool = || {
         let usable = |m: &&Model| !excluded(m, store, any) && !o.not.contains(&m.key);
         visible(data, store, o.all, false).map(|(_, m)| m).filter(usable)
     };
-    if let Some(c) = &o.custom {
+    let mut models: Vec<&Model> = if let Some(c) = &o.custom {
         // A task of your own has no ranking: the models you gave it, or with a tier that
         // tier's.
         let line = custom_line(pool(), store, c);
-        models = match &o.tier {
+        match &o.tier {
             // It has no pick on merit: a built-in task that fits has.
             Some(_) if o.no_fav => vec![],
             Some(tier) => store
@@ -361,20 +367,29 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
                 .into_iter()
                 .collect(),
             None => line,
-        };
+        }
     } else if let Some(t) = o.task {
-        let (front, off) = task_line(models.iter().copied(), pool(), store, t);
-        models = match &o.tier {
+        // A download only where the model is said and not started: `pick` says one. None
+        // with `--via`, whose harnesses an agent that cannot start another one names, and
+        // where a copy on your machine is picked only as your favorite.
+        let download = !o.id && (!o.cmd || o.prompt);
+        let line = || {
+            let (front, off) = task_line(filtered(), pool(), store, t);
+            let ours = data.models.iter().filter(|m| (!o.selected || store.is_marked(&m.key)) && keep(m));
+            let local =
+                o.tier.as_ref().and_then(|_| local(data, store, t, ours, download)).filter(|_| o.via.is_empty());
+            (front, off, local)
+        };
+        let (front, off, local) = match lines {
+            Some(l) => l.borrow_mut().entry((t.name, o.not.clone(), download)).or_insert_with(line).clone(),
+            None => line(),
+        };
+        match &o.tier {
             Some(tier) => {
                 // Your caps still hold.
                 let mut none = Store::default();
                 none.tiers.clone_from(&store.tiers);
                 let favs = if o.no_fav { &none } else { store };
-                // A download only where the model is said and not started: `pick` says one. None
-                // with `--via`, whose harnesses an agent that cannot start another one names, and
-                // where a copy on your machine is picked only as your favorite.
-                let ours = data.models.iter().filter(|m| (!o.selected || store.is_marked(&m.key)) && keep(m));
-                let local = local(data, store, t, ours, !o.id && (!o.cmd || o.prompt)).filter(|_| o.via.is_empty());
                 let pick = tier_pick(&front, &off, favs, t.name, tier);
                 let won = or_local(pick, local, favs, t.name, tier).map(|e| e.0);
                 let took = won.filter(|m| pick.is_none_or(|p| p.0.key != m.key));
@@ -385,17 +400,26 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
                 won.into_iter().collect()
             }
             None => front.into_iter().map(|(m, _)| m).collect(),
-        };
-    } else if let Some(c) = o.sort.map(|c| &COLS[c]) {
-        // Best first, names breaking ties.
-        models.sort_by(|a, b| by_value((c.get)(a), (c.get)(b), !c.lower_better).then_with(|| a.name.cmp(&b.name)));
-    }
+        }
+    } else {
+        let mut models: Vec<&Model> = filtered().collect();
+        if let Some(c) = o.sort.map(|c| &COLS[c]) {
+            // Best first, names breaking ties.
+            models.sort_by(|a, b| by_value((c.get)(a), (c.get)(b), !c.lower_better).then_with(|| a.name.cmp(&b.name)));
+        }
+        models
+    };
     let total = models.len();
     if o.limit > 0 {
         models.truncate(o.limit);
     }
     Ok((models, total, ran))
 }
+
+/// A task's line and the best model your machine runs for it, by task, the models left out and
+/// whether a download counts: the same for every tier, which `pick` asks one by one.
+type Lines<'a> = std::cell::RefCell<HashMap<(&'static str, Vec<String>, bool), Line<'a>>>;
+type Line<'a> = (Vec<(&'a Model, f64)>, Vec<&'a str>, Option<(&'a Model, f64)>);
 
 /// How a tier's pick runs when the best model your machine runs took the tier (`or_local`).
 #[derive(Clone, Copy)]
@@ -493,7 +517,7 @@ const NO_HARNESS: &str = "no harness lists any models";
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     let store = &flagged(store, o);
-    let (models, total, ran) = matched(data, store, o)?;
+    let (models, total, ran) = matched(data, store, o, None)?;
     let download = match ran {
         Some(Local::Download(b)) => Some(b),
         _ => None,
@@ -572,6 +596,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
         return Err(Exit { code: 2, msg: format!("no task '{c}': the tasks are {names}") });
     }
     let (mut said, mut found) = (Vec::new(), false);
+    let known = Lines::default();
     for (name, task, when) in tasks.into_iter().filter(|t| o.custom.as_deref().is_none_or(|c| c == t.0)) {
         let mut lines: Vec<(String, String)> = Vec::new();
         let asked = o.tier.is_some();
@@ -585,7 +610,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
                 prompt: true,
                 ..o.clone()
             };
-            let line = tier_line(data, store, &o)?;
+            let line = tier_line(data, store, &o, &known)?;
             // Most tasks have no free model: no line for it, unless it is the tier asked for.
             if *tier == TIERS[0].0 && !asked && line.starts_with(NO_MODEL) {
                 continue;
@@ -632,7 +657,7 @@ const NO_MODEL: &str = "no model";
 
 /// A tier's line in `pick`: your favorite when `o`'s harness has it and its bounds allow it,
 /// else the tier's pick on merit, followed by the favorite's command on the harness that has it.
-fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
+fn tier_line<'a>(data: &'a Data, store: &'a Store, o: &ListOpts, lines: &Lines<'a>) -> Result<String> {
     let allowed =
         |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| v >= lo && v <= hi));
     let said = |m: &Model, id: String| {
@@ -642,7 +667,7 @@ fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
     };
     // One the bounds allow, with what calls it: an id alone is no command to run.
     let line = |o: &ListOpts| {
-        let (models, _, ran) = matched(data, store, o)?;
+        let (models, _, ran) = matched(data, store, o, Some(lines))?;
         let m = models.first().copied();
         let call = |m: &Model| match ran {
             Some(Local::Download(b)) => Some(download_said(m, b)),
@@ -1459,7 +1484,7 @@ mod tests {
         let t = TASKS.iter().find(|t| t.name == "coding").unwrap();
         let line = |s: &Store| front(&data, s, t).0.iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
         let listed = |s: &Store, o: &ListOpts| {
-            matched(&data, &flagged(s, o), o).ok().unwrap().0.iter().map(|m| m.key.clone()).collect::<Vec<_>>()
+            matched(&data, &flagged(s, o), o, None).ok().unwrap().0.iter().map(|m| m.key.clone()).collect::<Vec<_>>()
         };
         let on_task = |o: ListOpts| ListOpts { task: Some(t), ..o };
         let bound = |col: &str, lo: f64, hi: f64| {
@@ -1592,7 +1617,7 @@ mod tests {
         assert!(list(&data, &store, &o).is_ok(), "the tier's pick among pi's");
         // `pick` gives both: pi's own, then the favorite where it runs.
         (o.no_fav, o.prompt) = (false, true);
-        let line = |data: &Data, store: &Store, o: &ListOpts| tier_line(data, store, o).ok();
+        let line = |data: &Data, store: &Store, o: &ListOpts| tier_line(data, store, o, &Default::default()).ok();
         let elsewhere = format!(
             "p/gpt55  -  (★ favorite mini is not on pi, run it with: {QUIET} opencode run --model p/mini \"<prompt>\")"
         );
@@ -1652,7 +1677,7 @@ mod tests {
         let data = Data { models: vec![hosted, pulled], ..Default::default() };
         let t = TASKS.iter().find(|t| t.name == "coding").unwrap();
         let o = ListOpts { task: Some(t), tier: Some("free".into()), cmd: true, prompt: true, ..Default::default() };
-        let line = |o: &ListOpts| tier_line(&data, &Store::default(), o).ok();
+        let line = |o: &ListOpts| tier_line(&data, &Store::default(), o, &Default::default()).ok();
         assert_eq!(
             line(&o),
             Some(format!("{QUIET} ollama run pulled:4b --nowordwrap --hidethinking \"<prompt>\"  -")),
