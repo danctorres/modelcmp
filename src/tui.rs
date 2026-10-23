@@ -2073,8 +2073,10 @@ fn layout(width: u16, app: &App) -> Layout {
     });
     let via_w =
         ms.iter().map(listed).chain(got).chain(out.then_some(OUT_OF_REACH.len())).max().unwrap_or(0).max(6) as u16;
-    // As wide as drawn: a CJK character or an emoji takes two cells.
-    let notes_w = ms.iter().filter_map(|m| app.store.note(&m.key)).map(|s| Span::raw(s).width()).max().unwrap_or(0);
+    // As wide as drawn: a CJK character or an emoji takes two cells. Of the models the data has,
+    // found from the few notes rather than from every model.
+    let noted = app.store.notes.iter().filter(|(k, _)| ms.iter().any(|m| m.key == **k));
+    let notes_w = noted.map(|(_, s)| Span::raw(s).width()).max().unwrap_or(0);
     let notes_w = notes_w.clamp(6, 40) as u16;
     // Of the models listed, not of all: one long name filtered out leaves no gap before Dev.
     let longest = app.rows.iter().map(|&r| ms[r].name.chars().count()).max().unwrap_or(0) as u16;
