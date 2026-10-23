@@ -426,7 +426,7 @@ pub fn task_frontier<'a>(
     // "value" alone leaves out the models far behind the best with a price, on coding, and has
     // no line while coding has no pace: coding per dollar, a weak free model would top it.
     let coder = matches!(t.need, fit::Need::Coder);
-    let behind = behind(ranked.iter().map(|e| e.0).filter(|m| m.cost().is_some()), "coding");
+    let behind = behind(ranked.iter().map(|e| e.0).filter(|m| coder && m.cost().is_some()), "coding");
     let near = |m: &Model| !coder || behind(m).is_some_and(|b| b <= FLOOR);
     let ranked: Vec<_> = ranked.iter().copied().filter(|(m, _)| near(m)).collect();
     let mut v = frontier(&ranked, |(m, _)| m, score);
@@ -498,9 +498,10 @@ pub fn local_best<'a>(
     let runs = |m: &Model| match m.here() {
         true => m.via.iter().any(|h| crate::data::runs_here(h) && !left_out(store, h)),
         false => {
+            // The size first, as the repo is slow to find.
             !left_out(store, crate::app::DOWNLOAD)
-                && m.hf_repo().is_some()
                 && size(m).zip(room).is_some_and(|(b, r)| b <= r)
+                && m.hf_repo().is_some()
         }
     };
     models.filter(|m| runs(m)).filter_map(|m| Some((m, line_score(m, t, bench)?))).max_by(|a, b| a.1.total_cmp(&b.1))
@@ -904,7 +905,8 @@ pub fn left_out_by(m: &Model, store: &Store, any: bool, download: bool) -> Optio
     if let Some(d) = m.devs().find(|d| store.dev_not.iter().any(|x| x == d)) {
         return Some(format!("{d} left out in Dev"));
     }
-    if price_out(m.cost(), store) {
+    // The price only with a level left out, as it is slow to find.
+    if store.price_not.is_some() && price_out(m.cost(), store) {
         return Some(format!("{} left out in Price", level_label(store.price_not?)));
     }
     if via_out(m, store, any, download) {

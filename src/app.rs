@@ -2166,14 +2166,17 @@ impl App {
         // theirs whatever `a`: the same models from mine as from all.
         // `E` shows the ones the filters exclude, so there they are not hidden.
         let e = only == Some(EXCLUDED);
+        // No search matches every model, with no fields to make for each.
+        let blank = self.query.trim().is_empty();
         self.data.models.iter().enumerate().filter(move |&(i, m)| {
             (!reach || only.is_some() || self.in_reach(m) || self.store.is_marked(&m.key))
-                && hits(
-                    &self.query,
-                    [&m.name, &m.developer, &crate::view::via_text(m), self.store.note(&m.key).unwrap_or("")],
-                    self.typos,
-                )
-                .is_some()
+                && (blank
+                    || hits(
+                        &self.query,
+                        [&m.name, &m.developer, &crate::view::via_text(m), self.store.note(&m.key).unwrap_or("")],
+                        self.typos,
+                    )
+                    .is_some())
                 && match only {
                     Some(MARKED) => self.store.is_marked(&m.key),
                     Some(FAV) => self.is_fav(&m.key),
@@ -2189,7 +2192,13 @@ impl App {
 
     /// `view::via_out`, as only the TUI knows what `x` can download.
     fn via_out(&self, m: &Model) -> bool {
-        view::via_out(m, &self.store, self.any_available, self.download(m).is_some())
+        view::via_out(m, &self.store, self.any_available, self.left_downloads(m))
+    }
+
+    /// Whether `x` can download `m`, asked only with an entry left out in Via, the one thing it
+    /// matters to (`view::via_out`), as it is slow to find for every model.
+    fn left_downloads(&self, m: &Model) -> bool {
+        !self.store.via_not.is_empty() && self.download(m).is_some()
     }
 
     /// `view::excluded`, knowing what `x` can download as `via_out` does.
@@ -2199,7 +2208,7 @@ impl App {
 
     /// `view::left_out_by`, knowing what `x` can download as `via_out` does.
     fn left_out_by(&self, m: &Model) -> Option<String> {
-        view::left_out_by(m, &self.store, self.any_available, self.download(m).is_some())
+        view::left_out_by(m, &self.store, self.any_available, self.left_downloads(m))
     }
 
     /// Whether "↓ downloadable" is left out and `x` can download `m`.
