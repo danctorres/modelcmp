@@ -1135,8 +1135,9 @@ pub fn fav(
             let favs: Vec<(&String, &str)> = slots.iter().filter_map(|s| Some((s, store.favorite(s)?))).collect();
             // A model's name where the task goes, or a typo, is no task: not a task with no favorite.
             if favs.is_empty() && fit::task(name).is_none() && !store.custom_tasks().contains(&name) {
-                let msg =
-                    format!("no task '{name}'. To make it a task of your own, run modelcmp fav {name} <model> --tier <tier>");
+                let msg = format!(
+                    "no task '{name}'. To make it a task of your own, run modelcmp fav {name} <model> --tier <tier>"
+                );
                 return Err(Exit { code: 2, msg });
             }
             match (favs.as_slice(), tier) {
