@@ -1214,6 +1214,8 @@ pub struct Row {
     pub ext: Option<(f64, f64)>,
     /// The cells holding a list price (`Model::listed`), drawn muted; empty off the price rows.
     pub listed: Vec<bool>,
+    /// Whether a higher value is the better, as the sort takes it: highest first, else lowest.
+    pub higher: bool,
     /// The topic the row belongs to, named in a rule above its first row; `""` for the
     /// model, price and context rows at the top.
     pub section: &'static str,
@@ -1235,7 +1237,7 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         // A value that reads as the best or the worst is coloured as it.
         let snap = |v: f64| ext.and_then(|(b, w)| [b, w].into_iter().find(|&e| fmt(e) == fmt(v))).unwrap_or(v);
         let vals = vals.into_iter().map(|v| v.map(snap)).collect();
-        Row { label: label.into(), cells, vals, ext, ..Default::default() }
+        Row { label: label.into(), cells, vals, ext, higher, ..Default::default() }
     }
     // A list price, yours having none, after a `~` as in the table, and as there neither the
     // best nor the worst: it has no value to colour.
@@ -1256,6 +1258,8 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
             cells: models.iter().map(|m| via(m, any, get(m).as_deref())).collect(),
             ..Default::default()
         },
+        // Blended, as the table's Price and the verdict take it.
+        price("price / 1M", Offer::blended),
         price("$ in / 1M", |o| o.input),
         // No cache discount: cached input costs full price.
         price("$ cached in / 1M", |o| o.cache_read.unwrap_or(o.input)),
@@ -1268,11 +1272,11 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
             true,
         ),
         Row {
-            section: "scores",
+            section: "index",
             ..row(crate::data::source().index().0, models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true)
         },
     ];
-    // Under context, before the scores' rule: the ECI row is the last so far.
+    // Under context, before the index's rule: the ECI row is the last so far.
     if models.iter().any(|m| m.tps.is_some() || m.ttft.is_some()) {
         let at = rows.len() - 1;
         rows.insert(at, row("answer starts", models.iter().map(|m| m.ttft).collect(), |v| format!("{v:.1}s"), false));
@@ -1284,23 +1288,22 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         let source = crate::data::source();
         let other = models.iter().map(|m| m.other_index).collect();
         let at = rows.len() - usize::from(source == crate::data::Source::Aa);
-        rows.insert(at, Row { section: "scores", ..row(source.other().index().0, other, |v| format!("{v:.1}"), true) });
+        rows.insert(at, Row { section: "index", ..row(source.other().index().0, other, |v| format!("{v:.1}"), true) });
     }
-    for t in TASKS.iter().filter(|t| t.name != "overall") {
+    for t in TASKS.iter().filter(|t| t.name != "overall" && !as_overall(models, t.name)) {
         let vals: Vec<Option<f64>> = models.iter().map(|m| task_score(m, t.name)).collect();
         if vals.iter().any(Option::is_some) {
-            rows.push(Row { section: "scores", ..row(t.name, vals, |v| format!("{v:.0}"), true) });
+            rows.push(Row { section: "tasks", ..row(t.name, vals, |v| format!("{v:.0}"), true) });
         }
     }
     if models.iter().any(|m| m.arena.is_some()) {
         let arena = models.iter().map(|m| m.arena).collect();
-        rows.push(Row { section: "scores", ..row("arena agent %", arena, signed, true) });
+        rows.push(Row { section: "arena", ..row("agent %", arena, signed, true) });
     }
     for (b, ..) in crate::data::ARENA_BOARDS {
         let vals: Vec<Option<f64>> = models.iter().map(|m| m.arena_more.get(b).copied()).collect();
         if vals.iter().any(Option::is_some) {
-            let name = format!("arena {}", b.to_lowercase());
-            rows.push(Row { section: "scores", ..row(&name, vals, |v| score(Some(v)), true) });
+            rows.push(Row { section: "arena", ..row(&b.to_lowercase(), vals, |v| score(Some(v)), true) });
         }
     }
     let mut benches: Vec<&String> = models.iter().flat_map(|m| m.scores.keys()).collect();
@@ -1313,14 +1316,38 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
     rows
 }
 
-/// The conclusion above a comparison: for each question, which model wins and by how much
-/// against the runner-up, as `[question, winner, margin]`. Values compare as shown, so two
-/// that print the same tie, and the winner cell names every tied model. With fewer than two
-/// models to compare, the winner is `-`.
-pub fn verdict(models: &[&Model]) -> Vec<[String; 3]> {
-    let coding = |m: &Model| task_score(m, "coding");
-    // A list price is not one you'd pay: it wins nothing here, as in the rows below.
-    let cost = |m: &Model| m.quoted().filter(|q| !q.1).map(|q| q.0.blended());
+/// The TUI's compare: the model row, which names its rows, and its columns, the other rows of
+/// `compare_rows` with Via last, the widest. A column with fewer than two values compares
+/// nothing, and is left out.
+pub fn compare_cols(models: &[&Model], any: bool, get: Get) -> (Row, Vec<Row>) {
+    let mut cols = compare_rows(models, any, get);
+    let names = cols.remove(0);
+    let via = cols.remove(0);
+    cols.retain(|c| c.cells.iter().filter(|v| *v != "-").count() >= 2);
+    cols.push(via);
+    (names, cols)
+}
+
+/// `models` in the order of the column labelled `label`, highest first when `desc`, a model
+/// with no value last, and a column of text A-Z. Models that tie keep their order.
+pub fn compare_sorted<'a>(models: Vec<&'a Model>, cols: &[Row], (label, desc): (&str, bool)) -> Vec<&'a Model> {
+    let Some(c) = cols.iter().find(|c| c.label == label) else { return models };
+    let mut order: Vec<usize> = (0..models.len()).collect();
+    if c.vals.is_empty() {
+        order.sort_by(|&a, &b| if desc { c.cells[b].cmp(&c.cells[a]) } else { c.cells[a].cmp(&c.cells[b]) });
+    } else {
+        order.sort_by(|&a, &b| by_value(c.vals[a], c.vals[b], desc));
+    }
+    order.into_iter().map(|i| models[i]).collect()
+}
+
+/// The conclusion above a comparison, as `[question, winner, margin]`: which model is cheaper
+/// and which the better value, by how much against the runner-up, then a row per task
+/// (`task_verdict`). Values compare as shown, so two that print the same tie, and the winner
+/// cell names every tied model, except in a task's row, where the cheaper of a tie is the one
+/// worth paying for. With fewer than two models to compare, the winner is `-`.
+pub fn verdict(models: &[&Model], store: &Store) -> Vec<[String; 3]> {
+    let cost = paid;
     // Value hangs on the price, so a list price wins nothing there either.
     let any_value = |m: &Model| m.fit.get("value").copied();
     let value = |m: &Model| any_value(m).filter(|_| !m.listed());
@@ -1332,11 +1359,59 @@ pub fn verdict(models: &[&Model]) -> Vec<[String; 3]> {
         }
         row
     };
-    vec![
+    let mut rows = vec![
         on_price(best(models, "cheaper", cost, false, usd), &|m| m.cost()),
-        best(models, "better at coding", coding, true, |v| format!("{v:.0}")),
         on_price(best(models, "better value", value, true, |v| format!("{v:.0}")), &any_value),
-    ]
+    ];
+    let tasks = TASKS.iter().filter(|t| t.name != "value" && !as_overall(models, t.name));
+    rows.extend(tasks.filter_map(|t| task_verdict(models, t, store)));
+    rows
+}
+
+/// Whether `task` scores every one of `models` as overall does, as shown, so it adds nothing:
+/// vision, when they all take images.
+fn as_overall(models: &[&Model], task: &str) -> bool {
+    let shown = |m: &Model, t| task_score(m, t).map(f64::round);
+    task != "overall" && models.iter().all(|m| shown(m, task) == shown(m, "overall"))
+}
+
+/// The blended price you'd pay for `m`. A list price is not one: it wins nothing in the
+/// verdict, as in the rows below it.
+fn paid(m: &Model) -> Option<f64> {
+    m.quoted().filter(|q| !q.1).map(|q| q.0.blended())
+}
+
+/// For task `t`, the models worth paying for, best first: the best, then each cheaper one
+/// that scores less, cheaper than every one before it, so a dearer model that is no better
+/// is left out. The best alone is said against the runner-up. Your favorite for the task has
+/// a ★. None when fewer than two models have a score.
+fn task_verdict(models: &[&Model], t: &fit::Task, store: &Store) -> Option<[String; 3]> {
+    // As shown: 60.6 and 61.4 both read 61.
+    let mut scored: Vec<(&Model, f64)> =
+        models.iter().filter_map(|m| Some((*m, task_score(m, t.name)?.round()))).collect();
+    if scored.len() < 2 {
+        return None;
+    }
+    // Best first, the cheaper of a tie first, an unknown or list price last.
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(by_value(paid(a.0), paid(b.0), false)));
+    let mut front: Vec<(&Model, f64)> = vec![];
+    for &(m, v) in &scored {
+        let cheaper = |f: &Model| paid(m).is_some_and(|c| paid(f).is_none_or(|fc| c < fc));
+        if front.iter().all(|(f, _)| cheaper(f)) {
+            front.push((m, v));
+        }
+    }
+    let name = |m: &Model| if store.is_favorite(Some(t), &m.key) { format!("★ {}", m.name) } else { m.name.clone() };
+    let at = |m: &Model, v: f64| format!("{v:.0} ({})", price(m));
+    let (top, v) = front[0];
+    let margin = match &front[1..] {
+        [] => format!("{} vs {:.0}", at(top, v), scored[1].1),
+        rest => {
+            let rest = rest.iter().map(|&(m, v)| format!("{} {}", name(m), at(m, v)));
+            std::iter::once(at(top, v)).chain(rest).collect::<Vec<_>>().join(" · ")
+        }
+    };
+    Some([t.name.into(), name(top), margin])
 }
 
 fn best(
@@ -1564,6 +1639,16 @@ mod tests {
     }
 
     #[test]
+    fn compare_leaves_out_a_column_with_one_value() {
+        let (a, b) =
+            (Model { eci: Some(150.0), context: 1, ..Default::default() }, Model { context: 2, ..Default::default() });
+        let labels =
+            |ms: &[&Model]| compare_cols(ms, false, &|_| None).1.into_iter().map(|c| c.label).collect::<Vec<_>>();
+        assert_eq!(labels(&[&a, &b]), ["context", "via"], "ECI has one value, so nothing to compare, and Via stays");
+        assert!(labels(&[&a, &a]).contains(&"ECI".to_string()));
+    }
+
+    #[test]
     fn compare_marks_best() {
         let mk = |n: &str, c: u64, eci: Option<f64>| Model { name: n.into(), context: c, eci, ..Default::default() };
         let (a, b) = (mk("a", 100, Some(150.0)), mk("b", 200, None));
@@ -1579,7 +1664,7 @@ mod tests {
         assert_eq!(find("context").ext, Some((200.0, 100.0)));
         assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);
-        assert_eq!((find("context").section, find("ECI").section), ("", "scores"));
+        assert_eq!((find("context").section, find("ECI").section), ("", "index"));
         let same = compare_rows(&[&a, &a], false, &|_| None);
         assert_eq!(same.iter().find(|r| r.label == "context").unwrap().ext, None, "equal values are not marked");
         let ms = [100_000, 200_400, 200_000, 0].map(|c| mk("m", c, None));
@@ -1609,12 +1694,14 @@ mod tests {
         let mut ms = [mk("big", Some(90.0), 10.0), mk("small", Some(60.0), 2.0), mk("new", None, 1.0)];
         fit::add_value(&mut ms);
         let [big, small, new] = &ms;
+        let store = Store::default();
+        let verdict = |ms: &[&Model]| verdict(ms, &store);
         let v = verdict(&[big, small, new]);
         let s = |r: [&str; 3]| r.map(String::from);
         assert_eq!(v[0], s(["cheaper", "new", "$1.0 vs $2.0"]));
-        assert_eq!(v[1], s(["better at coding", "big", "90 vs 60"]), "a model without the score is skipped");
-        assert_eq!(v[2], s(["better value", "small", "75 vs 25"]), "the Value column's percentile");
-        assert_eq!(verdict(&[big, new])[1], s(["better at coding", "-", "not enough data"]));
+        assert_eq!(v[1], s(["better value", "small", "75 vs 25"]), "the Value column's percentile");
+        assert_eq!(v[2], s(["coding", "big", "90 ($10) · small 60 ($2.0)"]), "the best, then a cheaper one");
+        assert_eq!(verdict(&[big, new]).len(), 2, "no row for a task fewer than two have a score on");
         assert_eq!(verdict(&[small, small])[0], s(["cheaper", "tie: small, small", "$2.0 each"]));
         let twin = mk("twin", Some(60.0), 2.0);
         assert_eq!(verdict(&[big, small, &twin])[0], s(["cheaper", "tie: small, twin", "$2.0 each, next $10"]));
@@ -1624,14 +1711,60 @@ mod tests {
         fit::add_value(&mut ms);
         let v = verdict(&[&ms[0], &ms[1], &ms[2]]);
         assert_eq!(v[0], s(["cheaper", "small", "$2.0 vs $10"]), "a list price is not one you'd pay");
-        assert_eq!((v[2][0].as_str(), v[2][1].as_str()), ("better value", "small"), "nor one to divide by");
+        assert_eq!((v[1][0].as_str(), v[1][1].as_str()), ("better value", "small"), "nor one to divide by");
         let v = verdict(&[&ms[1], &ms[2]]);
         assert_eq!(v[0], s(["cheaper", "-", "only a list price (~)"]), "a pair with one says why it has no winner");
-        assert_eq!(v[2], s(["better value", "-", "only a list price (~)"]));
-        assert_eq!(v[1][1], "est", "coding does not hang on the price");
+        assert_eq!(v[1], s(["better value", "-", "only a list price (~)"]));
+        assert_eq!(v[2][1], "est", "coding does not hang on the price");
         let none = Model { offers: vec![], ..mk("none", None, 0.0) };
         let v = verdict(&[&ms[2], &none]);
-        assert_eq!((v[0][2].as_str(), v[2][2].as_str()), ("not enough data", "not enough data"), "one price at all");
+        assert_eq!((v[0][2].as_str(), v[1][2].as_str()), ("not enough data", "not enough data"), "one price at all");
+    }
+
+    #[test]
+    fn vision_shows_only_when_it_differs_from_overall() {
+        let mk = |eci: f64, vision| Model {
+            eci: Some(eci),
+            vision,
+            fit: [("overall".to_string(), eci), ("vision".to_string(), eci)].into(),
+            ..Default::default()
+        };
+        let has = |ms: &[&Model]| {
+            let col = compare_rows(ms, false, &|_| None).iter().any(|r| r.label == "vision");
+            (col, verdict(ms, &Store::default()).iter().any(|r| r[0] == "vision"))
+        };
+        let (a, b, blind) = (mk(150.0, true), mk(140.0, true), mk(145.0, false));
+        assert_eq!(has(&[&a, &b]), (false, false), "both take images: vision is overall");
+        assert_eq!(has(&[&a, &b, &blind]), (true, true), "one does not, so vision leaves it out");
+    }
+
+    #[test]
+    fn a_task_verdict_leaves_out_a_dearer_model_no_better() {
+        let offer = |p: f64| Offer { input: p, output: p, ..Default::default() };
+        let mk = |n: &str, coding: f64, p: f64| Model {
+            key: n.into(),
+            name: n.into(),
+            fit: [("coding".to_string(), coding)].into(),
+            offers: vec![offer(p)],
+            ..Default::default()
+        };
+        let (big, mid, dear, cheap) =
+            (mk("big", 90.0, 10.0), mk("mid", 70.0, 5.0), mk("dear", 70.0, 20.0), mk("cheap", 70.2, 1.0));
+        let mut store = Store::default();
+        let coding = |ms: &[&Model], store: &Store| verdict(ms, store).into_iter().find(|r| r[0] == "coding").unwrap();
+        assert_eq!(coding(&[&dear, &mid, &big], &store)[2], "90 ($10) · mid 70 ($5.0)", "dear is no better than mid");
+        assert_eq!(
+            coding(&[&mid, &cheap], &store),
+            ["coding", "cheap", "70 ($1.0) vs 70"].map(String::from),
+            "as shown, a tie goes to the cheaper"
+        );
+        // Yours unpriced, so the price shown is a list one, ~$1.0.
+        let unpriced = Offer { available: true, unpriced: true, ..Default::default() };
+        let offers = vec![unpriced, Offer { available: false, ..offer(1.0) }];
+        let listed = Model { offers, ..mk("listed", 60.0, 0.0) };
+        assert_eq!(coding(&[&big, &listed], &store)[2], "90 ($10) vs 60", "a list price is not cheaper");
+        store.toggle_favorite("coding:high", "mid");
+        assert_eq!(coding(&[&big, &mid], &store)[2], "90 ($10) · ★ mid 70 ($5.0)", "your favorite has a ★");
     }
 
     #[test]

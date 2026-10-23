@@ -118,7 +118,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Compare models side by side, starting with a verdict: cheapest, best at coding, best value
+    /// Compare models side by side, starting with a verdict: cheapest, best value, and per task the best then each cheaper one worth paying for
     Compare {
         #[arg(num_args = 2.., required = true)]
         models: Vec<String>,

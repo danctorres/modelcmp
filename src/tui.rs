@@ -16,8 +16,8 @@ use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
 use crate::view::{
-    CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, compare_rows, detail_rows, hits,
-    level, level_label, short, truncate, verdict, via_names, via_text,
+    CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, detail_rows, hits, level,
+    level_label, short, truncate, verdict, via_names, via_text,
 };
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::Show;
@@ -740,9 +740,10 @@ fn more_at(buf: &Buffer) -> Vec<(u16, u16, Mouse)> {
         .collect()
 }
 
-/// How many models compare shows: what a click on its `‹` `›` moves, so the view moves by a screen.
+/// How many columns compare shows: what a click on its `‹` `›` moves, so the view moves by a
+/// screen. One model in recommend.
 fn across(app: &App) -> isize {
-    app.spots.iter().filter(|(_, s)| matches!(s, Stop::Compare(_))).count().max(1) as isize
+    if app.view == View::Compare { app.compare_shown.max(1) as isize } else { 1 }
 }
 
 /// What a mouse event lands on, with the same geometry `draw` uses: the frame's inner area
@@ -1162,7 +1163,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["↓ ↑ move"], [enter, &search[..]].concat(), vec!["esc back", "q quit"]]
         }
         View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
-        View::Compare => vec![vec!["↓ ↑ scroll", "← → 0 $ model"], search, actions("enter x o y f e i"), BACK.to_vec()],
+        View::Compare => {
+            vec![vec!["↓ ↑ model", "← → 0 $ column", "s sort"], search, actions("enter x o y f e i"), BACK.to_vec()]
+        }
         // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
         // On the `among` line, the models it ranks.
         View::Recommend if matches!(app.input, Input::Cap { .. } | Input::Task(_)) => {
@@ -1732,18 +1735,38 @@ fn draw(app: &mut App, f: &mut Frame) {
             Some(("compare".into(), lines))
         }
         View::Compare => {
-            let (lines, first, hits) = compare(
-                &app.marked_models(),
-                (app.any_available(), &|m| app.download(m), &app.store.via_not),
-                (app.compare_sel, app.compare_x),
-                area.width.saturating_sub(4) as usize,
+            // `n` `N` start the view at the column whose label they found.
+            let (n, jump) = app.hit;
+            let searched = !app.overlay_query.is_empty();
+            let sort = app.compare_sort.as_ref().map(|(l, d)| (l.as_str(), *d));
+            let c = compare(
+                &app.compare_models(),
+                (app.any_available(), &|m| app.download(m), &app.store),
+                (app.compare_sel, (app.compare_col, app.compare_x), (jump && searched).then_some(n)),
+                (area.width.saturating_sub(4) as usize, sort),
                 &app.overlay_query,
                 |m| app.muted(m),
                 &mut spots,
             );
-            app.compare_x = first;
-            hit_line = to_hit(app, &hits);
-            Some(("compare".into(), lines))
+            (app.compare_col, app.compare_x, app.compare_shown) = (c.col, c.first, c.shown);
+            if searched {
+                app.hit = (n.rem_euclid(c.hits.max(1) as isize), false);
+                if jump {
+                    app.status = match c.hits {
+                        0 => format!("no column matches {}", app.overlay_query),
+                        k => format!("column {} of {k}", app.hit.0 + 1),
+                    };
+                }
+            }
+            // The cursor's model in view, and at the first and the last the lines above and under it.
+            let shown = body.height.saturating_sub(2) as usize;
+            app.scroll = match app.compare_sel {
+                0 => list_top(0, c.at, shown),
+                s if s + 1 >= app.marked_shown => c.lines.len().saturating_sub(shown),
+                _ => list_top(app.scroll as usize, c.at, shown),
+            } as u16;
+            hit_line = Some(c.at);
+            Some(("compare".into(), c.lines))
         }
     };
     // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
@@ -3961,85 +3984,211 @@ fn detail(
     (title, lines)
 }
 
-/// The verdict, then the marked models side by side with the best value of each row in green,
-/// the worst in red, and the one under the cursor filled between its two bars; a `muted` model's
-/// column is grey, its bests and worsts too, as its row in the table. When they do not all fit in
-/// `avail` cells, the view starts at model `first`, moved only as far as it takes to show the
-/// selection, and the `first` in effect comes back for `App::compare_x`. Each shown model's
-/// column, between its two bars and from the model row down, goes to `spots`. `any` is whether
-/// you have access to a model, and `get` the mark of a model's download, for Via to read as in
-/// the table.
+/// What `compare` drew, for `draw` to scroll it and `App` to move over it.
+struct Compared {
+    lines: Vec<Line<'static>>,
+    /// The column under the cursor, for `App::compare_col`.
+    col: usize,
+    /// The first column shown, for `App::compare_x`, and how many show, a screen for `‹` `›`.
+    first: usize,
+    shown: usize,
+    /// How many labels the search finds.
+    hits: usize,
+    /// The line of the model under the cursor.
+    at: usize,
+}
+
+/// A label wraps no narrower than this, or than itself, so a column of short values still has
+/// a label that reads in a line or two.
+const LABEL_MIN: usize = 10;
+
+/// `label` in lines of at most `w` chars, broken after a space, `_` or `-`, a word longer than
+/// `w` on a line of its own, each with the char it starts at, for the search to underline.
+fn wrap_label(label: &str, w: usize) -> Vec<(usize, String)> {
+    let mut lines: Vec<(usize, String)> = vec![];
+    let mut at = 0;
+    for p in label.split_inclusive([' ', '_', '-']) {
+        match lines.last_mut() {
+            Some((_, l)) if format!("{l}{p}").trim_end().chars().count() <= w => l.push_str(p),
+            _ => lines.push((at, p.to_string())),
+        }
+        at += p.chars().count();
+    }
+    lines.into_iter().map(|(a, l)| (a, l.trim_end().to_string())).collect()
+}
+
+/// The verdict, then a row per marked model and a column per value, as in the table: the best
+/// of each column in green, the worst in red, a `muted` model's row grey, its bests and worsts
+/// too, and Via last, the widest. A label wraps over the header's lines, so a column is as wide
+/// as its values. The cursor's column, `col` or the `jump`th label `query` finds, is marked
+/// under its label as in the table, and the one `sort` names, by its label and whether highest
+/// first, has `▼` or `▲`. When the columns do not all fit in `avail` cells, the view starts at
+/// column `first`, moved only as far as it takes to show the cursor's. Each model's row and
+/// each column's label goes to `spots`. `any` is whether you have access to a model, and `get`
+/// the mark of a model's download, for Via to read as in the table.
 fn compare(
     models: &[&Model],
-    (any, get, via_not): (bool, crate::view::Get, &[String]),
-    (sel, first): (usize, usize),
-    avail: usize,
+    (any, get, store): (bool, crate::view::Get, &Store),
+    (sel, (col, first), jump): (usize, (usize, usize), Option<isize>),
+    (avail, sort): (usize, Option<(&str, bool)>),
     query: &str,
     muted: impl Fn(&Model) -> bool,
     spots: &mut Vec<Spot>,
-) -> (Vec<Line<'static>>, usize, Vec<usize>) {
-    let rows = compare_rows(models, any, get);
+) -> Compared {
+    let (names, mut cols) = crate::view::compare_cols(models, any, get);
+    // The sort's arrow before its label, as on the table's header.
+    let arrow = |label: &str| match sort {
+        Some((l, desc)) if l == label => {
+            if desc {
+                "▼"
+            } else {
+                "▲"
+            }
+        }
+        _ => "",
+    };
+    let searched: Vec<String> = cols.iter().map(|c| c.label.clone()).collect();
+    for c in &mut cols {
+        c.label = format!("{}{}", arrow(&c.label), c.label);
+    }
     let muted: Vec<bool> = models.iter().map(|m| muted(m)).collect();
-    // `query` underlines the rows' labels it finds, as every panel's search does, and their
-    // lines come back for `n` `N`.
-    let mut found_on = vec![];
-    let n = models.len();
+    let (n, m) = (models.len(), cols.len());
     let sel = sel.min(n.saturating_sub(1));
-    let label_w = rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
     // In cells as the terminal draws them, so a wide character keeps the columns in line.
-    let widths: Vec<usize> =
-        (0..n).map(|i| rows.iter().map(|r| Span::raw(r.cells[i].as_str()).width()).max().unwrap_or(0)).collect();
-    // How many models from `f` on fit beside the labels; always at least one.
+    let cell_w = |s: &str| Span::raw(s).width();
+    let name_w = names.cells.iter().map(|c| cell_w(c)).chain([names.label.chars().count()]).max().unwrap_or(0);
+    let widths: Vec<usize> = cols
+        .iter()
+        .map(|c| {
+            let vals = c.cells.iter().map(|s| cell_w(s)).max().unwrap_or(0);
+            let words = wrap_label(&c.label, 0).iter().map(|(_, l)| l.chars().count()).max().unwrap_or(0);
+            vals.max(words).max(LABEL_MIN.min(c.label.chars().count()))
+        })
+        .collect();
+    let heads: Vec<_> = cols.iter().zip(&widths).map(|(c, &w)| wrap_label(&c.label, w)).collect();
+    // How many columns from `f` on fit beside the names, always at least one. The `‹` goes in the
+    // gap before the first, the `›` after the last takes a cell, but only when there are more.
     let count = |f: usize, reserve: usize| {
-        let mut room = avail.saturating_sub(label_w + reserve);
+        let mut room = avail.saturating_sub(name_w + reserve);
         let ok = |w: &&usize| {
             let fit = room >= **w + 2;
             room = room.saturating_sub(**w + 2);
             fit
         };
-        widths[f..].iter().take_while(ok).count().max(1)
+        widths[f.min(m)..].iter().take_while(ok).count().max(1)
     };
-    // Two cells go to the " ›" marking models cut off on the right, but only when there are any;
-    // else one, to the right bar of the cursor on the last model.
     let fits = |f: usize| {
-        let all = count(f, 1);
-        if f + all >= n { all } else { count(f, 2) }
+        let all = count(f, 0);
+        if f + all >= m { all } else { count(f, 1) }
     };
-    let max_first = (0..n).find(|&f| f + fits(f) >= n).unwrap_or(0);
-    let mut first = first.min(sel).min(max_first);
-    while sel >= first + fits(first) {
+    // Found in the label as it reads, after the arrow.
+    let found_in = |c: usize| {
+        let shift = cols[c].label.chars().count() - searched[c].chars().count();
+        found(&searched[c], query).into_iter().map(|r| r.start + shift..r.end + shift).collect::<Vec<_>>()
+    };
+    let hits: Vec<usize> = (0..m).filter(|&c| !found_in(c).is_empty()).collect();
+    let col = jump
+        .and_then(|j| hits.get(j.rem_euclid(hits.len().max(1) as isize) as usize))
+        .copied()
+        .unwrap_or(col)
+        .min(m.saturating_sub(1));
+    let max_first = (0..m).find(|&f| f + fits(f) >= m).unwrap_or(0);
+    let mut first = first.min(col).min(max_first);
+    while col >= first + fits(first) {
         first += 1;
     }
-    let shown = fits(first);
+    let shown = fits(first).min(m - first.min(m));
+    let vis = first..first + shown;
     let mut out = vec![heading("verdict:")];
-    out.extend(verdict_lines(models));
+    out.extend(verdict_lines(models, store, avail));
     out.push(Line::default());
-    if shown < n {
+    if shown < m {
         // The arrows keep their keys.
-        out.push(key_line(&format!("models {}-{} of {n} · ← → move", first + 1, first + shown), &BTreeMap::new()));
+        out.push(key_line(&format!("columns {}-{} of {m} · ← → move", first + 1, first + shown), &BTreeMap::new()));
     }
-    let top = out.len();
-    // The model row carries `‹` and `›` for models scrolled off, as the table's header does.
+    // A rule naming each topic over its columns, its name running on past a topic too narrow
+    // for it, the next topic's rule starting after. The header's lines are for every column,
+    // not those shown, so the panel keeps its height as it scrolls.
+    if cols.iter().any(|c| !c.section.is_empty()) {
+        let mut text = String::new();
+        let (mut c, mut x) = (vis.start, name_w);
+        while c < vis.end {
+            let s = cols[c].section;
+            let run = (c..vis.end).take_while(|&k| cols[k].section == s).count();
+            let end = x + widths[c..c + run].iter().map(|w| w + 2).sum::<usize>();
+            if !s.is_empty() {
+                let at = text.chars().count().max(x) + 2;
+                let name = format!("{}── {s} ", " ".repeat(at - text.chars().count()));
+                let rule = end.saturating_sub(at + 4 + s.chars().count());
+                text += &(name + &"─".repeat(rule));
+            }
+            (c, x) = (c + run, end);
+        }
+        out.push(Line::styled(text, fg(MUTED)));
+    }
+    // The labels, their last lines on the header's last, as the values under them: right
+    // aligned, Via's left.
     let edge = MORE;
-    let (mut width, mut section) = (0usize, "");
-    for (k, r) in rows.into_iter().enumerate() {
-        // A rule naming each topic above its first shown row, as wide as the model row.
-        if r.section != section {
-            section = r.section;
-            let name = format!("── {section} ");
-            let rest = width.saturating_sub(name.chars().count());
-            out.push(Line::styled(name + &"─".repeat(rest), fg(MUTED)));
+    let left = |c: usize| searched[c] == "via";
+    let h = heads.iter().map(Vec::len).max().unwrap_or(1);
+    let head_top = out.len();
+    for j in 0..h {
+        let last = j + 1 == h;
+        let name = if last { names.label.as_str() } else { "" };
+        let mut spans = vec![Span::styled(format!("{name:<name_w$}"), fg(KEY))];
+        for c in vis.clone() {
+            if last && c == first && first > 0 {
+                spans.extend([Span::styled("‹", edge), Span::raw(" ")]);
+            } else {
+                spans.push(Span::raw("  "));
+            }
+            let Some((at, piece)) = (j + heads[c].len()).checked_sub(h).map(|k| &heads[c][k]) else {
+                spans.push(Span::raw(" ".repeat(widths[c])));
+                continue;
+            };
+            let (len, w) = (piece.chars().count(), widths[c]);
+            let pad = w - len;
+            let (before, after) = if left(c) { (0, pad) } else { (pad, 0) };
+            // The search's matches in the label, on the piece of it this line holds.
+            let lit: Vec<_> = found_in(c)
+                .into_iter()
+                .filter_map(|r| {
+                    let (s, e) = (r.start.max(*at), r.end.min(at + len));
+                    (s < e).then(|| s - at + before..e - at + before)
+                })
+                .collect();
+            let text = format!("{}{piece}{}", " ".repeat(before), " ".repeat(after));
+            spans.extend(lit_at(Line::styled(text, fg(KEY)), &lit).spans);
         }
-        let label = Line::from(Span::styled(format!("{:<label_w$}", r.label), fg(KEY)));
-        let hit = found(&r.label, query);
-        if !hit.is_empty() {
-            found_on.push(out.len());
+        if last && first + shown < m {
+            spans.push(Span::styled("›", edge));
         }
-        let mut spans = lit(label, query).spans;
-        // The two cells between models are the right bar of the cursor on the one and its left
-        // bar on the next, blank off it, so a model's cells stay where they are.
-        let bar = |on: bool, bar: &'static str| if on { Span::styled(bar, EDGE) } else { Span::raw(" ") };
-        for (i, c) in r.cells.into_iter().enumerate().skip(first).take(shown) {
+        out.push(Line::from(spans));
+    }
+    // Each label, from the gap before it, sorts by its column on a click.
+    let mut x = name_w;
+    for c in vis.clone() {
+        spots.push(Spot { lines: head_top..out.len(), x: x + 1..x + 2 + widths[c], at: Stop::CompareCol(c) });
+        x += widths[c] + 2;
+    }
+    // The rule under the header, heavy under the cursor's column, as in the table. With columns
+    // off screen the panel takes the whole width, so it keeps its size as it scrolls.
+    let width = if shown < m { avail } else { name_w + vis.clone().map(|c| widths[c] + 2).sum::<usize>() };
+    let at = name_w + vis.clone().take_while(|&c| c != col).map(|c| widths[c] + 2).sum::<usize>() + 2;
+    let heavy = if vis.contains(&col) { widths[col] } else { 0 };
+    out.push(Line::from(vec![
+        Span::styled("─".repeat(at.min(width)), fg(MUTED)),
+        Span::styled("━".repeat(heavy), fg(ACCENT)),
+        Span::styled("─".repeat(width.saturating_sub(at + heavy)), fg(MUTED)),
+    ]));
+    let top = out.len();
+    for (i, model) in models.iter().enumerate() {
+        let plain = if muted[i] { fg(MUTED) } else { Style::new() };
+        let name = &names.cells[i];
+        let mut spans = vec![Span::styled(format!("{name}{}", " ".repeat(name_w - cell_w(name))), plain)];
+        for c in vis.clone() {
+            let r = &cols[c];
+            let cell = r.cells[i].as_str();
             let style = match r.ext.and_then(|e| Some((e, r.vals[i]?))) {
                 _ if muted[i] => fg(MUTED),
                 // A list price, as in the table: not one you'd pay.
@@ -4048,56 +4197,40 @@ fn compare(
                 Some(((_, worst), v)) if v == worst => fg(BAD),
                 _ => Style::new(),
             };
-            if k == 0 && i == first && first > 0 {
-                spans.push(Span::styled("‹", edge));
+            let pad = " ".repeat(widths[c] - cell_w(cell));
+            spans.push(Span::raw("  "));
+            if left(c) {
+                if muted[i] {
+                    spans.push(Span::styled(cell.to_string(), style));
+                } else {
+                    spans.extend(via_spans(model, any, get(model).is_some(), cell, &store.via_not, style));
+                }
+                spans.push(Span::raw(pad));
             } else {
-                spans.push(bar(i > first && i - 1 == sel, "▐"));
-            }
-            spans.push(bar(i == sel, "▌"));
-            let style = if i == sel { style.bg(CURSOR) } else { style };
-            let pad = " ".repeat(widths[i] - Span::raw(c.as_str()).width());
-            if r.label == "via" && !muted[i] {
-                spans.push(Span::styled(pad, style));
-                spans.extend(via_spans(models[i], any, get(models[i]).is_some(), &c, via_not, style));
-            } else {
-                spans.push(Span::styled(pad + &c, style));
+                spans.push(Span::styled(pad + cell, style));
             }
         }
-        spans.push(bar(first + shown == sel + 1, "▐"));
-        if k == 0 && first + shown < n {
-            spans.push(Span::styled("›", edge));
-        }
-        let line = Line::from(spans);
-        if k == 0 {
-            // A rule under the model row, as under the table's header.
-            width = line.width();
-            out.extend([line, Line::styled("─".repeat(width), fg(MUTED))]);
-        } else {
-            out.push(line);
-        }
+        spots.push(Spot { lines: out.len()..out.len() + 1, x: 0..usize::MAX, at: Stop::Compare(i) });
+        out.push(Line::from(spans));
     }
-    // Each model's cells follow the cell before it, `‹` or the bar of the one before; the `‹`
-    // and `›` are no model's, as in the table's header.
-    let mut x = label_w + 1;
-    for (i, w) in widths.iter().enumerate().skip(first).take(shown) {
-        spots.push(Spot { lines: top..out.len(), x: x..x + w + 2, at: Stop::Compare(i) });
-        x += w + 2;
-    }
-    (out, first, found_on)
+    Compared { lines: out, col, first, shown, hits: hits.len(), at: top + sel }
 }
 
 /// The verdict as a small table: question, winner in green, margin dimmed.
-fn verdict_lines(models: &[&Model]) -> Vec<Line<'static>> {
-    let rows = verdict(models);
+/// A task's models that do not fit in `width` go on under the first, indented to it.
+fn verdict_lines(models: &[&Model], store: &Store, width: usize) -> Vec<Line<'static>> {
+    let rows = verdict(models, store);
     let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
     let (w0, w1) = (w(0), w(1));
+    let glue = Span::styled(" · ", fg(MUTED));
     rows.into_iter()
-        .map(|[q, win, margin]| {
-            Line::from(vec![
+        .flat_map(|[q, win, margin]| {
+            let label = vec![
                 Span::styled(format!("  {q:<w0$}  "), fg(KEY)),
                 Span::styled(format!("{win:<w1$}  "), fg(GOOD).add_modifier(BOLD)),
-                Span::styled(margin, fg(MUTED)),
-            ])
+            ];
+            let items = margin.split(" · ").map(|m| Line::styled(m.to_string(), fg(MUTED))).collect();
+            wrapped(label, items, &glue, width)
         })
         .collect()
 }
@@ -4559,20 +4692,19 @@ mod tests {
         let (buf, lines) = render(&mut a, 203, 5);
         assert_eq!(buf[(cell(&lines[opus as usize], "★"), opus)].fg, STAR, "{lines:?}");
         a.term_bg = None;
-        // In compare its column is muted.
+        // In compare its row is muted.
         let rows = compare(
             &a.marked_models(),
-            (a.any_available(), &|_| None, &[]),
-            (0, 0),
-            200,
+            (a.any_available(), &|_| None, &a.store),
+            (0, (0, 0), None),
+            (200, None),
             "",
             |m| a.muted(m),
             &mut vec![],
         )
-        .0;
-        let names = rows.iter().find(|l| l.to_string().starts_with("model ")).unwrap();
-        let opus = names.spans.iter().find(|s| s.content.contains("opus")).unwrap();
-        assert_eq!(opus.style.fg, Some(MUTED), "{names:?}");
+        .lines;
+        let row = rows.iter().rfind(|l| l.to_string().contains("opus")).unwrap();
+        assert!(row.spans.iter().all(|s| s.content.trim().is_empty() || s.style.fg == Some(MUTED)), "{row:?}");
         // Back in the available view it shows only for being marked, and says so.
         a.key(KeyCode::Char('m').into());
         let (_, lines) = render(&mut a, 203, 5);
@@ -5552,69 +5684,131 @@ mod tests {
     fn compare_colours_every_tied_cell() {
         let mk = |n: &str, context| Model { name: n.into(), context, ..Default::default() };
         let (a, b, c) = (mk("a", 1_000_000), mk("b", 200_000), mk("c", 200_000));
-        let lines = compare(&[&a, &b, &c], (false, &|_| None, &[]), (0, 0), 200, "", |_| false, &mut vec![]).0;
-        let ctx = lines.iter().find(|l| l.to_string().starts_with("context")).unwrap();
-        let fgs: Vec<_> =
-            ctx.spans.iter().filter(|s| s.content.trim().ends_with(['M', 'k'])).map(|s| s.style.fg).collect();
-        assert_eq!(fgs, [Some(GOOD), Some(BAD), Some(BAD)], "{ctx:?}");
+        let lines = compare(
+            &[&a, &b, &c],
+            (false, &|_| None, &Store::default()),
+            (0, (0, 0), None),
+            (200, None),
+            "",
+            |_| false,
+            &mut vec![],
+        )
+        .lines;
+        let fgs: Vec<_> = lines[lines.len() - 3..]
+            .iter()
+            .map(|l| l.spans.iter().find(|s| s.content.trim().ends_with(['M', 'k'])).unwrap().style.fg)
+            .collect();
+        assert_eq!(fgs, [Some(GOOD), Some(BAD), Some(BAD)], "a column per value, a row per model");
         // A harness left out in Via is grey, as in the table.
         let m = Model { name: "m".into(), via: vec!["codex".into(), "pi".into()], ..Default::default() };
-        let lines = compare(&[&m], (false, &|_| None, &["codex".into()]), (0, 0), 200, "", |_| false, &mut vec![]).0;
-        let via = lines.iter().find(|l| l.to_string().starts_with("via")).unwrap();
-        let fg = |h: &str| via.spans.iter().find(|s| s.content == h).map(|s| s.style.fg);
-        assert_eq!((fg("codex"), fg("pi")), (Some(Some(MUTED)), Some(None)), "{via:?}");
+        let mut store = Store::default();
+        store.via_not = vec!["codex".into()];
+        let lines =
+            compare(&[&m], (false, &|_| None, &store), (0, (0, 0), None), (200, None), "", |_| false, &mut vec![])
+                .lines;
+        let row = lines.last().unwrap();
+        let fg = |h: &str| row.spans.iter().find(|s| s.content == h).map(|s| s.style.fg);
+        assert_eq!((fg("codex"), fg("pi")), (Some(Some(MUTED)), Some(None)), "{row:?}");
     }
 
     #[test]
-    fn compare_scrolls_models_sideways() {
+    fn a_verdict_too_wide_goes_on_under_itself() {
+        let offer = |p: f64| Offer { input: p, output: p, ..Default::default() };
+        let mk = |n: &str, coding: f64, p: f64| Model {
+            name: n.into(),
+            fit: [("coding".to_string(), coding)].into(),
+            offers: vec![offer(p)],
+            ..Default::default()
+        };
+        let ms = [mk("big", 90.0, 10.0), mk("mid", 70.0, 5.0), mk("small", 50.0, 1.0)];
+        let ms: Vec<&Model> = ms.iter().collect();
+        let lines: Vec<String> = verdict_lines(&ms, &Store::default(), 40).iter().map(Line::to_string).collect();
+        let at = lines.iter().position(|l| l.trim_start().starts_with("coding")).unwrap();
+        assert!(lines[at].ends_with(" ·") && lines[at + 1].trim_start().starts_with("mid"), "{lines:#?}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 40), "{lines:#?}");
+    }
+
+    #[test]
+    fn compare_wraps_labels_over_the_header() {
+        assert_eq!(wrap_label("$ cached in / 1M", 8), [(0, "$ cached".into()), (9, "in / 1M".into())]);
+        assert_eq!(wrap_label("terminalbench_scicode_mean", 14)[0].1, "terminalbench_", "a word breaks after _");
+        assert_eq!(wrap_label("context", 3), [(0, "context".into())], "a word longer than the width keeps its line");
+    }
+
+    #[test]
+    fn compare_sorts_by_a_column() {
+        let mut a = app();
+        a.store.marked = vec!["opus".into(), "flash".into()];
+        a.rebuild();
+        let keys = |a: &App| a.compare_models().iter().map(|m| m.key.clone()).collect::<Vec<_>>();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+        a.key(KeyCode::Char('C').into());
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        assert_eq!(keys(&a), ["opus", "flash"], "in the order they were selected");
+        // The first column is the price: cheapest first, the cursor staying on its model.
+        a.key(KeyCode::Char('s').into());
+        assert_eq!((keys(&a), a.current().unwrap().key.as_str()), (vec!["flash".into(), "opus".into()], "opus"));
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let screen = text(term.backend().buffer()).join("\n");
+        assert!(screen.contains("▲price"), "{screen}");
+        a.key(KeyCode::Char('s').into());
+        assert_eq!(keys(&a), ["opus", "flash"], "again reverses");
+        a.key(KeyCode::Char('$').into());
+        assert_eq!(a.compare_col, a.compare_cols() - 1, "$ to the last column");
+        a.mouse(Mouse::Open(Stop::CompareCol(4)));
+        assert_eq!(a.compare_col, 4, "a click on a label sorts by it");
+        assert!(a.compare_sort.as_ref().is_some_and(|s| s.0 != "$ in / 1M"));
+    }
+
+    #[test]
+    fn compare_scrolls_columns_sideways() {
         let a = app();
         let ms: Vec<&Model> =
             ["opus", "flash"].iter().map(|k| a.data.models.iter().find(|m| m.key == *k).unwrap()).collect();
-        let row = |v: &Vec<Line>| v.iter().find(|l| l.to_string().starts_with("model ")).unwrap().to_string();
-        let (full, first, _) = compare(&ms, (false, &|_| None, &[]), (1, 1), 200, "", |_| false, &mut vec![]);
-        assert!(row(&full).contains("opus") && row(&full).contains("flash"));
-        assert_eq!(first, 0, "everything fits, so nothing scrolls off");
-        assert!(!row(&full).contains('‹') && !row(&full).contains('›'), "no scroll marks when all fit");
-        let mut spots = vec![];
-        let (cut, first, _) = compare(&ms, (false, &|_| None, &[]), (1, 0), 20, "", |_| false, &mut spots);
-        let edge = row(&cut).chars().position(|c| c == '‹').unwrap();
-        assert_eq!(spots[0].x.start, edge + 1, "a click on ‹ is on no model");
-        assert!(!row(&cut).contains("opus") && row(&cut).contains("flash"), "scrolls to show the selection");
-        assert_eq!(first, 1);
-        assert!(cut.iter().any(|l| l.to_string().starts_with("models 2-2 of 2")));
-        assert!(row(&cut).contains('‹') && !row(&cut).contains('›'), "‹ marks models off to the left");
-        let (past, first, _) = compare(&ms, (false, &|_| None, &[]), (7, 0), 20, "", |_| false, &mut vec![]);
-        assert!(row(&past).contains("flash") && first == 1, "a cursor past the models lands on the last");
-        let mut spots = vec![];
-        let (back, first, _) = compare(&ms, (false, &|_| None, &[]), (0, 1), 20, "", |_| false, &mut spots);
-        assert_eq!(spots[0].x.end, row(&back).chars().count() - 1, "nor on ›");
-        assert!(row(&back).contains("opus") && !row(&back).contains("flash"));
-        assert_eq!(first, 0);
-        assert!(row(&back).ends_with("opus▐›") && !row(&back).contains('‹'), "› marks models off to the right");
-        assert!(row(&back).contains('▌'), "the cursor's left bar, before the model's column");
-        // The model under the cursor keeps its colours on the fill, between the two bars.
-        let eci = back.iter().find(|l| l.to_string().starts_with("ECI")).unwrap();
-        let cur = eci.spans.iter().find(|s| s.style.bg == Some(CURSOR) && s.content.contains("150")).unwrap();
-        assert_eq!(cur.style.fg, Some(GOOD), "{eci:?}");
-        let labels = |v: &Vec<Line>| {
-            v.iter()
-                .map(Line::to_string)
-                .filter(|l| l.contains("  ") || l.contains('▌'))
-                .map(|l| l.split("  ").next().unwrap().split('▌').next().unwrap().trim().to_string())
-                .collect::<Vec<_>>()
+        let draw = |col, avail, query, jump| {
+            let mut spots = vec![];
+            let at = (1, (col, 0), jump);
+            let c =
+                compare(&ms, (false, &|_| None, &Store::default()), at, (avail, None), query, |_| false, &mut spots);
+            (c, spots)
         };
-        let rule = full.iter().position(|l| l.to_string().starts_with("model ")).unwrap() + 1;
-        assert!(full[rule].to_string().chars().all(|c| c == '─'), "a rule under the model row, as in the table");
-        let topics: Vec<String> = full.iter().map(Line::to_string).filter(|l| l.starts_with("── ")).collect();
-        assert!(topics[0].starts_with("── scores ─"), "{topics:?}");
-        assert!(topics.iter().all(|t| t.chars().count() == full[rule].width()), "topic rules span the model row");
-        let (some, _, on) = compare(&ms, (false, &|_| None, &[]), (0, 0), 200, "eci", |_| false, &mut vec![]);
-        assert_eq!(labels(&some), labels(&full), "a search keeps every row");
-        assert_eq!(on.len(), 1);
-        assert!(some[on[0]].to_string().starts_with("ECI"), "and says the line it found");
-        let (_, _, on) = compare(&ms, (false, &|_| None, &[]), (0, 0), 200, "ntext", |_| false, &mut vec![]);
-        let (_, _, typo) = compare(&ms, (false, &|_| None, &[]), (0, 0), 200, "contxt", |_| false, &mut vec![]);
-        assert_eq!((on.len(), typo.len()), (1, 0), "text anywhere in a label, as details find it, and no typo");
+        let head = |c: &Compared| c.lines[c.at - 3].to_string();
+        let (full, spots) = draw(0, 200, "", None);
+        assert_eq!((full.first, full.lines.len()), (0, full.at + 1), "everything fits, flash's row last");
+        assert!(full.lines[full.at].to_string().starts_with("flash"), "the cursor's row");
+        assert!(!full.lines.iter().any(|l| l.to_string().contains(['‹', '›'])), "no scroll marks when all fit");
+        assert_eq!(
+            spots
+                .iter()
+                .filter(|s| matches!(s.at, Stop::Compare(_)))
+                .map(|s| (s.lines.start, s.at))
+                .collect::<Vec<_>>(),
+            [(full.at - 1, Stop::Compare(0)), (full.at, Stop::Compare(1))]
+        );
+        let label = spots.iter().find(|s| s.at == Stop::CompareCol(0)).unwrap();
+        assert_eq!(label.lines.end, full.at - 2, "a column's label, over the rule, is its spot");
+        let rule = &full.lines[full.at - 2];
+        assert!(
+            rule.to_string().starts_with("───────━━━"),
+            "a rule under the header, heavy under the cursor's column: {rule}"
+        );
+        assert!(full.lines.iter().any(|l| l.to_string().contains("── index ")), "topics over their columns");
+        let (cut, _) = draw(0, 40, "", None);
+        assert!(cut.shown < full.shown && head(&cut).ends_with('›') && !head(&cut).contains('‹'), "{}", head(&cut));
+        assert!(cut.lines.iter().any(|l| l.to_string().starts_with(&format!("columns 1-{} of", cut.shown))));
+        let (moved, _) = draw(cut.shown, 40, "", None);
+        assert!(moved.first > 0 && head(&moved).contains('‹'), "the view follows the cursor, ‹ marks columns off");
+        assert_eq!(moved.col, cut.shown);
+        let size = |c: &Compared| (c.lines.len(), c.lines.iter().map(Line::width).max());
+        assert_eq!(size(&moved), size(&cut), "the panel keeps its size as it scrolls");
+        let (end, _) = draw(usize::MAX, 40, "", None);
+        assert!(!head(&end).ends_with('›') && end.first + end.shown == full.shown, "no further than the last");
+        let (found, _) = draw(0, 40, "eci", Some(0));
+        assert_eq!(found.hits, 1);
+        assert!(found.first > 0 && found.col > 0, "a match moves the cursor to its column");
+        let lit = found.lines.iter().flat_map(|l| &l.spans).any(|s| s.content == "ECI" && s.style != fg(KEY));
+        assert!(lit, "and its label is drawn as found");
+        assert_eq!((draw(0, 200, "ntext", None).0.hits, draw(0, 200, "contxt", None).0.hits), (1, 0), "no typo");
     }
 
     /// One check per defect a review found in the drawing.
@@ -5967,9 +6161,9 @@ mod tests {
         a.rebuild();
         type_in(&mut a, "C/eci");
         a.key(KeyCode::Enter.into());
-        assert_eq!(status(&mut a), "line 1 of 1", "compare's rows, by their labels");
+        assert_eq!(status(&mut a), "column 1 of 1", "compare's columns, by their labels");
         type_in(&mut a, "/contxt");
-        assert_eq!(status(&mut a), "no line matches contxt", "plain text, as every panel finds it");
+        assert_eq!(status(&mut a), "no column matches contxt", "plain text, as every panel finds it");
     }
 
     #[test]
@@ -6114,8 +6308,16 @@ mod tests {
         let lines = detail(&m, &store, true, (None, None)).1;
         let fg = |h: &str| lines.iter().flat_map(|l| &l.spans).find(|s| s.content == h).map(|s| s.style.fg);
         assert_eq!((fg("codex"), fg("pi")), (Some(Some(MUTED)), Some(None)), "{lines:?}");
-        let rows =
-            compare(&a.marked_models(), (a.any_available(), &|_| None, &[]), (0, 0), 200, "", |_| false, &mut vec![]).0;
+        let rows = compare(
+            &a.marked_models(),
+            (a.any_available(), &|_| None, &a.store),
+            (0, (0, 0), None),
+            (200, None),
+            "",
+            |_| false,
+            &mut vec![],
+        )
+        .lines;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
         assert!(rows.iter().any(|l| l.to_string().starts_with("model")));
     }

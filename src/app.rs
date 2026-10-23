@@ -505,7 +505,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("j", "down (or `↓`), a count repeats it, `3j` goes down 3 rows"),
             ("k", "up (or `↑`)"),
-            ("h", "column left (or `←`), previous model or tier in compare and recommend"),
+            ("h", "column left (or `←`), previous tier in recommend"),
             ("l", "column right (or `→`)"),
             ("_", "first column (or `0`)"),
             ("$", "last column"),
@@ -1176,8 +1176,8 @@ pub enum Mouse {
     /// Click on a `▲` `▼`: rows to move, a page each way, as `PgUp` `PgDn`. Under a prompt it is
     /// a click, which leaves it, where the wheel is still.
     Page(isize),
-    /// Click on a `‹` `›` in compare or recommend: models to move, a screen of them each way in
-    /// compare, one in recommend.
+    /// Click on a `‹` `›` in compare or recommend: compare's columns to move, a screen of them
+    /// each way, or one of recommend's models.
     Across(isize),
     /// Click on the table's `‹` `›`: the `hscroll` and cursor column to page to, as `layout` worked
     /// them out.
@@ -1215,6 +1215,8 @@ pub enum Mouse {
 pub enum Stop {
     /// Model `i` in compare.
     Compare(usize),
+    /// The label of column `i` in compare: a click sorts by it.
+    CompareCol(usize),
     /// Stop `i` of task `t` in recommend: 0 its name and the rest of its row, else its tier `i - 1`.
     Recommend(usize, usize),
     /// Tab `i` on recommend's `among` line.
@@ -1414,10 +1416,17 @@ pub struct App {
     pub scroll: u16,
     /// The row of `HELP` under the cursor in `?`.
     pub help_sel: usize,
-    /// The model under the cursor in the compare view, moved with `h l`.
+    /// The model under the cursor in the compare view, a row, moved with `j k`.
     pub compare_sel: usize,
-    /// First model the compare view shows, set by the renderer so the cursor stays in view.
+    /// The column under the cursor in the compare view, moved with `h l`.
+    pub compare_col: usize,
+    /// The label of the column compare is sorted by, and whether highest first, as `descending`.
+    /// None keeps the order the models were selected in.
+    pub compare_sort: Option<(String, bool)>,
+    /// First column the compare view shows, set by the renderer so the cursor's stays in view.
     pub compare_x: usize,
+    /// How many columns the compare view shows, a screen for a click on `‹` `›`.
+    pub compare_shown: usize,
     /// Where the renderer drew each model of the compare or recommend overlay, and the click on it.
     pub spots: Vec<(ratatui::layout::Rect, Stop)>,
     /// Where the last draw put each `‹` `›` `▲` `▼`, and the scroll a click on it does.
@@ -1518,7 +1527,10 @@ impl App {
             scroll: 0,
             help_sel: 0,
             compare_sel: 0,
+            compare_col: 0,
+            compare_sort: None,
             compare_x: 0,
+            compare_shown: 0,
             spots: vec![],
             more: vec![],
             panel: None,
@@ -1787,8 +1799,8 @@ impl App {
     /// the one a tier of the task picks in recommend, where a task's name has none.
     pub fn current(&self) -> Option<&Model> {
         if self.view == View::Compare {
-            let marked = self.marked_models();
-            return marked.get(self.compare_sel.min(marked.len().saturating_sub(1))).copied();
+            let shown = self.compare_models();
+            return shown.get(self.compare_sel.min(shown.len().saturating_sub(1))).copied();
         }
         if self.view == View::Recommend {
             if self.among.is_some() || self.caps {
@@ -1805,15 +1817,15 @@ impl App {
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
     }
 
-    /// How many stops the open overlay's sideways cursor moves over: compare's models, the
-    /// task's name and its tiers in recommend.
+    /// How many stops recommend's sideways cursor moves over: the task's name and its tiers.
     fn across_len(&self) -> usize {
-        match self.view {
-            View::Compare => self.marked_shown,
-            _ if self.one_pick(self.task_cur) => 2,
+        if self.one_pick(self.task_cur) {
+            2
+        } else if self.on_new_task() {
             // `+ new task` has no tiers.
-            _ if self.on_new_task() => 1,
-            _ => 1 + TIERS.len(),
+            1
+        } else {
+            1 + TIERS.len()
         }
     }
 
@@ -1908,11 +1920,6 @@ impl App {
         custom_line(self.data.models.iter().filter(|m| self.usable(m)), &self.store, task)
     }
 
-    /// The sideways model cursor of the open overlay: compare's, else recommend's.
-    fn across_sel(&mut self) -> &mut usize {
-        if self.view == View::Compare { &mut self.compare_sel } else { &mut self.task_sel }
-    }
-
     /// Rows of the visual range, in order.
     pub fn visual_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
         let (a, b) = (self.visual?, self.selected());
@@ -1969,6 +1976,36 @@ impl App {
 
     pub fn marked_models(&self) -> Vec<&Model> {
         self.store.marked.iter().filter_map(|k| self.data.models.iter().find(|m| m.key == *k)).collect()
+    }
+
+    /// The models compare shows, sorted by its column.
+    pub fn compare_models(&self) -> Vec<&Model> {
+        let marked = self.marked_models();
+        let Some((label, desc)) = &self.compare_sort else { return marked };
+        let cols = view::compare_cols(&marked, self.any_available(), &|m| self.download(m)).1;
+        view::compare_sorted(marked, &cols, (label, *desc))
+    }
+
+    /// How many columns compare has, which depends on the data its models have.
+    pub fn compare_cols(&self) -> usize {
+        view::compare_cols(&self.marked_models(), self.any_available(), &|m| self.download(m)).1.len()
+    }
+
+    /// `s` in compare: sort by the cursor's column, best first, and again to reverse, the
+    /// cursor staying on its model.
+    fn sort_compare(&mut self) {
+        let marked = self.marked_models();
+        let cols = view::compare_cols(&marked, self.any_available(), &|m| self.download(m)).1;
+        let Some(c) = cols.get(self.compare_col.min(cols.len().saturating_sub(1))) else { return };
+        // Best first: numbers by which is better, text A-Z.
+        let desc = match &self.compare_sort {
+            Some((l, d)) if *l == c.label => !d,
+            _ => c.higher,
+        };
+        let sort = Some((c.label.clone(), desc));
+        let key = self.current().map(|m| m.key.clone());
+        self.compare_sort = sort;
+        self.compare_sel = self.compare_models().iter().position(|m| Some(&m.key) == key.as_ref()).unwrap_or(0);
     }
 
     /// Whether any model is marked, so `S` has something to show: a kept mark of a model the
@@ -3201,6 +3238,8 @@ impl App {
             self.select(go(self.selected(), self.rows.len()));
         } else if self.view == View::Help {
             self.help_sel = go(self.help_sel, help_rows().count());
+        } else if self.view == View::Compare {
+            self.compare_sel = go(self.compare_sel, self.marked_shown);
         } else if self.view == View::Recommend {
             // The `among` line comes before the tiers' header, and that before the first task,
             // `+ new task` after the last.
@@ -3311,6 +3350,8 @@ impl App {
             self.select(row);
         } else if self.view == View::Help {
             self.help_sel = row.min(help_rows().count() - 1);
+        } else if self.view == View::Compare {
+            self.compare_sel = row.min(self.marked_shown.saturating_sub(1));
         } else if self.view == View::Recommend {
             self.task_to(row.min(self.task_count()));
         } else {
@@ -3764,13 +3805,19 @@ impl App {
                 }
             };
         }
-        // The sideways wheel moves the model cursor wherever h and l do.
+        // The sideways wheel does what h and l do: compare's columns, recommend's model cursor.
         if let (View::Compare | View::Recommend, Input::None, Mouse::Cols(n)) = (&self.view, &self.input, &m) {
             return self.table_key(KeyCode::Char(if *n < 0 { 'h' } else { 'l' }), n.abs());
         }
         if let (Input::None, Mouse::Model(s) | Mouse::Open(s) | Mouse::MarkModel(s)) = (&self.input, m) {
             match (s, &self.view) {
                 (Stop::Compare(i), View::Compare) => self.compare_sel = i,
+                // A click on a column's label sorts by it, as on the table's header.
+                (Stop::CompareCol(c), View::Compare) => {
+                    self.compare_col = c;
+                    self.sort_compare();
+                    return None;
+                }
                 (Stop::Recommend(t, i), View::Recommend) => {
                     (self.task_cur, self.task_sel, self.among, self.caps) = (t, i, None, false);
                 }
@@ -4056,8 +4103,10 @@ impl App {
             || matches!(self.view, View::Detail(_))
             || (self.view == View::Recommend && self.current().is_some())
             || (self.view == View::Compare && self.marked_shown >= 2);
-        // Compare and recommend move a model cursor sideways, wrapping, instead of the column.
-        let across = matches!(self.view, View::Compare | View::Recommend);
+        // Recommend moves a model cursor sideways, wrapping, instead of the column, and compare
+        // its column cursor.
+        let across = self.view == View::Recommend;
+        let compare = self.view == View::Compare;
         // On recommend's `among` line the cursor runs over the tabs, and enter or space picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
         let caps = self.view == View::Recommend && among.is_none() && self.caps;
@@ -4125,13 +4174,21 @@ impl App {
             KeyCode::Char('l') | KeyCode::Right if table => self.col = step_col(self.col, n),
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if across => {
                 let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
-                let (len, sel) = (self.across_len(), self.across_sel());
-                *sel = step((*sel).min(len.saturating_sub(1)), n, len);
+                let len = self.across_len();
+                self.task_sel = step(self.task_sel.min(len.saturating_sub(1)), n, len);
             }
+            KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if compare => {
+                let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
+                let len = self.compare_cols();
+                self.compare_col = step(self.compare_col.min(len.saturating_sub(1)), n, len);
+            }
+            KeyCode::Char('0' | '_') if compare => self.compare_col = 0,
+            KeyCode::Char('$') if compare => self.compare_col = self.compare_cols().saturating_sub(1),
+            KeyCode::Char('s') if compare && self.marked_shown >= 2 => self.sort_compare(),
             KeyCode::Char('0' | '_') if table => self.col = 0,
             KeyCode::Char('$') if table => self.col = step_col(0, -1),
-            KeyCode::Char('0' | '_') if across => *self.across_sel() = 0,
-            KeyCode::Char('$') if across => *self.across_sel() = self.across_len().saturating_sub(1),
+            KeyCode::Char('0' | '_') if across => self.task_sel = 0,
+            KeyCode::Char('$') if across => self.task_sel = self.across_len().saturating_sub(1),
             KeyCode::Char('w') if table => {
                 let (starts, last) = (group_starts(), step_col(0, -1));
                 for _ in 0..n {
@@ -4411,8 +4468,7 @@ impl App {
                 self.view = View::Compare;
                 self.overlay_query.clear();
                 self.scroll = 0;
-                self.compare_sel = 0;
-                self.compare_x = 0;
+                (self.compare_sel, self.compare_col, self.compare_x) = (0, 0, 0);
                 return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
@@ -7663,9 +7719,9 @@ mod tests {
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, "gpt55"), "esc lands on it");
         a.store.marked = vec!["gpt55".into(), "mini".into()];
         a.rebuild();
-        press(&mut a, "Cl");
+        press(&mut a, "Cj");
         assert_eq!(a.selected(), row(&a, "mini"), "compare's too");
-        press(&mut a, "h");
+        press(&mut a, "k");
         assert_eq!(a.selected(), row(&a, "gpt55"));
     }
 
@@ -7722,20 +7778,29 @@ mod tests {
         assert_eq!(a.rows.len(), 3);
         press(&mut a, "C");
         assert_eq!(a.view, View::Compare);
-        press(&mut a, "ll");
-        assert_eq!(a.compare_sel, 0, "l moves over the models and wraps");
+        press(&mut a, "jj");
+        assert_eq!(a.compare_sel, 0, "j moves down the models and wraps");
+        press(&mut a, "k");
+        assert_eq!(a.compare_sel, 1, "k wraps the other way");
+        press(&mut a, "gg");
+        assert_eq!(a.compare_sel, 0, "gg goes to the first model");
+        press(&mut a, "G");
+        assert_eq!(a.compare_sel, 1, "G to the last");
+        let last = a.compare_cols() - 1;
+        press(&mut a, "3l");
+        assert_eq!((a.compare_sel, a.compare_col), (1, 3), "l moves the column cursor");
         press(&mut a, "h");
-        assert_eq!(a.compare_sel, 1, "h wraps the other way");
-        press(&mut a, "0");
-        assert_eq!(a.compare_sel, 0, "0 picks the first model");
+        assert_eq!(a.compare_col, 2, "h back");
         press(&mut a, "$");
-        assert_eq!(a.compare_sel, 1, "$ picks the last model");
+        assert_eq!(a.compare_col, last, "$ to the last column");
+        press(&mut a, "l");
+        assert_eq!(a.compare_col, 0, "and from there l to the first, as in the table");
         press(&mut a, "2");
         a.mouse(Mouse::Model(Stop::Compare(0)));
         assert_eq!((&a.view, a.compare_sel), (&View::Compare, 0), "a click moves to the model");
-        press(&mut a, "l");
+        press(&mut a, "j");
         assert_eq!(a.compare_sel, 1, "and drops a count typed before it");
-        press(&mut a, "h");
+        press(&mut a, "k");
         a.mouse(Mouse::Open(Stop::Compare(1)));
         assert_eq!(
             (&a.view, a.current().unwrap().key.as_str()),
@@ -8135,7 +8200,7 @@ mod tests {
     #[test]
     fn a_refresh_that_drops_models_keeps_the_cursors_valid() {
         let mut a = app();
-        press(&mut a, " j C$");
+        press(&mut a, " j CG");
         assert_eq!((&a.view, a.compare_sel), (&View::Compare, 1));
         let one = Data { models: a.data.models.drain(..1).collect(), ..Data::default() };
         a.refreshed(Ok(one), tools());

@@ -7,7 +7,7 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 ## Columns
 
 One row per model. In the TUI, move the column cursor and the top border says what the column
-means. Green and red mark the best and worst value in a column, and in a row of compare.
+means. Green and red mark the best and worst value in a column, here and in compare.
 
 | Column | What it is |
 |---|---|

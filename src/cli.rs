@@ -811,7 +811,7 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
     if json {
         return print_json(&models.iter().map(|m| out(m, store, data.any_available(), true)).collect::<Vec<_>>());
     }
-    let rows = verdict(&models);
+    let rows = verdict(&models, store);
     let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
     let (w0, w1) = (w(0), w(1));
     println!("verdict:");
