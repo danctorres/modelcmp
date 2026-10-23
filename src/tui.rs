@@ -721,14 +721,12 @@ fn paint(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), String> {
 /// wheel.
 /// Found on the screen, as compare's are in its lines' spans and land where those do.
 fn more_at(buf: &Buffer) -> Vec<(u16, u16, Mouse)> {
-    let a = buf.area;
-    (a.top()..a.bottom())
-        .flat_map(|y| (a.left()..a.right()).map(move |x| (x, y)))
-        .filter_map(|(x, y)| {
-            let cell = &buf[(x, y)];
+    (buf.content.iter().enumerate())
+        .filter_map(|(i, cell)| {
             if (Some(cell.fg), Some(cell.bg)) != (MORE.fg, MORE.bg) || !cell.modifier.contains(BOLD) {
                 return None;
             }
+            let (x, y) = buf.pos_of(i);
             let m = match cell.symbol() {
                 "▲" => Mouse::Scroll(-3),
                 "▼" => Mouse::Scroll(3),
