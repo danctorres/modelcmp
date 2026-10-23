@@ -19,14 +19,14 @@ use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, detail_rows, hits, level,
     level_label, short, truncate, verdict, via_names, via_text,
 };
-use ratatui::buffer::{Buffer, Cell};
+use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode,
     KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::{Alignment, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
@@ -1358,7 +1358,7 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
     // Not over the frame's right corner, nor past it; nor, on its border, over the sort.
     let put = |buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style| {
         let end = frame.right().saturating_sub(1 + if y == frame.y { sort_w } else { 0 });
-        buf.set_stringn(x, y, text, usize::from(end.saturating_sub(x)), style);
+        put(buf, x, y, text, usize::from(end.saturating_sub(x)), style);
     };
     let panel = (RECOMMEND..TABS.len()).any(|i| app.tab_on(i));
     let (y, mut x, mut before, mut span) = (frame.y - 1, frame.x + 1, false, None::<(u16, u16)>);
@@ -1539,6 +1539,36 @@ const fn fg(c: Color) -> Style {
     Style::new().fg(c)
 }
 
+/// `Buffer::set_stringn`, a few times quicker for printable ASCII and a glyph of one cell, most of
+/// what is drawn: each char is one cell, with no graphemes to find.
+fn put(buf: &mut Buffer, x: u16, y: u16, s: impl AsRef<str>, max: usize, style: impl Into<Style>) -> (u16, u16) {
+    let (s, style) = (s.as_ref(), style.into());
+    let room = usize::from(buf.area.right().saturating_sub(x)).min(max);
+    if !plain(s) {
+        // A glyph of one cell, as a mark or a `│` is.
+        let mut chars = s.chars();
+        if let (Some(c), None) = (chars.next(), chars.next())
+            && !c.is_control()
+            && s.cell_width() == 1
+        {
+            if room == 0 {
+                return (x, y);
+            }
+            buf[(x, y)].set_symbol(s).set_style(style);
+            return (x + 1, y);
+        }
+        return buf.set_stringn(x, y, s, max, style);
+    }
+    let n = room.min(s.len());
+    if n > 0 {
+        let i = buf.index_of(x, y);
+        for (c, b) in buf.content[i..i + n].iter_mut().zip(s.bytes()) {
+            c.set_char(char::from(b)).set_style(style);
+        }
+    }
+    (x + n as u16, y)
+}
+
 /// Each cell of `r` in `buf`, a row at a time: several times quicker than cell by cell, as
 /// `Buffer::set_style` and `Clear` go.
 fn cells(buf: &mut Buffer, r: Rect, mut f: impl FnMut(&mut Cell)) {
@@ -1558,6 +1588,48 @@ fn restyle(buf: &mut Buffer, r: Rect, style: impl Into<Style>) {
     cells(buf, r, |c| {
         c.set_style(style);
     });
+}
+
+/// `s` right-aligned in `w` cells from `x`, as `put` draws `format!("{s:>w$}")`, with no string
+/// made for it.
+fn put_right(buf: &mut Buffer, x: u16, y: u16, s: &str, w: u16, style: Style) {
+    let pad = w.saturating_sub(s.chars().count() as u16);
+    cells(buf, Rect::new(x, y, pad, 1), |c| {
+        c.set_char(' ').set_style(style);
+    });
+    put(buf, x + pad, y, s, usize::from(w - pad), style);
+}
+
+/// Printable ASCII, which `put` and `put_line` draw a char to a cell.
+fn plain(s: &str) -> bool {
+    s.bytes().all(|b| (b' '..=b'~').contains(&b))
+}
+
+/// `line` in the row `area` as `Line::render` draws it, its plain spans the quick way (`put`).
+fn put_line(buf: &mut Buffer, line: &Line, area: Rect) {
+    let at = area.intersection(buf.area);
+    let width = line.width();
+    // Cut short, it is cut as ratatui cuts it.
+    if at.is_empty() || width == 0 || width > usize::from(at.width) {
+        return line.render(area, buf);
+    }
+    let at = Rect { height: 1, ..at };
+    restyle(buf, at, line.style);
+    let mut x = at.x
+        + match line.alignment {
+            Some(Alignment::Center) => (at.width - width as u16) / 2,
+            Some(Alignment::Right) => at.width - width as u16,
+            _ => 0,
+        };
+    for span in &line.spans {
+        let w = span.width() as u16;
+        if plain(&span.content) {
+            put(buf, x, at.y, &span.content, w.into(), span.style);
+        } else {
+            span.render(Rect { x, width: at.right() - x, ..at }, buf);
+        }
+        x += w;
+    }
 }
 
 /// A developer's or harness's colour, as a placeholder `recolor` resolves to one of the theme's
@@ -1668,16 +1740,16 @@ fn draw(app: &mut App, f: &mut Frame) {
             about = truncate(&text, room.max(1));
             x = start + room.saturating_sub(about.chars().count()) / 2;
         }
-        buf.set_stringn(body.x + x as u16, body.y, about, end.saturating_sub(x), fg(MUTED));
+        put(buf, body.x + x as u16, body.y, about, end.saturating_sub(x), fg(MUTED));
         let (right, above, below) = table(buf, inner, app);
         if right && inner.height > 0 {
             // Columns cut off on the right: `l` scrolls to them.
-            buf.set_stringn(body.right() - 1, inner.y, "›", 1, MORE);
+            put(buf, body.right() - 1, inner.y, "›", 1, MORE);
         }
         if inner.height > 1 {
             // The rule under the header runs into the frame.
-            buf.set_stringn(body.x, inner.y + 1, "├", 1, fg(MUTED));
-            buf.set_stringn(body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
+            put(buf, body.x, inner.y + 1, "├", 1, fg(MUTED));
+            put(buf, body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
         }
         if inner.height > head {
             vmarks(buf, body.x, inner.y + head, inner.bottom() - 1, above, below);
@@ -1763,7 +1835,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         *top = usize::from(scroll);
         // On the bottom border, as a dropdown says it, so it shows however the list scrolls.
         if none {
-            buf.set_stringn(rect.x + 2, rect.bottom() - 1, " no match ", usize::from(rect.width / 2), fg(MUTED));
+            put(buf, rect.x + 2, rect.bottom() - 1, " no match ", usize::from(rect.width / 2), fg(MUTED));
         }
         if rows > 0 {
             // The cursor runs through the box's border, as in the table, and the marks go over
@@ -2123,27 +2195,27 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     // In a terminal too narrow for both they are cut at the frame, not drawn over its border.
     let room = |x: u16, w: u16| usize::from(w.min(area.right().saturating_sub(x)));
     let (nw, dw) = (room(name_x, name_w), room(dev_x, dev_w));
-    buf.set_stringn(area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
-    buf.set_stringn(name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
-    buf.set_stringn(dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
+    put(buf, area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
+    put(buf, name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
+    put(buf, dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
     if (0..first).any(|k| !hidden(k + 1)) && name_x + name_w < area.right() {
         // Columns scrolled off to the left, Dev the first.
-        buf.set_stringn(name_x + name_w, y, "‹", 1, MORE);
+        put(buf, name_x + name_w, y, "‹", 1, MORE);
     }
     for &(i, x, w) in &cols {
         let (name, mark) = col_head(app, i + 2);
         let text = format!("{}{name}{mark}{}", arrow(i + 2), if app.menu(i + 2) { " ▾" } else { "" });
-        buf.set_stringn(area.x + x, y, format!("{text:>w$}", w = w as usize), w as usize, header(i + 2));
+        put(buf, area.x + x, y, format!("{text:>w$}", w = w as usize), w as usize, header(i + 2));
     }
     if let Some((x, w)) = via {
-        buf.set_stringn(area.x + x, y, format!("Via{} ▾", arrow(VIA)), w as usize, header(VIA));
+        put(buf, area.x + x, y, format!("Via{} ▾", arrow(VIA)), w as usize, header(VIA));
     }
     if let Some((x, w)) = notes {
-        buf.set_stringn(area.x + x, y, format!("{}{}", app.col_name(NOTES), arrow(NOTES)), w as usize, header(NOTES));
+        put(buf, area.x + x, y, format!("{}{}", app.col_name(NOTES), arrow(NOTES)), w as usize, header(NOTES));
     }
 
     for &x in &seps {
-        buf.set_stringn(area.x + x, y, "│", 1, fg(MUTED));
+        put(buf, area.x + x, y, "│", 1, fg(MUTED));
     }
     let span = |c: usize| match c {
         0 => Some((name_x, name_w)),
@@ -2171,18 +2243,18 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     let cur = span(app.col);
     // A rule parts the header from the rows, crossing the group lines.
     if area.height > 1 {
-        buf.set_stringn(area.x, y + 1, "─".repeat(area.width as usize), area.width as usize, fg(MUTED));
+        put(buf, area.x, y + 1, "─".repeat(area.width as usize), area.width as usize, fg(MUTED));
         for &x in &seps {
-            buf.set_stringn(area.x + x, y + 1, "┼", 1, fg(MUTED));
+            put(buf, area.x + x, y + 1, "┼", 1, fg(MUTED));
         }
         if let Some((x, w)) = cur {
-            buf.set_stringn(x, y + 1, "━".repeat(w as usize), w as usize, fg(ACCENT));
+            put(buf, x, y + 1, "━".repeat(w as usize), w as usize, fg(ACCENT));
         }
     }
 
     let head = head(app);
     if head > 2 && area.height > 2 {
-        buf.set_stringn(name_x, y + 2, NO_ACCESS, room(name_x, u16::MAX), fg(Color::Yellow));
+        put(buf, name_x, y + 2, NO_ACCESS, room(name_x, u16::MAX), fg(Color::Yellow));
     }
     let height = usize::from(area.height.saturating_sub(head));
     let sel = app.table.selected().unwrap_or(0).min(app.rows.len().saturating_sub(1));
@@ -2226,7 +2298,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         if on && area.x > 0 {
             cursor_ends(buf, area.x - 1, area.right(), y);
         }
-        buf.set_stringn(area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
+        put(buf, area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
         // Off, a mark is its own glyph in grey, as the ☆ is the ★'s, so it says what a click on
         // it does. Where colours are off (the reverse-video cursor, a solid fill) a grey one
         // would read as on, so there off is a shape of its own.
@@ -2234,8 +2306,8 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         match marked {
             // Bold as well as blue: on a solid fill, which keeps colours off, that is all the
             // mark has left to show itself with.
-            true => buf.set_stringn(box_x, y, "✓", 1, tint(MARK).add_modifier(BOLD)),
-            false => buf.set_stringn(box_x, y, unmarked, 1, tint(MUTED)),
+            true => put(buf, box_x, y, "✓", 1, tint(MARK).add_modifier(BOLD)),
+            false => put(buf, box_x, y, unmarked, 1, tint(MUTED)),
         };
         if app.starred(&m.key) {
             // In the colour of the task at hand, as its name in recommend; gold with no task, as the ★
@@ -2243,19 +2315,19 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             let star = tint(app.task_at_hand().map_or(STAR, |t| task_color(t.name)));
             // The gap after it takes the colour too: a font may draw the ★ wider than its cell,
             // and a terminal paints what hangs over in the next cell's colour.
-            buf.set_stringn(star_x, y, "★ ", gap(star_x), star.add_modifier(BOLD));
+            put(buf, star_x, y, "★ ", gap(star_x), star.add_modifier(BOLD));
         } else {
-            buf.set_stringn(star_x, y, "☆", 1, tint(MUTED));
+            put(buf, star_x, y, "☆", 1, tint(MUTED));
         }
         // A marked model's name is bold, as the ✓, and takes no colour: the fill says the row is
         // marked, and under the cursor the ✓ and the bold do. Out of reach, its Via says so.
         let name = if marked { text.add_modifier(BOLD) } else { text };
         // A cut name says so: "Claude Sonnet 5…" is not "Claude Sonnet 5.5" misread as "5.".
-        buf.set_stringn(name_x, y, truncate(&m.name, nw.max(1)), nw, name);
-        buf.set_stringn(dev_x, y, &m.developer, dw, soft(dev_color(&m.developer)));
+        put(buf, name_x, y, truncate(&m.name, nw.max(1)), nw, name);
+        put(buf, dev_x, y, &m.developer, dw, soft(dev_color(&m.developer)));
         for &(i, x, w) in &cols {
             let Some(v) = app.vals[r][i] else {
-                buf.set_stringn(area.x + x + w - 1, y, "-", 1, tint(MUTED));
+                put(buf, area.x + x + w - 1, y, "-", 1, tint(MUTED));
                 continue;
             };
             let listed = app.listed[r];
@@ -2273,14 +2345,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 Some((_, worst)) if !dim && v == worst => tint(BAD),
                 _ => text,
             };
-            let w = w as usize;
-            buf.set_stringn(
-                area.x + x,
-                y,
-                format!("{:>w$}", shown(i, v, listed, app.col_bench(i + crate::app::TEXT))),
-                w,
-                style,
-            );
+            put_right(buf, area.x + x, y, &shown(i, v, listed, app.col_bench(i + crate::app::TEXT)), w, style);
         }
         if let Some((x, w)) = via {
             let (start, end) = (area.x + x, area.x + x + w);
@@ -2289,10 +2354,10 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 for (j, h) in m.via.iter().enumerate() {
                     x += u16::from(j > 0);
                     let style = soft(via_color(&app.store.via_not, h));
-                    x = buf.set_stringn(x, y, short(h), end.saturating_sub(x) as usize, style).0;
+                    x = put(buf, x, y, short(h), end.saturating_sub(x) as usize, style).0;
                 }
             } else if get.is_none() {
-                buf.set_stringn(x, y, OUT_OF_REACH, w as usize, tint(MUTED).add_modifier(Modifier::ITALIC));
+                put(buf, x, y, OUT_OF_REACH, w as usize, tint(MUTED).add_modifier(Modifier::ITALIC));
             }
             // The download `x` offers, after the harnesses or alone: grey when it is too big for
             // your machine's memory, and in the text's colour when it fits, on a muted row too.
@@ -2303,20 +2368,20 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                     Some(true) if !excluded => base,
                     _ => text,
                 };
-                buf.set_stringn(x, y, get, end.saturating_sub(x) as usize, style);
+                put(buf, x, y, get, end.saturating_sub(x) as usize, style);
             }
         }
         let note = app.store.note(&m.key).unwrap_or("");
         if let Some((x, w)) = notes {
-            buf.set_stringn(area.x + x, y, note, w as usize, text.add_modifier(Modifier::ITALIC));
+            put(buf, area.x + x, y, note, w as usize, text.add_modifier(Modifier::ITALIC));
         }
         if excluded {
-            buf.set_stringn(ex_x, y, "✗ ", gap(ex_x), tint(BAD).add_modifier(BOLD));
+            put(buf, ex_x, y, "✗ ", gap(ex_x), tint(BAD).add_modifier(BOLD));
         } else {
-            buf.set_stringn(ex_x, y, included, 1, tint(MUTED));
+            put(buf, ex_x, y, included, 1, tint(MUTED));
         }
         for &x in &seps {
-            buf.set_stringn(area.x + x, y, "│", 1, tint(MUTED));
+            put(buf, area.x + x, y, "│", 1, tint(MUTED));
         }
         // What the search matched, underlined in bold; Notes may be scrolled off. On a solid
         // fill the yellow is behind the hit, as yellow text would not read there.
@@ -2452,27 +2517,27 @@ fn dropdown(
         let on = if i == 0 { picked.is_empty() && not.is_empty() } else { picked.contains(label) };
         let (unmarked, included) = if faint { ("✓ ", "✗") } else { ("☐ ", "·") };
         let (mark, style) = if on { ("✓ ", fg(MARK).add_modifier(BOLD)) } else { (unmarked, fg(MUTED)) };
-        let mut x = buf.set_stringn(inner.x + 1, y, mark, 2, style).0;
+        let mut x = put(buf, inner.x + 1, y, mark, 2, style).0;
         if matches!(col, 1 | PRICE | VIA) {
             let (s, style) = match i {
                 _ if not.contains(label) => ("✗", fg(BAD).add_modifier(BOLD)),
                 0 => (" ", fg(MUTED)),
                 _ => (included, fg(MUTED)),
             };
-            buf.set_stringn(x, y, s, 1, style);
+            put(buf, x, y, s, 1, style);
             x += 2;
         }
         let at = x;
-        let x = buf.set_stringn(x, y, format!("{label:<label_w$}  "), label_w + 2, fg(color)).0;
+        let x = put(buf, x, y, format!("{label:<label_w$}  "), label_w + 2, fg(color)).0;
         if let Some(t) = tag(col, label) {
-            buf.set_stringn(at + label.len() as u16 + 1, y, t, t.len(), fg(MUTED));
+            put(buf, at + label.len() as u16 + 1, y, t, t.len(), fg(MUTED));
         }
         // "all" is never a match.
         let hits = if i == 0 { vec![] } else { found(label, query) };
         for r in hits.into_iter().map(|r| r.start.min(label_w)..r.end.min(label_w)) {
             restyle(buf, Rect::new(at + r.start as u16, y, r.len() as u16, 1), hit_style(fg(color)));
         }
-        buf.set_stringn(x, y, format!("{n:>n_w$}"), n_w, fg(MUTED));
+        put(buf, x, y, format!("{n:>n_w$}"), n_w, fg(MUTED));
     }
     vmarks(buf, rect.x, inner.y, inner.bottom() - 1, top > 0, top + shown < len);
 }
@@ -2502,7 +2567,7 @@ fn cursor(on: bool, spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
 /// scrolled off above or below. Every scrolling list uses these, as `‹` `›` mark columns.
 fn vmarks(buf: &mut Buffer, x: u16, top: u16, bottom: u16, above: bool, below: bool) {
     let mut put = |y: u16, glyph: &str| {
-        buf.set_stringn(x, y, glyph, 1, MORE);
+        put(buf, x, y, glyph, 1, MORE);
     };
     if above {
         put(top, "▲");
@@ -2528,7 +2593,7 @@ fn key_link(app: &App) -> Option<std::ops::Range<u16>> {
 
 /// A solid label like a bar module; returns the column after it.
 fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) -> u16 {
-    buf.set_stringn(x, y, format!(" {text} "), max as usize, fg(Color::Black).bg(color).add_modifier(BOLD)).0
+    put(buf, x, y, format!(" {text} "), max as usize, fg(Color::Black).bg(color).add_modifier(BOLD)).0
 }
 
 /// The status bar's left side, joined with " · ": the model count, then what filters it.
@@ -2668,7 +2733,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         // save, which the next key clears, else the start's warning, kept while the first
         // start's question is open.
         if let Some(w) = app.failed.then_some(app.status.as_str()).or(app.store.warning.as_deref()) {
-            buf.set_stringn(x, area.y, w, usize::from(area.right().saturating_sub(x)), fg(BAD));
+            put(buf, x, area.y, w, usize::from(area.right().saturating_sub(x)), fg(BAD));
         }
         return None;
     }
@@ -2749,7 +2814,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
         let room = usize::from(hx.saturating_sub(x));
         let start = scrolled(width(&label), typed, cur, room);
         let text = format!("{label}{}{unit}", &typed[start..]);
-        buf.set_stringn(x, area.y, &text, room, Style::new());
+        put(buf, x, area.y, &text, room, Style::new());
         // Underlined as a link: a click on it opens the page (`hit`).
         if let Some(link) = key_link(app) {
             let w = (link.end.min(hx)).saturating_sub(link.start);
@@ -2761,8 +2826,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
             for part in hint.split("  ") {
                 let (key, what) = split_hint(part);
                 let key = bound_keys(key, &app.store.keys);
-                hx = buf.set_stringn(hx, area.y, &key, width(&key), fg(KEY).add_modifier(BOLD)).0;
-                hx = buf.set_stringn(hx, area.y, what, width(what), fg(MUTED)).0 + 2;
+                hx = put(buf, hx, area.y, &key, width(&key), fg(KEY).add_modifier(BOLD)).0;
+                hx = put(buf, hx, area.y, what, width(what), fg(MUTED)).0 + 2;
             }
         }
         let cx = x + (width(&label) + width(&typed[start..cur])) as u16;
@@ -2775,25 +2840,25 @@ fn status(buf: &mut Buffer, area: Rect, app: &App, boxed: bool) -> Option<u16> {
     let limit = (area.x + start).saturating_sub(1);
     for (i, line) in parts.iter().enumerate() {
         if i > 0 {
-            x = buf.set_stringn(x, area.y, " · ", limit.saturating_sub(x) as usize, fg(MUTED)).0;
+            x = put(buf, x, area.y, " · ", limit.saturating_sub(x) as usize, fg(MUTED)).0;
         }
         for span in &line.spans {
             let style = line.style.patch(span.style);
-            x = buf.set_stringn(x, area.y, &span.content, limit.saturating_sub(x) as usize, style).0;
+            x = put(buf, x, area.y, &span.content, limit.saturating_sub(x) as usize, style).0;
         }
     }
     // Hints: the key in colour, what it does in plain text.
     let mut x = area.x + start;
     for (i, hint) in hints.iter().enumerate() {
         if *hint == SEP {
-            x = buf.set_stringn(x, area.y, SEP, width, fg(MUTED)).0;
+            x = put(buf, x, area.y, SEP, width, fg(MUTED)).0;
         } else {
             let (key, what) = split_hint(hint);
-            x = buf.set_stringn(x, area.y, bound_keys(key, &app.store.keys), width, fg(KEY).add_modifier(BOLD)).0;
-            x = buf.set_stringn(x, area.y, what, width, Style::new()).0;
+            x = put(buf, x, area.y, bound_keys(key, &app.store.keys), width, fg(KEY).add_modifier(BOLD)).0;
+            x = put(buf, x, area.y, what, width, Style::new()).0;
         }
         if i + 1 < hints.len() {
-            x = buf.set_stringn(x, area.y, "  ", width, Style::new()).0;
+            x = put(buf, x, area.y, "  ", width, Style::new()).0;
         }
     }
     // The last hint stays however narrow the bar: where it ran over the pill, the pill wins.
@@ -3289,7 +3354,7 @@ fn overlay(
     block.render(rect, buf);
     let (above, below) = (*scroll > 0, *scroll as usize + shown < lines.len());
     for (line, y) in lines.into_iter().skip(top).take(shown).chain(pin).zip(text.y..text.bottom()) {
-        line.render(Rect { y, height: 1, ..text }, buf);
+        put_line(buf, &line, Rect { y, height: 1, ..text });
     }
     // A box of one line, under the tabs on a screen of four, has no text to mark.
     if text.height > 0 {
