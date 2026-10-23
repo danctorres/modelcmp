@@ -2406,7 +2406,6 @@ fn dropdown(
     let footer = if none { " no match ".to_string() } else { footer };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(fg(MUTED))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     let inner = block.inner(rect);
     // What is behind the box fades, as behind every box.
@@ -3229,11 +3228,12 @@ struct Spot {
     at: Stop,
 }
 
-/// A centred rounded box, its border muted as the table's frame so its title, bold in the text's
-/// colour, stands out, showing `lines` from `scroll` on, which is clamped to the content: the
-/// accent is left to the table's headers and the cursor. The lines `pin`, which say what the
-/// cursor is on, stay at the bottom of a box too short for every line (`pinned`). Returns where
-/// the lines went, and whether some are scrolled off above and below. The rest of `area` is dimmed.
+/// A centred rounded box, its border in the text's colour so it stands out from the grey table
+/// frame and what is dimmed behind it, showing `lines` from `scroll` on, which is clamped to the
+/// content: the accent is left to the table's headers and the cursor. The lines `pin`, which say
+/// what the cursor is on, stay at the bottom of a box too short for every line (`pinned`). Returns
+/// where the lines went, and whether some are scrolled off above and below. The rest of `area` is
+/// dimmed.
 fn overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -3258,7 +3258,6 @@ fn overlay(
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(fg(MUTED))
         .title_top(Line::from(format!(" {title} ")).style(Style::new().add_modifier(BOLD)))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     // Inside the border, a cell of padding either side.
@@ -5008,6 +5007,7 @@ mod tests {
         let dev = cell(&lines[0], "Dev") as usize - 2;
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭──────────────────╮"), "{}", lines[1]);
+        assert_eq!(buf[(dev as u16, 1)].fg, Color::Reset, "its border in the text's colour, as every box's");
         assert_eq!(&words(&lines[2])[5..10], ["▌", "✓", "all", "2", "▐"], "all is ticked, and has no ✗ box");
         assert_eq!(cell(&lines[2], "all"), cell(&lines[3], "anthropic"), "the names line up all the same");
         assert_eq!(&words(&lines[3])[5..10], ["│", "☐", "·", "anthropic", "1"]);
@@ -6331,7 +6331,7 @@ mod tests {
         let mut scroll = 99;
         overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, (0, 0, 0..0));
         assert_eq!(buf[(0, 0)].symbol(), "╭");
-        assert_eq!(buf[(0, 0)].fg, MUTED, "a box's border is muted as the table's frame, so its title stands out");
+        assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box's border is in the text's colour, unlike the grey table frame");
         assert_eq!(scroll as usize, help(&app()).0.len() - 4, "scroll is clamped to the content");
         assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
         scroll = 0;
