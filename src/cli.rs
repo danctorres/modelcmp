@@ -11,6 +11,7 @@ use crate::view::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write;
 
 /// An error with the process exit code it deserves: 3 for an ambiguous model name, 1 otherwise
 /// (clap takes 2, for a usage error).
@@ -202,9 +203,11 @@ fn table(models: &[&Model], store: &Store, any: bool) {
         models.iter().map(|m| f(m).chars().count()).chain([head.len()]).max().unwrap_or(0).min(max)
     };
     let (nw, dw) = (width(|m| m.name.clone(), "Model", 34), width(|m| m.developer.clone(), "Dev", 12));
-    let line = |mark: &str, name: &str, dev: &str, nums: &mut dyn Iterator<Item = &str>, via: &str| {
+    // Printed at once: stdout writes each line on its own.
+    let mut out = String::new();
+    let mut line = |mark: &str, name: &str, dev: &str, nums: &mut dyn Iterator<Item = &str>, via: &str| {
         let nums: String = nums.zip(&widths).map(|(v, &w)| format!(" {v:>w$}")).collect();
-        println!("{mark} {:<nw$} {:<dw$}{nums}  {via}", truncate(name, nw), truncate(dev, dw));
+        let _ = writeln!(out, "{mark} {:<nw$} {:<dw$}{nums}  {via}", truncate(name, nw), truncate(dev, dw));
     };
     line("  ", "Model", "Dev", &mut cols.iter().map(|c| c.head()), "Via");
     for (m, row) in models.iter().zip(&cells) {
@@ -217,6 +220,7 @@ fn table(models: &[&Model], store: &Store, any: bool) {
         };
         line(mark, &m.name, &m.developer, &mut row.iter().map(String::as_str), &via(m, any, None));
     }
+    print!("{out}");
 }
 
 /// Every name in `asked` must be one of `known`, any case, or the filter would silently match nothing.
