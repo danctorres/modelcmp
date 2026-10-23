@@ -85,7 +85,7 @@ pub const AA_CODING: &str = "terminalbench_scicode_mean";
 pub const TASKS: &[Task] = &[
     Task {
         name: "overall",
-        about: "overall index: ECI or AAII",
+        about: "general capability, from ECI or AAII",
         when: "a tiebreaker, or work that fits no other task",
         need: Need::None,
         aa: None,

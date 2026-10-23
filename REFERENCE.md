@@ -22,7 +22,7 @@ means. Green and red mark the best and worst value in a column, and in a row of 
 | AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
 | Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard, and its chat and WebDev ratings in the dropdown |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
-| Value | Coding score per dollar of Price, ranked 0-100 |
+| Value | coding score per dollar of Price, as a percentile (0-100) |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
 | Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare |
