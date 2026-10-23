@@ -112,7 +112,7 @@ Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data
 - Coding, Agentic and Reason are one benchmark's score as published, 0-100. modelcmp does not
   compute them.
 - A task's other benchmarks are in its column's dropdown (`d`), only those Epoch still runs on
-  new models.
+  new models. `B` finds a benchmark of any task without knowing which task it is for.
 
 Artificial Analysis (`--source aa`, its API with your key):
 

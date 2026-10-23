@@ -533,6 +533,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             (">", "minimum for the column, e.g. `>` 60 `enter`"),
             ("<", "maximum for the column, or a tier's price cap in recommend"),
             ("d", "dropdown on a ▾ header or a recommend tier, `space` `enter` toggle"),
+            ("B", "find a benchmark of any task column and show it in its column"),
             ("|", "columns to show, `space` `enter` toggle"),
             ("a", "all models, including ones you have no access to"),
             ("m", "mine only"),
@@ -785,6 +786,8 @@ pub enum Kind {
     Cols,
     /// `d` on a tier in recommend: the model it picks, your favorite there or the recommended one.
     Pick,
+    /// `B`: every benchmark of the task columns shown, picked in its column.
+    Bench,
 }
 
 /// The cursor and the search of an open list, a dropdown or a choice list.
@@ -1136,6 +1139,9 @@ pub enum Effect {
     Harness(Option<&'static str>),
     /// The column at this cursor index; the `|` chooser's items, applied by `App` itself.
     Col(usize),
+    /// The benchmark of the task column at cursor index `.0`, or none for its task's score; the
+    /// `B` chooser's items, applied by `App` itself.
+    Bench(usize, Option<&'static str>),
     /// The slot's favorite, or none for the model recommended there; the `d` list's items,
     /// applied by `App` itself.
     Pick(String, Option<String>),
@@ -1750,14 +1756,12 @@ impl App {
     fn jump_ticked(&mut self, n: isize) {
         let (ticked, what): (Vec<bool>, _) = match &self.input {
             Input::Choose { items, .. } => {
-                // A row with a box ticked.
-                let on = |i: usize| match &items[i].1 {
-                    Effect::Fav(k, t) => (0..BOXES).any(|c| self.store.favorite(&box_slot(t, c)) == Some(k)),
-                    Effect::Col(c) => !hidden(*c),
-                    _ => false,
+                let what = match items.first().map(|i| &i.1) {
+                    Some(Effect::Fav(..)) => "task",
+                    Some(Effect::Bench(..)) => "benchmark",
+                    _ => "column",
                 };
-                let what = if self.choosing_favs() { "task" } else { "column" };
-                ((0..items.len()).map(on).collect(), what)
+                (items.iter().map(|(_, e)| self.ticked(e)).collect(), what)
             }
             Input::Menu { col, items, .. } => {
                 // The ticks the dropdown draws: "all" has one while nothing is picked.
@@ -1785,6 +1789,17 @@ impl App {
                 let other = if ticked.get(cur) == Some(&true) { "other " } else { "" };
                 self.refuse(format!("no {other}ticked {what} is shown"));
             }
+        }
+    }
+
+    /// Whether the entry of a list with `effect` has its box ticked: a task with a favorite in
+    /// `f`'s grid, a column that shows, a benchmark its column shows.
+    pub fn ticked(&self, effect: &Effect) -> bool {
+        match effect {
+            Effect::Fav(k, t) => (0..BOXES).any(|c| self.store.favorite(&box_slot(t, c)) == Some(k)),
+            Effect::Col(c) => !hidden(*c),
+            Effect::Bench(c, b) => self.col_bench(*c) == *b,
+            _ => false,
         }
     }
 
@@ -2498,6 +2513,35 @@ impl App {
             cols.map(|c| (format!("{:<8} {}", base_col_name(c), base_col_about(c)), Effect::Col(c))).collect();
         let sel = items.iter().position(|(_, e)| *e == Effect::Col(self.col)).unwrap_or(0);
         self.input = Input::choose("columns?", Kind::Cols, items, sel);
+    }
+
+    /// The `B` chooser: the entries of every shown task column's dropdown, each named with its
+    /// column, so a benchmark is found without knowing which task it is for. On the one the
+    /// column under the cursor shows.
+    fn ask_benches(&mut self) {
+        // A task's line is drawn from its score, so its columns show that.
+        if self.task.is_some() {
+            return self.refuse("a task is in use, so the task columns show its score, c clears the task");
+        }
+        // Each column's dropdown entries, with how many models each scored, as `d` lists them.
+        let mut entries = vec![];
+        for c in TASK_COLS.filter(|&c| !hidden(c)) {
+            let Some((_, more)) = col_benches(c) else { continue };
+            let names = std::iter::once(None).chain(more.into_iter().map(Some));
+            for ((label, n), b) in self.menu_items(c).0.into_iter().zip(names) {
+                entries.push((format!("{label} · {}", base_col_name(c)), n, Effect::Bench(c, b)));
+            }
+        }
+        if entries.is_empty() {
+            return self.refuse("no task column is shown, | shows them");
+        }
+        // The counts in a column of their own, as in the dropdown.
+        let w = entries.iter().map(|(l, ..)| l.chars().count()).max().unwrap_or(0);
+        let nw = entries.iter().map(|(_, n, _)| n.to_string().len()).max().unwrap_or(0);
+        let items: Vec<_> = entries.into_iter().map(|(l, n, e)| (format!("{l:<w$}  {n:>nw$}"), e)).collect();
+        let shown = Effect::Bench(self.col, self.col_bench(self.col));
+        let sel = items.iter().position(|(_, e)| *e == shown).unwrap_or(0);
+        self.input = Input::choose("benchmark?", Kind::Bench, items, sel);
     }
 
     /// Show the column at cursor index `col`, or leave it out, from now on.
@@ -4499,6 +4543,7 @@ impl App {
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
             }
             KeyCode::Char('|') => self.ask_cols(),
+            KeyCode::Char('B') => self.ask_benches(),
             KeyCode::Char('H') => self.ask_harness(),
             KeyCode::Enter if self.view == View::Recommend && !row => {
                 let Some(t) = self.cur_task() else {
@@ -4996,6 +5041,26 @@ impl App {
                                     _ => None,
                                 };
                             }
+                            // The cursor goes to the column, which shows the benchmark. Looked up by
+                            // name, as a refresh may have changed the column's list meanwhile.
+                            Effect::Bench(c, b) => {
+                                let at = |(_, more): (_, Vec<&str>)| match b {
+                                    Some(b) => more.iter().position(|&x| x == b).map(|i| i + 1),
+                                    None => Some(0),
+                                };
+                                let Some(i) = col_benches(c).filter(|_| !hidden(c)).and_then(at) else {
+                                    self.refuse(format!(
+                                        "{} no longer lists it, B lists what it does",
+                                        base_col_name(c)
+                                    ));
+                                    return None;
+                                };
+                                self.col = c;
+                                self.pick_bench(c, i);
+                                self.rebuild();
+                                let shows = self.col_bench(c).map_or("its task's score".into(), bench_label);
+                                self.report(Ok(format!("{} shows {shows}", base_col_name(c))));
+                            }
                             Effect::Via(key, slot, h) => {
                                 self.store.set_favorite(&slot, &key, h.as_deref());
                                 let on = h.as_deref().unwrap_or("any harness");
@@ -5014,9 +5079,10 @@ impl App {
                             self.fav_at(&key, &slot);
                         }
                     }
-                    // The key that opens the theme list also closes it, and so the columns'.
+                    // The key that opens the theme list also closes it, and so the columns' and the benchmarks'.
                     KeyCode::Char('t') if *kind == Kind::Theme => self.input = Input::None,
                     KeyCode::Char('|') if *kind == Kind::Cols => self.input = Input::None,
+                    KeyCode::Char('B') if *kind == Kind::Bench => self.input = Input::None,
                     // And it is a tab, which tab leaves for the next.
                     KeyCode::Tab | KeyCode::BackTab if *kind == Kind::Theme => {
                         return self.step_tab(code == KeyCode::BackTab);
@@ -5661,8 +5727,10 @@ mod tests {
     #[test]
     fn the_key_picks_the_benchmark_source() {
         let mut a = app();
+        assert!(press(&mut a, "B").is_none(), "no key picks it");
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Bench, .. }), "B finds a benchmark");
         press(&mut a, "B");
-        assert_eq!(a.input, Input::None, "no key picks it");
+        assert_eq!(a.input, Input::None, "and closes the list");
         // The first start asks for the key alone, and a click beside it leaves it open.
         a.first_start = true;
         a.input = Input::key(false, false);
@@ -6466,6 +6534,44 @@ mod tests {
         a.select(llama);
         assert_eq!(press(&mut a, "x"), None);
         assert!(a.status.starts_with("no harness has"), "{}", a.status);
+    }
+
+    /// `B` finds a benchmark of any task column, from any column, and shows it in its own.
+    #[test]
+    fn b_finds_a_benchmark_of_any_task_column() {
+        let mut a = app();
+        a.col = 0;
+        press(&mut a, "B/remote");
+        let on = |a: &App| match &a.input {
+            // The label, without the count after it.
+            Input::Choose { kind: Kind::Bench, items, list, .. } => {
+                items[list.sel].0.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end().to_string()
+            }
+            _ => panic!("{:?}", a.input),
+        };
+        assert_eq!(on(&a), "Remote Labor Index · Epoch AI · Agentic");
+        let remote = Effect::Bench(ECI + 4, Some("Remote Labor Index"));
+        assert!(!a.ticked(&remote) && a.ticked(&Effect::Bench(ECI + 4, None)), "the task's score is ticked");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.col, a.col_bench(ECI + 4)), (ECI + 4, Some("Remote Labor Index")));
+        assert_eq!(a.input, Input::None);
+        assert_eq!(a.status, "Agentic shows Remote Labor Index · Epoch AI");
+        press(&mut a, "B");
+        assert_eq!(on(&a), "Remote Labor Index · Epoch AI · Agentic", "on the one the column shows");
+        assert!(a.ticked(&remote), "ticked, as in the dropdown");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.col_bench(ECI + 4), None, "picked again, the task's score is back");
+        // A column hidden while the list is open is not picked in, nor is the cursor put on it.
+        a.col = 0;
+        press(&mut a, "B/remote");
+        a.toggle_col(ECI + 4);
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.col, a.col_bench(ECI + 4)), (0, None), "{}", a.status);
+        assert!(a.status.starts_with("Agentic no longer lists it"), "{}", a.status);
+        a.toggle_col(ECI + 4);
+        a.task = crate::fit::task("coding");
+        press(&mut a, "B");
+        assert!(a.input == Input::None && a.status.starts_with("a task is in use"), "{}", a.status);
     }
 
     #[test]

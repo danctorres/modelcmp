@@ -676,6 +676,7 @@ fn event_loop(
                         | Effect::Theme(_)
                         | Effect::Harness(_)
                         | Effect::Col(_)
+                        | Effect::Bench(..)
                         | Effect::Pick(..),
                     )
                     | None => {}
@@ -2591,6 +2592,7 @@ fn mode(app: &App) -> (&'static str, Color) {
                 Kind::Cols => "COLUMNS",
                 Kind::Open => "OPEN",
                 Kind::Pick => "PICK",
+                Kind::Bench => "BENCH",
             };
             (name, Color::Green)
         }
@@ -2959,7 +2961,8 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
 
 /// The entries of a choice list, each coloured by its first word: the harness or the site.
 /// `out` are the harnesses left out in the Via dropdown, grey as in the table, and `colors` a
-/// tier's models' colours (`pick_colors`), an item each. `f`'s grid has lines of its own, `fav_lines`.
+/// tier's models' colours (`pick_colors`), an item each, and `ticks` which entries have their box
+/// ticked (`App::ticked`). `f`'s grid has lines of its own, `fav_lines`.
 #[allow(clippy::too_many_arguments)]
 fn choice_lines(
     kind: Kind,
@@ -2970,6 +2973,7 @@ fn choice_lines(
     fits: Option<bool>,
     out: &[String],
     colors: &[Color],
+    ticks: &[bool],
 ) -> Vec<Line<'static>> {
     let (query, typing) = (list.query.as_str(), list.typing);
     let mut lines: Vec<Line> = items
@@ -3009,10 +3013,8 @@ fn choice_lines(
                     None => spans.push(Span::styled(format!("{rest} "), fg(MUTED))),
                 }
                 // A column has its checkbox, as an entry of a dropdown: ticked while it shows.
-                if let Effect::Col(c) = effect {
-                    let on = !crate::app::hidden(*c);
-                    let tick = if on { Span::styled(" ✓", fg(MARK).add_modifier(BOLD)) } else { Span::raw(" ☐") };
-                    spans.insert(0, tick);
+                if let Effect::Col(_) = effect {
+                    spans.insert(0, tick(ticks.get(n) == Some(&true)));
                 }
                 let at = 1 + if matches!(effect, Effect::Col(_)) { 2 } else { 0 };
                 return lit_at(Line::from(spans), &label_hits(at));
@@ -3040,6 +3042,11 @@ fn choice_lines(
                 let color = colors.get(n).copied().unwrap_or(Color::Reset);
                 return lit_at(Line::from(spans).style(fg(color)), &label_hits(1));
             }
+            // A benchmark has its box too, ticked while its column shows it, as in the dropdown.
+            if let Effect::Bench(..) = effect {
+                let spans = vec![tick(ticks.get(n) == Some(&true)), Span::raw(format!(" {label} "))];
+                return lit_at(Line::from(spans), &label_hits(3));
+            }
             lit_at(Line::from(format!(" {label} ")).style(fg(color)), &label_hits(1))
         })
         .collect();
@@ -3050,6 +3057,7 @@ fn choice_lines(
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
         Kind::Harness | Kind::Pick => " ↓ ↑ move · / search · space enter picks · esc close",
+        Kind::Bench => " ↓ ↑ move · / search · space enter picks · esc B close",
         Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",
     };
@@ -3116,6 +3124,11 @@ fn list_top(top: usize, sel: usize, shown: usize) -> usize {
     top.clamp(sel.saturating_sub(shown.max(1) - 1), sel)
 }
 
+/// A list entry's checkbox, `✓` while `on`.
+fn tick(on: bool) -> Span<'static> {
+    if on { Span::styled(" ✓", fg(MARK).add_modifier(BOLD)) } else { Span::raw(" ☐") }
+}
+
 /// An open chooser's lines and the area its box is centred in, for `draw` and `hit` alike: the
 /// frame between the tabs and the status bar. A terminal too short for a box there has it over
 /// the tabs.
@@ -3129,7 +3142,8 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
             let fits = app.current().and_then(|m| app.fits_here(m)).filter(|_| *kind == Kind::Launch);
             let colors = if *kind == Kind::Pick { pick_colors(app, items) } else { vec![] };
             let (keys, out) = (&app.store.keys, &app.store.via_not);
-            choice_lines(*kind, items, list, edit_room(within), keys, fits, out, &colors)
+            let ticks: Vec<bool> = items.iter().map(|(_, e)| app.ticked(e)).collect();
+            choice_lines(*kind, items, list, edit_room(within), keys, fits, out, &colors, &ticks)
         }
     };
     Some((within, lines))
@@ -6349,6 +6363,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                &[],
             );
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
@@ -6358,21 +6373,22 @@ mod tests {
         assert_eq!(pi, [Some(dev_color("pi")), Some(MUTED)], "the harness as in Via, its command muted");
         let items = [("pi --model x".to_string(), Effect::Launch(vec!["pi".into()]))];
         let lines =
-            choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &["pi".into()], &[]);
+            choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &["pi".into()], &[], &[]);
         assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(MUTED), "left out in Via, grey");
         // llama.cpp's command starts with the binary the machine has, and `v`'s list grey too.
         let llama = |bin: &str| (format!("{bin} -hf x"), Effect::Launch(vec![bin.into()]));
         let via = ("pi --model x".to_string(), Effect::Via("k".into(), "coding".into(), Some("pi".into())));
         let items = [llama("llama-server"), llama("llama"), via];
         let out = [crate::data::LLAMA.into(), "pi".into()];
-        let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &out, &[]);
+        let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &out, &[], &[]);
         assert!(lines.iter().all(|l| l.style.patch(l.spans[0].style).fg == Some(MUTED)), "{lines:?}");
-        let lines = choice_lines(Kind::Launch, &items[..1], &List::default(), 80, &BTreeMap::new(), None, &[], &[]);
+        let lines =
+            choice_lines(Kind::Launch, &items[..1], &List::default(), 80, &BTreeMap::new(), None, &[], &[], &[]);
         assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(dev_color(crate::data::LLAMA)));
         let get = || Effect::Launch(["modelcmp", "get", "x"].map(String::from).to_vec());
         let size = |fits| {
             let items = [("ollama download and run (2.5 GB)".to_string(), get())];
-            let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), fits, &[], &[]);
+            let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), fits, &[], &[], &[]);
             lines[0].spans.iter().map(|s| (s.content.to_string(), lines[0].style.patch(s.style).fg)).next_back()
         };
         assert_eq!(size(Some(true)), Some((" (2.5 GB) ".into(), None)), "a download that fits, in the text's colour");
@@ -6390,11 +6406,20 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new(), None, &[], &[]);
+        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new(), None, &[], &[], &[]);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines =
-            choice_lines(Kind::Theme, &items, &List { sel: 1, ..search("gr") }, 80, &BTreeMap::new(), None, &[], &[]);
+        let lines = choice_lines(
+            Kind::Theme,
+            &items,
+            &List { sel: 1, ..search("gr") },
+            80,
+            &BTreeMap::new(),
+            None,
+            &[],
+            &[],
+            &[],
+        );
         let hit = lines[1].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.
