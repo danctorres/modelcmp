@@ -2391,6 +2391,8 @@ fn dropdown(
         .border_style(fg(MUTED))
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     let inner = block.inner(rect);
+    // What is behind the box fades, as behind every box.
+    buf.set_style(area, Style::new().add_modifier(Modifier::DIM));
     Clear.render(rect, buf);
     block.render(rect, buf);
     for (i, (label, n)) in items.iter().enumerate().skip(top).take(shown) {
@@ -3213,7 +3215,7 @@ struct Spot {
 /// colour, stands out, showing `lines` from `scroll` on, which is clamped to the content: the
 /// accent is left to the table's headers and the cursor. The lines `pin`, which say what the
 /// cursor is on, stay at the bottom of a box too short for every line (`pinned`). Returns where
-/// the lines went, and whether some are scrolled off above and below.
+/// the lines went, and whether some are scrolled off above and below. The rest of `area` is dimmed.
 fn overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -3243,6 +3245,8 @@ fn overlay(
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     // Inside the border, a cell of padding either side.
     let text = rect.inner(ratatui::layout::Margin::new(2, 1));
+    // What is behind the box fades, so the box is what shows.
+    buf.set_style(area, Style::new().add_modifier(Modifier::DIM));
     Clear.render(rect, buf);
     block.render(rect, buf);
     let (above, below) = (*scroll > 0, *scroll as usize + shown < lines.len());
