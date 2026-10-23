@@ -130,7 +130,7 @@ pub fn task_name(s: &str) -> Result<String, String> {
     if name.is_empty() {
         Err("a task needs a name".into())
     } else if name.contains(':') {
-        Err("a task's name takes no ':', which sets a tier apart".into())
+        Err("a task's name cannot contain ':', which separates the task from the tier".into())
     } else {
         Ok(name)
     }
@@ -219,7 +219,7 @@ impl Store {
         let mut s = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
             Err(e) => Store {
-                warning: Some(format!("cannot read {} ({e}); changes will not be saved", path.display())),
+                warning: Some(format!("cannot read {} ({e}), so changes will not be saved", path.display())),
                 unreadable: Some(e.to_string()),
                 ..Store::default()
             },
@@ -251,13 +251,17 @@ impl Store {
                         if copied && let Ok(json) = serde_json::to_string_pretty(&s) {
                             let _ = write_atomic(&path, json.as_bytes());
                         }
-                        let aside = if copied { "a copy is in" } else { "no copy could be made in" };
-                        let warning = Some(format!("{name} is partly not valid ({e}); the rest is kept, {aside} {to}"));
+                        let aside =
+                            if copied { "and a copy of the file is in" } else { "but no copy could be made in" };
+                        let warning = Some(format!("{name} is partly not valid ({e}): the rest is kept, {aside} {to}"));
                         Store { warning, ..s }
                     }
                     None => {
                         let _ = std::fs::rename(&path, &bad);
-                        Store { warning: Some(format!("{name} is not valid ({e}); moved to {to}")), ..Store::default() }
+                        Store {
+                            warning: Some(format!("{name} is not valid ({e}), so it was moved to {to}")),
+                            ..Store::default()
+                        }
                     }
                 }
             }),
@@ -303,8 +307,11 @@ impl Store {
         if s.keys != before {
             let gone: Vec<String> =
                 before.iter().filter(|(d, _)| !s.keys.contains_key(d)).map(|(d, k)| format!("{d}→{k}")).collect();
-            let said =
-                format!("keys dropped from {}, no action's or two on one key: {}", path.display(), gone.join(" "));
+            let said = format!(
+                "key bindings that name no action or share a key were dropped from {}: {}",
+                path.display(),
+                gone.join(" ")
+            );
             s.warning = s.warning.or(Some(said));
             if let Ok(json) = serde_json::to_string_pretty(&s) {
                 let _ = write_atomic(&path, json.as_bytes());
@@ -361,14 +368,14 @@ impl Store {
     pub fn set_tier_cap(&mut self, tier: &str, cap: Option<f64>) -> Result<(), String> {
         let was = self.tiers.clone();
         match cap {
-            Some(c) if !(c.is_finite() && c >= 0.0) => return Err(format!("{c} is no price")),
+            Some(c) if !(c.is_finite() && c >= 0.0) => return Err(format!("{c} is not a valid price")),
             Some(c) => drop(self.tiers.insert(tier.into(), c)),
             None => drop(self.tiers.remove(tier)),
         }
         let (low, mid) = (self.tier_cap("low"), self.tier_cap("mid"));
         if low > mid {
             self.tiers = was;
-            return Err(format!("low (${low}) would cost more than mid (${mid})"));
+            return Err(format!("low's cap (${low}) cannot be above mid's (${mid})"));
         }
         Ok(())
     }

@@ -257,10 +257,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Failure::NoKey => {
-                write!(
-                    f,
-                    "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or press K in the TUI, which asks for it"
-                )
+                write!(f, "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or press K in the TUI to enter one")
             }
             Failure::BadKey => f.write_str("Artificial Analysis rejected the API key"),
             Failure::Other(e) => f.write_str(e),
@@ -1242,7 +1239,7 @@ impl Data {
     /// What a load of the cache says: what its refresh said, as that one's, else what `missed`
     /// leaves empty.
     pub fn said(&self) -> Option<String> {
-        self.warning.as_ref().map(|w| format!("last refresh: {w}")).or_else(|| self.unscored())
+        self.warning.as_ref().map(|w| format!("{LAST_REFRESH}{w}")).or_else(|| self.unscored())
     }
 
     /// What `missed` leaves empty, said at every load until a refresh brings it.
@@ -1876,18 +1873,18 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     // and none show once Arena has published no leaderboard for `ARENA_MAX_AGE`.
     let [arena, more @ ..] = late.all(steps);
     let ranked = Arena::parse(&arena.unwrap_or_default());
-    let unranked = ranked.is_none().then_some("huggingface.co did not send Arena's agent leaderboard");
+    let unranked = ranked.is_none().then_some("could not get Arena's agent leaderboard from huggingface.co");
     let mut kept = Arena::cached(&cache, now()).unwrap_or_default();
     let mut kept_boards = std::mem::take(&mut kept.boards);
     let arena = ranked.or(Some(kept).filter(|k| !k.scores.is_empty())).unwrap_or_default();
     let unranked = match (unranked, arena.current(now())) {
-        (Some(e), true) => Some(format!("{e}: its scores are kept from the last refresh")),
+        (Some(e), true) => Some(format!("{e}, so its scores are kept from the last refresh")),
         (Some(e), false) => {
             data.arena_missed = true;
-            Some(format!("{e}: the Arena column is empty"))
+            Some(format!("{e}, so the Arena column is empty"))
         }
         (None, false) => Some(format!(
-            "Arena's agent leaderboard is from {}, too old to show: the Arena column is empty",
+            "Arena's agent leaderboard is from {}, too old to show, so the Arena column is empty",
             arena.date
         )),
         (None, true) => arena
@@ -1938,15 +1935,17 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let lost;
     (data.kept, lost) = silent.into_iter().partition(|h| data.harness.contains_key(h));
     let unlisted = |hs: &[String], kept: &str| {
-        (!hs.is_empty()).then(|| format!("{} did not list its models{kept}", hs.join(", ")))
+        let its = if hs.len() > 1 { "their" } else { "its" };
+        (!hs.is_empty()).then(|| format!("{} did not list {its} models{kept}", hs.join(", ")))
     };
-    let common: Vec<String> = [unlisted(&data.kept, ": kept the ones from the last refresh"), unlisted(&lost, "")]
-        .into_iter()
-        .chain(unpaged)
-        .chain([unnamed, unranked])
-        .flatten()
-        .chain(uncut)
-        .collect();
+    let common: Vec<String> =
+        [unlisted(&data.kept, ", so the ones from the last refresh are kept"), unlisted(&lost, "")]
+            .into_iter()
+            .chain(unpaged)
+            .chain([unnamed, unranked])
+            .flatten()
+            .chain(uncut)
+            .collect();
     // Each source's own, then the ones of the whole refresh.
     let said = |own: [Option<String>; 2]| {
         let all: Vec<_> = own.into_iter().flatten().chain(common.iter().cloned()).collect();
@@ -2124,7 +2123,9 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
             }
             // Said, as a favorite or a note on a key that changed is not found until the next refresh.
             Err(e) => {
-                data.warning = Some(format!("epoch.ai's names did not come ({e}): some models go by another key"))
+                data.warning = Some(format!(
+                    "could not get epoch.ai's model names ({e}), so some models may have a different key until the next refresh"
+                ))
             }
         }
         Ok(data)
@@ -2138,6 +2139,9 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
 
 /// Said after why Artificial Analysis's key did nothing: what is shown instead.
 pub const FELL_BACK: &str = " · benchmarks from Epoch AI";
+
+/// What a warning from the cached data's refresh starts with (`Data::said`).
+pub const LAST_REFRESH: &str = "last refresh: ";
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
 /// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
@@ -2163,13 +2167,16 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
                     Ok((d, w))
                 }
                 Err(e @ Failure::BadKey) if auto => {
-                    eprintln!("warning: {e}{FELL_BACK}");
+                    eprintln!("warning: {e}, so benchmarks are from Epoch AI");
                     set_source(Source::Epoch);
                     load(force, false)
                 }
                 Err(e) => match cached {
                     Some(d) => {
-                        let w = format!("refresh failed ({e}); using data {} old", crate::view::age(d.age()));
+                        let w = format!(
+                            "refresh failed ({e}), so this is the cached data from {} ago",
+                            crate::view::age(d.age())
+                        );
                         Ok((d, Some(w)))
                     }
                     None => Err(match e {

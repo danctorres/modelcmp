@@ -735,9 +735,11 @@ pub fn price(m: &Model) -> String {
 
 /// What a tier's line of `modelcmp recommend` shows, as recommend's grid in the TUI picks them.
 /// `{tiers}` is `tiers_said`.
-pub const RECOMMEND_LEGEND: &str = "the best model for each task at each price: {tiers}, \
-     or ★ your favorite, as name [key] · $/1M tokens · score on the task, marked not recommended when the favorite is not one. \
-     A model free on your machine takes a tier when it scores higher, with ↓ and its size when it needs a download (modelcmp memory)";
+pub const RECOMMEND_LEGEND: &str = "The best model for each task at each price: {tiers}. \
+     Each line reads name [key] · $ per 1M tokens · score on the task. ★ marks your favorite, \
+     with \"not recommended\" when it is not among the task's best models, and under it the tier's own pick when that differs. \
+     A model that runs free on your machine takes a tier when it scores higher, \
+     with ↓ and its size when it needs a download (modelcmp memory).";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
 pub const CUSTOM_ABOUT: &str = "your own task";

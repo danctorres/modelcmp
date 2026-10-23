@@ -230,7 +230,7 @@ fn check<'a>(flag: &str, asked: &[String], known: impl Iterator<Item = &'a str>)
     match asked.iter().find(|a| !known.contains(&a.to_lowercase())) {
         Some(bad) => {
             let known: Vec<_> = known.into_iter().collect();
-            Err(format!("no model has {flag} '{bad}'; known: {}", known.join(", ")).into())
+            Err(format!("{flag} '{bad}' matches no model, use one of: {}", known.join(", ")).into())
         }
         None => Ok(()),
     }
@@ -305,13 +305,13 @@ fn flagged(store: &Store, o: &ListOpts) -> Store {
 fn say_filters(store: &Store, flags: &str) {
     let on: Vec<String> = crate::view::picks_said(store).into_iter().chain(crate::view::bounds_said(store)).collect();
     if !on.is_empty() {
-        let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace their own, ") };
-        eprintln!("note: the TUI's filters hide models: {} ({flags}XX in the TUI takes them back)", on.join(" "));
+        let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace their own, and ") };
+        eprintln!("note: filters set in the TUI hide some models: {} ({flags}c in the TUI clears them)", on.join(" "));
     }
     let by: Vec<String> =
         TASKS.iter().filter_map(|t| Some(format!("{} by {}", t.name, crate::app::task_bench(store, t)?))).collect();
     if !by.is_empty() {
-        eprintln!("note: benchmarks picked in the TUI rank tasks: {} (c in the TUI takes them back)", by.join(", "));
+        eprintln!("note: benchmarks picked in the TUI rank some tasks: {} (c in the TUI resets them)", by.join(", "));
     }
 }
 
@@ -326,7 +326,7 @@ fn matched<'a>(data: &'a Data, store: &'a Store, o: &ListOpts) -> Result<(Vec<&'
     if let Some(c) = o.custom.as_deref().filter(|c| !store.custom_tasks().contains(c)) {
         let tasks = [fit::task_names().collect(), store.custom_tasks()].concat().join(", ");
         let msg = format!(
-            "no task '{c}': there are {tasks}; modelcmp fav {c} <model> --tier <tier> makes it one of your own"
+            "no task '{c}': the tasks are {tasks}, and modelcmp fav {c} <model> --tier <tier> makes it one of your own"
         );
         return Err(Exit { code: 2, msg });
     }
@@ -489,7 +489,7 @@ fn download_said(m: &Model, bytes: u64) -> String {
     format!("not on your machine, ask the user to download it ({}): modelcmp get {}", crate::data::gb(bytes), m.key)
 }
 
-const NO_HARNESS: &str = "no harness models found";
+const NO_HARNESS: &str = "no harness lists any models";
 
 pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     let store = &flagged(store, o);
@@ -508,7 +508,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
     }
     // Nor one out of every model there is, shown for want of yours: an id no harness here takes.
     if !any && !o.all && (o.tier.is_some() || o.id || o.cmd) {
-        return Err(format!("{NO_HARNESS}, and --all lists every model").into());
+        return Err(format!("{NO_HARNESS}, so there is no model to start (--all lists every model)").into());
     }
     if o.json {
         let out = |m: &&Model| {
@@ -542,7 +542,7 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         println!("\n{}", download_said(m, b));
     }
     if models.len() < total {
-        println!("\n{} of {total} shown; -n 0 for all", models.len());
+        println!("\n{} of {total} shown, -n 0 shows all", models.len());
     }
     Ok(())
 }
@@ -558,10 +558,10 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     say_filters(store, "--via and --min");
     // An agent told only what is known goes on to guess a model for its harness.
     check("--via", &o.via, data.models.iter().flat_map(|m| shown_via(m, data.any_available())))
-        .map_err(|e| Exit { msg: format!("{}: choose no model for it, tell the user", e.msg), ..e })?;
+        .map_err(|e| Exit { msg: format!("{}. Do not choose a model, tell the user", e.msg), ..e })?;
     // Every line would be a model with no way to run it.
     if !data.any_available() {
-        return Err(format!("{NO_HARNESS}: choose no model, tell the user").into());
+        return Err(format!("{NO_HARNESS}. Do not choose a model, tell the user").into());
     }
     let own = store.tasks_with_models();
     let own = own.iter().map(|&c| (c, None, format!("the user's own task, {}", store.about(c).unwrap_or(CUSTOM_WHEN))));
@@ -569,7 +569,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     // One task, or one tier, for an agent that chose it already.
     if let Some(c) = o.custom.as_deref().filter(|c| !tasks.iter().any(|t| t.0 == *c)) {
         let names = tasks.iter().map(|t| t.0).collect::<Vec<_>>().join(", ");
-        return Err(Exit { code: 2, msg: format!("no task '{c}': there are {names}") });
+        return Err(Exit { code: 2, msg: format!("no task '{c}': the tasks are {names}") });
     }
     let (mut said, mut found) = (Vec::new(), false);
     for (name, task, when) in tasks.into_iter().filter(|t| o.custom.as_deref().is_none_or(|c| c == t.0)) {
@@ -603,8 +603,8 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     if !found {
         // A copy your machine runs is no pick on merit (`Model::local`).
         let local = !o.via.is_empty() && o.via.iter().all(|v| crate::data::runs_here(&v.to_lowercase()));
-        let why = if local { ", a model your machine runs is picked only as your favorite (modelcmp fav)" } else { "" };
-        return Err(format!("no task has a model for this{why}: choose no model, tell the user").into());
+        let why = if local { ". A model your machine runs is only picked as a favorite (modelcmp fav)" } else { "" };
+        return Err(format!("no task has a model for this request{why}. Do not choose a model, tell the user").into());
     }
     println!("{}", grouped(said).join("\n"));
     Ok(())
@@ -660,7 +660,7 @@ fn tier_line(data: &Data, store: &Store, o: &ListOpts) -> Result<String> {
     let anywhere = ListOpts { via: vec![], cmd: true, ..o.clone() };
     let elsewhere = fav.and_then(|m| {
         Some(format!(
-            "  (★ favorite {} is not on {}, start: {})",
+            "  (★ favorite {} is not on {}, run it with: {})",
             m.name,
             o.via.join(", "),
             launch(data, store, &anywhere, m).ok()?
@@ -694,8 +694,12 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
             })
             .ok_or_else(|| {
                 // A favorite stays the pick though `--via` asks for a harness without it.
-                let on = if o.via.is_empty() { "no harness has".into() } else { format!("{} lacks", o.via.join(", ")) };
-                Exit::from(format!("{on} {}: there is no command to start it", m.name))
+                let on = if o.via.is_empty() {
+                    "no harness has".into()
+                } else {
+                    format!("{} does not have", o.via.join(", "))
+                };
+                Exit::from(format!("{on} {}, so there is no command to start it", m.name))
             }),
         false => Ok([via, default]
             .into_iter()
@@ -789,7 +793,7 @@ pub fn show(data: &Data, store: &Store, q: &str, json: bool, all: bool) -> Resul
     let cut = !all && others > 0 && others < m.offers.len();
     if cut {
         lines.truncate(lines.len() - others);
-        lines.push(format!("    {others} more you have no harness for, --all lists them"));
+        lines.push(format!("    {others} more providers that none of your harnesses use, --all lists them"));
     }
     for line in lines {
         println!("{line}");
@@ -843,8 +847,8 @@ fn page(m: &Model, on: Option<&str>) -> std::result::Result<String, String> {
     };
     let sites = links.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", ");
     let found = links.into_iter().find(|(s, _)| !site.is_empty() && s.starts_with(&site));
-    let has = if sites.is_empty() { "no site has one".into() } else { format!("it has {sites}") };
-    found.map(|(_, url)| url).ok_or(format!("{} has no page on {on}; {has}", m.name))
+    let has = if sites.is_empty() { "or on any other site".into() } else { format!("only on {sites}") };
+    found.map(|(_, url)| url).ok_or(format!("{} has no page on {on}, {has}", m.name))
 }
 
 pub fn open(data: &Data, q: &str, on: Option<&str>) -> Result {
@@ -866,7 +870,7 @@ pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
         Some(v) => *local
             .iter()
             .find(|h| h.eq_ignore_ascii_case(v))
-            .ok_or_else(|| format!("{v} runs no model on this machine: --via takes {OLLAMA} or {LLAMA}"))?,
+            .ok_or_else(|| format!("{v} does not run models on this machine, --via takes {OLLAMA} or {LLAMA}"))?,
         // The one that has the model, else one installed, else one that can be.
         None => {
             let can = |f: &dyn Fn(&str) -> bool| local.into_iter().find(|h| f(h));
@@ -894,7 +898,7 @@ pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
         let install = install_cmd(runner).ok_or_else(|| {
             let page =
                 if runner == OLLAMA { "https://ollama.com/download" } else { "https://github.com/ggml-org/llama.cpp" };
-            format!("{runner} is not installed, and modelcmp knows no command that installs it here: see {page}")
+            format!("{runner} is not installed, and modelcmp does not know how to install it here: see {page}")
         })?;
         let line = install.strip_prefix(&["sh", "-c"]).unwrap_or(install).join(" ");
         eprint!("{runner} is not installed. Run `{line}`? [y/N] ");
@@ -912,7 +916,7 @@ pub fn get(data: &Data, q: &str, via: Option<&str>, wait: bool) -> Result {
     if let (None, Some(repo)) = (&here, cmd.last()) {
         // The copy is that model here from now on, whatever its repo is called.
         keep_repo(&m.key, repo.trim_start_matches("hf.co/"));
-        eprintln!("Once it is downloaded, `modelcmp --refresh`, or `r` in the TUI, shows it as on your machine.");
+        eprintln!("Once it is downloaded, `modelcmp --refresh` (or `r` in the TUI) shows it as on your machine.");
     }
     let mut run = std::process::Command::new(&cmd[0]);
     run.args(&cmd[1..]);
@@ -947,7 +951,7 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     store.save()?;
     match left_out_by(m, store, data.any_available(), false) {
         // Taken back in the TUI alone: the dropdown's entry, which excludes more than this model.
-        Some(by) if rm => println!("{} is still hidden by the TUI's filters: {by}", m.name),
+        Some(by) if rm => println!("included {}, but the TUI's filters still exclude it: {by}", m.name),
         _ => println!("{} {}", if rm { "included" } else { "✗ excluded" }, m.name),
     }
     Ok(())
@@ -959,7 +963,7 @@ pub fn harness(store: &mut Store, name: Option<&str>, rm: bool) -> Result {
     let known = vias;
     match name.map(str::to_lowercase) {
         Some(h) if !known().any(|v| v == h) => {
-            let msg = format!("no harness '{h}': there are {}", known().collect::<Vec<_>>().join(", "));
+            let msg = format!("no harness '{h}': the harnesses are {}", known().collect::<Vec<_>>().join(", "));
             return Err(Exit { code: 2, msg });
         }
         Some(h) => {
@@ -1003,7 +1007,9 @@ pub fn tier(store: &mut Store, name: Option<&str>, usd: Option<f64>, rm: bool) -
 /// (`data::memory`): a tier picks a model whose download fits in it (`view::local_best`).
 pub fn memory(store: &mut Store, gb: Option<f64>, rm: bool) -> Result {
     match gb {
-        Some(g) if !(g.is_finite() && g > 0.0) => return Err(Exit { code: 2, msg: format!("{g} GB is no memory") }),
+        Some(g) if !(g.is_finite() && g > 0.0) => {
+            return Err(Exit { code: 2, msg: format!("{g} GB is not a valid memory size") });
+        }
         Some(g) => store.memory = Some(g),
         None if rm => store.memory = None,
         None => {}
@@ -1012,15 +1018,15 @@ pub fn memory(store: &mut Store, gb: Option<f64>, rm: bool) -> Result {
         store.save()?;
     }
     let Some(bytes) = crate::view::memory(store) else {
-        println!("no memory found, modelcmp memory <GB> sets it");
+        println!("could not find this machine's memory, modelcmp memory <GB> sets it");
         return Ok(());
     };
     // In GB of 2^30 bytes, as a GPU's is said: 24 GB, not 25.8.
     let gb = bytes as f64 / (1u64 << 30) as f64;
     let memory = if (gb - gb.round()).abs() < 0.05 { format!("{gb:.0} GB") } else { format!("{gb:.1} GB") };
-    let whose = if store.memory.is_some() { "yours" } else { "found" };
+    let whose = if store.memory.is_some() { "set by you" } else { "found" };
     let room = crate::view::room(store).map_or("-".into(), crate::data::gb);
-    println!("{memory} ({whose}): local models with a download up to {room}");
+    println!("{memory} ({whose}): fits local models with a download of up to {room}");
     Ok(())
 }
 
@@ -1091,10 +1097,10 @@ pub fn fav(
         // With a model, saved with it below.
         if q.is_none() {
             store.save()?;
-            println!("{t}: {}", store.about(t).unwrap_or("no about"));
+            println!("{t}: {}", store.about(t).unwrap_or("no --about text"));
             // A typo of a task's name makes one too, so it is said.
             if new && store.about(t).is_some() {
-                println!("new task {t}: agents see it once it has a model, modelcmp fav {t} <model> --tier <tier>");
+                println!("new task {t}: agents see it once it has a model (modelcmp fav {t} <model> --tier <tier>)");
             }
             return Ok(());
         }
@@ -1170,7 +1176,7 @@ pub fn fav(
             }
             // A tier is a budget: its favorite fits it.
             if let Err(why) = can_fav(store, t, m) {
-                return Err(format!("{why}: set it for a dearer tier").into());
+                return Err(format!("{why}, so make it the favorite of a higher tier").into());
             }
             // Said, as a mistyped task makes one of your own too.
             let name = t.split(':').next().unwrap_or(t);
@@ -1582,7 +1588,7 @@ mod tests {
         (o.no_fav, o.prompt) = (false, true);
         let line = |data: &Data, store: &Store, o: &ListOpts| tier_line(data, store, o).ok();
         let elsewhere = format!(
-            "p/gpt55  -  (★ favorite mini is not on pi, start: {QUIET} opencode run --model p/mini \"<prompt>\")"
+            "p/gpt55  -  (★ favorite mini is not on pi, run it with: {QUIET} opencode run --model p/mini \"<prompt>\")"
         );
         assert_eq!(line(&data, &store, &o), Some(elsewhere));
         store.set_note("mini", "slow");
@@ -1763,7 +1769,7 @@ mod tests {
     fn open_picks_the_first_page_or_the_site_named() {
         let mut m = model("gpt55", 90.0, 10.0);
         assert_eq!(page(&m, None), Err("no site has a page for gpt55".into()));
-        assert_eq!(page(&m, Some("epoch")), Err("gpt55 has no page on epoch; no site has one".into()));
+        assert_eq!(page(&m, Some("epoch")), Err("gpt55 has no page on epoch, or on any other site".into()));
         (m.epoch, m.aa, m.openrouter) = (Some("gpt-5-5".into()), Some("gpt-5-5".into()), Some("openai/gpt-5.5".into()));
         let (epoch, aa) = ("https://epoch.ai/models/gpt-5-5", "https://artificialanalysis.ai/models/gpt-5-5");
         assert_eq!(page(&m, None).as_deref(), Ok(epoch), "the first, as o then enter");
@@ -1771,7 +1777,7 @@ mod tests {
         for site in ["aa", "AA", "Artificial", "artificialanalysis.ai"] {
             assert_eq!(page(&m, Some(site)).as_deref(), Ok(aa), "{site}");
         }
-        let none = "gpt55 has no page on models; it has epoch.ai, artificialanalysis.ai, openrouter.ai";
+        let none = "gpt55 has no page on models, only on epoch.ai, artificialanalysis.ai, openrouter.ai";
         assert_eq!(page(&m, Some("models")), Err(none.into()));
         assert!(page(&m, Some("")).is_err(), "no site is not every site");
         m.offers.push(Offer { provider: "huggingface".into(), id: "openai/gpt-5.5".into(), ..Default::default() });

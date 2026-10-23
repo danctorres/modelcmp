@@ -11,10 +11,11 @@ use clap::{Parser, Subcommand};
 use cli::Exit;
 use store::Store;
 
-/// Pick the right LLM: prices (models.dev) + benchmarks (Epoch AI, or Artificial Analysis), filtered to the
-/// models you can already use: the ones your harnesses list (opencode models, pi --list-models, omp models,
-/// while claude, codex and gemini give their own provider's, copilot what its CLI takes on your plan, ollama and llama-cli the ones on your machine).
-/// The Via column says which. Run without a command for the interactive TUI.
+/// Pick the right LLM: prices from models.dev and benchmarks from Epoch AI or Artificial Analysis,
+/// for the models you can already use. Those are the ones your harnesses list: what opencode, pi and
+/// omp list, their own provider's models for claude, codex and gemini, the models your Copilot plan
+/// includes, and the ones ollama and llama-cli have on your machine. The Via column shows which
+/// harness has each model. Run without a command for the interactive TUI.
 #[derive(Parser)]
 #[command(
     version,
@@ -24,10 +25,10 @@ struct Args {
     /// Re-download data now instead of using the cache
     #[arg(long, global = true)]
     refresh: bool,
-    /// Percent of input tokens read from the prompt cache in Price: 90 fits an agent session, 0 a one-off prompt (`%` in the TUI)
+    /// The percent of input tokens read from the prompt cache, for the Price column: 90 suits an agent session, 0 a one-off prompt (`%` in the TUI)
     #[arg(long, global = true, value_name = "PERCENT", default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
     cache: u8,
-    /// Benchmarks from: epoch (Epoch AI) or aa (Artificial Analysis, needs ARTIFICIAL_ANALYSIS_API_KEY or the key saved in the TUI). Without it: aa when its key is there and works, else epoch
+    /// Where benchmarks come from: epoch (Epoch AI) or aa (Artificial Analysis, which needs ARTIFICIAL_ANALYSIS_API_KEY or a key saved in the TUI). Defaults to aa when a working key is set, else epoch
     #[arg(long, global = true, value_parser = PossibleValuesParser::new(data::Source::ALL.map(|s| s.id())))]
     source: Option<String>,
     #[command(subcommand)]
@@ -36,34 +37,34 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// List models you have access to (all with --all): rank, bound and sort them
+    /// List the models you have access to (every model with --all), filtered, sorted or ranked for a task
     #[command(alias = "ls")]
     List {
-        /// Best model per price level for a task (overall, coding, agentic, reasoning, vision, value): cheapest first, each row costing more and scoring higher. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (`fav`) gives the models you gave it
+        /// The best model at each price level for a task (overall, coding, agentic, reasoning, vision, value), cheapest first: each row costs more and scores higher than the one before. Excluded models are left out (`R` then `enter` in the TUI). A task of your own (see `fav`) lists the favorites you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// One model from the task's list: your favorite for the tier, when it costs no more than the tier's cap. Else free = the best free model, low = the best up to $2 per 1M tokens, mid = the best up to $5 (`modelcmp tier` changes them), high = your best, none when nothing is at the tier's price. A model your machine runs, or can download (`modelcmp memory`), takes the tier when it scores higher, as it is free there. A task of your own gives the tier's model
+        /// Print one model from the task's list: your favorite for the tier, if it costs no more than the tier's cap. Otherwise the best model the tier allows: free = only free models, low = up to $2 per 1M tokens, mid = up to $5 (`modelcmp tier` changes these), high = any price. It fails when no model fits the tier. A model your machine runs or can download (`modelcmp memory`) replaces a pick that is not your favorite when it scores higher, since it runs for free. A task of your own gives the tier's favorite
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
         #[arg(short, long, value_parser = PossibleValuesParser::new(app::COLS.map(|c| c.id)))]
         sort: Option<String>,
-        /// Keep models at or above a value, e.g. --min coding=60. Columns as in --sort, ctx in thousands of tokens (or in tokens from 10000), release as a date (2026-06). Repeatable. It replaces a `>` on the column kept by the TUI
+        /// Keep models at or above a value, e.g. --min coding=60. It takes the columns --sort takes. ctx is in thousands of tokens (or in tokens from 10000 up) and release is a date (2026-06). Repeatable. It replaces a `>` bound set in the TUI on the same column
         #[arg(long, value_parser = |s: &str| bound(s, false))]
         min: Vec<(usize, f64)>,
-        /// Keep models at or below a value, e.g. --max price=2. A release up to the end of its month or year. Repeatable. It replaces a `<` on the column kept by the TUI
+        /// Keep models at or below a value, e.g. --max price=2. A release date includes its whole month or year. Repeatable. It replaces a `<` bound set in the TUI on the same column, and --max price the Price level picked there
         #[arg(long, value_parser = |s: &str| bound(s, true))]
         max: Vec<(usize, f64)>,
         /// Include models you have no access to
         #[arg(short, long)]
         all: bool,
-        /// Selected only: your shortlist (`S` in the TUI)
+        /// Only the selected models, your shortlist (`S` in the TUI)
         #[arg(short = 'm', long, alias = "marked")]
         selected: bool,
-        /// Only these developers or countries, e.g. --dev anthropic --dev china. It replaces the TUI's Dev pick (`d`)
+        /// Only these developers or countries, e.g. --dev anthropic --dev china. It replaces what is picked in the TUI's Dev dropdown (`d`)
         #[arg(long)]
         dev: Vec<String>,
-        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli). Repeatable. It replaces the TUI's Via pick (`d`)
+        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli). Repeatable. It replaces what is picked in the TUI's Via dropdown (`d`)
         #[arg(long)]
         via: Vec<String>,
         /// Max rows, 0 = no limit
@@ -72,35 +73,37 @@ enum Cmd {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
-        /// Only the model's id, one per line. --via with a harness prints the id that one takes, an error when it lacks the model: `opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)`. Without it a favorite given a harness (`fav --via`) prints the id that one takes, else your default harness's (`modelcmp harness`)
+        /// Print only each model's id, one per line. With --via, the id that harness takes, or an error when it does not have the model: `opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)`. Without --via, the id for the harness set on the favorite (`fav --via`), else for your default harness (`modelcmp harness`)
         #[arg(long, conflicts_with = "json")]
         id: bool,
-        /// The tier's pick without your favorites: the model to use when a favorite is on no harness you can start
+        /// Ignore your favorites and print the tier's best model, for when the favorite is on no harness you can start
         #[arg(long, requires = "tier")]
         no_fav: bool,
-        /// Only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness of a favorite given one (`fav --via`), else your default one (`modelcmp harness`), else the first that has the model, among --via's when given
+        /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the favorite (`fav --via`), else your default harness (`modelcmp harness`), else the first one that has the model, out of the --via ones when given
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
     },
-    /// For an agent, one call: each task with what it is for, and the model for its free, low, mid and high tier (your favorite at the tier's price or under, else the best there), with its context and your note
+    /// For agents, in one call: every task with what it is for, and the model for each of its tiers
+    ///
+    /// Each tier (free, low, mid, high) gets one model, with its context size and your note. It is your favorite if that fits the tier's price, else the best model at that price
     Pick {
-        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes, and a favorite it lacks after the tier's own pick. Without it, the command that runs a prompt on each model, on the harness you have it on
+        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes. A favorite it does not have comes after the tier's pick, with the command that runs it elsewhere. Without --via, prints the command that runs a prompt on each model, on a harness that has it
         #[arg(long)]
         via: Vec<String>,
-        /// Only models at or above a value, favorites too: --min ctx=600 for a prompt of 600,000 tokens
+        /// Only models at or above a value, favorites included, e.g. --min ctx=600 for a prompt of 600,000 tokens
         #[arg(long, value_parser = |s: &str| bound(s, false))]
         min: Vec<(usize, f64)>,
-        /// Leave a model out, a favorite too, e.g. one your note rules out for this work: its name or the id printed. Repeatable
+        /// Leave out a model, even a favorite, e.g. one your note rules out for this work. Takes its name or the printed id. Repeatable
         #[arg(long, value_name = "MODEL")]
         not: Vec<String>,
-        /// Only this task, for one chosen already
+        /// Only this task, when you have already chosen one
         #[arg(short, long, value_parser = store::task_name)]
         task: Option<String>,
         /// Only this tier
         #[arg(long, value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
     },
-    /// Run a command as `pick` prints it, for an agent: what it says on stderr (a harness's steps) is left out, and its last 20 lines are said when it fails
+    /// Run a command that `pick` printed, for agents: its stderr (the harness's progress) is hidden, and its last 20 lines are shown if it fails
     Quiet {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         cmd: Vec<String>,
@@ -115,7 +118,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Side-by-side comparison, opening with a verdict: cheapest, best at coding, best value
+    /// Compare models side by side, starting with a verdict: cheapest, best at coding, best value
     Compare {
         #[arg(num_args = 2.., required = true)]
         models: Vec<String>,
@@ -127,38 +130,38 @@ enum Cmd {
     Open {
         model: String,
         /// The site: models.dev, epoch.ai, artificialanalysis.ai (or aa), openrouter.ai,
-        /// huggingface.co (or hf) or arena.ai, its agent leaderboard, a prefix will do. The first of them to have the model when left out
+        /// huggingface.co (or hf) or arena.ai (its agent leaderboard). A prefix is enough. Without it, the first of these with a page for the model
         #[arg(long)]
         on: Option<String>,
     },
     /// Download a copy of the model to your machine and run it there (`x` in the TUI)
     ///
-    /// The GGUF one Hugging Face has of it, by `llama-cli -hf` or `ollama run`, after installing one of them, once you agree, when you have neither
+    /// It runs the copy you already have, or downloads the model's GGUF copy from Hugging Face with `llama-cli -hf` or `ollama run`. When neither is installed, it asks before installing one
     Get {
         model: String,
-        /// The one that runs it (ollama or llama-cli), the one you have when left out
+        /// What runs it: ollama or llama-cli. Without it, the one you have
         #[arg(long)]
         via: Option<String>,
         /// Wait for enter after an error, which a terminal opened for this would close on
         #[arg(long, hide = true)]
         pause: bool,
     },
-    /// Select a model, to shortlist it until you deselect it: `list --selected` shows them (space in the TUI)
+    /// Select a model to add it to your shortlist, which `list --selected` shows (space in the TUI)
     #[command(alias = "mark")]
     Select {
         model: String,
-        /// Remove it instead
+        /// Deselect it instead
         #[arg(long)]
         rm: bool,
     },
-    /// Exclude a model you have but cannot use: --task and recommend leave it out (`e` in the TUI)
+    /// Exclude a model you have but cannot use, so --task, pick and recommend leave it out (`e` in the TUI)
     Exclude {
         model: String,
         /// Include it again
         #[arg(long)]
         rm: bool,
     },
-    /// Show a model's note, or set it (`i` in the TUI). Agents read it when choosing
+    /// Show or set a model's note (`i` in the TUI). Agents read it when choosing a model
     Note {
         model: String,
         #[arg(conflicts_with = "rm")]
@@ -167,9 +170,9 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Your default harness, alone shows it (`H` in the TUI)
+    /// Show or set your default harness (`H` in the TUI)
     ///
-    /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli: `list --cmd` and `--id` go by it when it has the model and --via names none, after a favorite's own harness (`fav --via`)
+    /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli. `list --cmd` and `list --id` use it when it has the model and no --via is given. A harness set on a favorite (`fav --via`) comes first
     Harness {
         #[arg(conflicts_with = "rm")]
         name: Option<String>,
@@ -177,22 +180,22 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// The price cap of the low or mid tier, alone shows every tier's
+    /// Show every tier's price cap, or set the low or mid tier's
     ///
-    /// A tier picks the best model at its cap or under: low up to $2 per 1M tokens and mid up to $5 by default. free takes only free models and high any
+    /// A tier picks the best model at or under its cap. By default low is up to $2 per 1M tokens and mid up to $5. free takes only free models and high any price
     Tier {
         #[arg(value_parser = PossibleValuesParser::new(["low", "mid"]))]
         name: Option<String>,
-        /// The dearest it takes, in $ per 1M tokens
+        /// The highest price it allows, in $ per 1M tokens
         #[arg(requires = "name", conflicts_with = "rm")]
         usd: Option<f64>,
-        /// Back to its default
+        /// Reset it to its default
         #[arg(long, requires = "name")]
         rm: bool,
     },
-    /// The folder of the `.gguf` files you downloaded, alone shows it
+    /// Show or set the folder of the `.gguf` files you downloaded
     ///
-    /// llama.cpp runs the models in it and a refresh lists them, when `LLAMA_ARG_MODELS_DIR` is not set
+    /// llama.cpp runs the models in it, and a refresh lists them. `LLAMA_ARG_MODELS_DIR` is used instead when it is set
     ModelsDir {
         #[arg(conflicts_with = "rm")]
         dir: Option<String>,
@@ -200,19 +203,21 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// The memory local models run in, in GB: your GPU's, or a Mac's RAM. Alone shows it
+    /// Show or set the memory local models run in, in GB: your GPU's, or a Mac's RAM
     ///
-    /// A tier picks the best model your machine runs, or can download, when it scores higher than the tier's pick: one whose download takes at most 80% of it, the rest holding its context. Without it, the NVIDIA GPUs' memory, else the RAM
+    /// A tier takes the best model your machine runs or can download when it scores higher than the tier's pick. A download fits when it takes at most 80% of this memory, leaving the rest for its context. When not set, it is the memory of your NVIDIA GPUs, else the RAM
     Memory {
         #[arg(conflicts_with = "rm")]
         gb: Option<f64>,
-        /// Back to the one found
+        /// Go back to the memory found on this machine
         #[arg(long)]
         rm: bool,
     },
-    /// Your favorite model for one tier of a task, at its price or under: --tier picks it and recommend marks it ★. Alone, shows them (`f` in the TUI)
+    /// Show or set your favorite model for a tier of a task (`f` in the TUI)
+    ///
+    /// It must fit the tier's price. `list --tier` and `pick` choose it, and `recommend` marks it ★. With no task, shows every favorite
     Fav {
-        /// overall, coding, agentic, reasoning, vision or value. Any other name is a task of your own, e.g. debugging, which has only the models you give it
+        /// overall, coding, agentic, reasoning, vision or value. Any other name is a task of your own, e.g. debugging, whose only models are the favorites you give it
         #[arg(value_parser = store::task_name)]
         task: Option<String>,
         #[arg(requires_all = ["task", "tier"], conflicts_with = "rm")]
@@ -223,17 +228,17 @@ enum Cmd {
         /// The harness you run it on (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): `list --task --id` prints the id that one takes
         #[arg(long, requires = "model")]
         via: Option<String>,
-        /// Clear the task's favorites, or with --tier the tier's. A task of your own is gone with its last model, unless it has an about, which --about "" clears
+        /// Clear the task's favorites, or only the tier's with --tier. A task of your own is deleted with its last favorite, unless it has an --about text (--about "" clears that)
         #[arg(long, requires = "task")]
         rm: bool,
-        /// Give a task of your own this name instead. Its models stay
+        /// Rename a task of your own. Its favorites stay
         #[arg(long, value_name = "NAME", requires = "task", conflicts_with_all = ["model", "tier", "rm"], value_parser = store::task_name)]
         rename: Option<String>,
-        /// What a task of your own is about, in your words: agents pick the task by it, and over a built-in task that fits too. It makes a new task with no model yet, which agents see only once it has one, and "" clears it
+        /// Describe a task of your own in your words. Agents choose the task by this text, even over a built-in task that also fits. It can create a task before it has a model, but agents only see the task once it has one. "" clears it
         #[arg(long, value_name = "TEXT", requires = "task", conflicts_with_all = ["rm", "rename"])]
         about: Option<String>,
     },
-    /// The best model per price for each task, what the task measures and when to use it (`R` in the TUI)
+    /// The best model at each price for each task, with what the task measures and when to use it (`R` in the TUI)
     Recommend {
         /// Machine-readable output
         #[arg(long)]
@@ -245,10 +250,10 @@ enum Cmd {
 fn bound(s: &str, max: bool) -> Result<(usize, f64), String> {
     let ids = || app::COLS.map(|c| c.id).join(", ");
     let (id, v) =
-        s.split_once('=').ok_or_else(|| format!("expected column=value, e.g. coding=60; columns: {}", ids()))?;
+        s.split_once('=').ok_or_else(|| format!("expected column=value, e.g. coding=60, columns: {}", ids()))?;
     let col =
-        app::COLS.iter().position(|c| c.id == id).ok_or_else(|| format!("no column '{id}'; columns: {}", ids()))?;
-    let v = (app::COLS[col].read)(v, max).ok_or_else(|| format!("'{v}' is not a value for {id}"))?;
+        app::COLS.iter().position(|c| c.id == id).ok_or_else(|| format!("no column '{id}', columns: {}", ids()))?;
+    let v = (app::COLS[col].read)(v, max).ok_or_else(|| format!("'{v}' is not a valid value for {id}"))?;
     Ok((col, v))
 }
 
@@ -277,7 +282,7 @@ fn main() {
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             }
             if let Some(w) = &store.warning {
-                eprintln!("warning: {w}");
+                warn(w);
             }
             // The one model to use, chosen without the exclusions and favorites the file held:
             // a failure, as the warning is said once and a `$(...)` shows it to nobody.
@@ -285,7 +290,8 @@ fn main() {
                 || matches!(cmd, Cmd::List { ref tier, id, cmd, .. } if tier.is_some() || id || cmd);
             if store.warning.is_some() && one {
                 Err(Exit::from(
-                    "your favorites and exclusions may not apply: see the warning, then run again".to_string(),
+                    "no model picked, as your favorites and exclusions may not apply: see the warning above, then run again"
+                        .to_string(),
                 ))
             } else {
                 run(cmd, args.refresh, source.is_none())
@@ -295,6 +301,14 @@ fn main() {
     if let Err(e) = result {
         eprintln!("modelcmp: {}", e.msg);
         std::process::exit(e.code);
+    }
+}
+
+/// One line per warning: a refresh joins its warnings with "; ", which the TUI lists as bullets.
+fn warn(w: &str) {
+    let (from, w) = w.strip_prefix(data::LAST_REFRESH).map_or(("", w), |w| (data::LAST_REFRESH, w));
+    for one in w.split("; ") {
+        eprintln!("warning: {from}{one}");
     }
 }
 
@@ -324,11 +338,11 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
     let data = if bare {
         data::Data::default()
     } else {
-        let (data, warn) = data::load(force, auto).map_err(|e| e.to_string())?;
+        let (data, warn_of) = data::load(force, auto).map_err(|e| e.to_string())?;
         // The other source's columns sort and bound too, with its data there.
         data::set_lent(data.lent);
-        if let Some(w) = warn {
-            eprintln!("warning: {w}");
+        if let Some(w) = warn_of {
+            warn(&w);
         }
         // Epoch AI by default for want of a key, which the TUI's frame says too. Not when asked
         // for, and only where benchmarks are what is shown: not for the id or command a script
@@ -336,9 +350,8 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
         let shown = matches!(cmd, Cmd::List { id: false, cmd: false, .. } | Cmd::Recommend { .. });
         if shown && data::keyless() {
             eprintln!(
-                "warning: no {} API key{} (set {}, or press K in the TUI)",
+                "warning: no {} API key, so benchmarks are from Epoch AI (set {}, or press K in the TUI)",
                 data::Source::Aa.label(),
-                data::FELL_BACK,
                 data::AA_KEY_ENV
             );
         }
