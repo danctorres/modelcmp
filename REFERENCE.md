@@ -362,7 +362,7 @@ has the model in Via's order, among `--via`'s when given. A model no harness has
   the user to download it (17.4 GB): modelcmp get qwen3827b`.
 - When no task has a model (`--via ollama`, whose copies are picked only as favorites, or a
   `--min` nothing meets), `pick` fails and tells the agent to choose no model and tell the
-  user.
+  user. With `--task`, it tells the agent to try another task.
 - `--task` and `--tier` print only that task or tier, for an agent that chose it already.
 
 ### Naming a model

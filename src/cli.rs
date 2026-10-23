@@ -601,6 +601,10 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
     }
     // `no model` on every line would send an agent from task to task for nothing.
     if !found {
+        // One task with none is no reason to stop: another task may have one.
+        if let Some(c) = o.custom.as_deref() {
+            return Err(format!("{c} has no model for this request, run pick without --task for another task").into());
+        }
         // A copy your machine runs is no pick on merit (`Model::local`).
         let local = !o.via.is_empty() && o.via.iter().all(|v| crate::data::runs_here(&v.to_lowercase()));
         let why = if local { ". A model your machine runs is only picked as a favorite (modelcmp fav)" } else { "" };
