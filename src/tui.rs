@@ -1190,7 +1190,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), cap, BACK.to_vec()]
         }
         View::Recommend => {
-            let view = [&["d dropdown"], &search[..]].concat();
+            // A favorite has a harness to pick.
+            let via: &[&str] = if app.tier_fav().is_some() { &["v harness"] } else { &[] };
+            let view = [&["d dropdown"], via, &search[..]].concat();
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], view, actions("enter x o y space f e i"), cap, BACK.to_vec()]
         }
     };
@@ -3093,7 +3095,7 @@ fn choice_lines(
             // What has a colour in the table keeps it here: a harness. A site, a theme and a
             // source have none, so they take the text's and not one their name gives.
             let color = match effect {
-                Effect::Launch(_) | Effect::Via(_, _, Some(_)) | Effect::Harness(Some(_)) => via_color(out, harness),
+                Effect::Launch(_) | Effect::Via(_, _, Some(_), _) | Effect::Harness(Some(_)) => via_color(out, harness),
                 _ => Color::Reset,
             };
             // What the search found in the label, as the cursor goes by it, `at` chars into the line.
@@ -3904,6 +3906,13 @@ fn entry(
         Span::styled(score, fg(price)),
     ]);
     if !boxed {
+        // The harness a favorite runs on (`v` in `f`'s grid), as `f`'s grid says it, before what
+        // else the line says of it, as a list.
+        let via = fav.then(|| app.store.task_via(task, (!one).then_some(TIERS[col].0), &m.key)).flatten();
+        if let Some(h) = via {
+            let and = if off || out.is_some() { "," } else { "" };
+            spans.push(Span::styled(format!(" via {h}{and}"), fg(MUTED)));
+        }
         if off {
             // Both read as a list: "not recommended, not available".
             let said = if out.is_some() { " not recommended," } else { " not recommended" };
@@ -5610,6 +5619,11 @@ mod tests {
         a.rebuild();
         let text: Vec<String> = recommend(&a, 200, &mut vec![]).0.iter().map(|l| l.to_string()).collect();
         assert!(!text.iter().any(|l| l.contains("recommended:")), "{text:?}");
+        // A favorite's harness follows it under the grid, not in its box.
+        a.store.via.insert("coding:high".into(), "claude".into());
+        let text: Vec<String> = recommend(&a, 200, &mut vec![]).0.iter().map(|l| l.to_string()).collect();
+        assert!(text.iter().any(|l| l.starts_with("  high:") && l.ends_with("via claude")), "{text:?}");
+        assert_eq!(text.iter().filter(|l| l.contains("via claude")).count(), 1, "{text:?}");
     }
 
     #[test]
@@ -6503,7 +6517,7 @@ mod tests {
         assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(MUTED), "left out in Via, grey");
         // llama.cpp's command starts with the binary the machine has, and `v`'s list grey too.
         let llama = |bin: &str| (format!("{bin} -hf x"), Effect::Launch(vec![bin.into()]));
-        let via = ("pi --model x".to_string(), Effect::Via("k".into(), "coding".into(), Some("pi".into())));
+        let via = ("pi --model x".to_string(), Effect::Via("k".into(), "coding".into(), Some("pi".into()), false));
         let items = [llama("llama-server"), llama("llama"), via];
         let out = [crate::data::LLAMA.into(), "pi".into()];
         let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &out, &[], &[]);

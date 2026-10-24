@@ -1128,8 +1128,9 @@ pub enum Effect {
     /// model for the task or one tier of it; applied by `App` itself.
     Fav(String, String),
     /// Run the model's favorite for the slot on this harness, or on none in particular; the
-    /// items of `v`'s list in the `f` chooser, applied by `App` itself.
-    Via(String, String, Option<String>),
+    /// items of `v`'s list, applied by `App` itself. True: opened from recommend, which a pick
+    /// or esc goes back to, not `f`'s grid.
+    Via(String, String, Option<String>, bool),
     /// Ask the name of a new task of your own for the model; the last of the `f` chooser's
     /// items, applied by `App` itself.
     NewTask(String),
@@ -3028,10 +3029,10 @@ impl App {
         self.input = Input::choose("default harness?", Kind::Harness, items, sel);
     }
 
-    /// `v` in `f`'s grid: the harnesses that have the slot's favorite `key`, to run it on one,
-    /// as `x` lists them, after "any", with the cursor on the one it has. Only a ticked entry
-    /// has a model to run.
-    fn ask_via(&mut self, key: &str, slot: &str) {
+    /// `v` in `f`'s grid, or on a tier's favorite in recommend (`back`): the harnesses that have
+    /// the slot's favorite `key`, to run it on one, as `x` lists them, after "any", with the
+    /// cursor on the one it has. Only a favorite has a harness.
+    fn ask_via(&mut self, key: &str, slot: &str, back: bool) {
         if self.store.favorite(slot) != Some(key) {
             return self.refuse(format!("tick {slot} first, only a favorite has a harness to run on"));
         }
@@ -3042,11 +3043,11 @@ impl App {
         if cmds.is_empty() {
             return self.refuse(format!("no harness has {}, Via shows where you have access", m.name));
         }
-        let via = |h: Option<String>| Effect::Via(key.to_string(), slot.to_string(), h);
+        let via = |h: Option<String>| Effect::Via(key.to_string(), slot.to_string(), h, back);
         let items: Vec<_> = std::iter::once(("any harness".to_string(), via(None)))
             .chain(cmds.into_iter().map(|(h, c)| (c.join(" "), via(Some(h.to_string())))))
             .collect();
-        let has = |e: &Effect| matches!(e, Effect::Via(_, _, h) if h.as_deref() == self.store.via(slot));
+        let has = |e: &Effect| matches!(e, Effect::Via(_, _, h, _) if h.as_deref() == self.store.via(slot));
         let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
         self.input = Input::choose("run on which harness?", Kind::Via, items, sel);
     }
@@ -4082,26 +4083,40 @@ impl App {
         }
     }
 
-    /// `d` on a tier in recommend, its ▾: the models it can take, to make one its favorite, best first
-    /// and the pick with none ahead of them, the cursor on the one it has. They are the ones
-    /// recommend ranks at the tier's price or under, scored or not, as a new model may not be yet,
-    /// and the favorite it has whatever the filters and the cap, as the grid keeps it.
-    fn ask_pick(&mut self) {
-        let tier = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps);
-        let own = self.custom_at();
-        let (Some(c), Some(task)) = (tier, self.cur_task().map(|t| t.name).or(own)) else {
-            return self.refuse(format!(
-                "{} lists a tier's models to choose from, put the cursor on a tier first",
-                self.key_of('d')
-            ));
-        };
-        // A task of one pick shows the favorite of any tier, else high's.
+    /// The task and the tier under recommend's cursor, a task of one pick's the tier whose
+    /// favorite it shows, else high's.
+    fn tier_at(&self) -> Option<(&str, usize)> {
+        let c = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps)?;
+        let task = self.cur_task().map(|t| t.name).or(self.custom_at())?;
         let c = match self.current().map(|m| m.key.as_str()) {
             Some(k) if self.one_pick(self.task_cur) => {
                 (0..BOXES).rev().find(|&c| self.store.favorite(&box_slot(task, c)) == Some(k)).unwrap_or(BOXES - 1)
             }
             _ if self.one_pick(self.task_cur) => BOXES - 1,
             _ => c,
+        };
+        Some((task, c))
+    }
+
+    /// The favorite of the tier under recommend's cursor, with its slot, when the tier shows it:
+    /// what `v` there picks a harness for. A favorite over the tier's cap, or one the best model
+    /// your machine runs took the tier from, is not the model there.
+    pub fn tier_fav(&self) -> Option<(String, String)> {
+        let slot = self.tier_at().map(|(t, c)| box_slot(t, c))?;
+        let key = self.store.favorite(&slot).filter(|&k| self.current().is_some_and(|m| m.key == k))?;
+        Some((key.to_string(), slot))
+    }
+
+    /// `d` on a tier in recommend, its ▾: the models it can take, to make one its favorite, best first
+    /// and the pick with none ahead of them, the cursor on the one it has. They are the ones
+    /// recommend ranks at the tier's price or under, scored or not, as a new model may not be yet,
+    /// and the favorite it has whatever the filters and the cap, as the grid keeps it.
+    fn ask_pick(&mut self) {
+        let Some((task, c)) = self.tier_at() else {
+            return self.refuse(format!(
+                "{} lists a tier's models to choose from, put the cursor on a tier first",
+                self.key_of('d')
+            ));
         };
         let (slot, x) = (box_slot(task, c), TIERS[c].0);
         let fav = self.store.favorite(&slot);
@@ -4431,6 +4446,28 @@ impl App {
                     None => self.refuse("D deletes a task you added, put the cursor on its name"),
                 }
             }
+            // `v` on a tier's favorite: the harness it runs on, as in `f`'s grid.
+            KeyCode::Char('v') if self.view == View::Recommend => match self.tier_fav() {
+                Some((key, slot)) => self.ask_via(&key, &slot, true),
+                None => {
+                    // A favorite the tier does not show: over its cap, or one your machine's best took it from.
+                    let fav = self.tier_at().and_then(|(t, c)| self.store.favorite(&box_slot(t, c)));
+                    let why = match (fav, self.current()) {
+                        (Some(fav), Some(m)) => {
+                            let fav = self.data.models.iter().find(|m| m.key == fav).map_or(fav, |m| &m.name);
+                            format!("this tier shows {}, not your favorite {fav}", m.name)
+                        }
+                        _ if self.among.is_some() || self.caps => {
+                            "v picks a favorite's harness, j moves down to a task".into()
+                        }
+                        _ if self.on_new_task() => "v picks a favorite's harness, k moves up to a task".into(),
+                        _ if self.task_sel == 0 => "v picks a favorite's harness, l moves to a tier".into(),
+                        (_, None) => "this tier has no model, d picks one as its favorite".into(),
+                        _ => "only a favorite has a harness, f or d makes this tier's model one".into(),
+                    };
+                    self.refuse(why);
+                }
+            },
             // Enter on a task's name is below; on a tier with no model it has none to show either.
             KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | ' ') | KeyCode::Enter
                 if self.view == View::Recommend && !row && (code != KeyCode::Enter || self.task_sel > 0) =>
@@ -5015,7 +5052,7 @@ impl App {
                     KeyCode::Char('v') if *kind == Kind::Fav && !list.typing => {
                         if let Some((_, Effect::Fav(key, task))) = items.get(at?) {
                             let (key, slot) = (key.clone(), box_slot(task, list.col));
-                            self.ask_via(&key, &slot);
+                            self.ask_via(&key, &slot, false);
                         }
                     }
                     // `r` renames the task of your own under the cursor and `a` writes what it is
@@ -5091,11 +5128,15 @@ impl App {
                                 let shows = self.col_bench(c).map_or("its task's score".into(), bench_label);
                                 self.report(Ok(format!("{} shows {shows}", base_col_name(c))));
                             }
-                            Effect::Via(key, slot, h) => {
+                            Effect::Via(key, slot, h, back) => {
                                 self.store.set_favorite(&slot, &key, h.as_deref());
                                 let on = h.as_deref().unwrap_or("any harness");
                                 self.report(Ok(format!("★ the favorite for {slot} runs on {on}")));
-                                self.fav_at(&key, &slot);
+                                if back {
+                                    self.input = Input::None;
+                                } else {
+                                    self.fav_at(&key, &slot);
+                                }
                                 return Some(Effect::Save);
                             }
                             effect => return Some(effect),
@@ -5103,12 +5144,13 @@ impl App {
                     }
                     _ if list.key(code, mods, &names, false) => {}
                     // Esc leaves the harnesses for f's grid they were opened from, on the same task.
-                    KeyCode::Esc if *kind == Kind::Via => {
-                        if let Some((_, Effect::Via(key, slot, _))) = items.first() {
+                    KeyCode::Esc if *kind == Kind::Via => match items.first() {
+                        Some((_, Effect::Via(key, slot, _, false))) => {
                             let (key, slot) = (key.clone(), slot.clone());
                             self.fav_at(&key, &slot);
                         }
-                    }
+                        _ => self.input = Input::None,
+                    },
                     // The key that opens the theme list also closes it, and so the columns' and the benchmarks'.
                     KeyCode::Char('t') if *kind == Kind::Theme => self.input = Input::None,
                     KeyCode::Char('|') if *kind == Kind::Cols => self.input = Input::None,
@@ -7546,6 +7588,56 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         a.store.clear_favorite("api:high");
         assert_eq!(a.store.custom_tasks(), ["api", "tool-dispatch"]);
+    }
+
+    #[test]
+    fn v_in_recommend_puts_a_tier_favorite_on_a_harness() {
+        let mut a = app();
+        for m in &mut a.data.models {
+            let via = m.via.clone();
+            m.offers[0].via = via;
+        }
+        press(&mut a, "R");
+        // Off a tier, the status says where one is.
+        press(&mut a, "v");
+        assert!(a.input == Input::None && a.status.ends_with("j moves down to a task"), "the from line: {}", a.status);
+        (a.among, a.caps) = (None, true);
+        press(&mut a, "v");
+        assert!(a.status.ends_with("j moves down to a task"), "the tiers' header: {}", a.status);
+        (a.caps, a.task_cur) = (false, a.task_count());
+        press(&mut a, "v");
+        assert!(a.status.ends_with("k moves up to a task"), "+ new task: {}", a.status);
+        let coding = TASKS.iter().position(|t| t.name == "coding").unwrap();
+        (a.task_cur, a.task_sel) = (coding, 0);
+        press(&mut a, "v");
+        assert!(a.input == Input::None && a.status.contains("l moves to a tier"), "{}", a.status);
+        a.task_sel = 1;
+        press(&mut a, "v");
+        assert!(a.status.starts_with("this tier has no model"), "free: {}", a.status);
+        a.task_sel = TIERS.len();
+        press(&mut a, "v");
+        assert!(a.input == Input::None && a.status.starts_with("only a favorite"), "{}", a.status);
+        a.store.toggle_favorite("coding:high", "gpt55");
+        a.rebuild();
+        press(&mut a, "v");
+        assert!(matches!(&a.input, Input::Choose { kind: Kind::Via, items, .. } if items.len() == 3));
+        code(&mut a, KeyCode::Esc);
+        assert!(a.input == Input::None && a.view == View::Recommend, "esc: back on recommend");
+        press(&mut a, "vj");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.via("coding:high"), Some("opencode"));
+        assert!(a.input == Input::None && a.view == View::Recommend, "a pick: back on recommend");
+        // A favorite the tier does not show, as one over its cap, has no harness to pick there.
+        a.store.set_favorite("coding:mid", "gpt55", None);
+        a.rebuild();
+        a.task_sel = 3;
+        press(&mut a, "v");
+        assert!(a.input == Input::None && a.status == "this tier shows mini, not your favorite gpt55", "{}", a.status);
+        a.task_sel = TIERS.len();
+        // From `f`'s grid it goes back to the grid, as before.
+        press(&mut a, "fv");
+        code(&mut a, KeyCode::Esc);
+        assert!(matches!(&a.input, Input::Choose { kind: Kind::Fav, .. }), "esc: back on f's grid");
     }
 
     #[test]
