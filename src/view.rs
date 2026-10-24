@@ -1108,7 +1108,8 @@ pub fn detail_rows(
     let source = crate::data::source();
     let mut v = vec![
         format!("{}{}", m.name, if excluded(m, store, any) { " (excluded)" } else { "" }),
-        format!("  developer:  {}", or_dash(&m.devs().collect::<Vec<_>>().join(", "))),
+        format!("  developer:  {}", or_dash(&m.developer)),
+        format!("  country:    {}", or_dash(&m.country)),
         format!("  via:        {}", via(m, any, get)),
         // What you'd pay and to whom, `~` as in the table; the list price when it is not yours.
         // Per 1M tokens, as the providers below say.
@@ -1693,7 +1694,7 @@ mod tests {
         assert_eq!(via(&a, true, Some("↓ 2.5 GB")), "↓ 2.5 GB", "a download stands for it");
         assert!(detail_lines(&a, &Store::default(), true).contains(&format!("  via:        {OUT_OF_REACH}")));
         let sized = detail_rows(&a, &Store::default(), true, None, Some(2_500_000_000));
-        assert_eq!(sized[5].1, "  size:       2.5 GB (GGUF copy on Hugging Face)", "under context, once known");
+        assert_eq!(sized[6].1, "  size:       2.5 GB (GGUF copy on Hugging Face)", "under context, once known");
         assert_eq!(find("Ctx").ext, Some((200.0, 100.0)));
         assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);

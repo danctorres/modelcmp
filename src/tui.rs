@@ -6200,17 +6200,17 @@ mod tests {
             (a.scroll, a.status.clone(), y.map(|y| text(buf)[y as usize].clone()))
         };
         let (scroll, status, on) = at(&mut a);
-        assert_eq!((scroll, status.as_str()), (2, "line 1 of 2"), "the price line, the title not counted");
+        assert_eq!((scroll, status.as_str()), (3, "line 1 of 2"), "the price line, the title not counted");
         assert!(on.unwrap().contains("price:"), "the cursor on it");
         a.key(KeyCode::Char('n').into());
         let (scroll, status, on) = at(&mut a);
-        assert_eq!((scroll, status.as_str()), (10, "line 2 of 2"), "the providers' row, as far down as it scrolls");
+        assert_eq!((scroll, status.as_str()), (11, "line 2 of 2"), "the providers' row, as far down as it scrolls");
         let on = on.unwrap();
         assert!(on.contains("5.0  opus"), "the cursor on it, not at the top: {on}");
         a.key(KeyCode::Char('n').into());
-        assert_eq!(at(&mut a).0, 2, "round again after the last");
+        assert_eq!(at(&mut a).0, 3, "round again after the last");
         a.key(KeyCode::Char('N').into());
-        assert_eq!(at(&mut a).0, 10, "N the previous, round to the last");
+        assert_eq!(at(&mut a).0, 11, "N the previous, round to the last");
         a.key(KeyCode::Char('N').into());
         assert_eq!(at(&mut a).1, "line 1 of 2");
         type_in(&mut a, "/zzz");
@@ -6434,6 +6434,10 @@ mod tests {
             .collect();
         assert!(text.iter().any(|l| l.starts_with("  developer:  anthropic")), "{text:?}");
         let mut m = a.data.models[0].clone();
+        m.country = "USA".into();
+        let text: Vec<String> =
+            detail(&m, &a.store, a.any_available(), (None, None)).1.iter().map(ToString::to_string).collect();
+        assert!(text.iter().any(|l| l == "  country:    USA"), "{text:?}");
         m.fit.insert("coding".into(), 50.0);
         let lines = detail(&m, &a.store, a.any_available(), (None, None)).1;
         let coding = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == "coding").expect("a coding fit line");
