@@ -853,11 +853,10 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
     let lw = table.iter().map(|r| r.label.chars().count() + 1).max().unwrap_or(0).max(22);
     let mut section = "";
     for row in table {
-        // A rule naming each topic above its first row, as in the TUI.
+        // A rule above each group of rows, as the TUI splits its columns.
         if row.section != section {
             section = row.section;
-            let name = format!("── {section} ");
-            println!("{name}{}", "─".repeat((lw + 18 * models.len()).saturating_sub(name.chars().count())));
+            println!("{}", "─".repeat(lw + 18 * models.len()));
         }
         print!("{:<lw$}", row.label);
         for c in &row.cells {

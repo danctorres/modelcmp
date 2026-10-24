@@ -4187,16 +4187,20 @@ fn compare(
         })
         .collect();
     let heads: Vec<_> = cols.iter().zip(&widths).map(|(c, &w)| wrap_label(&c.label, w)).collect();
+    // A group of columns starts after the names and where the section changes, split from the
+    // one before by a `│` in its gap, a cell wider, as in the table.
+    let starts = |c: usize, f: usize| c == f || cols[c].section != cols[c - 1].section;
+    let gap = |c: usize, f: usize| 2 + usize::from(starts(c, f));
     // How many columns from `f` on fit beside the names, always at least one. The `‹` goes in the
     // gap before the first, the `›` after the last takes a cell, but only when there are more.
     let count = |f: usize, reserve: usize| {
         let mut room = avail.saturating_sub(name_w + reserve);
-        let ok = |w: &&usize| {
-            let fit = room >= **w + 2;
-            room = room.saturating_sub(**w + 2);
+        let ok = |&(c, w): &(usize, &usize)| {
+            let fit = room >= w + gap(c, f);
+            room = room.saturating_sub(w + gap(c, f));
             fit
         };
-        widths[f.min(m)..].iter().take_while(ok).count().max(1)
+        widths.iter().enumerate().skip(f.min(m)).take_while(ok).count().max(1)
     };
     let fits = |f: usize| {
         let all = count(f, 0);
@@ -4227,30 +4231,10 @@ fn compare(
         // The arrows keep their keys.
         out.push(key_line(&format!("columns {}-{} of {m} · ← → move", first + 1, first + shown), &BTreeMap::new()));
     }
-    // A rule naming each topic over its columns, its name running on past a topic too narrow
-    // for it, the next topic's rule starting after. The header's lines are for every column,
-    // not those shown, so the panel keeps its height as it scrolls.
-    if cols.iter().any(|c| !c.section.is_empty()) {
-        let mut text = String::new();
-        let (mut c, mut x) = (vis.start, name_w);
-        while c < vis.end {
-            let s = cols[c].section;
-            let run = (c..vis.end).take_while(|&k| cols[k].section == s).count();
-            let end = x + widths[c..c + run].iter().map(|w| w + 2).sum::<usize>();
-            if !s.is_empty() {
-                let at = text.chars().count().max(x) + 2;
-                let name = format!("{}── {s} ", " ".repeat(at - text.chars().count()));
-                let rule = end.saturating_sub(at + 4 + s.chars().count());
-                text += &(name + &"─".repeat(rule));
-            }
-            (c, x) = (c + run, end);
-        }
-        out.push(Line::styled(text, fg(MUTED)));
-    }
     // The labels, their last lines on the header's last, as the values under them: right
     // aligned, Via's left.
     let edge = MORE;
-    let left = |c: usize| searched[c] == "via";
+    let left = |c: usize| searched[c] == "Via";
     let h = heads.iter().map(Vec::len).max().unwrap_or(1);
     let head_top = out.len();
     for j in 0..h {
@@ -4259,7 +4243,9 @@ fn compare(
         let mut spans = vec![Span::styled(format!("{name:<name_w$}"), fg(KEY))];
         for c in vis.clone() {
             if last && c == first && first > 0 {
-                spans.extend([Span::styled("‹", edge), Span::raw(" ")]);
+                spans.extend([Span::styled("‹", edge), Span::styled(SEP, fg(MUTED)), Span::raw(" ")]);
+            } else if starts(c, first) {
+                spans.extend([Span::raw(" "), Span::styled(SEP, fg(MUTED)), Span::raw(" ")]);
             } else {
                 spans.push(Span::raw("  "));
             }
@@ -4289,19 +4275,22 @@ fn compare(
     // Each label, from the gap before it, sorts by its column on a click.
     let mut x = name_w;
     for c in vis.clone() {
-        spots.push(Spot { lines: head_top..out.len(), x: x + 1..x + 2 + widths[c], at: Stop::CompareCol(c) });
-        x += widths[c] + 2;
+        let g = gap(c, first);
+        spots.push(Spot { lines: head_top..out.len(), x: x + g - 1..x + g + widths[c], at: Stop::CompareCol(c) });
+        x += widths[c] + g;
     }
-    // The rule under the header, heavy under the cursor's column, as in the table. With columns
-    // off screen the panel takes the whole width, so it keeps its size as it scrolls.
-    let width = if shown < m { avail } else { name_w + vis.clone().map(|c| widths[c] + 2).sum::<usize>() };
-    let at = name_w + vis.clone().take_while(|&c| c != col).map(|c| widths[c] + 2).sum::<usize>() + 2;
-    let heavy = if vis.contains(&col) { widths[col] } else { 0 };
-    out.push(Line::from(vec![
-        Span::styled("─".repeat(at.min(width)), fg(MUTED)),
-        Span::styled("━".repeat(heavy), fg(ACCENT)),
-        Span::styled("─".repeat(width.saturating_sub(at + heavy)), fg(MUTED)),
-    ]));
+    // The rule under the header, heavy under the cursor's column and crossing the group lines,
+    // as in the table. With columns off screen the panel takes the whole width, so it keeps its
+    // size as it scrolls.
+    let width = if shown < m { avail } else { x };
+    let mut rule = vec![Span::styled("─".repeat(name_w), fg(MUTED))];
+    for c in vis.clone() {
+        rule.push(Span::styled(if starts(c, first) { "─┼─" } else { "──" }, fg(MUTED)));
+        let (line, style) = if c == col { ("━", fg(ACCENT)) } else { ("─", fg(MUTED)) };
+        rule.push(Span::styled(line.repeat(widths[c]), style));
+    }
+    rule.push(Span::styled("─".repeat(width.saturating_sub(x)), fg(MUTED)));
+    out.push(Line::from(rule));
     let top = out.len();
     for (i, model) in models.iter().enumerate() {
         let plain = if muted[i] { fg(MUTED) } else { Style::new() };
@@ -4319,7 +4308,11 @@ fn compare(
                 _ => Style::new(),
             };
             let pad = " ".repeat(widths[c] - cell_w(cell));
-            spans.push(Span::raw("  "));
+            if starts(c, first) {
+                spans.extend([Span::raw(" "), Span::styled(SEP, fg(MUTED)), Span::raw(" ")]);
+            } else {
+                spans.push(Span::raw("  "));
+            }
             if left(c) {
                 if muted[i] {
                     spans.push(Span::styled(cell.to_string(), style));
@@ -5872,14 +5865,14 @@ mod tests {
         assert_eq!((keys(&a), a.current().unwrap().key.as_str()), (vec!["flash".into(), "opus".into()], "opus"));
         term.draw(|f| draw(&mut a, f)).unwrap();
         let screen = text(term.backend().buffer()).join("\n");
-        assert!(screen.contains("▲price"), "{screen}");
+        assert!(screen.contains("▲Price"), "{screen}");
         a.key(KeyCode::Char('s').into());
         assert_eq!(keys(&a), ["opus", "flash"], "again reverses");
         a.key(KeyCode::Char('$').into());
         assert_eq!(a.compare_col, a.compare_cols() - 1, "$ to the last column");
         a.mouse(Mouse::Open(Stop::CompareCol(4)));
         assert_eq!(a.compare_col, 4, "a click on a label sorts by it");
-        assert!(a.compare_sort.as_ref().is_some_and(|s| s.0 != "$ in / 1M"));
+        assert!(a.compare_sort.as_ref().is_some_and(|s| s.0 != "$in"));
     }
 
     #[test]
@@ -5911,10 +5904,11 @@ mod tests {
         assert_eq!(label.lines.end, full.at - 2, "a column's label, over the rule, is its spot");
         let rule = &full.lines[full.at - 2];
         assert!(
-            rule.to_string().starts_with("───────━━━"),
+            rule.to_string().starts_with("──────┼─━━━"),
             "a rule under the header, heavy under the cursor's column: {rule}"
         );
-        assert!(full.lines.iter().any(|l| l.to_string().contains("── index ")), "topics over their columns");
+        let crossed = |l: &Line| l.to_string().chars().filter(|&c| c == '│' || c == '┼').count();
+        assert!(full.lines[full.at - 2..].iter().all(|l| crossed(l) > 1), "group lines run down the panel");
         let (cut, _) = draw(0, 40, "", None);
         assert!(cut.shown < full.shown && head(&cut).ends_with('›') && !head(&cut).contains('‹'), "{}", head(&cut));
         assert!(cut.lines.iter().any(|l| l.to_string().starts_with(&format!("columns 1-{} of", cut.shown))));
@@ -5930,7 +5924,7 @@ mod tests {
         assert!(found.first > 0 && found.col > 0, "a match moves the cursor to its column");
         let lit = found.lines.iter().flat_map(|l| &l.spans).any(|s| s.content == "ECI" && s.style != fg(KEY));
         assert!(lit, "and its label is drawn as found");
-        assert_eq!((draw(0, 200, "ntext", None).0.hits, draw(0, 200, "contxt", None).0.hits), (1, 0), "no typo");
+        assert_eq!((draw(0, 200, "rice", None).0.hits, draw(0, 200, "prce", None).0.hits), (1, 0), "no typo");
     }
 
     /// One check per defect a review found in the drawing.
@@ -6461,7 +6455,7 @@ mod tests {
         )
         .lines;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
-        assert!(rows.iter().any(|l| l.to_string().starts_with("model")));
+        assert!(rows.iter().any(|l| l.to_string().starts_with("Model")));
     }
 
     #[test]

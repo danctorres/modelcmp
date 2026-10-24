@@ -1246,15 +1246,16 @@ pub struct Row {
     pub listed: Vec<bool>,
     /// Whether a higher value is the better, as the sort takes it: highest first, else lowest.
     pub higher: bool,
-    /// The topic the row belongs to, named in a rule above its first row; `""` for the
-    /// model, price and context rows at the top.
+    /// The group of columns the row is in, as the table's, split from the next by a rule: `""`
+    /// for the model, price and context rows at the top.
     pub section: &'static str,
 }
 
 /// The mark of a model's download, when `x` offers one in the TUI (`App::download`).
 pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
 
-/// Rows for side-by-side comparison; Via as the table shows it (`shown_via`).
+/// Rows for side-by-side comparison, named and ordered as the table's columns, with the
+/// model's first; Via as the table shows it (`shown_via`).
 pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
         let mut it = vals.iter().flatten();
@@ -1284,78 +1285,75 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         r.listed = offers.iter().map(|o| o.1).collect();
         r
     };
+    // Named as the table's columns, and a task with none, as vision, by its name.
+    let head = |id: &str| {
+        crate::app::COLS
+            .iter()
+            .find(|c| c.id == id)
+            .map_or_else(|| id[..1].to_uppercase() + &id[1..], |c| c.head().into())
+    };
     let mut rows = vec![
-        Row { label: "model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), ..Default::default() },
-        Row {
-            label: "via".into(),
-            cells: models.iter().map(|m| via(m, any, get(m).as_deref())).collect(),
-            ..Default::default()
-        },
+        Row { label: "Model".into(), cells: models.iter().map(|m| m.name.clone()).collect(), ..Default::default() },
         // Blended, as the table's Price and the verdict take it.
-        price("price / 1M", Offer::blended),
-        price("$ in / 1M", |o| o.input),
+        price(&head("price"), Offer::blended),
+        price(&head("in"), |o| o.input),
         // No cache discount: cached input costs full price.
-        price("$ cached in / 1M", |o| o.cache_read.unwrap_or(o.input)),
-        price("$ out / 1M", |o| o.output),
+        price(&head("cache"), |o| o.cache_read.unwrap_or(o.input)),
+        price(&head("out"), |o| o.output),
         // Unknown is no context to rank.
         row(
-            "context",
+            &head("ctx"),
             models.iter().map(|m| (m.context > 0).then_some(m.context as f64)).collect(),
             |c| ctx(c as u64),
             true,
         ),
         Row {
-            section: "index",
+            section: "scores",
             ..row(crate::data::source().index().0, models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true)
         },
     ];
-    // Under context, before the index's rule: the ECI row is the last so far.
-    if models.iter().any(|m| m.tps.is_some() || m.ttft.is_some()) {
-        let at = rows.len() - 1;
-        rows.insert(at, row("answer starts", models.iter().map(|m| m.ttft).collect(), |v| format!("{v:.1}s"), false));
-        rows.insert(at, row("tokens/s", models.iter().map(|m| m.tps).collect(), |v| format!("{v:.0}"), true));
-    }
     // The other source's index beside this one's, with its data there too: ECI then AAII, as
     // the table's columns.
     if models.iter().any(|m| m.other_index.is_some()) {
         let source = crate::data::source();
         let other = models.iter().map(|m| m.other_index).collect();
         let at = rows.len() - usize::from(source == crate::data::Source::Aa);
-        rows.insert(at, Row { section: "index", ..row(source.other().index().0, other, |v| format!("{v:.1}"), true) });
+        rows.insert(at, Row { section: "scores", ..row(source.other().index().0, other, |v| format!("{v:.1}"), true) });
+    }
+    if models.iter().any(|m| m.arena.is_some()) {
+        let arena = models.iter().map(|m| m.arena).collect();
+        rows.push(Row { section: "scores", ..row(&head("arena"), arena, signed, true) });
     }
     for t in TASKS.iter().filter(|t| t.name != "overall" && !as_overall(models, t.name)) {
         let vals: Vec<Option<f64>> = models.iter().map(|m| task_score(m, t.name)).collect();
         if vals.iter().any(Option::is_some) {
-            rows.push(Row { section: "tasks", ..row(t.name, vals, |v| format!("{v:.0}"), true) });
+            rows.push(Row { section: "scores", ..row(&head(t.name), vals, |v| format!("{v:.0}"), true) });
         }
     }
-    if models.iter().any(|m| m.arena.is_some()) {
-        let arena = models.iter().map(|m| m.arena).collect();
-        rows.push(Row { section: "arena", ..row("agent %", arena, signed, true) });
+    if models.iter().any(|m| m.tps.is_some() || m.ttft.is_some()) {
+        let speed = |id, f: fn(&Model) -> Option<f64>, fmt: fn(f64) -> String, higher| Row {
+            section: "speed",
+            ..row(&head(id), models.iter().map(|m| f(m)).collect(), fmt, higher)
+        };
+        rows.push(speed("tps", |m| m.tps, |v| format!("{v:.0}"), true));
+        rows.push(speed("ttft", |m| m.ttft, |v| format!("{v:.1}s"), false));
     }
-    for (b, ..) in crate::data::ARENA_BOARDS {
-        let vals: Vec<Option<f64>> = models.iter().map(|m| m.arena_more.get(b).copied()).collect();
-        if vals.iter().any(Option::is_some) {
-            rows.push(Row { section: "arena", ..row(&b.to_lowercase(), vals, |v| score(Some(v)), true) });
-        }
-    }
-    let mut benches: Vec<&String> = models.iter().flat_map(|m| m.scores.keys()).collect();
-    benches.sort();
-    benches.dedup();
-    for b in benches {
-        let vals = models.iter().map(|m| m.scores.get(b).copied()).collect();
-        rows.push(Row { section: "benchmarks", ..row(b, vals, |v| format!("{:.1}%", v * 100.0), true) });
-    }
+    rows.push(Row {
+        label: "Via".into(),
+        section: "via",
+        cells: models.iter().map(|m| via(m, any, get(m).as_deref())).collect(),
+        ..Default::default()
+    });
     rows
 }
 
 /// The TUI's compare: the model row, which names its rows, and its columns, the other rows of
-/// `compare_rows` with Via last, the widest. A column with fewer than two values compares
+/// `compare_rows`. A column with fewer than two values compares
 /// nothing, and is left out.
 pub fn compare_cols(models: &[&Model], any: bool, get: Get) -> (Row, Vec<Row>) {
     let mut cols = compare_rows(models, any, get);
     let names = cols.remove(0);
-    let via = cols.remove(0);
+    let via = cols.pop().expect("Via is the last row");
     cols.retain(|c| c.cells.iter().filter(|v| *v != "-").count() >= 2);
     cols.push(via);
     (names, cols)
@@ -1679,7 +1677,7 @@ mod tests {
             (Model { eci: Some(150.0), context: 1, ..Default::default() }, Model { context: 2, ..Default::default() });
         let labels =
             |ms: &[&Model]| compare_cols(ms, false, &|_| None).1.into_iter().map(|c| c.label).collect::<Vec<_>>();
-        assert_eq!(labels(&[&a, &b]), ["context", "via"], "ECI has one value, so nothing to compare, and Via stays");
+        assert_eq!(labels(&[&a, &b]), ["Ctx", "Via"], "ECI has one value, so nothing to compare, and Via stays");
         assert!(labels(&[&a, &a]).contains(&"ECI".to_string()));
     }
 
@@ -1690,21 +1688,21 @@ mod tests {
         let rows = compare_rows(&[&a, &b], false, &|_| None);
         let find = |l: &str| rows.iter().find(|r| r.label == l).unwrap();
         // With access to no model, Via is empty; with access to another, it says so, as the table.
-        assert_eq!(find("via").cells, vec!["-", "-"]);
-        assert_eq!(compare_rows(&[&a], true, &|_| None)[1].cells, vec![OUT_OF_REACH]);
+        assert_eq!(find("Via").cells, vec!["-", "-"]);
+        assert_eq!(compare_rows(&[&a], true, &|_| None).last().unwrap().cells, vec![OUT_OF_REACH]);
         assert_eq!(via(&a, true, Some("↓ 2.5 GB")), "↓ 2.5 GB", "a download stands for it");
         assert!(detail_lines(&a, &Store::default(), true).contains(&format!("  via:        {OUT_OF_REACH}")));
         let sized = detail_rows(&a, &Store::default(), true, None, Some(2_500_000_000));
         assert_eq!(sized[5].1, "  size:       2.5 GB (GGUF copy on Hugging Face)", "under context, once known");
-        assert_eq!(find("context").ext, Some((200.0, 100.0)));
+        assert_eq!(find("Ctx").ext, Some((200.0, 100.0)));
         assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);
-        assert_eq!((find("context").section, find("ECI").section), ("", "index"));
+        assert_eq!((find("Ctx").section, find("ECI").section), ("", "scores"));
         let same = compare_rows(&[&a, &a], false, &|_| None);
-        assert_eq!(same.iter().find(|r| r.label == "context").unwrap().ext, None, "equal values are not marked");
+        assert_eq!(same.iter().find(|r| r.label == "Ctx").unwrap().ext, None, "equal values are not marked");
         let ms = [100_000, 200_400, 200_000, 0].map(|c| mk("m", c, None));
         let rows = compare_rows(&ms.each_ref(), false, &|_| None);
-        let context = rows.iter().find(|r| r.label == "context").unwrap();
+        let context = rows.iter().find(|r| r.label == "Ctx").unwrap();
         let best = Some(200_400.0);
         assert_eq!(context.vals, [Some(100_000.0), best, best, None], "200k twice, and unknown is not the worst");
         // A list price is neither the best nor the worst, as in the table.
@@ -1713,7 +1711,7 @@ mod tests {
         let unpriced = Offer { unpriced: true, ..at(0.0) };
         let listed = Model { offers: vec![unpriced, Offer { available: false, ..at(1.0) }], ..Default::default() };
         let rows = compare_rows(&[&yours(3.0), &yours(5.0), &listed], false, &|_| None);
-        let price = rows.iter().find(|r| r.label == "$ in / 1M").unwrap();
+        let price = rows.iter().find(|r| r.label == "$in").unwrap();
         assert_eq!((price.cells[2].as_str(), price.ext), ("~1.0", Some((3.0, 5.0))));
     }
 
@@ -1765,7 +1763,7 @@ mod tests {
             ..Default::default()
         };
         let has = |ms: &[&Model]| {
-            let col = compare_rows(ms, false, &|_| None).iter().any(|r| r.label == "vision");
+            let col = compare_rows(ms, false, &|_| None).iter().any(|r| r.label == "Vision");
             (col, verdict(ms, &Store::default()).iter().any(|r| r[0] == "vision"))
         };
         let (a, b, blind) = (mk(150.0, true), mk(140.0, true), mk(145.0, false));
