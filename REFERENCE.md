@@ -25,7 +25,7 @@ means. Green and red mark the best and worst value in a column, here and in comp
 | Value | coding score per dollar of Price, as a percentile (0-100) |
 | Tok/s | output tokens per second. From Artificial Analysis |
 | TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
-| Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare |
+| Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare. The one the model runs on (`H`) is dark on its colour, here, in the details and compare |
 | Notes | your note on it |
 
 One table shows the columns of both sources. The columns of the source not in use show when
@@ -172,10 +172,10 @@ modelcmp memory 24                             # the GB your GPU has, when the o
 modelcmp select sonnet-5                       # shortlist it, list --selected shows them
 modelcmp note sonnet-5 "fast enough for refactors"
 modelcmp exclude llama-4-maverick              # have it, can't use it
-modelcmp harness claude                        # your default harness (`H` in the TUI)
+modelcmp harness opencode                      # your default harness
+modelcmp harness claude opus-5.5 sonnet-5      # the harness these run on (`H` in the TUI)
 modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier of a task, at its price or under
 modelcmp tier mid 8                            # mid takes models up to $8, `modelcmp tier` shows every cap
-modelcmp fav coding opus-5.5 --tier high --via claude   # and the harness you run it on
 
 # tasks of your own
 modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"
@@ -318,16 +318,18 @@ which tasks a pick ranks. Each prices at its own cache share, the TUI's set with
 1. With `--via` naming a harness, the id that harness takes (`--via claude --id` gives
    `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts
    opencode). It is an error when the harness lacks the model.
-2. With `--task`, the id the favorite's harness takes (`fav --via`), while it has the model.
-3. With `--task`, the id your default harness takes (`modelcmp harness`), when it has the model.
-4. The id opencode takes, or pi or omp when only they have the model.
-5. The id at the provider you'd pay.
-6. For a model only your machine runs, the tag `ollama run` takes, or the repo (`-hf`) or file
+2. The id the model's harness takes (`modelcmp harness claude opus-5.5`, `H`), while it has the model.
+3. The id your default harness takes (`modelcmp harness`), when it has the model.
+4. The id its developer's own harness takes (claude for a Claude model), as `--cmd` starts it.
+5. The id the first harness to have the model takes, in Via's order: opencode, pi, omp, and for
+   a model only your machine runs, the tag `ollama run` takes, or the repo (`-hf`) or file
    (`-m`) `llama-cli` takes.
+6. The id at the provider you'd pay.
 
 `--cmd` prints the command that starts the harness on the model instead (`claude --model
-claude-opus-5-5`). The harness is the favorite's, else your default one, else the first that
-has the model in Via's order, among `--via`'s when given. A model no harness has is an error.
+claude-opus-5-5`). The harness is the model's, else your default one, else its developer's own
+(claude for a Claude model, codex for OpenAI's, gemini for Google's), else the first that has
+the model in Via's order, among `--via`'s when given. A model no harness has is an error.
 
 - With `--tier`, `--id` or `--cmd`, no match is an error (exit code 1), so a harness is never
   started on an empty model. Without them `list` says `no models match` and exits with 0.
@@ -557,10 +559,11 @@ Each model carries these fields:
 
 `recommend --json` has a list of tasks, each with its `when`, its `frontier`, the `tiers` the
 TUI's `R` shows (the key each of `free`, `low`, `mid` and `high` picks, or one `pick` for a task
-with one), the user's `tier_favorites`, and their harnesses as `tier_via`.
+with one), and the user's `tier_favorites`.
 
 - A frontier entry carries its `context` in tokens, `via` (the harnesses that have the model,
-  as in `list --json`), and the user's `note` when the model has one.
+  as in `list --json`), the `harness` the user runs it on when they chose one that has it, and
+  the user's `note` when the model has one.
 - A favorite that is on the line only as the favorite has `"recommended": false`, and the text
   output marks it `not recommended`.
 - The text output prints each tier's pick as `name [key] · $price · score`, the score being
@@ -574,5 +577,4 @@ A task of your own follows the built-in ones with the same fields and `"custom":
 | `about` | what the user wrote, `your own task` when nothing |
 | `when` | says it wins over a built-in task that fits too |
 | `tier_favorites` | the models the user gave its tiers |
-| `tier_via` | the harnesses they run on when the user chose one, `{}` otherwise, as for a built-in task |
 | `frontier` | those models, cheapest first, with a null `score` |

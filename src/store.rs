@@ -71,12 +71,12 @@ pub struct Store {
     /// (`custom_tasks`).
     #[serde(alias = "preferred")]
     pub favorite: BTreeMap<String, String>,
-    /// `slot` -> the harness you run its favorite on (`fav --via`, `v` in `f`'s grid): `--id`
-    /// gives the id that one takes. Gone with the favorite.
+    /// Model key -> the harness you run it on (`H`, `modelcmp harness <harness> <model>`):
+    /// `--cmd` and `--id` go by it when none is asked for.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub via: BTreeMap<String, String>,
+    pub runs_on: BTreeMap<String, String>,
     /// The harness `--cmd` and `--id` go by when none is asked for and it has the model
-    /// (`modelcmp harness`); a favorite's own comes first.
+    /// (`modelcmp harness`); a model's own comes first.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub harness: String,
     /// The folder of the `.gguf` files you downloaded (`modelcmp models-dir`), read when
@@ -272,9 +272,6 @@ impl Store {
         s.favorite.retain(|k, _| k.split_once(':').is_some_and(|(_, x)| tier(x)));
         // A cap left by a hand edit on a tier that takes none, or that is no price.
         s.tiers.retain(|t, c| crate::view::capped(t) && c.is_finite() && *c >= 0.0);
-        // A harness is its favorite's: one left by a hand edit has no model to run.
-        let Store { favorite, via, .. } = &mut s;
-        via.retain(|k, _| favorite.contains_key(k));
         // A price level left by a hand edit that is none would hide nothing, yet show as left out.
         s.price_not = s.price_not.filter(|&l| l < crate::view::LEVELS.len());
         s.price_pick = s.price_pick.filter(|&l| l < crate::view::LEVELS.len());
@@ -412,19 +409,14 @@ impl Store {
         self.favorite.get(task).map(String::as_str)
     }
 
-    /// The harness you run the slot's favorite on, when you chose one.
-    pub fn via(&self, slot: &str) -> Option<&str> {
-        self.via.get(slot).map(String::as_str)
+    /// The harness you run the model on, when you chose one (`H`).
+    pub fn runs_on(&self, key: &str) -> Option<&str> {
+        self.runs_on.get(key).map(String::as_str)
     }
 
-    /// The harness of `key` as a favorite of the task: with a tier, the tier's when it is that
-    /// one's favorite, and with none, of the first tier it has.
-    pub fn task_via(&self, task: &str, tier: Option<&str>, key: &str) -> Option<&str> {
-        let slots: Vec<String> = match tier {
-            Some(x) => vec![slot(task, x)],
-            None => task_slots(task).collect(),
-        };
-        slots.iter().find(|s| self.favorite(s) == Some(key)).and_then(|s| self.via(s))
+    /// Run the model on `harness`, or on none in particular with None.
+    pub fn set_runs_on(&mut self, key: &str, harness: Option<&str>) {
+        set_text(&mut self.runs_on, key, harness.unwrap_or(""));
     }
 
     /// What `--tier` tries before the computed pick: the tier's favorite.
@@ -467,9 +459,6 @@ impl Store {
             return Err(format!("a task named {new} already exists"));
         }
         for (from, to) in task_slots(old).zip(task_slots(new)) {
-            if let Some(via) = self.via.remove(&from) {
-                self.via.insert(to.clone(), via);
-            }
             if let Some(model) = self.favorite.remove(&from) {
                 self.favorite.insert(to, model);
             }
@@ -509,19 +498,17 @@ impl Store {
         if self.favorite.get(slot).is_some_and(|k| k == key) {
             self.clear_favorite(slot);
         } else {
-            self.set_favorite(slot, key, None);
+            self.set_favorite(slot, key);
         }
     }
 
-    /// Make `key` the slot's favorite, run on the harness `via` when one is given.
-    pub fn set_favorite(&mut self, slot: &str, key: &str, via: Option<&str>) {
+    /// Make `key` the slot's favorite.
+    pub fn set_favorite(&mut self, slot: &str, key: &str) {
         self.favorite.insert(slot.to_string(), key.to_string());
-        set_text(&mut self.via, slot, via.unwrap_or(""));
     }
 
-    /// The slot left with no favorite, nor its harness; false when it had none.
+    /// The slot left with no favorite; false when it had none.
     pub fn clear_favorite(&mut self, slot: &str) -> bool {
-        self.via.remove(slot);
         self.favorite.remove(slot).is_some()
     }
 
@@ -631,19 +618,16 @@ mod tests {
         s.toggle_favorite(&slot("coding", "high"), "gpt55");
         assert_eq!((s.tier_favorite("coding", "low"), s.tier_favorite("coding", "free")), (Some("flash"), None));
         assert_eq!(s.favorite_for("gpt55"), ["coding:mid", "coding:high"]);
-        s.set_favorite("coding:mid", "gpt55", Some("codex"));
-        assert_eq!(s.task_via("coding", Some("mid"), "gpt55"), Some("codex"), "the tier's harness");
-        assert_eq!(s.task_via("coding", Some("high"), "gpt55"), None, "the tier's favorite has none of its own");
-        assert_eq!(s.task_via("coding", Some("low"), "gpt55"), None, "another model's tier");
-        assert_eq!(s.task_via("coding", None, "gpt55"), Some("codex"), "no tier: the slot it is the favorite of");
-        s.toggle_favorite("coding:mid", "flash");
-        assert_eq!(s.via("coding:mid"), None, "another model: the harness goes with the one it was for");
+        s.set_runs_on("gpt55", Some("codex"));
+        assert_eq!(s.runs_on("gpt55"), Some("codex"));
+        s.set_runs_on("gpt55", None);
+        assert!(s.runs_on.is_empty(), "none in particular");
         // Files written before the renames call favorites "preferred" and pins "favorites", and
         // older ones have a task's own favorite, of no tier, which no tier picks now.
         let file = br#"{"preferred":{"coding":"old","coding:low":"old","debugging":"old","debugging:fast":"x","long-context:low":"x"},"via":{"coding":"claude"},"favorites":["old"]}"#;
         std::fs::write(&p, file).unwrap();
         let old = Store::load_from(p.clone());
-        assert!(old.favorite("coding").is_none() && old.via.is_empty() && old.is_marked("old"));
+        assert!(old.favorite("coding").is_none() && old.runs_on.is_empty() && old.is_marked("old"));
         // A task that is not built in is your own.
         assert_eq!(old.custom_tasks(), ["long-context"]);
         assert_eq!(old.favorite_for("old"), ["coding:low"]);

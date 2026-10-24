@@ -10,7 +10,7 @@
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
     Mouse, NCOLS, NEW_TASK, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys,
-    box_slot, found, got, group_starts, help_rows, hidden, on_price, shown, slot_box,
+    box_slot, found, got, group_starts, help_rows, hidden, on_price, runs_on, shown, slot_box,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -69,13 +69,13 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     }
     // Asked first: reading the reply takes whatever else is queued with it, and here that is
     // nothing.
-    let term_bg = cfg!(unix).then(terminal_bg).flatten();
+    let (term_bg, term_ansi) = if cfg!(unix) { terminal_colors() } else { (None, None) };
     // Start from the cache however old, or with no cache from an empty table, and download behind
     // the intro and the table (`--refresh` too), so nothing waits for it and a failure shows in
     // the frame.
     let mut app = App::new((!ask).then(data::load_cache).flatten().unwrap_or_default(), store);
     app.dir = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
-    app.term_bg = term_bg;
+    (app.term_bg, app.term_ansi) = (term_bg, term_ansi);
     let (mut rx, mut pre) = (None, None);
     if ask {
         app.first_start = true;
@@ -169,7 +169,7 @@ fn upgrade(cmds: &[Vec<String>]) -> Result<(), String> {
 }
 
 /// The terminal's background colour, for a marked row's faint fill with the terminal's own
-/// colours. It is asked for with OSC 11, then for the cursor position, which every terminal
+/// colours, and its 16 (OSC 4), for a pill's faded one behind a box. It is asked for with OSC 11, then for the cursor position, which every terminal
 /// answers: replies come in the order asked, so once the position is in, the colour's either is
 /// queued or is not coming, with no wait to guess at and no late reply read as keys. crossterm
 /// knows no OSC reply, so it comes through as the keys that spell it. The fill is a 24-bit
@@ -179,7 +179,7 @@ fn upgrade(cmds: &[Vec<String>]) -> Result<(), String> {
 /// every Windows console that runs it draws them.
 /// ponytail: one that never answers the position costs crossterm's 2 s at each start, and a reply
 /// later than that is read as keys; read the tty here with a wait of our own if one turns up.
-fn terminal_bg() -> Option<u32> {
+fn terminal_colors() -> (Option<u32>, Option<[u32; 16]>) {
     use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use std::io::Write;
     let term = std::env::var("TERM").unwrap_or_default();
@@ -187,13 +187,16 @@ fn terminal_bg() -> Option<u32> {
         && !["kitty", "alacritty", "ghostty", "foot", "wezterm", "direct"].iter().any(|t| term.contains(t))
         && std::env::var_os("WSL_DISTRO_NAME").is_none()
     {
-        return None;
+        return (None, None);
     }
     // Raw, so the reply is not echoed.
-    enable_raw_mode().ok()?;
+    if enable_raw_mode().is_err() {
+        return (None, None);
+    }
     let mut out = std::io::stdout();
     let mut reply = String::new();
-    if out.write_all(b"\x1b]11;?\x07").and_then(|()| out.flush()).is_ok() {
+    let ask: String = (0..16).map(|i| format!("\x1b]4;{i};?\x07")).collect();
+    if out.write_all(format!("\x1b]11;?\x07{ask}").as_bytes()).and_then(|()| out.flush()).is_ok() {
         // With no position in, what did come is still read, or it is left for the table as keys.
         let _ = ratatui::crossterm::cursor::position();
         while event::poll(Duration::ZERO).unwrap_or(false) {
@@ -209,13 +212,37 @@ fn terminal_bg() -> Option<u32> {
         }
     }
     let _ = disable_raw_mode();
-    parse_bg(&reply)
+    (parse_bg(&reply), parse_ansi(&reply))
 }
 
-/// The colour in an OSC 11 reply, `]11;rgb:1e1e/1e1e/2e2e`: the high byte of each channel.
+/// The colour in an OSC 11 reply, `]11;rgb:1e1e/1e1e/2e2e`: the high byte of each channel. Not
+/// an OSC 4 one's, `]4;11;rgb:...` included, from a terminal that answers those alone.
 fn parse_bg(reply: &str) -> Option<u32> {
-    let mut rgb = reply.split_once("rgb:")?.1.split('/').map(|c| u32::from_str_radix(c.get(..2)?, 16).ok());
+    let (i, _) = reply
+        .match_indices("rgb:")
+        .find(|&(i, _)| reply[..i].strip_suffix("11;").is_some_and(|h| !h.ends_with(';')))?;
+    rgb(&reply[i + 4..])
+}
+
+/// The colour at the start of `s`, `1e1e/1e1e/2e2e`: the high byte of each channel.
+fn rgb(s: &str) -> Option<u32> {
+    let mut rgb = s.split('/').map(|c| u32::from_str_radix(c.get(..2)?, 16).ok());
     Some(rgb.next()?? << 16 | rgb.next()?? << 8 | rgb.next()??)
+}
+
+/// The terminal's 16 colours in the OSC 4 replies after the OSC 11 one, each `4;<slot>;rgb:...`
+/// with no escape in it (`terminal_colors`), when it told all of them.
+fn parse_ansi(reply: &str) -> Option<[u32; 16]> {
+    let mut slots = [None; 16];
+    let parts: Vec<&str> = reply.split("rgb:").collect();
+    for w in parts.windows(2) {
+        // What precedes `rgb:` ends in `4;<slot>;`, after the previous colour's digits.
+        let Some((head, slot)) = w[0].strip_suffix(';').and_then(|h| h.rsplit_once(';')) else { continue };
+        if let (true, Ok(i @ 0..16)) = (head.ends_with('4'), slot.parse::<usize>()) {
+            slots[i] = rgb(w[1]);
+        }
+    }
+    slots.iter().all(Option::is_some).then(|| slots.map(Option::unwrap_or_default))
 }
 
 /// Half blocks, two square pixels to a cell.
@@ -392,7 +419,7 @@ fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                     Some(k) => fg(RAINBOW.get(k / STEP).copied().unwrap_or(ACCENT)).add_modifier(BOLD),
                 }
             });
-            recolor(buf, theme, app.term_bg);
+            recolor(buf, theme, app.term_bg, app.term_ansi.as_ref());
         })?;
         if end == 0 {
             return Ok(());
@@ -674,7 +701,6 @@ fn event_loop(
                         | Effect::Via(..)
                         | Effect::NewTask(_)
                         | Effect::Theme(_)
-                        | Effect::Harness(_)
                         | Effect::Col(_)
                         | Effect::Bench(..)
                         | Effect::Pick(..),
@@ -710,7 +736,7 @@ fn paint(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), String> {
         .draw(|f| {
             draw(app, f);
             app.more = more_at(f.buffer_mut());
-            recolor(f.buffer_mut(), palette(app), app.term_bg);
+            recolor(f.buffer_mut(), palette(app), app.term_bg, app.term_ansi.as_ref());
         })
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -1074,8 +1100,8 @@ const SEP: &str = "│";
 /// Every box in recommend has it, two cells wide, muted but on the cursor's: `d` opens its dropdown.
 const MENU: &str = " ▾";
 /// The actions on one model, in the one order every view shows them in.
-const ACTIONS: [&str; 8] =
-    ["enter details", "x launch", "o open", "y copy name", "space select", "f fav", "e exclude", "i note"];
+const ACTIONS: [&str; 9] =
+    ["enter details", "x launch", "H harness", "o open", "y copy name", "space select", "f fav", "e exclude", "i note"];
 
 /// The last group of every overlay, the last hints a narrow terminal drops.
 const BACK: [&str; 2] = ["esc back", "q quit"];
@@ -1105,7 +1131,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["↓ ↑ G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
         View::Table => {
-            let mut view = vec!["H harness", "| columns", "/ filter", "s sort"];
+            let mut view = vec!["| columns", "/ filter", "s sort"];
             if app.menu(app.col) {
                 view.push("d dropdown");
             }
@@ -1145,9 +1171,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 back.push("esc back");
             }
             back.push("q quit");
-            vec![vec!["← → column"], view, actions("enter x o y space f e i"), back]
+            vec![vec!["← → column"], view, actions("enter x H o y space f e i"), back]
         }
-        View::Detail(_) => vec![vec!["↓ ↑ scroll"], search, actions("x o y space f e i"), BACK.to_vec()],
+        View::Detail(_) => vec![vec!["↓ ↑ scroll"], search, actions("x H o y space f e i"), BACK.to_vec()],
         View::Issues => vec![vec!["↓ ↑ scroll"], [&search[..], &["r refresh"]].concat(), BACK.to_vec()],
         // `?` here closes help, which `esc back` already says.
         View::Help if matches!(app.input, Input::Bind { .. }) => vec![vec!["esc cancel"]],
@@ -1163,7 +1189,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         }
         View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
         View::Compare => {
-            vec![vec!["↓ ↑ model", "← → 0 $ column", "s sort"], search, actions("enter x o y f e i"), BACK.to_vec()]
+            vec![vec!["↓ ↑ model", "← → 0 $ column", "s sort"], search, actions("enter x H o y f e i"), BACK.to_vec()]
         }
         // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
         // On the `from` line, the models it ranks.
@@ -1190,10 +1216,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), cap, BACK.to_vec()]
         }
         View::Recommend => {
-            // A favorite has a harness to pick.
-            let via: &[&str] = if app.tier_fav().is_some() { &["v harness"] } else { &[] };
-            let view = [&["d dropdown"], via, &search[..]].concat();
-            vec![vec!["↓ ↑ task", "← → 0 $ tier"], view, actions("enter x o y space f e i"), cap, BACK.to_vec()]
+            let view = [&["d dropdown"], &search[..]].concat();
+            vec![vec!["↓ ↑ task", "← → 0 $ tier"], view, actions("enter x H o y space f e i"), cap, BACK.to_vec()]
         }
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
@@ -1422,6 +1446,8 @@ const WASH: u32 = 12;
 /// And of the text colour in the cursor's: the most that every theme reads on and tells from a
 /// marked row's fill (`roles_are_told_apart`), about what an editor's cursor line has.
 const CURSOR_WASH: u32 = 8;
+/// And of a pill's colour in its fill behind a box, faded as the text around it.
+const PILL_FADE: u32 = 50;
 /// The mark colour in that fill with the terminal's own colours, which do not tell their slot 12.
 /// ponytail: one blue for a dark and a light terminal; ask for slot 12 (OSC 4) to follow the rice.
 const TERM_MARK: u32 = 0x5c9cff;
@@ -1429,10 +1455,30 @@ const TERM_MARK: u32 = 0x5c9cff;
 /// Swap the terminal colours for the theme's after drawing, so the drawing code keeps naming
 /// terminal colours: the 16, default text, and a developer's placeholder (see `dev_color`).
 /// Backgrounds with no colour get the theme's; with the terminal's own colours they stay transparent.
-/// `term_bg` is the terminal's background, if it told (`terminal_bg`).
-fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>) {
+/// `term_bg` is the terminal's background and `slots` its 16, if it told (`terminal_colors`).
+fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>, slots: Option<&[u32; 16]>) {
     let bg = palette.map(|p| Color::from_u32(p.bg));
     for cell in &mut buf.content {
+        // A pill behind a box (`Modifier::DIM`) fades as the rest does, which faint does to no
+        // background: its fill half mixed into the background, else, with no colours to mix,
+        // its colour as text.
+        if cell.fg == Color::Black && cell.bg != Color::Reset && cell.modifier.contains(Modifier::DIM) {
+            let fill = match (palette, term_bg, slots) {
+                (Some(p), ..) => Some((contrasting(cell.bg, p), p.bg, Color::from_u32(p.bg))),
+                (None, Some(b), Some(s)) => {
+                    ansi(resolve(cell.bg, None)).map(|i| (Color::from_u32(s[i]), b, Color::Black))
+                }
+                _ => None,
+            };
+            if let Some((c, bg, text)) = fill {
+                (cell.fg, cell.bg) = (text, wash(c, bg, PILL_FADE));
+                continue;
+            }
+            // A selected row's solid fill (`solid`) is black on the mark too, and stays.
+            if term_bg.is_some() || cell.bg != MARK {
+                (cell.fg, cell.bg) = (cell.bg, Color::Reset);
+            }
+        }
         // The terminal's own colours with its background unknown have no faint fill: the cursor
         // is a reverse-video bar there, its two ends part of it and colours off it so it reads
         // as one. A pill in the accent keeps its fill.
@@ -1467,7 +1513,8 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>) {
                 wash(Color::from_u32(if lum(b) < 128.0 { 0xffffff } else { 0 }), b, CURSOR_WASH)
             }
             (_, None, Some(b)) if cell.fg != Color::Black => wash(Color::from_u32(TERM_MARK), b, WASH),
-            (c, None, _) => c,
+            // A pill in a harness's colour (`chip`) is in the one its name has off it.
+            (c, None, _) => resolve(c, None),
         };
     }
 }
@@ -2353,9 +2400,12 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
             let (start, end) = (area.x + x, area.x + x + w);
             let (mut x, get) = (start, app.download(m));
             if reach {
+                // The harness it runs on (`H`) a chip in its colour, so a model with one shows it.
+                let runs = runs_on(&app.store, m);
                 for (j, h) in m.via.iter().enumerate() {
                     x += u16::from(j > 0);
-                    let style = soft(via_color(&app.store.via_not, h));
+                    let c = via_color(&app.store.via_not, h);
+                    let style = if runs == Some(h.as_str()) { chip(if dim { MUTED } else { c }) } else { soft(c) };
                     x = put(buf, x, y, short(h), end.saturating_sub(x) as usize, style).0;
                 }
             } else if get.is_none() {
@@ -2692,10 +2742,9 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
-                Kind::Via => "VIA",
+                Kind::Via => "HARNESS",
                 Kind::Fav => "FAV",
                 Kind::Theme => "THEME",
-                Kind::Harness => "HARNESS",
                 Kind::Cols => "COLUMNS",
                 Kind::Open => "OPEN",
                 Kind::Pick => "PICK",
@@ -2927,22 +2976,34 @@ fn edit_prefix(e: &Edit) -> String {
 /// A row of `f`'s grid while it is written in place: `edit_prefix`, then the text, or in grey
 /// what to write while there is none. Text too long for `room` cells scrolls sideways.
 /// A harness's colour, grey when it is left out in the Via dropdown (`out`): the model shows for
-/// its others. The table, `x`, `v`'s list, the details and compare all say it so.
+/// its others. The table, `x`, the details and compare all say it so.
 fn via_color(out: &[String], h: &str) -> Color {
     if out.iter().any(|x| x == h) { MUTED } else { dev_color(h) }
 }
 
-/// `said`, `view::via`'s text for `m`, in `style`, a harness left out in the Via dropdown grey.
-fn via_spans(m: &Model, any: bool, get: bool, said: &str, out: &[String], style: Style) -> Vec<Span<'static>> {
+/// The harness a model runs on (`H`) in Via: dark on `c`, its colour, so it stands out of the list.
+fn chip(c: Color) -> Style {
+    fg(Color::Black).bg(c).add_modifier(BOLD)
+}
+
+/// `said`, `view::via`'s text for `m`, in `style`, a harness left out in the Via dropdown grey
+/// and the one it runs on (`H`) a `chip`, as in the table.
+fn via_spans(m: &Model, any: bool, get: bool, said: &str, store: &Store, style: Style) -> Vec<Span<'static>> {
     let harnesses = crate::view::via_harnesses(m, any, get);
     let Some(rest) = said.strip_prefix(&*harnesses.join(", ")) else {
         return vec![Span::styled(said.to_string(), style)];
     };
+    let runs = runs_on(store, m);
     let mut spans = vec![];
     for (i, h) in harnesses.into_iter().enumerate() {
         spans.extend((i > 0).then(|| Span::styled(", ", style)));
-        let grey = via_color(out, h) == MUTED;
-        spans.push(Span::styled(h.to_string(), if grey { style.fg(MUTED) } else { style }));
+        let c = via_color(&store.via_not, h);
+        let style = match (runs == Some(h), c == MUTED) {
+            (true, _) => style.patch(chip(c)),
+            (_, true) => style.fg(MUTED),
+            _ => style,
+        };
+        spans.push(Span::styled(h.to_string(), style));
     }
     spans.push(Span::styled(rest.to_string(), style));
     spans
@@ -2982,10 +3043,12 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     let w = fav_name_w(items);
     let head: String = crate::view::TIERS.iter().map(|t| format!(" {:<1$}", t.0, BOX_W - 1)).collect();
     let mut lines = vec![Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED))];
-    let mut under = String::new();
+    // And the harness the favorite runs on, a `chip` after it as in Via.
+    let (mut under, mut runs_chip) = (String::new(), None);
     // The grid is for one model: looked up once, not per box.
     let key = items.iter().find_map(|(_, e)| if let Effect::Fav(k, _) = e { Some(k) } else { None });
     let model = key.and_then(|k| app.data.models.iter().find(|m| m.key == *k));
+    let runs = model.and_then(|m| runs_on(&app.store, m));
     for (i, (label, effect)) in items.iter().enumerate() {
         let on = i == list.sel;
         let Effect::Fav(key, task) = effect else {
@@ -3026,9 +3089,10 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
             if at {
                 let name =
                     |k: &str| app.data.models.iter().find(|m| m.key == k).map_or(k.to_string(), |m| m.name.clone());
-                under = match (app.store.favorite(&slot), app.store.via(&slot), &over) {
+                runs_chip = runs.filter(|_| app.store.favorite(&slot) == Some(key.as_str()) && over.is_none());
+                under = match (app.store.favorite(&slot), runs, &over) {
                     (Some(k), _, Some(why)) if k == key => format!("{slot}: unused, {why}, space clears it"),
-                    (Some(k), Some(h), _) if k == key => format!("{slot}: {}, via {h}", name(k)),
+                    (Some(k), Some(_), _) if k == key => format!("{slot}: {}", name(k)),
                     (Some(k), ..) if k == key => format!("{slot}: {}", name(k)),
                     (Some(k), ..) => format!("{slot}: the favorite is {}", name(k)),
                     (None, _, Some(why)) => format!("{slot}: {why}"),
@@ -3047,15 +3111,20 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     let hint = match (list.typing, own) {
         // While searching the letters are typed, as the status bar says.
         (true, _) => " ↓ ↑ match · enter toggle · esc clear",
-        // `r` and `a` are said once there is a task of your own. `↓ ↑` and enter work too, left
-        // unsaid: with them the line is wider than 80 columns hold.
-        (_, true) => " ← → tier · / search · space toggle · v via · r rename · a about · esc close",
-        _ => " ↓ ↑ ← → move · / search · space enter toggle · v via · esc close",
+        // `r` and `a` are said once there is a task of your own. `↓ ↑`, enter and esc work too,
+        // left unsaid: with them the line is wider than 80 columns hold.
+        (_, true) => " ← → tier · / search · space toggle · H harness · r rename · a about",
+        _ => " ↓ ↑ ← → move · / search · space enter toggle · H harness · esc close",
     };
     // As wide as the hint at most, so the box keeps its width as the cursor moves.
     let width = hint.chars().count();
     lines.push(Line::default());
-    lines.push(Line::from(format!(" {}", truncate(&under, width - 1))).style(fg(MUTED)));
+    // The name is cut, not the `via` that leads to the chip.
+    let (via, chip_w) = runs_chip.map_or(("", 0), |h| (", via ", 6 + h.chars().count()));
+    let said = format!(" {}{via}", truncate(&under, (width - 1).saturating_sub(chip_w)));
+    let mut said = vec![Span::styled(said, fg(MUTED))];
+    said.extend(runs_chip.map(|h| Span::styled(h.to_string(), chip(via_color(&app.store.via_not, h)))));
+    lines.push(Line::from(said));
     // A row being written takes every key; a name enter did not take says why. As wide as the
     // hint it stands for.
     lines.push(match &list.edit {
@@ -3095,7 +3164,7 @@ fn choice_lines(
             // What has a colour in the table keeps it here: a harness. A site, a theme and a
             // source have none, so they take the text's and not one their name gives.
             let color = match effect {
-                Effect::Launch(_) | Effect::Via(_, _, Some(_), _) | Effect::Harness(Some(_)) => via_color(out, harness),
+                Effect::Launch(_) | Effect::Via(_, Some(_), _) => via_color(out, harness),
                 _ => Color::Reset,
             };
             // What the search found in the label, as the cursor goes by it, `at` chars into the line.
@@ -3103,7 +3172,7 @@ fn choice_lines(
                 |at: usize| found(label, query).into_iter().map(|r| r.start + at..r.end + at).collect::<Vec<_>>();
             // A name, then what follows it muted: a harness and the command that opens it.
             let name = match effect {
-                Effect::Launch(_) | Effect::Via(..) | Effect::Harness(_) | Effect::Col(_) => {
+                Effect::Launch(_) | Effect::Via(..) | Effect::Col(_) => {
                     Some((label.find(' ').unwrap_or(label.len()), fg(color)))
                 }
                 _ => None,
@@ -3163,7 +3232,7 @@ fn choice_lines(
         Kind::Cols => " ↓ ↑ move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
-        Kind::Harness | Kind::Pick => " ↓ ↑ move · / search · space enter picks · esc close",
+        Kind::Pick => " ↓ ↑ move · / search · space enter picks · esc close",
         Kind::Bench => " ↓ ↑ move · / search · space enter picks · esc B close",
         Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",
@@ -3906,12 +3975,13 @@ fn entry(
         Span::styled(score, fg(price)),
     ]);
     if !boxed {
-        // The harness a favorite runs on (`v` in `f`'s grid), as `f`'s grid says it, before what
-        // else the line says of it, as a list.
-        let via = fav.then(|| app.store.task_via(task, (!one).then_some(TIERS[col].0), &m.key)).flatten();
-        if let Some(h) = via {
+        // The harness the model runs on (`H`), as `f`'s grid says it, before what else the line
+        // says of it, as a list, the harness a `chip` as in Via.
+        if let Some(h) = runs_on(&app.store, m) {
             let and = if off || out.is_some() { "," } else { "" };
-            spans.push(Span::styled(format!(" via {h}{and}"), fg(MUTED)));
+            spans.push(Span::styled(" via ", fg(MUTED)));
+            spans.push(Span::styled(h.to_string(), chip(via_color(&app.store.via_not, h))));
+            spans.push(Span::styled(and, fg(MUTED)));
         }
         if off {
             // Both read as a list: "not recommended, not available".
@@ -4096,7 +4166,7 @@ fn detail(
                 Some((k, v)) if k.trim() == "via" && s.starts_with("  ") => {
                     let (pad, said) = v.split_at(v.len() - v.trim_start().len());
                     let mut spans = vec![Span::styled(format!("{k}:"), fg(KEY)), Span::raw(pad.to_string())];
-                    spans.extend(via_spans(m, any, get.is_some(), said, &store.via_not, Style::new()));
+                    spans.extend(via_spans(m, any, get.is_some(), said, store, Style::new()));
                     Line::from(spans)
                 }
                 // A download's size grey when it is too big for your machine's memory, as in Via.
@@ -4326,7 +4396,7 @@ fn compare(
                 if muted[i] {
                     spans.push(Span::styled(cell.to_string(), style));
                 } else {
-                    spans.extend(via_spans(model, any, get(model).is_some(), cell, &store.via_not, style));
+                    spans.extend(via_spans(model, any, get(model).is_some(), cell, store, style));
                 }
                 spans.push(Span::raw(pad));
             } else {
@@ -4487,7 +4557,7 @@ mod tests {
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
         assert!(
-            lines[3].contains("s sort  d dropdown  % no cache  r refresh  K api key  │  enter details"),
+            lines[3].contains("d dropdown  % no cache  r refresh  K api key  │  enter details  x launch  H harness"),
             "{}",
             lines[3]
         );
@@ -4573,7 +4643,7 @@ mod tests {
         buf[(0, 0)].set_fg(Color::Black).set_bg(Color::LightBlue);
         buf[(1, 0)].set_fg(Color::Reset);
         buf[(2, 0)].set_fg(BAD).set_bg(Color::LightBlue);
-        recolor(&mut buf, THEMES[crate::view::theme("nord")].1.as_ref(), None);
+        recolor(&mut buf, THEMES[crate::view::theme("nord")].1.as_ref(), None, None);
         // A marked row's ✗: nord's red, on its background with a little of the light blue in it.
         assert_eq!((buf[(2, 0)].fg, buf[(2, 0)].bg), (Color::from_u32(0xbf616a), Color::from_u32(0x3c4654)));
         // A pill: nord's background as the text, and the light blue kept, being the half of blue
@@ -4581,16 +4651,57 @@ mod tests {
         assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (Color::from_u32(0x2e3440), Color::from_u32(0xa3d0e8)));
         assert_eq!((buf[(1, 0)].fg, buf[(1, 0)].bg), (Color::from_u32(0xd8dee9), Color::from_u32(0x2e3440)));
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
-        recolor(&mut buf, None, None);
+        recolor(&mut buf, None, None, None);
         assert_eq!(buf[(0, 0)].bg, Color::Reset, "the terminal's own colours keep its background");
+        // A harness's chip is filled with the colour its name has when it is not the chosen one.
+        for theme in [None, THEMES[crate::view::theme("nord")].1.as_ref()] {
+            for term_bg in [None, Some(0x1e1e2e)] {
+                let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+                buf[(0, 0)].set_style(fg(dev_color("claude")));
+                buf[(1, 0)].set_style(chip(dev_color("claude")));
+                recolor(&mut buf, theme, term_bg, None);
+                assert_eq!(buf[(1, 0)].bg, buf[(0, 0)].fg, "{term_bg:?}");
+                let full = buf[(1, 0)].bg;
+                // Behind a box, its fill half mixed into the background, so it fades as the text
+                // around it, once there are colours to mix: else its colour as text.
+                let slots: [u32; 16] = std::array::from_fn(|i| 0x0f0f0f * i as u32);
+                for s in [None, Some(&slots)] {
+                    let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+                    buf[(0, 0)].set_style(fg(dev_color("claude")).add_modifier(Modifier::DIM));
+                    buf[(1, 0)].set_style(chip(dev_color("claude")).add_modifier(Modifier::DIM));
+                    recolor(&mut buf, theme, term_bg, s);
+                    let (name, pill) = (&buf[(0, 0)], &buf[(1, 0)]);
+                    let mixed = match (theme, term_bg, s) {
+                        (Some(p), ..) => Some(wash(full, p.bg, PILL_FADE)),
+                        (None, Some(b), Some(s)) => Some(wash(Color::from_u32(s[ansi(full).unwrap()]), b, PILL_FADE)),
+                        _ => None,
+                    };
+                    match mixed {
+                        Some(c) => assert_eq!(pill.bg, c, "{term_bg:?} {s:?}"),
+                        None => assert_eq!((pill.fg, pill.bg), (name.fg, name.bg), "{term_bg:?}"),
+                    }
+                }
+            }
+        }
+        let reply = "]11;rgb:1e1e/1e1e/2e2e".to_string()
+            + &(0..16).map(|i| format!("]4;{i};rgb:{i:02x}{i:02x}/0000/ffff\\")).collect::<String>();
+        let slots = parse_ansi(&reply).unwrap();
+        assert_eq!((slots[0], slots[11], slots[15]), (0x0000ff, 0x0b00ff, 0x0f00ff));
+        assert_eq!(parse_bg(&reply), Some(0x1e1e2e), "the background's reply comes first");
+        assert_eq!(parse_bg(&reply[22..]), None, "a slot's colour is not the background");
+        assert_eq!(parse_ansi("]11;rgb:1e1e/1e1e/2e2e]4;0;rgb:0000/0000/0000"), None, "all 16 or none");
         // A marked row with them: a solid fill, or a faint one mixed from the terminal's
         // background once it told it, which leaves a pill as it is.
         let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
         buf[(0, 0)].set_fg(BAD).set_bg(MARK);
         buf[(1, 0)].set_fg(Color::Black).set_bg(MARK);
-        recolor(&mut buf, None, None);
+        recolor(&mut buf, None, None, None);
         assert_eq!(buf[(0, 0)].bg, MARK);
-        recolor(&mut buf, None, parse_bg("]11;rgb:1e1e/1e1e/2e2eg"));
+        let mut behind = Buffer::empty(Rect::new(0, 0, 1, 1));
+        behind[(0, 0)].set_style(fg(Color::Black).bg(MARK).add_modifier(Modifier::DIM));
+        recolor(&mut behind, None, None, None);
+        assert_eq!(behind[(0, 0)].bg, MARK, "a selected row behind a box keeps its fill");
+        recolor(&mut buf, None, parse_bg("]11;rgb:1e1e/1e1e/2e2eg"), None);
         assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (BAD, Color::from_u32(0x252d47)));
         assert_eq!(buf[(1, 0)].bg, MARK);
         // The cursor's is a grey: white in a dark background, black in a light one, or the
@@ -4598,7 +4709,7 @@ mod tests {
         for (theme, bg, fill) in [(None, 0x1e1e2e, 0x30303e), (None, 0xffffff, 0xeaeaea), (Some("nord"), 0, 0x3b414d)] {
             let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
             buf[(0, 0)].set_bg(CURSOR);
-            recolor(&mut buf, theme.and_then(|t| THEMES[crate::view::theme(t)].1.as_ref()), Some(bg));
+            recolor(&mut buf, theme.and_then(|t| THEMES[crate::view::theme(t)].1.as_ref()), Some(bg), None);
             assert_eq!(buf[(0, 0)].bg, Color::from_u32(fill), "{theme:?} on {bg:06x}");
         }
         assert_eq!([parse_bg(""), parse_bg("rgb:ff/00")], [None, None], "no reply, or half of one");
@@ -5019,7 +5130,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  H harness  | columns  / filter  s sort  K api key  │  enter details  x launch  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
+                "← → column  │  | columns  / filter  s sort  K api key  │  enter details  x launch  H harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -5619,11 +5730,42 @@ mod tests {
         a.rebuild();
         let text: Vec<String> = recommend(&a, 200, &mut vec![]).0.iter().map(|l| l.to_string()).collect();
         assert!(!text.iter().any(|l| l.contains("recommended:")), "{text:?}");
-        // A favorite's harness follows it under the grid, not in its box.
-        a.store.via.insert("coding:high".into(), "claude".into());
+        // A model's harness follows it under the grid, not in its box, while it has the model.
+        a.store.set_runs_on("opus", Some("claude"));
+        let text: Vec<String> = recommend(&a, 200, &mut vec![]).0.iter().map(|l| l.to_string()).collect();
+        assert!(!text.iter().any(|l| l.contains("via claude")), "claude does not have it: {text:?}");
+        let opus = a.data.models.iter_mut().find(|m| m.key == "opus").unwrap();
+        opus.via.push("claude".into());
+        opus.offers[0].via.push("claude".into());
         let text: Vec<String> = recommend(&a, 200, &mut vec![]).0.iter().map(|l| l.to_string()).collect();
         assert!(text.iter().any(|l| l.starts_with("  high:") && l.ends_with("via claude")), "{text:?}");
         assert_eq!(text.iter().filter(|l| l.contains("via claude")).count(), 1, "{text:?}");
+        let lines = recommend(&a, 200, &mut vec![]).0;
+        let claude = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == "claude").unwrap();
+        assert_eq!(claude.style.bg, Some(dev_color("claude")), "a chip, as in Via");
+        // And under `f`'s grid, on the tier it is the favorite of.
+        let items = vec![("coding".to_string(), Effect::Fav("opus".into(), "coding".into()))];
+        let lines = fav_lines(&a, &items, &List { col: 3, ..Default::default() }, 200);
+        let line = lines.iter().find(|l| l.to_string().contains("coding:high")).unwrap();
+        assert!(line.to_string().ends_with("via claude"), "{line}");
+        assert_eq!(line.spans.last().unwrap().style.bg, Some(dev_color("claude")), "a chip, as in Via");
+    }
+
+    #[test]
+    fn via_chips_the_harness_a_model_runs_on() {
+        let mut a = app();
+        let m = &mut a.data.models[0];
+        m.via = vec!["opencode".into(), "claude".into()];
+        m.offers[0].via = m.via.clone();
+        let (m, bold) = (m.clone(), |s: &Span| s.style.add_modifier.contains(BOLD));
+        let said = crate::view::via(&m, true, None);
+        assert!(!via_spans(&m, true, false, &said, &a.store, Style::new()).iter().any(bold), "none chosen");
+        a.store.set_runs_on(&m.key, Some("claude"));
+        let spans = via_spans(&m, true, false, &said, &a.store, Style::new());
+        let bolded: Vec<&str> = spans.iter().filter(|s| bold(s)).map(|s| &*s.content).collect();
+        assert_eq!(bolded, ["claude"]);
+        let claude = spans.iter().find(|s| s.content == "claude").unwrap();
+        assert_eq!((claude.style.fg, claude.style.bg), (Some(Color::Black), Some(dev_color("claude"))), "a chip");
     }
 
     #[test]
@@ -6175,7 +6317,7 @@ mod tests {
         // colours off it; a pill in the accent stays one.
         let mut buf = buf.clone();
         buf[(x + 1, y)].set_fg(Color::Black).set_bg(ACCENT);
-        recolor(&mut buf, None, None);
+        recolor(&mut buf, None, None, None);
         let (end, text) = (&buf[(x, y + 1)], &buf[(x + 2, y + 1)]);
         assert_eq!((end.symbol(), end.fg, end.bg), (" ", Color::Reset, Color::Reset));
         assert!(end.modifier.contains(Modifier::REVERSED) && text.modifier.contains(Modifier::REVERSED));
@@ -6515,9 +6657,9 @@ mod tests {
         let lines =
             choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &["pi".into()], &[], &[]);
         assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(MUTED), "left out in Via, grey");
-        // llama.cpp's command starts with the binary the machine has, and `v`'s list grey too.
+        // llama.cpp's command starts with the binary the machine has, and `H`'s list grey too.
         let llama = |bin: &str| (format!("{bin} -hf x"), Effect::Launch(vec![bin.into()]));
-        let via = ("pi --model x".to_string(), Effect::Via("k".into(), "coding".into(), Some("pi".into()), false));
+        let via = ("pi --model x".to_string(), Effect::Via("k".into(), Some("pi".into()), None));
         let items = [llama("llama-server"), llama("llama"), via];
         let out = [crate::data::LLAMA.into(), "pi".into()];
         let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &out, &[], &[]);
@@ -6579,7 +6721,7 @@ mod tests {
             let lines = fav_lines(&a, &items, &List { edit, ..Default::default() }, 80);
             [lines[1].to_string(), lines.last().unwrap().to_string()]
         };
-        let wide = " ↓ ↑ ← → move · / search · space enter toggle · v via · esc close".chars().count();
+        let wide = " ↓ ↑ ← → move · / search · space enter toggle · H harness · esc close".chars().count();
         assert_eq!(
             text(What::Rename("x".into()), "y", None),
             [" y ".to_string(), format!("{:<wide$}", " enter apply · esc cancel")],

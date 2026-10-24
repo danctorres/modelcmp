@@ -810,6 +810,12 @@ pub fn vias() -> impl Iterator<Item = &'static str> {
     HARNESSES.iter().map(|h| h.0)
 }
 
+/// The harnesses that have only their developer's models (claude, codex, gemini): the one of a
+/// model's own developer runs it, before a harness of anyone's models.
+pub fn first_party() -> impl Iterator<Item = &'static str> {
+    HARNESSES.iter().filter(|h| matches!(h.1, Probe::Provider(_))).map(|h| h.0)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Offer {
     pub provider: String,

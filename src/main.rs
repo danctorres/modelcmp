@@ -73,13 +73,13 @@ enum Cmd {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
-        /// Print only each model's id, one per line. With --via, the id that harness takes, or an error when it does not have the model: `opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)`. Without --via, the id for the harness set on the favorite (`fav --via`), else for your default harness (`modelcmp harness`)
+        /// Print only each model's id, one per line. With --via, the id that harness takes, or an error when it does not have the model: `opencode -m $(modelcmp list --task coding --tier mid --via opencode --id)`. Without --via, the id for the harness --cmd starts on it, else the model's own id
         #[arg(long, conflicts_with = "json")]
         id: bool,
         /// Ignore your favorites and print the tier's best model, for when the favorite is on no harness you can start
         #[arg(long, requires = "tier")]
         no_fav: bool,
-        /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the favorite (`fav --via`), else your default harness (`modelcmp harness`), else the first one that has the model, out of the --via ones when given
+        /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the model (`modelcmp harness <harness> <model>`), else your default harness, else the model's developer's own (claude for a Claude model), else the first one that has the model, out of the --via ones when given
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
     },
@@ -170,13 +170,14 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Show or set your default harness (`H` in the TUI)
+    /// Show or set your default harness, or the harness a model runs on (`H` in the TUI)
     ///
-    /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli. `list --cmd` and `list --id` use it when it has the model and no --via is given. A harness set on a favorite (`fav --via`) comes first
+    /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli. `list --cmd`, `list --id` and `pick` run a model on the harness you gave it, else on your default harness, else on its developer's own (claude for a Claude model), else on the first that has it. `modelcmp harness claude opus-5.5 sonnet-5` runs those two on claude
     Harness {
-        #[arg(conflicts_with = "rm")]
         name: Option<String>,
-        /// Clear it
+        /// The models to run on it, else it is your default harness
+        models: Vec<String>,
+        /// Clear your default harness, or the harness of the models named
         #[arg(long)]
         rm: bool,
     },
@@ -225,9 +226,6 @@ enum Cmd {
         /// The tier it is the favorite for, e.g. a cheap model for low and a strong one for high
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
-        /// The harness you run it on (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): `list --task --id` prints the id that one takes
-        #[arg(long, requires = "model")]
-        via: Option<String>,
         /// Clear the task's favorites, or only the tier's with --tier. A task of your own is deleted with its last favorite, unless it has an --about text (--about "" clears that)
         #[arg(long, requires = "task")]
         rm: bool,
@@ -326,15 +324,18 @@ fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
 /// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
 fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
     // These name no model: they neither wait for a download nor fail without one.
-    let bare = matches!(
-        cmd,
-        Cmd::Harness { .. }
-            | Cmd::Tier { .. }
-            | Cmd::ModelsDir { .. }
-            | Cmd::Memory { .. }
-            | Cmd::Quiet { .. }
-            | Cmd::Fav { task: Some(_), rename: Some(_), .. }
-    );
+    let bare = match &cmd {
+        // `--rm` takes every name as a model's.
+        Cmd::Harness { name, models, rm } => models.is_empty() && !(*rm && name.is_some()),
+        _ => matches!(
+            cmd,
+            Cmd::Tier { .. }
+                | Cmd::ModelsDir { .. }
+                | Cmd::Memory { .. }
+                | Cmd::Quiet { .. }
+                | Cmd::Fav { task: Some(_), rename: Some(_), .. }
+        ),
+    };
     let data = if bare {
         data::Data::default()
     } else {
@@ -430,18 +431,14 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
         }),
         Cmd::Select { model, rm } => cli::select(&data, &mut store, &model, rm),
         Cmd::Exclude { model, rm } => cli::exclude(&data, &mut store, &model, rm),
-        Cmd::Harness { name, rm } => cli::harness(&mut store, name.as_deref(), rm),
+        Cmd::Harness { name, models, rm } => cli::harness(&data, &mut store, name.as_deref(), &models, rm),
         Cmd::Tier { name, usd, rm } => cli::tier(&mut store, name.as_deref(), usd, rm),
         Cmd::ModelsDir { dir, rm } => cli::models_dir(&mut store, dir.as_deref(), rm),
         Cmd::Memory { gb, rm } => cli::memory(&mut store, gb, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),
-        Cmd::Fav { task, model, tier, via, rm, about, .. } => {
-            let (task, tier) = (task.as_deref(), tier.as_deref());
-            // As `list --via` takes a harness: in any case.
-            let via = via.map(|h| h.to_lowercase());
-            let model = model.as_deref().map(|m| (m, via.as_deref()));
-            cli::fav(&data, &mut store, task, tier, model, rm, about.as_deref())
+        Cmd::Fav { task, model, tier, rm, about, .. } => {
+            cli::fav(&data, &mut store, task.as_deref(), tier.as_deref(), model.as_deref(), rm, about.as_deref())
         }
         Cmd::Recommend { json } => cli::recommend(&data, &store, json),
     }

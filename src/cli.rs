@@ -1,6 +1,8 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
-use crate::app::{COLS, Col, TEXT, col_value, hidden, launch_cmd, model_id, on_price, shown, unmeasured};
+use crate::app::{
+    COLS, Col, TEXT, col_value, harness_cmd, harness_id, hidden, launch_cmd, on_price, shown, unmeasured,
+};
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot, task_slots};
@@ -704,42 +706,24 @@ fn tier_line<'a>(data: &'a Data, store: &'a Store, o: &ListOpts, lines: &Lines<'
 
 /// What `--id` or `--cmd` prints for `m`: the id a harness takes, or the command that starts it.
 fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String> {
-    let has = |list: &[String], v: &str| list.iter().any(|x| x.eq_ignore_ascii_case(v));
-    // The harness you run a favorite of the task on, while it has the model; not one
-    // `--via` leaves out, which asks for another's.
-    let name = o.task.map(|t| t.name).or(o.custom.as_deref());
-    let via =
-        name.and_then(|n| store.task_via(n, o.tier.as_deref(), &m.key)).filter(|h| o.via.is_empty() || has(&o.via, h));
-    // Your default harness, after a favorite's own; not one `--via` leaves out either.
-    // Nor ollama or llama.cpp for a model another harness runs in full.
-    let default = Some(store.harness.as_str())
-        .filter(|h| !h.is_empty() && (o.via.is_empty() || has(&o.via, h)))
-        .filter(|h| !crate::data::runs_here(h) || m.local());
     // `--via` naming a harness asks for the id that one takes, so one without the model is
     // an error for `--id` as for `--cmd`, not another harness's id.
     let named = o.via.iter().any(|v| vias().any(|h| h.eq_ignore_ascii_case(v)));
-    match o.cmd || named {
-        true => command(m, &[via, default], &o.via, &data.harness)
-            .and_then(|mut c| match (o.cmd, o.prompt) {
-                (true, true) => one_shot(c),
-                (true, false) => Some(c.into_iter().map(quote).collect::<Vec<_>>().join(" ")),
-                _ => c.pop(),
-            })
-            .ok_or_else(|| {
-                // A favorite stays the pick though `--via` asks for a harness without it.
-                let on = if o.via.is_empty() {
-                    "no harness has".into()
-                } else {
-                    format!("{} does not have", o.via.join(", "))
-                };
-                Exit::from(format!("{on} {}, so there is no command to start it", m.name))
-            }),
-        false => Ok([via, default]
-            .into_iter()
-            .flatten()
-            .find_map(|h| launch_cmd(m, h, &data.harness)?.pop())
-            .unwrap_or_else(|| model_id(m, &data.harness))),
+    if !o.cmd && !named {
+        return Ok(harness_id(store, m, &o.via, &data.harness));
     }
+    harness_cmd(store, m, &o.via, &data.harness)
+        .and_then(|mut c| match (o.cmd, o.prompt) {
+            (true, true) => one_shot(c),
+            (true, false) => Some(c.into_iter().map(quote).collect::<Vec<_>>().join(" ")),
+            _ => c.pop(),
+        })
+        .ok_or_else(|| {
+            // A favorite stays the pick though `--via` asks for a harness without it.
+            let on =
+                if o.via.is_empty() { "no harness has".into() } else { format!("{} does not have", o.via.join(", ")) };
+            Exit::from(format!("{on} {}, so there is no command to start it", m.name))
+        })
 }
 
 /// What a command of `pick` starts with: `quiet` runs the rest.
@@ -800,20 +784,6 @@ fn quote(w: String) -> String {
     // `~` too: it opens no word of an id ("openrouter/~anthropic/..."), where alone the shell expands it.
     let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-~".contains(c);
     if w.chars().all(plain) && !w.starts_with('~') { w } else { format!("'{}'", w.replace('\'', "'\\''")) }
-}
-
-/// The command that starts a harness on `m`: the first of `first` to have the model (the
-/// favorite's harness, then your default one), else the first that does, in Via's order and
-/// among `only` when it names any.
-fn command(
-    m: &Model,
-    first: &[Option<&str>],
-    only: &[String],
-    listed: &BTreeMap<String, Vec<String>>,
-) -> Option<Vec<String>> {
-    let asked = |h: &&str| only.is_empty() || only.iter().any(|x| x.eq_ignore_ascii_case(h));
-    let has = |h: &str| launch_cmd(m, h, listed);
-    first.iter().flatten().find_map(|h| has(h)).or_else(|| vias().filter(asked).find_map(has))
 }
 
 pub fn show(data: &Data, store: &Store, q: &str, json: bool, all: bool) -> Result {
@@ -991,13 +961,50 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
 }
 
 /// Show your default harness, or set or clear it: the one `--cmd` and `--id` go by when none is
-/// asked for and it has the model.
-pub fn harness(store: &mut Store, name: Option<&str>, rm: bool) -> Result {
+/// asked for and it has the model. With models, the harness each runs on, ahead of the default.
+pub fn harness(data: &Data, store: &mut Store, name: Option<&str>, models: &[String], rm: bool) -> Result {
     let known = vias;
-    match name.map(str::to_lowercase) {
-        Some(h) if !known().any(|v| v == h) => {
-            let msg = format!("no harness '{h}': the harnesses are {}", known().collect::<Vec<_>>().join(", "));
+    let unknown = |h: &str| {
+        let msg = format!("no harness '{h}': the harnesses are {}", known().collect::<Vec<_>>().join(", "));
+        Exit { code: 2, msg }
+    };
+    // `--rm` takes every name as a model's, all found before any is cleared, so a typo leaves
+    // each as it was. A key `harness` lists goes too, for a model the data no longer has.
+    if rm && name.is_some() {
+        let names: Vec<&str> = name.into_iter().chain(models.iter().map(String::as_str)).collect();
+        if let Some(h) = names.iter().find(|q| known().any(|v| v.eq_ignore_ascii_case(q))) {
+            let msg = format!("--rm takes the models alone, not {h}: modelcmp harness --rm <model>");
             return Err(Exit { code: 2, msg });
+        }
+        let found = names
+            .iter()
+            .map(|&q| match store.runs_on.contains_key(q) && !data.models.iter().any(|m| m.key == q) {
+                true => Ok((q.to_string(), q.to_string())),
+                false => resolve(data, q).map(|m| (m.key.clone(), m.name.clone())),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (k, name) in found {
+            store.set_runs_on(&k, None);
+            println!("{name}: any harness");
+        }
+        return Ok(store.save()?);
+    }
+    match name.map(str::to_lowercase) {
+        Some(h) if !known().any(|v| v == h) => return Err(unknown(&h)),
+        Some(h) if !models.is_empty() => {
+            let models = models.iter().map(|q| resolve(data, q)).collect::<Result<Vec<_>>>()?;
+            // A harness that cannot run the model would leave `--cmd` with nothing to start.
+            if let Some(m) = models.iter().find(|m| launch_cmd(m, &h, &data.harness).is_none()) {
+                let has: Vec<&str> = m.via.iter().map(String::as_str).collect();
+                let has =
+                    if has.is_empty() { "no harness has it".into() } else { format!("it is on {}", has.join(", ")) };
+                return Err(format!("{h} does not have {}: {has}", m.name).into());
+            }
+            for m in models {
+                store.set_runs_on(&m.key, Some(&h));
+                println!("{}: {h}", m.name);
+            }
+            store.save()?;
         }
         Some(h) => {
             store.harness = h;
@@ -1009,8 +1016,15 @@ pub fn harness(store: &mut Store, name: Option<&str>, rm: bool) -> Result {
             store.save()?;
             println!("no default harness");
         }
-        None if store.harness.is_empty() => println!("no default harness, modelcmp harness <name> sets one"),
-        None => println!("{}", store.harness),
+        None => {
+            match store.harness.as_str() {
+                "" => println!("no default harness, modelcmp harness <name> sets one"),
+                h => println!("{h}"),
+            }
+            for (k, h) in &store.runs_on {
+                println!("{k}: {h}");
+            }
+        }
     }
     Ok(())
 }
@@ -1108,7 +1122,7 @@ pub fn fav(
     store: &mut Store,
     task: Option<&str>,
     tier: Option<&str>,
-    q: Option<(&str, Option<&str>)>,
+    q: Option<&str>,
     rm: bool,
     about: Option<&str>,
 ) -> Result {
@@ -1150,7 +1164,7 @@ pub fn fav(
         let m = model(k);
         let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score)" } else { "" };
         let about = store.about(t.split(':').next().unwrap_or(t)).map_or(String::new(), |a| format!("  {a}"));
-        let via = store.via(t).map_or(String::new(), |h| format!("  via {h}"));
+        let via = m.and_then(|m| crate::app::runs_on(store, m)).map_or(String::new(), |h| format!("  via {h}"));
         // One a later cap left dearer than its tier: kept for when the cap is raised.
         let over = m.and_then(|m| over_cap(store, t, m)).map_or(String::new(), |w| format!("  (unused: {w})"));
         format!("★ {} [{k}]{via}{skipped}{over}{about}", m.map_or(k, |m| m.name.as_str()))
@@ -1191,7 +1205,7 @@ pub fn fav(
                 println!("cleared {s}");
             }
         }
-        (Some(name), Some((q, via)), _) => {
+        (Some(name), Some(q), _) => {
             // Clap asks for --tier with a model, and a slot of no tier would be gone on the next load.
             let Some(x) = tier else {
                 let msg = format!("a model needs --tier: modelcmp fav {name} <model> --tier <tier>");
@@ -1199,15 +1213,6 @@ pub fn fav(
             };
             let t = &slot(name, x);
             let m = resolve(data, q)?;
-            // A harness that cannot run the model would leave `--id` with nothing to give.
-            if let Some(h) = via.filter(|h| launch_cmd(m, h, &data.harness).is_none()) {
-                let has: Vec<&str> = m.via.iter().map(String::as_str).collect();
-                let has =
-                    if has.is_empty() { "no harness has it".into() } else { format!("it is on {}", has.join(", ")) };
-                // An unknown harness is a usage error, as it is for `harness`.
-                let code = if vias().any(|v| v == h) { 1 } else { 2 };
-                return Err(Exit { code, msg: format!("{h} does not have {}: {has}", m.name) });
-            }
             // A tier is a budget: its favorite fits it.
             if let Err(why) = can_fav(store, t, m) {
                 return Err(format!("{why}, so make it the favorite of a higher tier").into());
@@ -1215,10 +1220,9 @@ pub fn fav(
             // Said, as a mistyped task makes one of your own too.
             let name = t.split(':').next().unwrap_or(t);
             let new = fit::task(name).is_none() && !store.custom_tasks().contains(&name);
-            store.set_favorite(t, &m.key, via);
+            store.set_favorite(t, &m.key);
             store.save()?;
-            let via = via.map_or(String::new(), |h| format!(" via {h}"));
-            println!("★ {t}{}: {}{via}", if new { " (new task)" } else { "" }, m.name);
+            println!("★ {t}{}: {}", if new { " (new task)" } else { "" }, m.name);
             // Kept for when a harness has it, and said: `pick` and `recommend` pass it over.
             if !crate::view::in_reach(m, false, data.any_available()) {
                 eprintln!("note: no harness here has {}, so no pick uses it until one does", m.name);
@@ -1271,28 +1275,29 @@ fn usable<'a>(data: &'a Data, store: &'a Store) -> impl Iterator<Item = &'a Mode
     visible(data, store, false, false).map(|(_, m)| m).filter(move |m| !excluded(m, store, any))
 }
 
-/// What each tier of a task has: a favorite, or the harness it runs on.
-type Slots<'a> = BTreeMap<&'static str, &'a str>;
-
 /// A task's tiers' favorites, the ones `on` its line: one excluded or out of reach is off it,
-/// so agents are not pointed at it either. Then the harnesses you run them on, while they have
-/// the model, as `--id` and `--cmd` go by.
-fn favorites<'a>(data: &Data, store: &'a Store, task: &str, on: impl Fn(&str) -> bool) -> (Slots<'a>, Slots<'a>) {
+/// so agents are not pointed at it either.
+fn favorites<'a>(
+    data: &Data,
+    store: &'a Store,
+    task: &str,
+    on: impl Fn(&str) -> bool,
+) -> BTreeMap<&'static str, &'a str> {
     // One dearer than the tier is no pick of it either.
     let in_budget = |tier: &str, k: &str| data.models.iter().find(|m| m.key == k).is_none_or(|m| fits(store, tier, m));
     let fav = |x: &str| store.tier_favorite(task, x).filter(|k| on(k) && in_budget(x, k));
-    let has = |k: &str, h: &str| data.models.iter().any(|m| m.key == k && launch_cmd(m, h, &data.harness).is_some());
-    let via = |x: &str| fav(x).and_then(|k| store.via(&slot(task, x)).filter(|h| has(k, h)));
-    let slots = |of: &dyn Fn(&str) -> Option<&'a str>| TIERS.iter().filter_map(|x| Some((x.0, of(x.0)?))).collect();
-    (slots(&fav), slots(&via))
+    TIERS.iter().filter_map(|x| Some((x.0, fav(x.0)?))).collect()
 }
 
-/// A model on a task's line in `recommend --json`, with the harnesses that have it (`via`); a
-/// `score` the task does not have is NaN, so null.
+/// A model on a task's line in `recommend --json`, with the harnesses that have it (`via`) and
+/// the one you run it on (`harness`) while it has it; a `score` the task does not have is NaN, so null.
 fn entry(m: &Model, store: &Store, score: f64, recommended: bool) -> serde_json::Value {
     let mut e = serde_json::json!({"key": m.key, "name": m.name, "context": m.context, "via": m.via, "price": m.cost().map(|c| (c * 1000.0).round() / 1000.0), "score": (score * 10.0).round() / 10.0, "recommended": recommended});
     if let Some(n) = store.note(&m.key) {
         e["note"] = n.into();
+    }
+    if let Some(h) = crate::app::runs_on(store, m) {
+        e["harness"] = h.into();
     }
     // As `price.listed` of `list --json`: an estimate from other providers' list price.
     if m.listed() {
@@ -1307,10 +1312,10 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
     let custom = store.tasks_with_models().into_iter().map(|t| {
         let line = custom_line(usable(data, store), store, t);
         let front: Vec<_> = line.iter().map(|m| entry(m, store, f64::NAN, false)).collect();
-        let (tier_favs, tier_via) = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
+        let tier_favs = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
         let (own, off) = custom_front(&line);
         let tiers = tiers(tier_picks(&own, &off, store, t), t);
-        serde_json::json!({"name": t, "custom": true, "about": store.about(t).unwrap_or(CUSTOM_ABOUT), "when": CUSTOM_WHEN, "benchmarks": [], "tier_favorites": tier_favs, "tier_via": tier_via, "tiers": tiers, "frontier": front})
+        serde_json::json!({"name": t, "custom": true, "about": store.about(t).unwrap_or(CUSTOM_ABOUT), "when": CUSTOM_WHEN, "benchmarks": [], "tier_favorites": tier_favs, "tiers": tiers, "frontier": front})
     });
     TASKS
         .iter()
@@ -1320,7 +1325,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                 .iter()
                 .map(|&(m, s)| entry(m, store, s, !off.contains(&m.key.as_str())))
                 .collect();
-            let (tier_favs, tier_via) = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
+            let tier_favs = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
             let (picks, _, local) = local_picks(data, store, t, &line, &off);
             // The best model your machine runs, with the download it needs when it is not on it.
             let local = local.map(|(m, _)| {
@@ -1328,7 +1333,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
                 serde_json::json!({"key": m.key, "here": m.here(), "download": size})
             });
             let tiers = tiers(picks, t.name);
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "tier_favorites": tier_favs, "tier_via": tier_via, "tiers": tiers, "local": local, "frontier": front})
+            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -1409,6 +1414,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::command;
     use serde_json::Value;
 
     fn model(key: &str, coding: f64, price: f64) -> Model {
@@ -1563,7 +1569,7 @@ mod tests {
             not: vec![],
         };
         assert!(list(&data, &store, &o).is_err(), "openai has no model for coding");
-        store.set_favorite("coding:low", "mini", None);
+        store.set_favorite("coding:low", "mini");
         assert!(list(&data, &store, &o).is_ok());
     }
 
@@ -1582,7 +1588,7 @@ mod tests {
     fn a_favorite_needs_a_tier() {
         let data = Data { models: vec![model("mini", 60.0, 1.0)], ..Default::default() };
         let mut store = Store::default();
-        let e = fav(&data, &mut store, Some("coding"), None, Some(("mini", None)), false, None).unwrap_err();
+        let e = fav(&data, &mut store, Some("coding"), None, Some("mini"), false, None).unwrap_err();
         assert_eq!((e.code, store.favorite.is_empty()), (2, true), "{}", e.msg);
     }
 
@@ -1594,7 +1600,7 @@ mod tests {
             (m.available, m.via, m.offers[0].via) = (true, vec![h.into()], vec![h.into()]);
         }
         let mut store = Store::default();
-        store.set_favorite("coding:low", "mini", None);
+        store.set_favorite("coding:low", "mini");
         let mut o = ListOpts {
             task: fit::task("coding"),
             custom: None,
@@ -1774,6 +1780,26 @@ mod tests {
     }
 
     #[test]
+    fn harness_rm_clears_the_models_or_none() {
+        let data = Data { models: vec![model("mini", 60.0, 1.0)], ..Default::default() };
+        let dir = std::env::temp_dir().join(format!("modelcmp-harness-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store::load_from(dir.join("user.json"));
+        store.set_runs_on("mini", Some("codex"));
+        store.set_runs_on("gone", Some("pi"));
+        let rm = |store: &mut Store, names: &[&str]| {
+            let models: Vec<String> = names[1..].iter().map(|s| s.to_string()).collect();
+            harness(&data, store, Some(names[0]), &models, true).map_err(|e| e.code)
+        };
+        assert_eq!(rm(&mut store, &["codex", "mini"]), Err(2), "a harness is no model to clear");
+        assert_eq!(rm(&mut store, &["mini", "typo"]), Err(1), "a typo");
+        assert_eq!(store.runs_on("mini"), Some("codex"), "clears none before every one is found");
+        assert_eq!(rm(&mut store, &["mini", "gone"]), Ok(()), "a key the data no longer has");
+        assert!(store.runs_on.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn the_command_starts_the_harness_asked_for() {
         let mut m = model("gpt55", 90.0, 10.0);
         let none = BTreeMap::new();
@@ -1783,20 +1809,30 @@ mod tests {
             let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
             command(&m, first, &only, &none).map(|c| c.join(" "))
         };
-        assert_eq!(cmd(&[], &[]).as_deref(), Some("opencode --model p/gpt55"), "the first in Via's order");
-        assert_eq!(cmd(&[Some("codex")], &[]).as_deref(), Some("codex --model gpt55"), "the favorite's");
+        assert_eq!(cmd(&[], &[]).as_deref(), Some("codex --model gpt55"), "its developer's own, before Via's order");
+        assert_eq!(cmd(&[], &["opencode"]).as_deref(), Some("opencode --model p/gpt55"), "--via's");
+        assert_eq!(cmd(&[Some("opencode")], &[]).as_deref(), Some("opencode --model p/gpt55"), "the model's");
+        assert_eq!(cmd(&[Some("claude")], &[]).as_deref(), Some("codex --model gpt55"), "one without it: the next");
         assert_eq!(
-            cmd(&[Some("claude")], &[]).as_deref(),
+            cmd(&[None, Some("opencode")], &[]).as_deref(),
             Some("opencode --model p/gpt55"),
-            "one without it: the next"
+            "your default one"
         );
-        assert_eq!(cmd(&[None, Some("codex")], &[]).as_deref(), Some("codex --model gpt55"), "your default one");
         assert_eq!(
-            cmd(&[Some("opencode"), Some("codex")], &[]).as_deref(),
-            Some("opencode --model p/gpt55"),
-            "after the favorite's"
+            cmd(&[Some("codex"), Some("opencode")], &[]).as_deref(),
+            Some("codex --model gpt55"),
+            "after the model's"
         );
         assert_eq!(cmd(&[], &["Codex"]).as_deref(), Some("codex --model gpt55"), "--via's, in any case");
+        let mut store = Store::default();
+        assert_eq!(harness_id(&store, &m, &[], &none), "gpt55", "--id: the id of the one --cmd starts");
+        m.offers[0].via.push(crate::data::OLLAMA.into());
+        store.harness = crate::data::OLLAMA.into();
+        let start = harness_cmd(&store, &m, &[], &none).map(|c| c.join(" "));
+        assert_eq!(start.as_deref(), Some("codex --model gpt55"), "no ollama for one another harness runs in full");
+        m.offers[0].via = vec!["pi".into(), "opencode".into()];
+        let cmd = command(&m, &[], &[], &none).map(|c| c.join(" "));
+        assert_eq!(cmd.as_deref(), Some("opencode --model p/gpt55"), "no developer's own: the first in Via's order");
     }
 
     #[test]
@@ -1863,10 +1899,7 @@ mod tests {
         let coding = |v: &[Value]| v.iter().find(|t| t["name"] == "coding").unwrap().clone();
         let names = |t: &Value| t["frontier"].as_array().unwrap().iter().map(|e| e["key"].clone()).collect::<Vec<_>>();
         let t = coding(&recommend_json(&data, &store));
-        assert_eq!(
-            keys(&t),
-            ["about", "benchmarks", "frontier", "local", "name", "tier_favorites", "tier_via", "tiers", "when"]
-        );
+        assert_eq!(keys(&t), ["about", "benchmarks", "frontier", "local", "name", "tier_favorites", "tiers", "when"]);
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "gpt55"});
         assert_eq!(t["tiers"], tiers, "as recommend's grid in the TUI");
         assert_eq!(keys(&t["frontier"][0]), ["context", "key", "name", "price", "recommended", "score", "via"]);
@@ -1877,14 +1910,20 @@ mod tests {
             "slow",
             "a note only when there is one"
         );
-        store.set_favorite("coding:low", "mini", Some("pi"));
+        store.set_favorite("coding:low", "mini");
+        store.set_runs_on("mini", Some("pi"));
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(t["tier_favorites"], serde_json::json!({"low": "mini"}));
-        assert_eq!(t["tier_via"], serde_json::json!({}), "a harness that lost the model is not one to start");
+        let harness = |t: &serde_json::Value| {
+            t["frontier"].as_array().unwrap().iter().find(|e| e["key"] == "mini").unwrap()["harness"].clone()
+        };
+        assert_eq!(harness(&t), serde_json::Value::Null, "a harness that lost the model is not one to start");
         let mut data = data;
-        data.models[1].offers[0].via = vec!["pi".into()];
+        let mini = data.models.iter().position(|m| m.key == "mini").unwrap();
+        data.models[mini].via.push("pi".into());
+        data.models[mini].offers[0].via.push("pi".into());
         let t = coding(&recommend_json(&data, &store));
-        assert_eq!(t["tier_via"], serde_json::json!({"low": "pi"}), "its harness");
+        assert_eq!(harness(&t), "pi", "its harness");
         store.toggle_excluded("mini");
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(names(&t), ["gpt55"]);
@@ -1899,8 +1938,7 @@ mod tests {
         store.toggle_favorite("debugging:high", "gpt55");
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();
-        let fields =
-            ["about", "benchmarks", "custom", "frontier", "name", "tier_favorites", "tier_via", "tiers", "when"];
+        let fields = ["about", "benchmarks", "custom", "frontier", "name", "tier_favorites", "tiers", "when"];
         assert_eq!((keys(own), all.len()), (fields.to_vec(), TASKS.len() + 1));
         assert_eq!(
             (&own["name"], &own["tier_favorites"], names(own)),
@@ -1923,7 +1961,7 @@ mod tests {
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": null, "high": "gpt55"});
         assert_eq!(own["tiers"], tiers, "each tier the model it is given, none for the rest");
         // One dearer than its tier, as a cap lowered after it leaves it, points no agent at it.
-        store.set_favorite("debugging:mid", "gpt55", None);
+        store.set_favorite("debugging:mid", "gpt55");
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();
         let favs = serde_json::json!({"low": "mini", "high": "gpt55"});

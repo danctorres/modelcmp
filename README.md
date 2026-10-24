@@ -82,7 +82,7 @@ In the TUI, `R` recommends, `d` picks a tier's model there, `space` selects mode
 them, `f` sets your favorite for a task's tiers and `/` filters. `enter` shows everything about a
 model, `o` opens its page on a site like OpenRouter and `t` changes the theme. `x` opens a harness
 on the model, or downloads a local model and runs it with ollama or llama.cpp, installing the
-runner if you have neither.
+runner if you have neither, and `H` picks the harness the model runs on.
 Movement uses vim keys (`hjkl`, `gg`, `G`, counts like `3j`), and the arrows and mouse work too.
 `?` lists every key, and `enter` on one changes it. `qq` quits.
 
@@ -122,7 +122,8 @@ modelcmp pick                                                # what the skill ru
 ```
 
 The [skill](skills/modelcmp/SKILL.md) lets an orchestrator agent choose the model for each subtask.
-It runs `modelcmp pick` and starts the subtask on that model, in whichever harness has it, even a
+It runs `modelcmp pick` and starts the subtask on that model, in the harness you chose for it (`H`),
+else in its developer's own (Claude Code for Claude) or whichever has it, even a
 local model from ollama or llama.cpp that you made your favorite.
 
 ![An agent using the modelcmp skill to pick a free model for the unit tests and the best one for a race condition](https://github.com/user-attachments/assets/d2c5349e-0cc6-475c-b978-9897ca203bdf)

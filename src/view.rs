@@ -1567,7 +1567,7 @@ mod tests {
         assert_eq!(keys(&store).0, ["fits", "paid", "paid", "paid"], "free only, as paid scores higher");
         assert_eq!(keys(&store).1, [true, false, false, false], "the tier it took");
         let mut fav = Store::default();
-        fav.set_favorite(&crate::store::slot("reasoning", "free"), "hosted", None);
+        fav.set_favorite(&crate::store::slot("reasoning", "free"), "hosted");
         assert_eq!(keys(&fav).0[0], "hosted", "your favorite stays");
     }
 
@@ -1858,9 +1858,9 @@ mod tests {
         let offers = vec![Offer { input: 10.0, output: 10.0, ..Default::default() }];
         let m = Model { key: "dear".into(), offers, ..Default::default() };
         let mut store = Store::default();
-        store.set_favorite("debugging:low", "dear", None);
+        store.set_favorite("debugging:low", "dear");
         assert!(custom_line([&m].into_iter(), &store, "debugging").is_empty(), "low's, a cap lowered after it");
-        store.set_favorite("debugging:high", "dear", None);
+        store.set_favorite("debugging:high", "dear");
         assert_eq!(custom_line([&m].into_iter(), &store, "debugging").len(), 1, "high's");
     }
 }
