@@ -294,9 +294,9 @@ which tasks a pick ranks. Each prices at its own cache share, the TUI's set with
 - A tier never holds a model dearer than its cap, your favorite included. With no model at its
   price it has none, as `free` does when there is no free model, and `pick` says `no model` there.
 - A tier goes by the price paid where the model runs. With `--via` that is what those harnesses
-  charge, which the Price column, `--max price` and the JSON's `price` show too. Without it,
-  `--id`, `--cmd` and `pick` start a tier's pick on a harness whose own price fits the tier, so a
-  model opencode has free runs there and not on pi, which charges for it.
+  charge, which the Price column, `--max price` and the JSON's `price` show too. `--id`, `--cmd`
+  and `pick` start a tier's pick on a harness whose own price fits the tier, among `--via`'s when
+  given, so a model opencode has free runs there and not on pi, which charges for it.
 - `value` lists the models within 8 months of progress of your best on coding. A month of
   progress is a twelfth of what the best coding score rose in the last year, among the models
   listed here that the source scored. A benchmark scored for 6 to 12 months is measured over

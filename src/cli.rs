@@ -455,7 +455,8 @@ fn launch_local(data: &Data, store: &Store, o: &ListOpts, m: &Model, ran: Option
     match ran {
         Some(Local::Here) => {
             let runner = m.via.iter().filter(|h| crate::data::runs_here(h)).take(1).cloned().collect();
-            launch(data, store, &ListOpts { via: runner, ..o.clone() }, m)
+            // Free on your machine, so no tier's price (`within`) holds it back.
+            launch(data, store, &ListOpts { via: runner, tier: None, ..o.clone() }, m)
         }
         _ => launch(data, store, o, m),
     }
@@ -719,8 +720,9 @@ fn tier_line<'a>(data: &'a Data, store: &'a Store, o: &ListOpts, lines: &Lines<'
 
 /// What `--id` or `--cmd` prints for `m`: the id a harness takes, or the command that starts it.
 fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String> {
-    // A tier's pick starts on a harness at the tier's price. With `--via`, `on_via` priced it there.
-    let capped = o.tier.as_deref().filter(|_| o.via.is_empty()).map(|t| within(store, t, m));
+    // A tier's pick starts on a harness at the tier's price, among `--via`'s too: `on_via` priced
+    // it at the cheapest of them, which need not be the one `harness_cmd` starts.
+    let capped = o.tier.as_deref().map(|t| within(store, t, m));
     let m = capped.as_ref().unwrap_or(m);
     // `--via` naming a harness asks for the id that one takes, so one without the model is
     // an error for `--id` as for `--cmd`, not another harness's id.
@@ -1776,6 +1778,35 @@ mod tests {
         let pi = ListOpts { via: vec!["pi".into()], cmd: false, ..o };
         on_via(&mut data, &pi.via);
         assert_eq!(line(&data, &pi).as_deref(), Some(NO_MODEL), "pi has it at a price");
+    }
+
+    /// With `--via` naming both, the free tier's pick, free on one of them, starts on that one:
+    /// on opencode, which has it free, not on pi, your default, which charges for it.
+    #[test]
+    fn a_tier_s_pick_on_two_harnesses_runs_where_its_price_fits() {
+        let mut flash = model("flash", 60.0, 0.0);
+        flash.offers[0].provider = "opencode".into();
+        let paid = Offer { provider: "openrouter".into(), input: 0.2, output: 0.5, ..flash.offers[0].clone() };
+        flash.offers.push(paid);
+        for (o, h) in flash.offers.iter_mut().zip(["opencode", "pi"]) {
+            (o.available, o.via) = (true, vec![h.into()]);
+        }
+        (flash.available, flash.via) = (true, vec!["opencode".into(), "pi".into()]);
+        let mut data = Data { models: vec![flash], ..Default::default() };
+        let mut store = Store::default();
+        store.harness = "pi".into();
+        let o = ListOpts {
+            task: fit::task("coding"),
+            tier: Some("free".into()),
+            via: vec!["opencode".into(), "pi".into()],
+            ..Default::default()
+        };
+        on_via(&mut data, &o.via);
+        let line = tier_line(&data, &store, &o, &Default::default()).ok();
+        assert_eq!(line.as_deref(), Some("opencode/flash  -"), "pick: not pi's id, at a price");
+        let cmd = ListOpts { cmd: true, ..o };
+        let m = matched(&data, &store, &cmd, None).ok().unwrap().0[0];
+        assert_eq!(launch(&data, &store, &cmd, m).ok().as_deref(), Some("opencode --model opencode/flash"), "--cmd");
     }
 
     /// `--sort` goes by the benchmark picked in a column, as the table, `--min` and `--max` do.
