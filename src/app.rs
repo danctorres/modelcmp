@@ -3676,7 +3676,11 @@ impl App {
             let aa = crate::data::Source::Aa.label();
             format!("no {aa} API key, so benchmarks are from Epoch AI, {} adds one", self.key_of('K'))
         });
-        let all: Vec<String> = self.data.warning.clone().into_iter().chain(key).collect();
+        let out = self.data.logged_out().map(|h| match h {
+            "copilot" => "copilot lists no models, so it is not logged in or its plan has Auto alone".to_string(),
+            h => format!("{h} is installed but not logged in, so its models are left out"),
+        });
+        let all: Vec<String> = self.data.warning.clone().into_iter().chain(key).chain(out).collect();
         Some(all.join(crate::data::SEP)).filter(|w| !w.is_empty())
     }
 

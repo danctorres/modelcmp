@@ -372,8 +372,9 @@ enum Probe {
     /// A command that prints a numbered list of the models it has downloaded to this machine
     /// (`cache_ids`), with the files downloaded by hand to its folder (`gguf_ids`).
     Cache(&'static [&'static str]),
-    /// No such command: being installed means access to every model of this provider.
-    Provider(&'static str),
+    /// No such command: being installed means access to every model of this provider, unless
+    /// the shell line given exits 0, which it does only when sure that it is logged out.
+    Provider(&'static str, &'static str),
     /// No such command either, but its CLI lists what the account may use to an Agent Client
     /// Protocol client (`copilot_ids`).
     Copilot,
@@ -386,13 +387,22 @@ const HARNESSES: &[(&str, Probe)] = &[
     ("opencode", Probe::List(&["models"])),
     ("pi", Probe::Table(&["--list-models"])),
     ("omp", Probe::Json(&["models", "--json"])),
-    ("claude", Probe::Provider("anthropic")),
-    ("codex", Probe::Provider("openai")),
-    ("gemini", Probe::Provider("google")),
+    ("claude", Probe::Provider("anthropic", r#"claude auth status | grep -q '"loggedIn": false'"#)),
+    ("codex", Probe::Provider("openai", CODEX_OUT)),
+    ("gemini", Probe::Provider("google", GEMINI_OUT)),
     ("copilot", Probe::Copilot),
     (OLLAMA, Probe::Names(&["list"])),
     (LLAMA, Probe::Cache(&["--cache-list"])),
 ];
+
+/// Exits 0 when codex is logged out: `login status` says so, and there is no key in
+/// CODEX_API_KEY, which `codex exec` takes, nor a provider of its own, which needs no login.
+const CODEX_OUT: &str = r#"[ -z "$CODEX_API_KEY" ] && ! grep -qs model_provider "${CODEX_HOME:-$HOME/.codex}/config.toml" && codex login status 2>&1 | grep -q 'Not logged in'"#;
+
+/// Exits 0 when gemini, which has no status command, is logged out: no Google login saved,
+/// which signing out deletes, no other auth type in its settings, and no variable it takes one
+/// from, set or in its `.env` at home. A project's own `.env`, in a folder unknown here, is not seen.
+const GEMINI_OUT: &str = r#"h=${GEMINI_CLI_HOME:-$HOME} && [ ! -f "$h/.gemini/oauth_creds.json" ] && ! grep -sE '"selected(Auth)?Type"' "$h/.gemini/settings.json" | grep -qv oauth-personal && [ -z "$GEMINI_API_KEY$GOOGLE_GEMINI_BASE_URL$GOOGLE_GENAI_USE_GCA$GOOGLE_GENAI_USE_VERTEXAI$CLOUD_SHELL$GEMINI_CLI_USE_COMPUTE_ADC$GEMINI_FORCE_ENCRYPTED_FILE_STORAGE" ] && ! grep -qs -e GEMINI_API_KEY -e GOOGLE_GEMINI_BASE_URL -e GOOGLE_GENAI_USE -e CLOUD_SHELL -e COMPUTE_ADC -e FORCE_ENCRYPTED "$h/.gemini/.env" "$h/.env""#;
 
 /// Ollama, and the provider of the offer made for a model it runs here (`Offer::local`).
 pub const OLLAMA: &str = "ollama";
@@ -826,7 +836,7 @@ pub fn vias() -> impl Iterator<Item = &'static str> {
 /// The harnesses that have only their developer's models (claude, codex, gemini): the one of a
 /// model's own developer runs it, before a harness of anyone's models.
 pub fn first_party() -> impl Iterator<Item = &'static str> {
-    HARNESSES.iter().filter(|h| matches!(h.1, Probe::Provider(_))).map(|h| h.0)
+    HARNESSES.iter().filter(|h| matches!(h.1, Probe::Provider(..))).map(|h| h.0)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -1261,6 +1271,12 @@ impl Data {
         self.warning.as_ref().map(|w| format!("{LAST_REFRESH}{w}")).or_else(|| self.unscored())
     }
 
+    /// The installed harnesses that list no model as one logged out does: those of their
+    /// developer's models alone, and copilot, whose plan with Auto alone lists none too.
+    pub fn logged_out(&self) -> impl Iterator<Item = &'static str> + '_ {
+        first_party().chain(["copilot"]).filter(|h| self.harness.get(*h).is_some_and(Vec::is_empty))
+    }
+
     /// What `missed` leaves empty, said at every load until a refresh brings it.
     pub fn unscored(&self) -> Option<String> {
         (!self.missed.is_empty()).then(|| format!("epoch.ai sent no {} scores", self.missed.join(", ")))
@@ -1518,7 +1534,11 @@ type Listing = (String, Option<Vec<String>>);
 /// All are asked at once, so the slowest is the wait.
 fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &Steps, answers: &Sender<Listing>) {
     let ids = |bin: &str, probe: &Probe| match probe {
-        Probe::Provider(p) => Some(vec![format!("{p}/*")]),
+        // Logged out, it runs none. A check that fails or hangs cannot tell, so it may run them all.
+        Probe::Provider(p, out) => Some(match listing("sh", &["-c", out], stop) {
+            Some(_) => vec![],
+            None => vec![format!("{p}/*")],
+        }),
         Probe::List(args) => {
             let out = listing(bin, args, stop)?;
             Some(out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect())
@@ -4399,6 +4419,50 @@ mod tests {
         d.borrow(Source::Epoch, None);
         assert_eq!((got(&d, 0), d.lent), ((None, None), false));
         assert_eq!(d.models[0].bench("scicode"), None);
+    }
+
+    #[test]
+    fn a_harness_is_logged_out_only_when_sure() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!("modelcmp-login-{}", std::process::id()));
+        let bin = home.join("bin");
+        for dir in [&bin, &home.join(".codex"), &home.join(".gemini")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        // As the real ones answer, exiting 1: claude on stdout, codex on stderr.
+        for (name, says) in [("claude", r#"echo "{\"loggedIn\": $IN}""#), ("codex", r#"echo "$SAYS" >&2"#)] {
+            std::fs::write(bin.join(name), format!("#!/bin/sh\n{says}\nexit 1\n")).unwrap();
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let out = |harness: &str, env: &[(&str, &str)]| {
+            let Some((_, Probe::Provider(_, line))) = HARNESSES.iter().find(|h| h.0 == harness) else { panic!() };
+            let mut sh = std::process::Command::new("sh");
+            sh.args(["-c", line]).env_clear().env("HOME", &home).env("PATH", &path).envs(env.iter().copied());
+            sh.status().unwrap().success()
+        };
+        let write = |file: &str, text: &str| std::fs::write(home.join(file), text).unwrap();
+        assert!(out("claude", &[("IN", "false")]));
+        assert!(!out("claude", &[("IN", "true")]));
+        assert!(!out("claude", &[]), "an answer it does not know");
+        assert!(out("codex", &[("SAYS", "Not logged in")]));
+        assert!(!out("codex", &[("SAYS", "Logged in using ChatGPT")]));
+        assert!(!out("codex", &[("SAYS", "Not logged in"), ("CODEX_API_KEY", "k")]), "a key `codex exec` takes");
+        write(".codex/config.toml", "model_provider = \"azure\"\n");
+        assert!(!out("codex", &[("SAYS", "Not logged in")]), "a provider of its own");
+        assert!(out("gemini", &[]), "nothing to log in with");
+        assert!(!out("gemini", &[("GEMINI_API_KEY", "k")]));
+        write(".env", "GEMINI_API_KEY=k\n");
+        assert!(!out("gemini", &[]), "a key in its .env");
+        std::fs::remove_file(home.join(".env")).unwrap();
+        write(".gemini/settings.json", r#"{"security": {"auth": {"selectedType": "oauth-personal"}}}"#);
+        assert!(out("gemini", &[]), "a Google login picked, then signed out of");
+        write(".gemini/oauth_creds.json", "{}");
+        assert!(!out("gemini", &[]), "a Google login");
+        std::fs::remove_file(home.join(".gemini/oauth_creds.json")).unwrap();
+        write(".gemini/settings.json", r#"{"security": {"auth": {"selectedType": "vertex-ai"}}}"#);
+        assert!(!out("gemini", &[]), "another auth type, which it may have all it needs for");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

@@ -6420,6 +6420,12 @@ mod tests {
         let lines = screen(&mut a);
         assert!(lines.iter().any(|l| l.contains("• copilot did not list its models")), "one a line");
         assert!(lines.iter().any(|l| l.contains("• openrouter.ai did not list its models")));
+        a.data.harness =
+            BTreeMap::from([("codex".into(), vec![]), ("copilot".into(), vec![]), ("ollama".into(), vec![])]);
+        let lines = screen(&mut a);
+        assert!(lines.iter().any(|l| l.contains("• codex is installed but not logged in")));
+        assert!(lines.iter().any(|l| l.contains("• copilot lists no models, so it is not logged in")));
+        assert!(!lines.iter().any(|l| l.contains("ollama is")), "one with no model downloaded is not logged out");
         bang(&mut a);
         assert_eq!(a.view, View::Table, "`!` closes it too");
     }
