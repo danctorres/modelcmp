@@ -2010,7 +2010,8 @@ impl App {
     /// The line of a task of your own in recommend: the models you gave it and its tiers that
     /// are ones to use, cheapest first.
     pub fn custom_line(&self, task: &str) -> Vec<&Model> {
-        custom_line(self.data.models.iter().filter(|m| self.usable(m)), &self.store, task)
+        // Its few favorites first: `usable` prices each model it is asked of.
+        custom_line(self.data.models.iter(), &self.store, task).into_iter().filter(|m| self.usable(m)).collect()
     }
 
     /// Rows of the visual range, in order.
