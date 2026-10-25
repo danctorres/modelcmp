@@ -997,7 +997,7 @@ fn in_bound(m: &Model, b: &crate::store::Bound, store: &Store) -> bool {
     let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
     !crate::app::bound_applies(crate::app::TEXT + at, &store.hide)
         || crate::app::pick_gone(store, crate::app::TEXT + at)
-        || crate::app::col_value(m, at, store).is_some_and(|v| v >= lo && v <= hi)
+        || crate::app::col_value(m, at, store).is_some_and(|v| crate::app::meets(at, v, lo, hi))
 }
 
 /// `bound_said` for a bound the store keeps, named by the benchmark picked in its column.

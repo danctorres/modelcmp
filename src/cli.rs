@@ -1,7 +1,8 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
 use crate::app::{
-    COLS, Col, TEXT, col_value, harness_cmd, harness_id, hidden, launch_cmd, on_price, shown, stored_bench, unmeasured,
+    COLS, Col, TEXT, col_value, harness_cmd, harness_id, hidden, launch_cmd, meets, on_price, shown, stored_bench,
+    unmeasured,
 };
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
@@ -350,7 +351,7 @@ fn matched<'a>(
                 // On a task not through ollama or llama.cpp: its copy is no pick on merit (`Model::local`).
                 && (o.via.is_empty()
                     || shown_via(m, any).iter().any(|v| has(&o.via, v) && !(task && crate::data::runs_here(v))))
-                && o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| v >= lo && v <= hi))
+                && o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| meets(c, v, lo, hi)))
                 && !(task && excluded(m, store, any))
                 && !o.not.contains(&m.key)
     };
@@ -668,7 +669,7 @@ const NO_MODEL: &str = "no model";
 /// else the tier's pick on merit, followed by the favorite's command on the harness that has it.
 fn tier_line<'a>(data: &'a Data, store: &'a Store, o: &ListOpts, lines: &Lines<'a>) -> Result<String> {
     let allowed =
-        |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| v >= lo && v <= hi));
+        |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| meets(c, v, lo, hi)));
     let said = |m: &Model, id: String| {
         let ctx = COLS.iter().find(|c| c.id == "ctx").and_then(|c| Some((c.show)((c.get)(m)?)));
         let note = store.note(&m.key).map(|n| format!("  note: {n}")).unwrap_or_default();
@@ -1544,6 +1545,26 @@ mod tests {
         assert_eq!((line(&store).len(), crate::view::bounds_said(&store).count()), (2, 0));
         (store.bounds, store.price_pick) = (vec![], Some(0));
         assert_eq!(crate::view::picks_said(&store), ["Price=free"]);
+    }
+
+    /// A bound takes a score as the table shows it, in whole points: a model shown at 64 meets
+    /// `--min coding=64`, and one shown at 63 `--max coding=63`.
+    #[test]
+    fn a_bound_takes_a_score_in_whole_points() {
+        let data = Data { models: vec![model("kimi", 63.986, 2.0), model("opus", 63.3, 5.0)], ..Default::default() };
+        let c = COLS.iter().position(|c| c.id == "coding").unwrap();
+        let listed = |lo, hi| {
+            let o = ListOpts { bounds: vec![(c, lo, hi)], ..Default::default() };
+            matched(&data, &Store::default(), &o, None)
+                .ok()
+                .unwrap()
+                .0
+                .iter()
+                .map(|m| m.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed(64.0, f64::INFINITY), ["kimi"]);
+        assert_eq!(listed(f64::NEG_INFINITY, 63.0), ["opus"]);
     }
 
     /// A model a dropdown entry leaves out is excluded in `list --json` too, and says which entry.

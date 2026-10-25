@@ -451,6 +451,14 @@ pub fn col_value(m: &Model, at: usize, store: &Store) -> Option<f64> {
     }
 }
 
+/// Whether `v`, a value of `COLS[at]`, is within a bound from `lo` to `hi`. A score counts in
+/// whole points, as its cell shows it, so a model shown at 64 meets a minimum of 64.
+pub fn meets(at: usize, v: f64, lo: f64, hi: f64) -> bool {
+    let score = COLS.get(at).is_some_and(|c| ["eci", OTHER, "coding", "agentic", "reasoning", "value"].contains(&c.id));
+    let v = if score { v.round_ties_even() } else { v };
+    v >= lo && v <= hi
+}
+
 /// What the column at cursor index `col` means.
 pub fn base_col_about(col: usize) -> String {
     match col {
@@ -2317,7 +2325,7 @@ impl App {
             .position(|&(c, lo, hi)| {
                 (c != skip || skip == PRICE && lo.is_finite() || skip == VIA)
                     && bound_applies(c, hide)
-                    && !self.bound_val(i, m, c).is_some_and(|v| v >= lo && v <= hi)
+                    && !self.bound_val(i, m, c).is_some_and(|v| meets(c - TEXT, v, lo, hi))
             })
             .map(Fail::Bound)
     }

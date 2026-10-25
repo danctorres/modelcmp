@@ -242,7 +242,7 @@ stored as `tool-dispatch`).
 | `price`, `in`, `cache`, `out` | $ per 1M tokens |
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
-| `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores |
+| `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores, in whole points as the table shows them |
 | `tps`, `ttft` | from Artificial Analysis |
 | `arena` | from Arena's Agent leaderboard, in percent |
 | `other` | the other source's index |
