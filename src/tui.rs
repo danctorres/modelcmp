@@ -171,17 +171,17 @@ fn upgrade(cmds: &[Vec<String>]) -> Result<(), String> {
 /// The terminal's background colour, for a marked row's faint fill with the terminal's own
 /// colours, and its 16 (OSC 4), for a pill's faded one behind a box. It is asked for with OSC 11, then for the cursor position, which every terminal
 /// answers: replies come in the order asked, so once the position is in, the colour's either is
-/// queued or is not coming, with no wait to guess at and no late reply read as keys. crossterm
-/// knows no OSC reply, so it comes through as the keys that spell it. The fill is a 24-bit
-/// colour, which the 16 never were, so a terminal that does not say it draws those is not asked:
-/// one may answer here and still garble them. It says so in `COLORTERM`, or, as `ssh` and `sudo`
-/// drop that, with a `TERM` only a terminal that draws them sets. Under WSL neither is set, and
-/// every Windows console that runs it draws them.
-/// ponytail: one that never answers the position costs crossterm's 2 s at each start, and a reply
-/// later than that is read as keys; read the tty here with a wait of our own if one turns up.
+/// queued or is not coming, with no late reply read as keys. Read from the tty here, not through
+/// crossterm, which waits 2 s for a position that does not come and knows no OSC reply. The fill
+/// is a 24-bit colour, which the 16 never were, so a terminal that does not say it draws those is
+/// not asked: one may answer here and still garble them. It says so in `COLORTERM`, or, as `ssh`
+/// and `sudo` drop that, with a `TERM` only a terminal that draws them sets. Under WSL neither is
+/// set, and every Windows console that runs it draws them.
+/// ponytail: a reply later than the wait is read as keys by the table, where its `e` excludes a
+/// model; ask the terminal ahead of a slow link's round trip if one is slower than a second.
 fn terminal_colors() -> (Option<u32>, Option<[u32; 16]>) {
     use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-    use std::io::Write;
+    use std::io::{ErrorKind, Read, Write};
     let term = std::env::var("TERM").unwrap_or_default();
     if !matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor" | "24bit"))
         && !["kitty", "alacritty", "ghostty", "foot", "wezterm", "direct"].iter().any(|t| term.contains(t))
@@ -189,30 +189,46 @@ fn terminal_colors() -> (Option<u32>, Option<[u32; 16]>) {
     {
         return (None, None);
     }
-    // Raw, so the reply is not echoed.
+    // Not blocking, so the wait is ours. Raw, so the reply is not echoed.
+    #[cfg(unix)]
+    let tty = std::os::unix::fs::OpenOptionsExt::custom_flags(std::fs::OpenOptions::new().read(true), libc::O_NONBLOCK)
+        .open("/dev/tty");
+    #[cfg(not(unix))]
+    let tty = std::fs::File::open("/dev/tty");
+    let Ok(mut tty) = tty else { return (None, None) };
     if enable_raw_mode().is_err() {
         return (None, None);
     }
     let mut out = std::io::stdout();
-    let mut reply = String::new();
+    let mut reply = Vec::new();
     let ask: String = (0..16).map(|i| format!("\x1b]4;{i};?\x07")).collect();
-    if out.write_all(format!("\x1b]11;?\x07{ask}").as_bytes()).and_then(|()| out.flush()).is_ok() {
-        // With no position in, what did come is still read, or it is left for the table as keys.
-        let _ = ratatui::crossterm::cursor::position();
-        while event::poll(Duration::ZERO).unwrap_or(false) {
-            match event::read() {
-                Ok(Event::Key(k)) => {
-                    if let KeyCode::Char(c) = k.code {
-                        reply.push(c);
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => break,
+    if out.write_all(format!("\x1b]11;?\x07{ask}\x1b[6n").as_bytes()).and_then(|()| out.flush()).is_ok() {
+        // The most the first frame waits for them: a terminal here answers in a few milliseconds,
+        // one over ssh in a round trip, which a slow link takes most of a second for.
+        let wait = Duration::from_millis(if std::env::var_os("SSH_CONNECTION").is_some() { 1000 } else { 200 });
+        let (end, mut buf) = (Instant::now() + wait, [0; 1024]);
+        // ponytail: looked at every millisecond rather than waited on, as poll(2) is unsafe code.
+        while !positioned(&String::from_utf8_lossy(&reply)) && Instant::now() < end {
+            match tty.read(&mut buf) {
+                Ok(n) if n > 0 => reply.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(1)),
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                _ => break,
             }
         }
     }
     let _ = disable_raw_mode();
+    let reply = String::from_utf8_lossy(&reply);
     (parse_bg(&reply), parse_ansi(&reply))
+}
+
+/// Whether the cursor position's reply, `ESC [ row ; col R`, is in: the last of those asked for.
+fn positioned(reply: &str) -> bool {
+    let number = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    reply
+        .split("\x1b[")
+        .skip(1)
+        .any(|s| s.split_once('R').and_then(|(at, _)| at.split_once(';')).is_some_and(|(r, c)| number(r) && number(c)))
 }
 
 /// The colour in an OSC 11 reply, `]11;rgb:1e1e/1e1e/2e2e`: the high byte of each channel. Not
@@ -231,7 +247,7 @@ fn rgb(s: &str) -> Option<u32> {
 }
 
 /// The terminal's 16 colours in the OSC 4 replies after the OSC 11 one, each `4;<slot>;rgb:...`
-/// with no escape in it (`terminal_colors`), when it told all of them.
+/// after its ESC `]` (`terminal_colors`), when it told all of them.
 fn parse_ansi(reply: &str) -> Option<[u32; 16]> {
     let mut slots = [None; 16];
     let parts: Vec<&str> = reply.split("rgb:").collect();
@@ -4771,6 +4787,13 @@ mod tests {
         assert_eq!(parse_bg(&reply), Some(0x1e1e2e), "the background's reply comes first");
         assert_eq!(parse_bg(&reply[22..]), None, "a slot's colour is not the background");
         assert_eq!(parse_ansi("]11;rgb:1e1e/1e1e/2e2e]4;0;rgb:0000/0000/0000"), None, "all 16 or none");
+        // As the tty sends them, each ended by BEL or ST, and the cursor's position last.
+        let raw = "\x1b]11;rgb:1e1e/1e1e/2e2e\x07".to_string()
+            + &(0..16).map(|i| format!("\x1b]4;{i};rgb:{i:02x}{i:02x}/0000/ffff\x1b\\")).collect::<String>();
+        assert_eq!((parse_bg(&raw), parse_ansi(&raw)), (Some(0x1e1e2e), Some(slots)));
+        assert!(!positioned(&raw) && !positioned(&format!("{raw}\x1b[24;1")), "not until its R is in");
+        assert!(positioned(&format!("{raw}\x1b[24;1R")), "then nothing more is waited for");
+        assert!(!positioned("\x1b[A\x1b[1;5A"), "an arrow key is no position");
         // A marked row with them: a solid fill, or a faint one mixed from the terminal's
         // background once it told it, which leaves a pill as it is.
         let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
