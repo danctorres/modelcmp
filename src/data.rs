@@ -1428,6 +1428,11 @@ fn cache_path(src: Source) -> PathBuf {
     cache_file(&name)
 }
 
+/// When the file at `p` was last written, which a refresh of another run changes.
+fn written(p: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
 pub fn load_cache() -> Option<Data> {
     load_repos();
     // The other source's, read beside this one's: each is milliseconds of parsing.
@@ -2292,6 +2297,8 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
         let w = format!("refresh failed ({e}), so this is the cached data from {} ago", crate::view::age(d.age()));
         Ok((d, Some(w)))
     };
+    // Before the read, so that a refresh another run makes after it is read below.
+    let read = written(&cache_path(source()));
     match load_cache() {
         Some(d) if !force && !d.stale() => {
             let w = d.said();
@@ -2299,9 +2306,13 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
         }
         cached => {
             // One refresh at a time: agents that find the cache stale together wait for the
-            // first and read what it wrote.
+            // first and read what it wrote. Unwritten, it is the same cache, not read twice.
             let _held = crate::store::lock(&cache_path(source()));
-            if !force && let Some(d) = load_cache().filter(|d| !d.stale()) {
+            let wrote = written(&cache_path(source())) != read;
+            if !force
+                && wrote
+                && let Some(d) = load_cache().filter(|d| !d.stale())
+            {
                 let w = d.said();
                 return Ok((d, w));
             }
@@ -4446,6 +4457,21 @@ mod tests {
         assert_eq!(back.said().as_deref(), Some("last refresh: copilot did not list its models"));
         // Not stale yet, yesterday's is still refreshed by the TUI's first start of today.
         assert!(aged(48 * 60, false).of_another_day() && !aged(0, false).of_another_day());
+    }
+
+    /// A stale cache is read again under the lock only when another run wrote it meanwhile, not
+    /// at every command while a refresh that failed is not tried again.
+    #[test]
+    fn a_stale_cache_is_read_again_only_once_written() {
+        let p = std::env::temp_dir().join(format!("modelcmp-written-{}.json", std::process::id()));
+        crate::store::write_atomic(&p, b"{}").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(2 * 86400);
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        let read = written(&p);
+        assert!(read.is_some() && written(&p) == read, "unwritten, it is the same");
+        crate::store::write_atomic(&p, b"{}").unwrap();
+        assert_ne!(written(&p), read, "written again, though with the same bytes");
+        std::fs::remove_file(p).unwrap();
     }
 
     #[test]
