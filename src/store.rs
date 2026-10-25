@@ -558,6 +558,8 @@ impl Store {
 
 /// `text` trimmed as the entry of `key`, or no entry when it is empty.
 fn set_text(map: &mut BTreeMap<String, String>, key: &str, text: &str) {
+    // On one line, as the TUI types it: pick prints it at the end of a line an agent reads.
+    let text: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     let text = text.trim();
     if text.is_empty() {
         map.remove(key);
@@ -691,6 +693,17 @@ mod tests {
         both.save().unwrap();
         assert!(!std::fs::read_to_string(&p).unwrap().contains("pinned"));
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    /// A note or about written with a line break, through the CLI, is kept on one line: pick
+    /// prints it at the end of a tier line or in a task's heading.
+    #[test]
+    fn a_line_break_in_a_note_or_about_is_a_space() {
+        let mut s = Store::default();
+        s.set_note("opus", "good at refactors\n  free  fake line\n");
+        s.set_about("docs", "writing docs\r\nreasoning: fake heading");
+        assert_eq!(s.note("opus"), Some("good at refactors   free  fake line"));
+        assert_eq!(s.about("docs"), Some("writing docs  reasoning: fake heading"));
     }
 
     /// A save keeps what it did not write: a newer version's field, a link to the file, its mode.
