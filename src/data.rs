@@ -2193,9 +2193,22 @@ pub const LAST_REFRESH: &str = "last refresh: ";
 /// Between the warnings of a refresh, which `!` and `modelcmp` split on to list them.
 pub const SEP: &str = " · ";
 
+/// Source id -> when a command's refresh last failed to download, and why: offline, every
+/// command would otherwise wait on a refresh of its own to fail.
+const FAILED: &str = "failed.json";
+
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
 /// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
 pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> {
+    // Tried again once `RETRY` has passed, or when you ask for it.
+    let failed = || {
+        let (at, e) = kept::<(u64, String)>(FAILED).remove(source().id())?;
+        (now().saturating_sub(at) < RETRY.as_secs()).then_some(e)
+    };
+    let kept_from = |d: Data, e: &str| {
+        let w = format!("refresh failed ({e}), so this is the cached data from {} ago", crate::view::age(d.age()));
+        Ok((d, Some(w)))
+    };
     match load_cache() {
         Some(d) if !force && !d.stale() => {
             let w = d.said();
@@ -2209,6 +2222,10 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
                 let w = d.said();
                 return Ok((d, w));
             }
+            let cached = match (cached, (!force).then(failed).flatten()) {
+                (Some(d), Some(e)) => return kept_from(d, &e),
+                (cached, _) => cached,
+            };
             // A refresh can take up to a minute, which with nothing said looks like a hang.
             eprintln!("downloading model data, cached for 24h...");
             match refresh(&Steps::default(), None::<fn(Data)>) {
@@ -2223,11 +2240,13 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
                 }
                 Err(e) => match cached {
                     Some(d) => {
-                        let w = format!(
-                            "refresh failed ({e}), so this is the cached data from {} ago",
-                            crate::view::age(d.age())
-                        );
-                        Ok((d, Some(w)))
+                        // Not a key turned down, which a new one mends at once.
+                        if let Failure::Other(e) = &e {
+                            let mut failed = kept::<(u64, String)>(FAILED);
+                            failed.insert(source().id().into(), (now(), e.clone()));
+                            keep(FAILED, &failed);
+                        }
+                        kept_from(d, &e.to_string())
                     }
                     None => Err(match e {
                         Failure::Other(e) => Failure::Other(format!("could not download model data: {e}")),
