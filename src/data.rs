@@ -97,8 +97,9 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// Epoch's, and no `Model::task_cost` nor `task_tokens`. 29: Epoch's coding score is WeirdML v3, where
 /// it was WeirdML, which stopped at 2026-09-03, and its tasks have more benchmarks. 30: `SHORT_NAMES`.
 /// 31: Epoch's coding score is FrontierCode, which scores more models than WeirdML v3.
-/// 32: a row keeps the vendor most offers name it with.
-const FORMAT: u32 = 32;
+/// 32: a row keeps the vendor most offers name it with. 33: an Arena row dated in brackets is of
+/// that release.
+const FORMAT: u32 = 33;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -2420,7 +2421,7 @@ impl Arena {
             else {
                 continue;
             };
-            let w = words(&clean_name(&name)).join(" ");
+            let w = arena_words(&name).join(" ");
             arena.scores.entry(w).and_modify(|b| *b = b.max(score)).or_insert(score);
             arena.date = arena.date.max(r.leaderboard_publish_date.unwrap_or_default());
         }
@@ -2508,9 +2509,25 @@ impl Arena {
             models.iter().flat_map(|m| std::iter::once(&m.key).chain(&m.aka)).map(String::as_str).collect();
         let plain = plain(models);
         let settled = |s: &HashMap<String, f64>| {
+            let mut releases: HashMap<&str, usize> = HashMap::new();
+            for name in s.keys() {
+                *releases.entry(undated(name).unwrap_or(name)).or_default() += 1;
+            }
             let mut out: HashMap<String, f64> = HashMap::new();
             for (name, &v) in s {
-                let w: Vec<String> = name.split(' ').map(String::from).collect();
+                let mut w: Vec<String> = name.split(' ').map(String::from).collect();
+                // A dated release is its own row, which models.dev's ids may date as "0813" of
+                // "20260813", else the undated one when Arena lists no other release of it.
+                // ponytail: that may be an older release when models.dev has no row of that date.
+                if let Some(plain) = undated(name) {
+                    let date = w.pop().unwrap_or_default();
+                    let spelled = |d: &str| Some(w.concat() + d).filter(|k| known.contains(k.as_str()));
+                    match spelled(&date).or_else(|| spelled(&date[4..]).filter(|_| date.len() == 8)) {
+                        Some(own) => w = vec![own],
+                        None if releases[plain] == 1 => {}
+                        None => w.push(date),
+                    }
+                }
                 let n = match setting_at(&w) {
                     n if n == w.len() && n > 1 && w[n - 1] == "max" => n - 1,
                     n => n,
@@ -2657,6 +2674,23 @@ fn hf_found(
 fn words(s: &str) -> Vec<String> {
     let s = s.replace('+', " plus ");
     s.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_ascii_lowercase).collect()
+}
+
+/// A name's words as Arena's rows are kept: those `clean_name` leaves, then the numbers of each
+/// bracket as one, which date a release: "DeepSeek-V4-Pro (High, 20260813)" is "deepseek v4 pro
+/// 20260813", not DeepSeek-V4-Pro. The rest is a setting ("High", "32K") or a quantization
+/// ("NVFP4"), and the model's.
+fn arena_words(name: &str) -> Vec<String> {
+    let brackets = name.split(['(', '[']).skip(1).filter_map(|b| b.split([')', ']']).next());
+    let date = |b: &str| words(b).into_iter().filter(|w| w.bytes().all(|b| b.is_ascii_digit())).collect::<String>();
+    words(&clean_name(name)).into_iter().chain(brackets.map(date).filter(|d| !d.is_empty())).collect()
+}
+
+/// A name of Arena's without the release it ends in (`arena_words`), "qwen3 8 max" of "qwen3 8 max
+/// 0902": none when it ends in none.
+fn undated(name: &str) -> Option<&str> {
+    let date = |d: &str| d.len() >= 4 && d.bytes().all(|b| b.is_ascii_digit());
+    name.rsplit_once(' ').filter(|(_, d)| date(d)).map(|(name, _)| name)
 }
 
 /// The model pages a site's sitemap lists, by name: `claude-opus-5-5`. None when it is not one.
@@ -4260,6 +4294,29 @@ mod tests {
         assert_eq!(back.said().as_deref(), Some("last refresh: copilot did not list its models"));
         // Not stale yet, yesterday's is still refreshed by the TUI's first start of today.
         assert!(aged(48 * 60, false).of_another_day() && !aged(0, false).of_another_day());
+    }
+
+    #[test]
+    fn a_dated_arena_row_is_of_its_release() {
+        let row = |key: &str| Model { key: key.into(), ..Default::default() };
+        let keys = ["deepseekv4pro", "deepseekv4pro0813", "qwen38max", "qwen38max0902", "kimi9", "grok9"];
+        let mut ms = keys.map(row);
+        let rated =
+            |(name, rating): (&str, f64)| format!(r#"{{"row": {{"model_name": "{name}", "rating": {rating}}}}}"#);
+        let rows = [
+            ("DeepSeek-V4-Pro (High, 20260813)", 1582.0),
+            ("DeepSeek-V4-Pro", 1447.0),
+            ("Qwen3.8-Max (0902)", 1673.0),
+            ("Qwen3.8-Max", 1672.0),
+            ("Kimi 9 (0711)", 1370.0),
+            ("Kimi 9 (0905)", 1380.0),
+            ("Grok 9 (High, 20260709)", 1500.0),
+        ];
+        let rows = format!(r#"{{"rows": [{}]}}"#, rows.map(rated).join(","));
+        Arena::parse(rows.as_bytes()).unwrap().score(&mut ms);
+        let got = ms.each_ref().map(|m| m.arena);
+        let want = [Some(1447.0), Some(1582.0), Some(1672.0), Some(1673.0), None, Some(1500.0)];
+        assert_eq!(got, want, "each release its row, a lone one the model's, and one of two others none");
     }
 
     #[test]
