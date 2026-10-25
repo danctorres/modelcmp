@@ -396,8 +396,8 @@ A refresh asks each harness on your `PATH` which models it has, and the Via colu
   is logged out.
 - `copilot` gives the models GitHub Copilot's CLI takes on your plan, asked of the CLI itself
   with `copilot --acp`, under its own login. Each refresh leaves an empty folder in
-  `~/.copilot/session-state/`. The VS Code extension alone is not enough, install the CLI. Not
-  logged in it lists no models, as on a plan with Auto alone, and `!` says so.
+  `~/.copilot/session-state/`. The VS Code extension alone is not enough, install the CLI.
+  Logged out, it lists no models, and `!` says so.
 - ollama and llama.cpp give the models on your machine, as below.
 
 Via names them short, so a model's harnesses fit on its line: `oc` opencode, `pi`, `omp`, `cc`

@@ -1271,12 +1271,6 @@ impl Data {
         self.warning.as_ref().map(|w| format!("{LAST_REFRESH}{w}")).or_else(|| self.unscored())
     }
 
-    /// The installed harnesses that list no model as one logged out does: those of their
-    /// developer's models alone, and copilot, whose plan with Auto alone lists none too.
-    pub fn logged_out(&self) -> impl Iterator<Item = &'static str> + '_ {
-        first_party().chain(["copilot"]).filter(|h| self.harness.get(*h).is_some_and(Vec::is_empty))
-    }
-
     /// What `missed` leaves empty, said at every load until a refresh brings it.
     pub fn unscored(&self) -> Option<String> {
         (!self.missed.is_empty()).then(|| format!("epoch.ai sent no {} scores", self.missed.join(", ")))
@@ -1712,9 +1706,8 @@ fn copilot_session(answer: &serde_json::Value, home: Option<PathBuf>) -> Option<
 }
 
 /// The ids of a new session's answer that Copilot's CLI takes, under models.dev's provider
-/// for them: the ones no policy keeps off, switched off or not yet on. None for an error, as
-/// a CLI not logged in answers. A session without models is of a plan with Auto alone, which
-/// picks the model itself: it takes none.
+/// for them: the ones no policy keeps off, switched off or not yet on. None for an error. A
+/// session without models is of a CLI not logged in, which opens one all the same: it takes none.
 fn copilot_enabled(answer: &serde_json::Value) -> Option<Vec<String>> {
     let taken = |m: &&serde_json::Value| {
         let state = &m["_meta"]["copilotEnablement"];
@@ -2012,6 +2005,14 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     for h in awaited {
         listed.entry(h.to_string()).or_insert(None);
     }
+    // Of this refresh's answers: a harness of its developer's models lists none only when it is
+    // sure to be logged out, and copilot none when it is.
+    let logged_out: Vec<String> = HARNESSES
+        .iter()
+        .filter(|h| matches!(h.1, Probe::Provider(..) | Probe::Copilot))
+        .filter(|h| matches!(listed.get(h.0), Some(Some(ids)) if ids.is_empty()))
+        .map(|h| format!("{} is installed but not logged in, so its models are left out", h.0))
+        .collect();
     let silent;
     (data.harness, silent) = keep_listed(listed, || was.harness(false));
     let lost;
@@ -2026,6 +2027,7 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
             .chain(unpaged)
             .chain([unnamed, unranked])
             .flatten()
+            .chain(logged_out)
             .chain(uncut)
             .collect();
     // Each source's own, then the ones of the whole refresh.
@@ -4527,8 +4529,8 @@ mod tests {
         assert_eq!(copilot_enabled(&session), Some(ids), "not the ones a policy keeps off");
         let out = serde_json::json!({"jsonrpc": "2.0", "id": 2,
             "error": {"code": -32000, "message": "Authentication required"}});
-        assert_eq!(copilot_enabled(&out), None, "not a listing, as when logged out");
-        // Copilot 1.0.96's on a plan with Auto alone, trimmed.
+        assert_eq!(copilot_enabled(&out), None, "an error is not a listing");
+        // Copilot 1.0.96's when not logged in, trimmed.
         let auto = serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"configOptions": [{"type": "select",
             "id": "mode", "category": "mode",
             "currentValue": "https://agentclientprotocol.com/protocol/session-modes#agent"}],
