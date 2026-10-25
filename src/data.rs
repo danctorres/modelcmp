@@ -1897,6 +1897,8 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     let (mut found, mut asks): (Asked, _) = (kept("hf.json"), HF_ASKS);
     hf_found(&mut data.models, &mut found, &mut asks, hf_spelled);
     if let Some((_, Ok(o))) = &mut other {
+        // OpenRouter's repos first, as for `data`: `hf_found` guesses only the rest.
+        hf_listed(&mut o.models, &openrouter);
         hf_found(&mut o.models, &mut found, &mut asks, hf_spelled);
     }
     keep("hf.json", &found);
@@ -1951,7 +1953,6 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
     if let Some((_, Ok(o))) = &mut other {
         aa_pages(&mut o.models, &aa);
         epoch_listed(&mut o.models, &epoch);
-        hf_listed(&mut o.models, &openrouter);
         arena.score(&mut o.models);
         (o.arena_date, o.arena_dates, o.arena_missed) =
             (arena.date.clone(), data.arena_dates.clone(), data.arena_missed);
