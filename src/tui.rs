@@ -616,15 +616,14 @@ fn event_loop(
             relock(&mut held, app);
             unsaved |= app.ask_default();
         }
-        if dirty {
-            paint(terminal, app)?;
-        }
+        let mut painted = if dirty { paint(terminal, app) } else { Ok(()) };
         // Only now, after the frame: what the input changed shows at once, not after its write.
+        // Saved too when the frame could not be drawn, the terminal gone.
         if std::mem::take(&mut unsaved)
             && let Err(e) = app.store.save()
         {
             app.report(Err(format!("could not save: {e}")));
-            paint(terminal, app)?;
+            painted = painted.and_then(|()| paint(terminal, app));
         }
         held = None;
         if std::mem::take(&mut sized) {
@@ -633,6 +632,7 @@ fn event_loop(
         if !gone_now.is_empty() {
             data::save_gone(&mut gone, gone_now.drain(..));
         }
+        painted?;
         // Block on input; wake every 200ms while a refresh or the newest release is awaited, else
         // once a minute to repaint the data age in the frame.
         // A size awaited is looked for often, as `x`'s list is open for it, and so is what a copy,
