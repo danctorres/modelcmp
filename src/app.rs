@@ -6,7 +6,7 @@ use crate::fit::{TASKS, Task};
 use crate::store::{Bound, Store};
 use crate::view::{
     self, LEVELS, NO_ACCESS, NO_SELECTED, OUT_OF_REACH, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach,
-    level_label, money, score, shown_via, signed, task_line, task_score,
+    level_label, money, score, shown_via, signed, task_line, task_score, within,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -4195,6 +4195,13 @@ impl App {
 
     /// The task and the tier under recommend's cursor, a task of one pick's the tier whose
     /// favorite it shows, else high's.
+    /// `m`, recommend's pick under the cursor, on the harnesses alone where its price fits the
+    /// box's tier (`within`), for `x` and `Y` to start it where `--cmd` does. None elsewhere.
+    fn capped(&self, m: &Model) -> Option<Model> {
+        let c = self.tier_at().filter(|_| self.view == View::Recommend)?.1;
+        Some(within(&self.store, TIERS[c].0, m))
+    }
+
     fn tier_at(&self) -> Option<(&str, usize)> {
         let c = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps)?;
         let task = self.cur_task().map(|t| t.name).or(self.custom_at())?;
@@ -4636,7 +4643,8 @@ impl App {
                     self.refuse(why);
                 } else {
                     // On the harness `--cmd` starts.
-                    let runs = harness_cmd(&self.store, m, &[], &self.data.harness);
+                    let capped = self.capped(m);
+                    let runs = harness_cmd(&self.store, capped.as_ref().unwrap_or(m), &[], &self.data.harness);
                     let on = |e: &Effect| matches!((e, &runs), (Effect::Launch(c), Some(r)) if c[0] == r[0]);
                     let sel = items.iter().position(|(_, e)| on(e)).unwrap_or(0);
                     self.input = Input::choose("open in which harness?", Kind::Launch, items, sel);
@@ -4648,7 +4656,13 @@ impl App {
             // The id the harness `x` starts on takes, as `--id`.
             KeyCode::Char('Y') if row => {
                 let m = self.current()?;
-                return Some(Effect::Copy(harness_id(&self.store, m, &[], &self.data.harness)));
+                let capped = self.capped(m);
+                return Some(Effect::Copy(harness_id(
+                    &self.store,
+                    capped.as_ref().unwrap_or(m),
+                    &[],
+                    &self.data.harness,
+                )));
             }
             KeyCode::Char('y') if row => return Some(Effect::Copy(self.current()?.name.clone())),
             KeyCode::Char(' ') if table && self.selecting() => {
@@ -7778,6 +7792,38 @@ mod tests {
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.runs_on(&key), Some("opencode"));
         assert!(a.input == Input::None && a.view == View::Recommend, "a pick: back on recommend");
+    }
+
+    /// `x` and `Y` on a tier's pick start it where its price fits the tier, as `--cmd` does: on
+    /// opencode, which has mini free, not on codex, your default, which charges for it.
+    #[test]
+    fn x_in_recommend_starts_a_tier_pick_where_its_price_fits() {
+        let mut a = app();
+        let mini = a.data.models.iter_mut().find(|m| m.key == "mini").unwrap();
+        let free =
+            Offer { input: 0.0, output: 0.0, via: vec!["opencode".into()], available: true, ..mini.offers[0].clone() };
+        let paid = Offer { provider: "q".into(), via: vec!["codex".into()], ..free.clone() };
+        mini.offers = vec![free, Offer { input: 1.0, output: 1.0, ..paid }];
+        a.store.harness = "codex".into();
+        a.rebuild();
+        press(&mut a, "R");
+        let coding = TASKS.iter().position(|t| t.name == "coding").unwrap();
+        (a.among, a.task_cur, a.task_sel) = (None, coding, 1);
+        assert_eq!(a.current().map(|m| m.key.as_str()), Some("mini"), "the free tier's");
+        press(&mut a, "x");
+        let sel = |a: &App| match &a.input {
+            Input::Choose { kind: Kind::Launch, items, list, .. } => Some(items[list.sel].0.clone()),
+            _ => None,
+        };
+        assert!(sel(&a).is_some_and(|c| c.starts_with("opencode")), "{:?}", sel(&a));
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/mini".into())), "opencode's id");
+        // In the table, with no tier, x starts on your default.
+        code(&mut a, KeyCode::Esc);
+        let row = a.rows.iter().position(|&i| a.data.models[i].key == "mini").unwrap();
+        a.table.select(Some(row));
+        press(&mut a, "x");
+        assert!(sel(&a).is_some_and(|c| c.starts_with("codex")), "{:?}", sel(&a));
     }
 
     #[test]

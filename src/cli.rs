@@ -8,8 +8,8 @@ use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot, task_slots};
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front,
-    custom_line, detail_lines, excluded, fits, left_out_by, one_pick, or_local, over_cap, price, priced, shown_via,
-    task_line, tier_pick, tier_picks, truncate, used_benches, verdict, via, visible, with_local,
+    custom_line, detail_lines, excluded, fits, left_out_by, one_pick, or_local, over_cap, price, priced, reach,
+    shown_via, task_line, tier_pick, tier_picks, truncate, used_benches, verdict, via, visible, with_local, within,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -708,6 +708,9 @@ fn tier_line<'a>(data: &'a Data, store: &'a Store, o: &ListOpts, lines: &Lines<'
 
 /// What `--id` or `--cmd` prints for `m`: the id a harness takes, or the command that starts it.
 fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String> {
+    // A tier's pick starts on a harness at the tier's price. With `--via`, `on_via` priced it there.
+    let capped = o.tier.as_deref().filter(|_| o.via.is_empty()).map(|t| within(store, t, m));
+    let m = capped.as_ref().unwrap_or(m);
     // `--via` naming a harness asks for the id that one takes, so one without the model is
     // an error for `--id` as for `--cmd`, not another harness's id.
     let named = o.via.iter().any(|v| vias().any(|h| h.eq_ignore_ascii_case(v)));
@@ -726,6 +729,21 @@ fn launch(data: &Data, store: &Store, o: &ListOpts, m: &Model) -> Result<String>
                 if o.via.is_empty() { "no harness has".into() } else { format!("{} does not have", o.via.join(", ")) };
             Exit::from(format!("{on} {}, so there is no command to start it", m.name))
         })
+}
+
+/// Prices each model a harness of `via` has at its offers there (`reach`), so it is ranked,
+/// bounded and given a tier at the price paid on them: one opencode has free costs what pi
+/// charges with `--via pi`. A model none of them has keeps its price, as a favorite run
+/// elsewhere. `list` and `pick` take `data` so.
+pub fn on_via(data: &mut Data, via: &[String]) {
+    if via.is_empty() {
+        return;
+    }
+    for m in &mut data.models {
+        reach(m, via);
+    }
+    // Value ranks the price you would pay.
+    fit::add_value(&mut data.models);
 }
 
 /// What a command of `pick` starts with: `quiet` runs the rest.
@@ -1696,6 +1714,36 @@ mod tests {
         );
         let pi = ListOpts { via: vec!["opencode".into()], cmd: false, ..o };
         assert_eq!(line(&pi).as_deref(), Some("p/hosted  -"), "a harness asked for: its own free pick");
+    }
+
+    /// A tier judges a model at the price paid where it runs: one opencode has free and pi at a
+    /// price is the free tier's on opencode, your default harness pi aside, and none of pi's.
+    #[test]
+    fn a_tier_s_pick_runs_where_its_price_fits() {
+        let mut flash = model("flash", 60.0, 0.0);
+        flash.offers[0].provider = "opencode".into();
+        let paid = Offer { provider: "openrouter".into(), input: 0.2, output: 0.5, ..flash.offers[0].clone() };
+        flash.offers.push(paid);
+        for (o, h) in flash.offers.iter_mut().zip(["opencode", "pi"]) {
+            (o.available, o.via) = (true, vec![h.into()]);
+        }
+        (flash.available, flash.via) = (true, vec!["opencode".into(), "pi".into()]);
+        let mut data = Data { models: vec![flash], ..Default::default() };
+        let mut store = Store::default();
+        store.harness = "pi".into();
+        let o = ListOpts {
+            task: fit::task("coding"),
+            tier: Some("free".into()),
+            cmd: true,
+            prompt: true,
+            ..Default::default()
+        };
+        let line = |data: &Data, o: &ListOpts| tier_line(data, &store, o, &Default::default()).ok();
+        let free = format!("{QUIET} opencode run --model opencode/flash \"<prompt>\"  -");
+        assert_eq!(line(&data, &o), Some(free), "not pi's, at a price");
+        let pi = ListOpts { via: vec!["pi".into()], cmd: false, ..o };
+        on_via(&mut data, &pi.via);
+        assert_eq!(line(&data, &pi).as_deref(), Some(NO_MODEL), "pi has it at a price");
     }
 
     /// `--sort` goes by the benchmark picked in a column, as the table, `--min` and `--max` do.

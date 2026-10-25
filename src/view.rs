@@ -621,6 +621,35 @@ pub fn fits(store: &Store, tier: &str, m: &Model) -> bool {
     cap.is_infinite() || m.cost().is_some_and(|c| c <= cap)
 }
 
+/// Makes `m`'s offers yours only where `harnesses` list them, so its price (`Model::cost`) is the
+/// one paid there. False, leaving it as it was, when none of them has it.
+pub fn reach(m: &mut Model, harnesses: &[String]) -> bool {
+    let on = |o: &Offer| o.via.iter().any(|v| harnesses.iter().any(|h| h.eq_ignore_ascii_case(v)));
+    if !m.offers.iter().any(on) {
+        return false;
+    }
+    for o in &mut m.offers {
+        o.available = on(o);
+    }
+    true
+}
+
+/// `m` on the harnesses alone whose own offer of it (`reach`) fits `tier`'s cap (`fits`), so a
+/// tier's pick starts where it costs what the tier allows: on opencode, which has it free, not
+/// on pi, which charges for it.
+pub fn within(store: &Store, tier: &str, m: &Model) -> Model {
+    let fit = |h: &String| {
+        let mut one = m.clone();
+        reach(&mut one, std::slice::from_ref(h)) && fits(store, tier, &one)
+    };
+    let ok: Vec<String> = m.offers.iter().flat_map(|o| &o.via).filter(|h| fit(h)).cloned().collect();
+    let mut m = m.clone();
+    for o in &mut m.offers {
+        o.via.retain(|h| ok.contains(h));
+    }
+    m
+}
+
 /// Why `m` can be no favorite for `slot`, a tier's it is dearer than (`fits`). None when it can.
 pub fn over_cap(store: &Store, slot: &str, m: &Model) -> Option<String> {
     let tier = slot.split_once(':')?.1;

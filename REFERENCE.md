@@ -293,6 +293,10 @@ which tasks a pick ranks. Each prices at its own cache share, the TUI's set with
   tier's pick, as it is free there. See [models on your machine](#models-on-your-machine).
 - A tier never holds a model dearer than its cap, your favorite included. With no model at its
   price it has none, as `free` does when there is no free model, and `pick` says `no model` there.
+- A tier goes by the price paid where the model runs. With `--via` that is what those harnesses
+  charge, which the Price column, `--max price` and the JSON's `price` show too. Without it,
+  `--id`, `--cmd` and `pick` start a tier's pick on a harness whose own price fits the tier, so a
+  model opencode has free runs there and not on pi, which charges for it.
 - `value` lists the models within 8 months of progress of your best on coding. A month of
   progress is a twelfth of what the best coding score rose in the last year, among the models
   listed here that the source scored. A benchmark scored for 6 to 12 months is measured over
@@ -330,8 +334,8 @@ which tasks a pick ranks. Each prices at its own cache share, the TUI's set with
 claude-opus-5-5`). The harness is the model's, else your default one, else its developer's own
 (claude for a Claude model, codex for OpenAI's, gemini for Google's), else the first that has
 the model in Via's order, among `--via`'s when given. Without `--via` these last two skip a
-harness you left out in the TUI's Via dropdown while another has the model, for `--id` too. A
-model no harness has is an error.
+harness you left out in the TUI's Via dropdown while another has the model, for `--id` too. With
+`--tier` only the harnesses whose own price fits the tier count. A model no harness has is an error.
 
 - With `--tier`, `--id` or `--cmd`, no match is an error (exit code 1), so a harness is never
   started on an empty model. Without them `list` says `no models match` and exits with 0.

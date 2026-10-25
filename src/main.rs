@@ -64,7 +64,7 @@ enum Cmd {
         /// Only these developers or countries, e.g. --dev anthropic --dev china. It replaces what is picked in the TUI's Dev dropdown (`d`)
         #[arg(long)]
         dev: Vec<String>,
-        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli). Repeatable. It replaces what is picked in the TUI's Via dropdown (`d`)
+        /// Only models you have through these harnesses (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli), at the price they charge, which Price, --max price and --tier go by. Repeatable. It replaces what is picked in the TUI's Via dropdown (`d`)
         #[arg(long)]
         via: Vec<String>,
         /// Max rows, 0 = no limit
@@ -79,7 +79,7 @@ enum Cmd {
         /// Ignore your favorites and print the tier's best model, for when the favorite is on no harness you can start
         #[arg(long, requires = "tier")]
         no_fav: bool,
-        /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the model (`modelcmp harness <harness> <model>`), else your default harness, else the model's developer's own (claude for a Claude model), else the first one that has the model, out of the --via ones when given
+        /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the model (`modelcmp harness <harness> <model>`), else your default harness, else the model's developer's own (claude for a Claude model), else the first one that has the model, out of the --via ones when given. With --tier, only one whose own price fits the tier counts
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
     },
@@ -87,7 +87,7 @@ enum Cmd {
     ///
     /// Each tier (free, low, mid, high) gets one model, with its context size and your note. It is your favorite if that fits the tier's price, else the best model at that price
     Pick {
-        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes. A favorite it does not have comes after the tier's pick, with the command that runs it elsewhere. Without --via, prints the command that runs a prompt on each model, on a harness that has it
+        /// The harness you will start (opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli): prints the ids it takes, picked at the price it charges. A favorite it does not have comes after the tier's pick, with the command that runs it elsewhere. Without --via, prints the command that runs a prompt on each model, on a harness that has it at the tier's price
         #[arg(long)]
         via: Vec<String>,
         /// Only models at or above a value, favorites included, e.g. --min ctx=600 for a prompt of 600,000 tokens
@@ -336,7 +336,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
                 | Cmd::Fav { task: Some(_), rename: Some(_), .. }
         ),
     };
-    let data = if bare {
+    let mut data = if bare {
         data::Data::default()
     } else {
         let (data, warn_of) = data::load(force, auto).map_err(|e| e.to_string())?;
@@ -408,6 +408,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
                 prompt: false,
                 not: vec![],
             };
+            cli::on_via(&mut data, &opts.via);
             cli::list(&data, &store, &opts)
         }
         Cmd::Pick { via, min, not, task, tier } => {
@@ -415,6 +416,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
             shown(bounds.iter().map(|b| b.0))?;
             // The task asked for, built in or yours, goes by its name.
             let opts = cli::ListOpts { via, bounds, custom: task, tier, ..Default::default() };
+            cli::on_via(&mut data, &opts.via);
             cli::pick(&data, &store, &opts, &not)
         }
         Cmd::Quiet { cmd } => cli::quiet(&cmd),
