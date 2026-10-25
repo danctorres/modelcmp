@@ -4457,6 +4457,8 @@ mod tests {
         assert_eq!(back.said().as_deref(), Some("last refresh: copilot did not list its models"));
         // Not stale yet, yesterday's is still refreshed by the TUI's first start of today.
         assert!(aged(48 * 60, false).of_another_day() && !aged(0, false).of_another_day());
+        // And `?` says so.
+        assert!(crate::app::HELP[0].1.iter().any(|&(k, about)| k == "r" && about.contains("a day's first start")));
     }
 
     /// A stale cache is read again under the lock only when another run wrote it meanwhile, not

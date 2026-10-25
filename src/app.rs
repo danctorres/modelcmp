@@ -493,7 +493,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("↺", "`enter` here puts every key back to its default"),
             ("esc", "back: close the panel, then drop the highlight, filter, `S` `F` `E`, task"),
             ("q", "quit, asks first"),
-            ("r", "refresh data now (auto at start after 24h)"),
+            ("r", "refresh data now (auto at a day's first start, and after 24h)"),
             ("!", "list warnings from the last refresh or a missing key, or click the ⚠"),
             ("K", "add or replace the Artificial Analysis API key"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
