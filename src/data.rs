@@ -1735,13 +1735,13 @@ fn answer(
     stop: &AtomicBool,
 ) -> Option<serde_json::Value> {
     use std::io::{BufRead, BufReader, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::sync::mpsc::RecvTimeoutError::Timeout;
     if stop.load(Relaxed) {
         return None;
     }
     let (io, null) = (Stdio::piped, Stdio::null());
-    let mut child = Command::new(bin).args(args).current_dir(cwd).stdin(io()).stdout(io()).stderr(null).spawn().ok()?;
+    let mut child = grouped(bin).args(args).current_dir(cwd).stdin(io()).stdout(io()).stderr(null).spawn().ok()?;
     let (mut stdin, out) = (child.stdin.take()?, child.stdout.take()?);
     // One that has already gone takes nothing, and has no answer to read either.
     let _ = stdin.write_all(asks.as_bytes()).and_then(|()| stdin.flush());
@@ -1770,7 +1770,7 @@ fn answer(
     while answer.is_some() && !stop.load(Relaxed) && Instant::now() < end && matches!(child.try_wait(), Ok(None)) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
+    kill(&mut child);
     let _ = child.wait();
     answer
 }
@@ -1778,13 +1778,13 @@ fn answer(
 /// `bin args` stdout, or `None` when it is missing, fails, or is killed at `limit` or on `stop`,
 /// which also keeps it from starting.
 fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::sync::mpsc::RecvTimeoutError::Timeout;
     if stop.load(Relaxed) {
         return None;
     }
     let mut child =
-        Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        grouped(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     // Read while it runs: output larger than the pipe holds would otherwise block it.
     let mut out = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1798,7 +1798,7 @@ fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<S
             Ok(Some(status)) if status.success() => break,
             Ok(Some(_)) | Err(_) => return None,
             Ok(None) if start.elapsed() >= limit || stop.load(Relaxed) => {
-                let _ = child.kill();
+                kill(&mut child);
                 // Reaped off the caller: one stuck in the kernel, as `nvidia-smi` in a wedged
                 // driver, takes the kill only once it is out, which may be never.
                 std::thread::spawn(move || drop(child.wait()));
@@ -1816,6 +1816,29 @@ fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<S
             Err(_) => return None,
         }
     }
+}
+
+/// `bin` in a process group of its own, which `kill` ends whole.
+fn grouped(bin: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    cmd
+}
+
+/// Kills `child` with what it started, as the rest of a pipeline `sh -c` runs, which would run
+/// on and hold its output open.
+fn kill(child: &mut std::process::Child) {
+    // Not once reaped, as its id may then be another's.
+    #[cfg(unix)]
+    if let (Ok(None), Ok(id)) = (child.try_wait(), libc::pid_t::try_from(child.id())) {
+        #[allow(unsafe_code)]
+        // SAFETY: `kill` takes no pointer, and the group is the child's own (`grouped`).
+        unsafe {
+            libc::kill(-id, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 /// The steps of a refresh, its downloads and its harnesses: how many, and the ones still awaited.
@@ -4588,6 +4611,20 @@ mod tests {
         let left = run("sh", &["-c", "sleep 10 &"], Duration::from_millis(200), go);
         assert_eq!(left, None, "nor is a pipe it left open waited for past the limit");
         assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_hang_is_killed_with_the_pipeline_it_runs() {
+        // As a Provider probe, `sh -c 'a | b'`: a part left running would mark its file later.
+        let (go, dir, limit) = (&AtomicBool::new(false), std::env::temp_dir(), Duration::from_millis(200));
+        let mark = |name: &str| dir.join(format!("modelcmp-{}-{name}", std::process::id()));
+        let (ran, asked) = (mark("run"), mark("answer"));
+        let line = |f: &PathBuf| format!("(sleep 1; touch '{}') | cat", f.display());
+        assert_eq!(run("sh", &["-c", &line(&ran)], limit, go), None);
+        assert_eq!(answer("sh", &["-c", &line(&asked)], &dir, "", 1, limit, go), None);
+        std::thread::sleep(Duration::from_millis(1500));
+        let left = [&ran, &asked].map(|f| std::fs::remove_file(f).is_ok());
+        assert_eq!(left, [false, false], "nothing of it is left to run on");
     }
 
     #[test]
