@@ -320,6 +320,11 @@ fn say_filters(store: &Store, flags: &str) {
         let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace the matching ones, and ") };
         eprintln!("note: filters set in the TUI hide some models: {} ({flags}c in the TUI clears them)", on.join(" "));
     }
+    say_benches(store);
+}
+
+/// Says on stderr which tasks a benchmark picked in the TUI ranks.
+fn say_benches(store: &Store) {
     let by: Vec<String> =
         TASKS.iter().filter_map(|t| Some(format!("{} by {}", t.name, crate::app::task_bench(store, t)?))).collect();
     if !by.is_empty() {
@@ -836,6 +841,7 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
     if json {
         return print_json(&models.iter().map(|m| out(m, store, data.any_available(), true)).collect::<Vec<_>>());
     }
+    say_benches(store);
     let rows = verdict(&models, store);
     let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
     let (w0, w1) = (w(0), w(1));
@@ -844,7 +850,7 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
         println!("  {q:<w0$}  {win:<w1$}  {margin}");
     }
     println!();
-    let table = compare_rows(&models, data.any_available(), &|_| None);
+    let table = compare_rows(&models, data.any_available(), &|_| None, store);
     // Artificial Analysis names its benchmarks at length.
     let lw = table.iter().map(|r| r.label.chars().count() + 1).max().unwrap_or(0).max(22);
     let mut section = "";

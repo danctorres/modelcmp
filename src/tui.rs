@@ -4365,7 +4365,7 @@ fn compare(
     muted: impl Fn(&Model) -> bool,
     spots: &mut Vec<Spot>,
 ) -> Compared {
-    let (mut names, mut cols) = crate::view::compare_cols(marked, any, get);
+    let (mut names, mut cols) = crate::view::compare_cols(marked, any, get, store);
     // Sorted here, so the rows are made once, as they are slow to make: their cells move with
     // their models.
     let mut models = marked.to_vec();

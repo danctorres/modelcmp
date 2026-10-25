@@ -1288,8 +1288,9 @@ pub struct Row {
 pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
 
 /// Rows for side-by-side comparison, named and ordered as the table's columns, with the
-/// model's first; Via as the table shows it (`shown_via`).
-pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
+/// model's first; Via as the table shows it (`shown_via`), and a task as its line ranks it with
+/// `store`'s picks (`line_score`).
+pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
         let mut it = vals.iter().flatten();
         // As shown, like the verdict: 60.6 and 61.4 both read 61, and neither is the better.
@@ -1359,9 +1360,12 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         rows.push(Row { section: "scores", ..row(&head("arena"), arena, signed, true) });
     }
     for t in TASKS.iter().filter(|t| t.name != "overall" && !as_overall(models, t.name)) {
-        let vals: Vec<Option<f64>> = models.iter().map(|m| task_score(m, t.name)).collect();
+        // A benchmark picked in the task's column, marked `*` as the table's header is.
+        let bench = crate::app::task_bench(store, t);
+        let vals: Vec<Option<f64>> = models.iter().map(|m| line_score(m, t, bench)).collect();
         if vals.iter().any(Option::is_some) {
-            rows.push(Row { section: "scores", ..row(&head(t.name), vals, |v| format!("{v:.0}"), true) });
+            let label = head(t.name) + if bench.is_some() { "*" } else { "" };
+            rows.push(Row { section: "scores", ..row(&label, vals, |v| format!("{v:.0}"), true) });
         }
     }
     if models.iter().any(|m| m.tps.is_some() || m.ttft.is_some()) {
@@ -1384,8 +1388,8 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
 /// The TUI's compare: the model row, which names its rows, and its columns, the other rows of
 /// `compare_rows`. A column with fewer than two values compares
 /// nothing, and is left out.
-pub fn compare_cols(models: &[&Model], any: bool, get: Get) -> (Row, Vec<Row>) {
-    let mut cols = compare_rows(models, any, get);
+pub fn compare_cols(models: &[&Model], any: bool, get: Get, store: &Store) -> (Row, Vec<Row>) {
+    let mut cols = compare_rows(models, any, get, store);
     let names = cols.remove(0);
     let via = cols.pop().expect("Via is the last row");
     cols.retain(|c| c.cells.iter().filter(|v| *v != "-").count() >= 2);
@@ -1462,11 +1466,16 @@ fn paid(m: &Model) -> Option<f64> {
 /// For task `t`, the models worth paying for, best first: the best, then each cheaper one
 /// that scores less, cheaper than every one before it, so a dearer model that is no better
 /// is left out. The best alone is said against the runner-up. Your favorite for the task has
-/// a ★. None when fewer than two models have a score. `paid` is each model's (`paid`).
+/// a ★. None when fewer than two models have a score. `paid` is each model's (`paid`). Scored
+/// as the task's line is, by a benchmark picked in its column (`line_score`).
 fn task_verdict(models: &[&Model], paid: &[Option<f64>], t: &fit::Task, store: &Store) -> Option<[String; 3]> {
+    let bench = crate::app::task_bench(store, t);
     // As shown: 60.6 and 61.4 both read 61. With the price, which the sort asks at every step.
-    let mut scored: Vec<(&Model, f64, Option<f64>)> =
-        models.iter().zip(paid).filter_map(|(m, &c)| Some((*m, task_score(m, t.name)?.round_ties_even(), c))).collect();
+    let mut scored: Vec<(&Model, f64, Option<f64>)> = models
+        .iter()
+        .zip(paid)
+        .filter_map(|(m, &c)| Some((*m, line_score(m, t, bench)?.round_ties_even(), c)))
+        .collect();
     if scored.len() < 2 {
         return None;
     }
@@ -1722,8 +1731,9 @@ mod tests {
     fn compare_leaves_out_a_column_with_one_value() {
         let (a, b) =
             (Model { eci: Some(150.0), context: 1, ..Default::default() }, Model { context: 2, ..Default::default() });
-        let labels =
-            |ms: &[&Model]| compare_cols(ms, false, &|_| None).1.into_iter().map(|c| c.label).collect::<Vec<_>>();
+        let labels = |ms: &[&Model]| {
+            compare_cols(ms, false, &|_| None, &Store::default()).1.into_iter().map(|c| c.label).collect::<Vec<_>>()
+        };
         assert_eq!(labels(&[&a, &b]), ["Ctx", "Via"], "ECI has one value, so nothing to compare, and Via stays");
         assert!(labels(&[&a, &a]).contains(&"ECI".to_string()));
     }
@@ -1732,11 +1742,11 @@ mod tests {
     fn compare_marks_best() {
         let mk = |n: &str, c: u64, eci: Option<f64>| Model { name: n.into(), context: c, eci, ..Default::default() };
         let (a, b) = (mk("a", 100, Some(150.0)), mk("b", 200, None));
-        let rows = compare_rows(&[&a, &b], false, &|_| None);
+        let rows = compare_rows(&[&a, &b], false, &|_| None, &Store::default());
         let find = |l: &str| rows.iter().find(|r| r.label == l).unwrap();
         // With access to no model, Via is empty; with access to another, it says so, as the table.
         assert_eq!(find("Via").cells, vec!["-", "-"]);
-        assert_eq!(compare_rows(&[&a], true, &|_| None).last().unwrap().cells, vec![OUT_OF_REACH]);
+        assert_eq!(compare_rows(&[&a], true, &|_| None, &Store::default()).last().unwrap().cells, vec![OUT_OF_REACH]);
         assert_eq!(via(&a, true, Some("↓ 2.5 GB")), "↓ 2.5 GB", "a download stands for it");
         assert!(detail_lines(&a, &Store::default(), true).contains(&format!("  via:        {OUT_OF_REACH}")));
         let sized = detail_rows(&a, &Store::default(), true, None, Some(2_500_000_000));
@@ -1745,10 +1755,10 @@ mod tests {
         assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
         assert_eq!(find("ECI").cells, vec!["150.0", "-"]);
         assert_eq!((find("Ctx").section, find("ECI").section), ("", "scores"));
-        let same = compare_rows(&[&a, &a], false, &|_| None);
+        let same = compare_rows(&[&a, &a], false, &|_| None, &Store::default());
         assert_eq!(same.iter().find(|r| r.label == "Ctx").unwrap().ext, None, "equal values are not marked");
         let ms = [100_000, 200_400, 200_000, 0].map(|c| mk("m", c, None));
-        let rows = compare_rows(&ms.each_ref(), false, &|_| None);
+        let rows = compare_rows(&ms.each_ref(), false, &|_| None, &Store::default());
         let context = rows.iter().find(|r| r.label == "Ctx").unwrap();
         let best = Some(200_400.0);
         assert_eq!(context.vals, [Some(100_000.0), best, best, None], "200k twice, and unknown is not the worst");
@@ -1757,7 +1767,7 @@ mod tests {
         let yours = |p: f64| Model { offers: vec![at(p)], ..Default::default() };
         let unpriced = Offer { unpriced: true, ..at(0.0) };
         let listed = Model { offers: vec![unpriced, Offer { available: false, ..at(1.0) }], ..Default::default() };
-        let rows = compare_rows(&[&yours(3.0), &yours(5.0), &listed], false, &|_| None);
+        let rows = compare_rows(&[&yours(3.0), &yours(5.0), &listed], false, &|_| None, &Store::default());
         let price = rows.iter().find(|r| r.label == "$in").unwrap();
         assert_eq!((price.cells[2].as_str(), price.ext), ("~1.0", Some((3.0, 5.0))));
     }
@@ -1810,7 +1820,7 @@ mod tests {
             ..Default::default()
         };
         let has = |ms: &[&Model]| {
-            let col = compare_rows(ms, false, &|_| None).iter().any(|r| r.label == "Vision");
+            let col = compare_rows(ms, false, &|_| None, &Store::default()).iter().any(|r| r.label == "Vision");
             (col, verdict(ms, &Store::default()).iter().any(|r| r[0] == "vision"))
         };
         let (a, b, blind) = (mk(150.0, true), mk(140.0, true), mk(145.0, false));
@@ -1862,6 +1872,29 @@ mod tests {
         assert_eq!(line.iter().map(|(m, _)| m.key.as_str()).collect::<Vec<_>>(), ["cheap"], "the cheaper of a tie");
         let coding = verdict(&[&dear, &cheap], &Store::default()).into_iter().find(|r| r[0] == "coding").unwrap();
         assert_eq!(coding, ["coding", "cheap", "46 ($1.0) vs 46"].map(String::from), "the score the row shows");
+    }
+
+    #[test]
+    fn a_task_verdict_and_column_go_by_the_benchmark_picked_in_it() {
+        let offer = |p: f64| Offer { input: p, output: p, ..Default::default() };
+        let mk = |n: &str, agentic: f64, rli: f64, p: f64| Model {
+            key: n.into(),
+            name: n.into(),
+            tool_call: true,
+            fit: [("agentic".to_string(), agentic)].into(),
+            scores: [("Remote Labor Index".to_string(), rli)].into(),
+            offers: vec![offer(p)],
+            ..Default::default()
+        };
+        let (opus, argon) = (mk("opus", 60.0, 0.1, 5.0), mk("argon", 57.0, 0.5, 2.7));
+        let mut store = Store::default();
+        store.bench.insert("agentic".into(), "Remote Labor Index".into());
+        let agentic = verdict(&[&opus, &argon], &store).into_iter().find(|r| r[0] == "agentic").unwrap();
+        // As the line ranks it, and recommend, pick and --task: opus scores 60 on the task, argon 57.
+        assert_eq!(agentic, ["agentic", "argon", "50 ($2.7) vs 10"].map(String::from));
+        let rows = compare_rows(&[&opus, &argon], false, &|_| None, &store);
+        let col = rows.iter().find(|r| r.label.starts_with("Agentic")).unwrap();
+        assert_eq!((col.label.as_str(), col.cells.as_slice()), ("Agentic*", &["10", "50"].map(String::from)[..]));
     }
 
     #[test]

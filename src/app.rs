@@ -2084,20 +2084,20 @@ impl App {
     pub fn compare_models(&self) -> Vec<&Model> {
         let marked = self.marked_models();
         let Some((label, desc)) = &self.compare_sort else { return marked };
-        let cols = view::compare_cols(&marked, self.any_available(), &|m| self.download(m)).1;
+        let cols = view::compare_cols(&marked, self.any_available(), &|m| self.download(m), &self.store).1;
         view::compare_order(marked.len(), &cols, (label, *desc)).into_iter().map(|i| marked[i]).collect()
     }
 
     /// How many columns compare has, which depends on the data its models have.
     pub fn compare_cols(&self) -> usize {
-        view::compare_cols(&self.marked_models(), self.any_available(), &|m| self.download(m)).1.len()
+        view::compare_cols(&self.marked_models(), self.any_available(), &|m| self.download(m), &self.store).1.len()
     }
 
     /// `s` in compare: sort by the cursor's column, best first, and again to reverse, the
     /// cursor staying on its model.
     fn sort_compare(&mut self) {
         let marked = self.marked_models();
-        let cols = view::compare_cols(&marked, self.any_available(), &|m| self.download(m)).1;
+        let cols = view::compare_cols(&marked, self.any_available(), &|m| self.download(m), &self.store).1;
         let Some(c) = cols.get(self.compare_col.min(cols.len().saturating_sub(1))) else { return };
         // Best first: numbers by which is better, text A-Z.
         let desc = match &self.compare_sort {
