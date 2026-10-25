@@ -4341,8 +4341,8 @@ fn wrap_label(label: &str, w: usize) -> Vec<(usize, String)> {
 }
 
 /// The verdict, then a row per marked model and a column per value, as in the table: the best
-/// of each column in green, the worst in red, a `muted` model's row grey, its bests and worsts
-/// too, and Via last, the widest. A label wraps over the header's lines, so a column is as wide as
+/// of each column in green and the worst in red, of the models not `muted`, whose rows are grey,
+/// and Via last, the widest. A label wraps over the header's lines, so a column is as wide as
 /// its values. The cursor's column, `col` or the `jump`th label `query` finds, is marked under
 /// its label and filled as in the table, and the one `sort` names, by its label and whether
 /// highest first, has `▼` or `▲`, the `marked` models sorted by it as `App::compare_models`
@@ -4386,6 +4386,21 @@ fn compare(
     }
     let muted: Vec<bool> = models.iter().map(|m| muted(m)).collect();
     let (n, m) = (models.len(), cols.len());
+    // The cells that read as the best and the worst of each column, of the models not muted: a
+    // muted one holds neither, as in the table (`App::ext`), so a column does not lose them.
+    let ext: Vec<Option<(&str, &str)>> = (cols.iter())
+        .map(|r| {
+            // None where every cell reads alike, the muted ones' too.
+            r.ext?;
+            let shown = (0..n).filter(|&i| !muted[i]);
+            let mut it = shown.filter_map(|i| Some((r.vals.get(i).copied()??, r.cells[i].as_str())));
+            let first = it.next()?;
+            let (lo, hi) = it
+                .fold((first, first), |(lo, hi), e| (if e.0 < lo.0 { e } else { lo }, if e.0 > hi.0 { e } else { hi }));
+            let (best, worst) = if r.higher { (hi.1, lo.1) } else { (lo.1, hi.1) };
+            (best != worst).then_some((best, worst))
+        })
+        .collect();
     let sel = sel.min(n.saturating_sub(1));
     // In cells as the terminal draws them, so a wide character keeps the columns in line.
     let cell_w = |s: &str| Span::raw(s).width();
@@ -4511,12 +4526,12 @@ fn compare(
         for c in vis.clone() {
             let r = &cols[c];
             let cell = r.cells[i].as_str();
-            let style = match r.ext.and_then(|e| Some((e, r.vals[i]?))) {
+            let style = match ext[c] {
                 _ if muted[i] => fg(MUTED),
                 // A list price, as in the table: not one you'd pay.
                 _ if r.listed.get(i) == Some(&true) => fg(MUTED).add_modifier(Modifier::ITALIC),
-                Some(((best, _), v)) if v == best => fg(GOOD).add_modifier(BOLD),
-                Some(((_, worst), v)) if v == worst => fg(BAD),
+                Some((best, _)) if cell == best => fg(GOOD).add_modifier(BOLD),
+                Some((_, worst)) if cell == worst => fg(BAD),
                 _ => Style::new(),
             };
             let pad = " ".repeat(widths[c] - cell_w(cell));
@@ -6161,6 +6176,26 @@ mod tests {
         let row = lines.last().unwrap();
         let fg = |h: &str| row.spans.iter().find(|s| s.content == h).map(|s| s.style.fg);
         assert_eq!((fg("codex"), fg("pi")), (Some(Some(MUTED)), Some(None)), "{row:?}");
+    }
+
+    #[test]
+    fn compare_takes_no_best_or_worst_from_a_muted_model() {
+        let offer = |p: f64| Offer { input: p, output: p, ..Default::default() };
+        let mk =
+            |n: &str, p: f64| Model { key: n.into(), name: n.into(), offers: vec![offer(p)], ..Default::default() };
+        let ms = [mk("cheapest", 0.1), mk("cheap", 1.0), mk("dear", 5.0), mk("dearest", 9.0)];
+        let ms: Vec<&Model> = ms.iter().collect();
+        let muted = |m: &Model| ["cheapest", "dearest"].contains(&m.key.as_str());
+        let at = (0, (0, 0), None);
+        let c = compare(&ms, (false, &|_| None, &Store::default()), at, (200, None), "", muted, &mut vec![]);
+        // Price, the first column: its cell after the name and the `│` before it.
+        let fgs: Vec<_> = c.lines[c.at..].iter().map(|l| l.spans[4].style.fg).collect();
+        assert_eq!(
+            fgs,
+            [Some(MUTED), Some(GOOD), Some(BAD), Some(MUTED)],
+            "the others' best and worst: {:#?}",
+            c.lines
+        );
     }
 
     #[test]
