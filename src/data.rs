@@ -97,7 +97,8 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// Epoch's, and no `Model::task_cost` nor `task_tokens`. 29: Epoch's coding score is WeirdML v3, where
 /// it was WeirdML, which stopped at 2026-09-03, and its tasks have more benchmarks. 30: `SHORT_NAMES`.
 /// 31: Epoch's coding score is FrontierCode, which scores more models than WeirdML v3.
-const FORMAT: u32 = 31;
+/// 32: a row keeps the vendor most offers name it with.
+const FORMAT: u32 = 32;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -3199,7 +3200,7 @@ fn slug(id: &str) -> String {
 const NAME_ORGS: &[&str] = &["au", "coding", "dola", "doubao"];
 
 /// Vendors whose name prefixes their models' in a reseller's listing: "Anthropic Claude Opus 4.7".
-const VENDORS: &[&str] = &["openai", "anthropic", "google", "xai", "meta", "mistral"];
+const VENDORS: &[&str] = &["openai", "anthropic", "google", "xai", "meta", "mistral", "nvidia"];
 
 /// "openaigpt41" -> "gpt41" when "gpt41" exists: providers that prefix the vendor
 /// ("OpenAI: GPT-4.1", "Anthropic Claude Opus 4.7") fold into the plain entry. A stealth
@@ -3208,7 +3209,14 @@ const VENDORS: &[&str] = &["openai", "anthropic", "google", "xai", "meta", "mist
 /// 8B") keeps its own entry and prices. A name without a digit folds when another provider
 /// sells the same id by the plain name (`sold`): NanoGPT's "Elorian Glimpse" is `elorian/glimpse`,
 /// which OpenRouter calls "Glimpse". Ambient's "Ambient Large" is not Mistral's "Large".
-fn fold_vendor(key: &str, sold: impl Fn(&str) -> bool, keys: &HashSet<String>, orgs: &HashSet<String>) -> String {
+/// Nor does a name fold into one fewer offers give (`keys`, each name's count): "Mistral Medium
+/// 3.5" is the model's, and aimlapi's "Medium 3.5" goes into it (`merge_same_ids`), not it there.
+fn fold_vendor(
+    key: &str,
+    sold: impl Fn(&str) -> bool,
+    keys: &HashMap<String, usize>,
+    orgs: &HashSet<String>,
+) -> String {
     let mut k = key;
     // ponytail: suffix must be ≥5 chars with a digit, or be sold by that name under the same
     // id (or follow a known vendor, for "o3"), a cheap guard against false merges.
@@ -3217,11 +3225,11 @@ fn fold_vendor(key: &str, sold: impl Fn(&str) -> bool, keys: &HashSet<String>, o
         let long = r.len() >= 5 && r.bytes().any(|b| b.is_ascii_digit());
         let said = sold(r);
         let vendor = VENDORS.contains(&prefix);
-        ((long || said) && orgs.contains(prefix) || vendor) && keys.contains(*r)
+        ((long || said) && orgs.contains(prefix) || vendor) && keys.get(*r).is_some_and(|n| Some(n) >= keys.get(k))
     }) {
         k = r;
     }
-    k.strip_suffix("alpha").filter(|b| keys.contains(*b)).unwrap_or(k).to_string()
+    k.strip_suffix("alpha").filter(|b| keys.contains_key(*b)).unwrap_or(k).to_string()
 }
 
 // ---------- models.dev ----------
@@ -3843,7 +3851,11 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         .filter(|e| !["embed", "rerank"].iter().any(|w| e.3.to_lowercase().contains(w)))
         .filter(|e| !norm(&e.3).is_empty())
         .collect();
-    let keys: HashSet<String> = entries.iter().map(|e| norm(&e.3)).collect();
+    // Each name with how many offers go by it.
+    let mut keys: HashMap<String, usize> = HashMap::new();
+    for e in &entries {
+        *keys.entry(norm(&e.3)).or_default() += 1;
+    }
     let offer_id = |mid: &String, md: &MdModel| if md.id.is_empty() { mid.clone() } else { md.id.clone() };
     // Each name with the ids it is sold as.
     let sold: HashSet<(String, String)> =
@@ -4390,6 +4402,26 @@ mod tests {
     }
 
     #[test]
+    fn a_name_most_offers_give_keeps_its_vendor() {
+        // aimlapi alone leaves Mistral out: its "Medium 3.5" goes into the model, not the model
+        // into it, which no source names so.
+        let json = br#"{"mistral": {"models": {"mistral-medium-2604": {"name": "Mistral Medium 3.5"}}},
+                        "openrouter": {"models": {"mistralai/mistral-medium-3-5": {"name": "Mistral Medium 3.5"}}},
+                        "aimlapi": {"models": {"mistralai/mistral-medium-3-5": {"name": "Medium 3.5"}}}}"#;
+        let mut ep = Scores::default();
+        ep.groups.insert("mistralmedium35".into(), ("Mistral Medium 3.5".into(), Some(141.0), BTreeMap::new()));
+        let d = merge(json, &ep, None).unwrap();
+        let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.name.as_str(), m.eci, m.offers.len())).collect();
+        assert_eq!(rows, [("mistralmedium35", "Mistral Medium 3.5", Some(141.0), 3)]);
+        // Nor one vendor's word apart from another's: NVIDIA's name and the plain one are one row.
+        let json = br#"{"a": {"models": {"nvidia/nemotron-9-nano-30b": {"name": "NVIDIA Nemotron 9 Nano 30B"}}},
+                        "b": {"models": {"nvidia/nemotron-9-nano-30b": {"name": "NVIDIA Nemotron 9 Nano 30B"}}},
+                        "c": {"models": {"nemotron-9-nano-30b": {"name": "Nemotron 9 Nano 30B"}}}}"#;
+        let d = merge(json, &ep, None).unwrap();
+        assert_eq!(d.models.iter().map(|m| m.offers.len()).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
     fn rows_sharing_an_id_merge() {
         let row = |key: &str, ids: &[&str]| {
             let offers = ids.iter().map(|i| Offer { id: i.to_string(), ..Default::default() }).collect();
@@ -4674,9 +4706,9 @@ mod tests {
 
     #[test]
     fn folds_vendor_prefix() {
-        let keys: HashSet<String> =
+        let keys: HashMap<String, usize> =
             ["gpt41", "openaigpt41", "prozaiorgglm5", "zaiorgglm5", "glm5x", "o3", "openaio3", "spacebunny"]
-                .map(String::from)
+                .map(|k| (k.to_string(), 1))
                 .into();
         let orgs: HashSet<String> = ["pro", "zaiorg"].map(String::from).into();
         let fold = |k| fold_vendor(k, |_| false, &keys, &orgs);
@@ -4687,7 +4719,8 @@ mod tests {
         assert_eq!(fold("spacebunnyalpha"), "spacebunny");
         assert_eq!(fold("oxalpha"), "oxalpha", "no plain entry, no fold");
         assert_eq!(fold("shisav2gpt41"), "shisav2gpt41", "a fine-tune is not its base");
-        let keys: HashSet<String> = ["glimpse", "elorianglimpse", "large", "ambientlarge"].map(String::from).into();
+        let keys: HashMap<String, usize> =
+            ["glimpse", "elorianglimpse", "large", "ambientlarge"].map(|k| (k.to_string(), 1)).into();
         let orgs: HashSet<String> = ["elorian", "ambient"].map(String::from).into();
         let by_glimpse = |r: &str| r == "glimpse";
         assert_eq!(fold_vendor("elorianglimpse", by_glimpse, &keys, &orgs), "glimpse", "sold by the plain name too");
