@@ -383,8 +383,9 @@ fn matched<'a>(
         let line = || {
             let (front, off) = task_line(filtered(), pool(), store, t);
             let ours = data.models.iter().filter(|m| (!o.selected || store.is_marked(&m.key)) && keep(m));
+            // Not looked for with `--via`, which takes none: it may ask Hugging Face for sizes.
             let local =
-                o.tier.as_ref().and_then(|_| local(data, store, t, ours, download)).filter(|_| o.via.is_empty());
+                o.tier.as_ref().filter(|_| o.via.is_empty()).and_then(|_| local(data, store, t, ours, download));
             (front, off, local)
         };
         let (front, off, local) = match lines {
