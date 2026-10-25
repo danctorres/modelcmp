@@ -472,7 +472,9 @@ fn local<'a>(
     download: bool,
 ) -> Option<(&'a Model, f64)> {
     let sizes = download.then(|| download_sizes(data, store));
-    crate::view::local_best(models, t, store, |m| sizes?.get(&m.key).copied(), crate::view::room(store))
+    // None to fit with no download weighed: `nvidia-smi` takes a second to say it.
+    let room = sizes.and_then(|_| crate::view::room(store));
+    crate::view::local_best(models, t, store, |m| sizes?.get(&m.key).copied(), room)
 }
 
 /// The sizes of the downloads `local` weighs, by model key: the ones kept, and the ones of
@@ -1748,6 +1750,23 @@ mod tests {
         );
         let pi = ListOpts { via: vec!["opencode".into()], cmd: false, ..o };
         assert_eq!(line(&pi).as_deref(), Some("p/hosted  -"), "a harness asked for: its own free pick");
+    }
+
+    /// `--id` and `--cmd` weigh no download, so they leave the memory a download fits in
+    /// unasked, which `nvidia-smi` takes a second to say. The command of `pick` weighs one.
+    #[test]
+    fn an_id_or_command_leaves_the_memory_unasked() {
+        let data = Data { models: vec![model("a", 50.0, 0.0)], ..Default::default() };
+        let o = ListOpts { task: fit::task("coding"), tier: Some("free".into()), id: true, ..Default::default() };
+        let asked = |o: &ListOpts| {
+            crate::data::MEMORY_ASKED.set(false);
+            assert!(matched(&data, &Store::default(), o, None).is_ok());
+            crate::data::MEMORY_ASKED.get()
+        };
+        assert!(!asked(&o), "--id");
+        let cmd = ListOpts { id: false, cmd: true, ..o };
+        assert!(!asked(&cmd), "--cmd");
+        assert!(asked(&ListOpts { prompt: true, ..cmd }), "pick's");
     }
 
     /// A tier judges a model at the price paid where it runs: one opencode has free and pi at a

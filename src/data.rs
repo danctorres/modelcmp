@@ -582,6 +582,8 @@ pub fn download_size(base: &str, key: &str) -> Result<Option<u64>, String> {
 // ponytail: other GPUs (AMD, Intel) count as RAM, and a model split between GPU and RAM runs
 // slower than one that fits: `modelcmp memory` sets it by hand.
 pub fn memory() -> Option<u64> {
+    #[cfg(test)]
+    MEMORY_ASKED.set(true);
     static MEMORY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *MEMORY.get_or_init(|| {
         if cfg!(test) {
@@ -600,6 +602,10 @@ pub fn memory() -> Option<u64> {
         Some(found)
     })
 }
+
+// Whether a test's thread asked for `memory`, which it finds none of.
+#[cfg(test)]
+thread_local!(pub static MEMORY_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
 
 /// Where `memory` keeps what it found, and for how long, in seconds.
 const MEMORY_FILE: &str = "memory.json";
