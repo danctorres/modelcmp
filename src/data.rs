@@ -3074,16 +3074,19 @@ fn merge_sized(
     };
     let mut rows: Vec<(usize, &String)> = names.iter().map(|(k, w)| (w.len(), *k)).collect();
     rows.sort();
+    // The rows of each page, the longest names first: a row is compared with its page's alone.
+    let mut on_page: HashMap<&String, Vec<&String>> = HashMap::new();
+    for &(_, k) in rows.iter().rev() {
+        if let Some(page) = pages.get(k) {
+            on_page.entry(page).or_default().push(k);
+        }
+    }
     // Each row's group, by the longest name that adds a size to it: that one adds a size to
     // all the shorter ones too.
     let mut groups: BTreeMap<&String, Vec<&String>> = BTreeMap::new();
     for &(_, k) in &rows {
         let Some(page) = pages.get(k) else { continue };
-        let mut longer = rows
-            .iter()
-            .rev()
-            .map(|r| r.1)
-            .filter(|&t| t != k && pages.get(t) == Some(page) && adds_size(&names[k], &names[t]));
+        let mut longer = on_page[page].iter().copied().filter(|&t| t != k && adds_size(&names[k], &names[t]));
         let Some(t) = longer.next() else { continue };
         // Two sizes of one name are two models: "Llama 3.1" is neither 8B nor 70B.
         if longer.all(|c| adds_size(&names[c], &names[t])) {
