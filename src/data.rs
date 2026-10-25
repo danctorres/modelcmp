@@ -581,8 +581,10 @@ pub fn memory() -> Option<u64> {
         {
             return Some(bytes);
         }
-        let found = find_memory()?;
-        keep(MEMORY_FILE, &HashMap::from([("bytes".to_string(), found), ("at".to_string(), now())]));
+        let (found, sure) = find_memory()?;
+        if sure {
+            keep(MEMORY_FILE, &HashMap::from([("bytes".to_string(), found), ("at".to_string(), now())]));
+        }
         Some(found)
     })
 }
@@ -591,10 +593,12 @@ pub fn memory() -> Option<u64> {
 const MEMORY_FILE: &str = "memory.json";
 const MEMORY_FOR: u64 = 7 * 24 * 3600;
 
-/// `memory`, looked up now. A wedged GPU driver can hang `nvidia-smi`, which the TUI's first
-/// frame waits on, so it is given up on at 5 s and the RAM counted.
-fn find_memory() -> Option<u64> {
-    let out = |bin: &str, args: &[&str]| run(bin, args, Duration::from_secs(5), &AtomicBool::new(false));
+/// `memory`, looked up now, and whether to keep it. A wedged GPU driver can hang `nvidia-smi`,
+/// which the TUI's first frame waits on, so it is given up on at `LIMIT` and the RAM counted, not
+/// kept: a driver slow to start after a boot answers the next time.
+fn find_memory() -> Option<(u64, bool)> {
+    const LIMIT: Duration = Duration::from_secs(5);
+    let out = |bin: &str, args: &[&str]| run(bin, args, LIMIT, &AtomicBool::new(false));
     let nvidia = || {
         let mib = out("nvidia-smi", &["--query-gpu=memory.total", "--format=csv,noheader,nounits"])?;
         let all: u64 = mib.lines().filter_map(|l| l.trim().parse::<u64>().ok()).sum();
@@ -606,7 +610,14 @@ fn find_memory() -> Option<u64> {
         let kb = info.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
         Some(kb.trim().trim_end_matches("kB").trim().parse::<u64>().ok()? << 10)
     };
-    if cfg!(target_os = "macos") { mac() } else { nvidia().or_else(linux) }
+    if cfg!(target_os = "macos") {
+        return Some((mac()?, true));
+    }
+    let asked = Instant::now();
+    match nvidia() {
+        Some(gpus) => Some((gpus, true)),
+        None => Some((linux()?, asked.elapsed() < LIMIT)),
+    }
 }
 
 /// The file Hugging Face's manifest for llama.cpp names, its size and its projector's (0 for
