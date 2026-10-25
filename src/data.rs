@@ -2224,7 +2224,12 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
     // Tried again once `RETRY` has passed, or when you ask for it.
     let failed = || {
         let (at, e) = kept::<(u64, String)>(FAILED).remove(source().id())?;
-        (now().saturating_sub(at) < RETRY.as_secs()).then_some(e)
+        let ago = now().saturating_sub(at);
+        (ago < RETRY.as_secs()).then(|| {
+            let (ago, next) = (Duration::from_secs(ago), RETRY - Duration::from_secs(ago));
+            let age = crate::view::age;
+            format!("{e}, {} ago, not tried again until {} from now or --refresh", age(ago), age(next))
+        })
     };
     let kept_from = |d: Data, e: &str| {
         let w = format!("refresh failed ({e}), so this is the cached data from {} ago", crate::view::age(d.age()));
