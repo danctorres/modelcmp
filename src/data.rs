@@ -754,20 +754,23 @@ fn local_key(tag: &str) -> String {
     let digit = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
     // A Hugging Face repo says the size in its name, so ollama's `:latest` for it is no part of it.
     let hub = tag.starts_with("hf.co/") || tag.starts_with("huggingface.co/");
+    // unsloth's dynamic quantizations start with `ud`, `UD-Q4_K_XL`.
     let extra = |p: &str| {
-        p == "qat"
+        ["qat", "ud"].contains(&p)
             || (hub && p == "latest")
-            || ["q", "fp", "bf", "f"].iter().any(|q| p.strip_prefix(q).is_some_and(digit))
+            || ["q", "iq", "tq", "mxfp", "fp", "bf", "f"].iter().any(|q| p.strip_prefix(q).is_some_and(digit))
             || (digit(p) && p.ends_with('k'))
     };
     // Whoever it was pulled from, `hf.co/bartowski/Qwen3.5-4B-GGUF:Q4_K_M` or `someone/qwen3.5:4b`.
     let tag = tag.rsplit('/').next().unwrap_or(tag).to_ascii_lowercase();
+    // A file split in parts, `x-Q4_K_M-00001-of-00002.gguf`, by the name they share.
+    let tag = split_stem(&tag).map_or(tag, |stem| stem + ".gguf");
     let (name, variant) = match tag.strip_suffix(".gguf") {
         // A file downloaded by hand, `gemma-3-4b-it-Q4_K_M.gguf`: its name, then its quantization.
         Some(file) => file.rsplit_once(['-', '.']).unwrap_or((file, "")),
         None => tag.split_once(':').unwrap_or((&tag, "")),
     };
-    let name = name.trim_end_matches("-gguf");
+    let name = name.trim_end_matches("-gguf").trim_end_matches("-ud");
     norm(&format!("{name}{}", variant.split('-').filter(|p| !extra(p)).collect::<String>()))
 }
 
@@ -5477,6 +5480,24 @@ mod tests {
         assert_eq!(named("ollama/hf.co/callgg/llama-3.2-1b-gguf:latest"), ["llama321b"]);
         assert_eq!(named("ollama/someone/llama3.2:1b"), ["llama321b"], "nor is another's upload");
         assert_eq!(named("llama-cli/callgg/llama-3.2-1b-gguf:Q4_K_M"), ["llama321b"]);
+    }
+
+    #[test]
+    fn local_names_leave_out_every_quantization() {
+        for (tag, key) in [
+            ("hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:IQ3_M", "llama323binstruct"),
+            ("/models/Llama-3.2-3B-Instruct-IQ4_XS.gguf", "llama323binstruct"),
+            ("hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL", "qwen38b"),
+            ("/models/Qwen3-8B-UD-Q4_K_XL.gguf", "qwen38b"),
+            ("/models/gpt-oss-20b-mxfp4.gguf", "gptoss20b"),
+            ("/models/Qwen3-235B-A22B-Q4_K_M-00001-of-00003.gguf", "qwen3235ba22b"),
+        ] {
+            assert_eq!(local_key(tag), key, "{tag} without its quantization");
+        }
+        // A file split in parts is loaded from its first.
+        let parts = ["00002", "00001"].map(|n| format!("{LLAMA}//models/Qwen3-235B-A22B-Q4_K_M-{n}-of-00002.gguf"));
+        let tags = local_tags(&parts, &HashSet::from(["qwen3235ba22b"]), &HashMap::new());
+        assert_eq!(tags, HashMap::from([("qwen3235ba22b".to_string(), &parts[1][LLAMA.len() + 1..])]));
     }
 
     #[test]
