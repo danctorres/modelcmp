@@ -98,8 +98,10 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// it was WeirdML, which stopped at 2026-09-03, and its tasks have more benchmarks. 30: `SHORT_NAMES`.
 /// 31: Epoch's coding score is FrontierCode, which scores more models than WeirdML v3.
 /// 32: a row keeps the vendor most offers name it with. 33: an Arena row dated in brackets is of
-/// that release.
-const FORMAT: u32 = 33;
+/// that release. 34: Artificial Analysis's scores too are of the release a row's offers are, an
+/// Arena name with its vendor first is of its model, a merged row takes its dated release's Arena
+/// rating, and volcengine's ids are ByteDance's.
+const FORMAT: u32 = 34;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -2622,9 +2624,9 @@ impl Arena {
             for name in s.keys() {
                 *releases.entry(undated(name).unwrap_or(name)).or_default() += 1;
             }
-            let mut out: HashMap<String, f64> = HashMap::new();
-            for (name, &v) in s {
-                let mut w: Vec<String> = name.split(' ').map(String::from).collect();
+            // The key the words `w` of `name` give, and whether it is the spelling of a release Arena dates.
+            let key = |name: &str, mut w: Vec<String>| {
+                let mut dated = false;
                 // A dated release is its own row, which models.dev's ids may date as "0813" of
                 // "20260813", else the undated one when Arena lists no other release of it.
                 // ponytail: that may be an older release when models.dev has no row of that date.
@@ -2632,7 +2634,7 @@ impl Arena {
                     let date = w.pop().unwrap_or_default();
                     let spelled = |d: &str| Some(w.concat() + d).filter(|k| known.contains(k.as_str()));
                     match spelled(&date).or_else(|| spelled(&date[4..]).filter(|_| date.len() == 8)) {
-                        Some(own) => w = vec![own],
+                        Some(own) => (w, dated) = (vec![own], true),
                         None if releases[plain] == 1 => {}
                         None => w.push(date),
                     }
@@ -2645,14 +2647,33 @@ impl Arena {
                 let set = n < w.len() && !known.contains(whole.as_str()) && known.contains(base.as_str());
                 // As `own_reasoner`, with "max" a setting too.
                 let own = setting(&w[n..]).0 == Some(true) && plain.contains(&base);
-                let k = if set && !own { base } else { whole };
-                out.entry(k).and_modify(|b| *b = b.max(v)).or_insert(v);
+                (if set && !own { base } else { whole }, dated)
+            };
+            // Each key's score, and whether it is the spelling of a release Arena dates.
+            let mut out: HashMap<String, (bool, f64)> = HashMap::new();
+            for (name, &v) in s {
+                let w: Vec<String> = name.split(' ').map(String::from).collect();
+                let (mut k, mut dated) = key(name, w.clone());
+                // A vendor before the name is no part of it, as in `merge_same_ids`, unless a model
+                // is named with it: Arena's "NVIDIA-Nemotron-3-Super-120B-A12B" is Nemotron 3 Super
+                // 120B A12B, and "Mistral Large 4" is Mistral Large 4.
+                if !known.contains(k.as_str())
+                    && (VENDORS.contains(&w[0].as_str()) || w[0] == "amazon")
+                    && let Some(b) = Some(key(name, w[1..].to_vec())).filter(|b| known.contains(b.0.as_str()))
+                {
+                    (k, dated) = b;
+                }
+                out.entry(k).and_modify(|b| *b = (b.0 || dated, b.1.max(v))).or_insert((dated, v));
             }
             out
         };
         let (scores, more) = (settled(&self.scores), self.lists().map(|(n, s)| (n, settled(s))).collect::<Vec<_>>());
         for m in models {
-            let of = |s: &HashMap<String, f64>| std::iter::once(&m.key).chain(&m.aka).find_map(|k| s.get(k)).copied();
+            // A model that absorbed the key of a dated release is that release, whatever its name.
+            let of = |s: &HashMap<String, (bool, f64)>| {
+                let rows = || std::iter::once(&m.key).chain(&m.aka).filter_map(|k| s.get(k));
+                rows().find(|r| r.0).or_else(|| rows().next()).map(|r| r.1)
+            };
             m.arena = of(&scores);
             m.arena_more = more.iter().filter_map(|(n, s)| Some((n.to_string(), of(s)?))).collect();
         }
@@ -3501,8 +3522,8 @@ struct Scores {
     /// Epoch's model ids, for a model it names otherwise: `grok-4.3` is "Grok 4.3 Beta". Apart
     /// from `alias`, as an id only finds the scores: it does not choose which row keeps its key.
     ids: HashMap<String, String>,
-    /// group -> the model ids Epoch benchmarked, which say what release its scores are of
-    /// (`other_release`).
+    /// group -> the model ids Epoch benchmarked, or Artificial Analysis's slugs without their
+    /// setting, which say what release its scores are of (`other_release`).
     versions: HashMap<String, BTreeSet<String>>,
     /// group -> organization.
     org: HashMap<String, String>,
@@ -3570,7 +3591,7 @@ fn short_org(s: &str) -> String {
         "deepseek" => "DeepSeek".into(),
         "xai" | "x-ai" | "spacexai" => "xAI".into(),
         "z-ai" | "zhipuai" | "thudm" => "Z.ai".into(),
-        "bytedance" | "bytedance-seed" => "ByteDance".into(),
+        "bytedance" | "bytedance-seed" | "volcengine" => "ByteDance".into(),
         "ibm" | "ibm-granite" => "IBM".into(),
         "xiaomimimo" => "Xiaomi".into(),
         "inclusionai" => "inclusionAI".into(),
@@ -3923,6 +3944,10 @@ fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
             scores.insert(crate::fit::AA_CODING.into(), (tb + sci) / 2.0);
         }
         let top = |f: &str| m[f].as_f64().filter(|x| x.is_finite() && *x > 0.0);
+        // The release it is of, "…-preview-09-2025" not the row sold as "…-preview-06-17". Not
+        // its setting, which a row naming one picks (`aa_named`).
+        let w = words(slug);
+        sc.versions.entry(key.clone()).or_default().insert(w[..setting_at(&w)].join("-"));
         sc.settings.entry(key.clone()).or_default().push(AaEntry {
             slug: slug.to_string(),
             release: m["release_date"].as_str().unwrap_or_default().to_string(),
@@ -4432,6 +4457,36 @@ mod tests {
     }
 
     #[test]
+    fn an_arena_row_named_with_its_vendor_first_is_of_its_model() {
+        let row = |key: &str| Model { key: key.into(), ..Default::default() };
+        let vl = Model { aka: vec!["nemotron35supervl120ba12b".into()], ..row("nemotron35supervl") };
+        let mut ms = [vl, row("nova2lite"), row("mistrallarge4")];
+        let rated =
+            |(name, rating): (&str, f64)| format!(r#"{{"row": {{"model_name": "{name}", "rating": {rating}}}}}"#);
+        let rows = [
+            ("NVIDIA-Nemotron-3.5-Super-VL-120B-A12B (NVFP4)", 1405.0),
+            ("Amazon Nova 2 Lite", 1362.0),
+            ("Mistral Large 4", 1432.0),
+        ];
+        let rows = format!(r#"{{"rows": [{}]}}"#, rows.map(rated).join(","));
+        Arena::parse(rows.as_bytes()).unwrap().score(&mut ms);
+        let got = ms.each_ref().map(|m| m.arena);
+        assert_eq!(got, [Some(1405.0), Some(1362.0), Some(1432.0)], "the vendor left out, unless the model has it");
+    }
+
+    #[test]
+    fn a_merged_model_is_the_dated_release_it_absorbed() {
+        // Providers name command-r-plus-08-2024 "Command R+" and "Command R+ 08-2024": one row, of
+        // that release, which Arena dates in brackets beside its undated original.
+        let mut ms =
+            [Model { key: "commandrplus".into(), aka: vec!["commandrplus082024".into()], ..Default::default() }];
+        let rows = br#"{"rows": [{"row": {"model_name": "Command R+ (08-2024)", "rating": 1228.87}},
+                                 {"row": {"model_name": "Command R+", "rating": 1203.8}}]}"#;
+        Arena::parse(rows).unwrap().score(&mut ms);
+        assert_eq!(ms[0].arena, Some(1229.0), "the release it is, not the one its name is");
+    }
+
+    #[test]
     fn a_row_borrows_the_other_sources_columns() {
         let row = |key: &str| Model { key: key.into(), tps: Some(1.0), ..Default::default() };
         let mut d = Data { models: vec![row("a"), row("b")], ..Default::default() };
@@ -4901,6 +4956,29 @@ mod tests {
     }
 
     #[test]
+    fn an_artificial_analysis_release_is_not_the_one_a_row_sells_dated_otherwise() {
+        let api = br#"{"data":[
+            {"slug":"gemini-2-5-flash-lite-preview-09-2025","name":"Gemini 2.5 Flash-Lite Preview (Sep '25)",
+             "evaluations":{"artificial_analysis_intelligence_index":10.4}},
+            {"slug":"command-r-plus-04-2024","name":"Command-R+ (Apr '24)",
+             "evaluations":{"artificial_analysis_intelligence_index":5.3}},
+            {"slug":"grok-4-fast-reasoning","name":"Grok 4 Fast (Reasoning)",
+             "evaluations":{"artificial_analysis_intelligence_index":35}},
+            {"slug":"grok-4-fast","name":"Grok 4 Fast (Non-reasoning)",
+             "evaluations":{"artificial_analysis_intelligence_index":23}}]}"#;
+        let json = br#"{"p": {"models": {
+            "gemini-2.5-flash-lite-preview-06-17": {"name": "Gemini 2.5 Flash Lite Preview"},
+            "command-r-plus-08-2024": {"name": "Command R+"},
+            "grok-4-fast-non-reasoning": {"name": "Grok 4 Fast Non-Reasoning"}}}}"#;
+        let d = merge(json, &parse_aa(api).unwrap(), None).unwrap();
+        let shown = |n: &str| d.models.iter().find(|m| m.name == n).map(|m| (m.eci, m.aa.clone()));
+        assert_eq!(shown("Gemini 2.5 Flash Lite Preview"), Some((None, None)), "the June preview, not September's");
+        assert_eq!(shown("Command R+"), Some((None, None)));
+        let setting = Some((Some(23.0), Some("grok-4-fast".into())));
+        assert_eq!(shown("Grok 4 Fast Non-Reasoning"), setting, "a setting is no release");
+    }
+
+    #[test]
     fn retired_and_fine_tuned_models_keep_out_of_the_base() {
         let json = br#"{"p": {"models": {
             "gpt-4.1": {"name": "GPT-4.1", "cost": {"input": 2, "output": 8}},
@@ -5344,6 +5422,19 @@ mod tests {
         );
         assert_eq!(developer_from_name("Nemotron 3 Ultra Free"), "NVIDIA");
         assert_eq!(developer_from_name("Space Bunny Free"), "");
+    }
+
+    #[test]
+    fn volcengine_ids_are_bytedance_models() {
+        // ofox sells ByteDance's Seed as "volcengine/doubao-seed-character", Volcengine being
+        // ByteDance's cloud, and Volcengine's own id names no vendor.
+        let json = br#"{
+            "ofox": {"models": {"volcengine/doubao-seed-character": {"name": "Seed Character"}}},
+            "volcengine": {"models": {"doubao-seed-character-260628": {"name": "Seed Character"}}}
+        }"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        let devs: Vec<_> = d.models.iter().map(|m| (m.name.as_str(), m.developer.as_str())).collect();
+        assert_eq!(devs, [("Seed Character", "ByteDance")], "its developer, not the cloud it is sold on");
     }
 
     #[test]
