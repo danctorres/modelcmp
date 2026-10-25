@@ -96,7 +96,8 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// 26: `Model::arena_more` has `ARENA_BOARDS` too. 27: `Data::missed`. 28: Artificial Analysis's has
 /// Epoch's, and no `Model::task_cost` nor `task_tokens`. 29: Epoch's coding score is WeirdML v3, where
 /// it was WeirdML, which stopped at 2026-09-03, and its tasks have more benchmarks. 30: `SHORT_NAMES`.
-const FORMAT: u32 = 30;
+/// 31: Epoch's coding score is FrontierCode, which scores more models than WeirdML v3.
+const FORMAT: u32 = 31;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.

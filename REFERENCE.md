@@ -64,7 +64,7 @@ A task column is a benchmark score, 0-100, blank for a model not tested on it.
 
 With Epoch AI, the default, it is one widely run benchmark about the task:
 
-- Coding: WeirdML v3
+- Coding: FrontierCode
 - Agentic: APEX-Agents
 - Reason: LMCA
 

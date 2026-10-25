@@ -1509,7 +1509,7 @@ mod tests {
     #[test]
     fn details_list_the_benchmarks_no_task_score_is() {
         let scores =
-            [("WeirdML v3", 0.5), ("FrontierSWE", 0.4), ("scicode", 0.1)].map(|(b, s)| (b.to_string(), s)).into();
+            [("FrontierCode", 0.5), ("FrontierSWE", 0.4), ("scicode", 0.1)].map(|(b, s)| (b.to_string(), s)).into();
         let mut m = Model { scores, ..Default::default() };
         m.fit.insert("coding".into(), 50.0);
         m.shown.insert("coding".into(), 50.0);
@@ -1518,7 +1518,7 @@ mod tests {
         assert!(lines[at("    coding")].contains("  50  "), "{}", lines[at("    coding")]);
         assert_eq!(at("    FrontierSWE"), at("  other benchmarks") + 1, "not the task's score");
         assert_eq!(at("    scicode"), at("  other benchmarks") + 2);
-        assert!(!lines.iter().any(|l| l.starts_with("    WeirdML v3")), "the task's score, the same number again");
+        assert!(!lines.iter().any(|l| l.starts_with("    FrontierCode")), "the task's score, the same number again");
     }
 
     #[test]

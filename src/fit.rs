@@ -99,7 +99,7 @@ pub const TASKS: &[Task] = &[
         need: Need::None,
         aa: Some(AA_CODING),
         aa_more: &["terminalbench_v4_0", "scicode"],
-        benches: &["WeirdML v3", "FrontierCode", "FrontierSWE", "MirrorCode", "Surface Evolver Bench"],
+        benches: &["FrontierCode", "WeirdML v3", "FrontierSWE", "MirrorCode", "Surface Evolver Bench"],
     },
     Task {
         name: "agentic",
@@ -332,8 +332,8 @@ mod tests {
     #[test]
     fn ranks_by_task() {
         use crate::data::Source::{Aa, Epoch};
-        let a = scores(&[("APEX-Agents", 0.9), ("WeirdML v3", 0.2), ("FrontierSWE", 0.9)]);
-        let b = scores(&[("APEX-Agents", 0.5), ("WeirdML v3", 0.7)]);
+        let a = scores(&[("APEX-Agents", 0.9), ("FrontierCode", 0.2), ("FrontierSWE", 0.9)]);
+        let b = scores(&[("APEX-Agents", 0.5), ("FrontierCode", 0.7)]);
         let p = pools([(Some(145.0), &a), (None, &b)].into_iter());
         let ((pa, shown_a), (pb, _)) = (scored(Epoch, Some(145.0), &a, &p), scored(Epoch, None, &b, &p));
         assert!(pa["agentic"] > pb["agentic"]);
