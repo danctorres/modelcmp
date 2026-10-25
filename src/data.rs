@@ -1772,7 +1772,9 @@ fn run(bin: &str, args: &[&str], limit: Duration, stop: &AtomicBool) -> Option<S
             Ok(Some(_)) | Err(_) => return None,
             Ok(None) if start.elapsed() >= limit || stop.load(Relaxed) => {
                 let _ = child.kill();
-                let _ = child.wait();
+                // Reaped off the caller: one stuck in the kernel, as `nvidia-smi` in a wedged
+                // driver, takes the kill only once it is out, which may be never.
+                std::thread::spawn(move || drop(child.wait()));
                 return None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
