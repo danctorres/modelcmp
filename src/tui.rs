@@ -1456,6 +1456,9 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
 /// it, as a marked row's blue does, and the accent's is a developer's and a price level's too.
 const CURSOR: Color = ACCENT;
 const FILL: Style = Style::new().bg(CURSOR);
+/// The cursor's column in the table and compare, a fainter grey than its row (`COLUMN_WASH`),
+/// and bold where there is no faint fill to have.
+const COLUMN: Color = Color::LightMagenta;
 /// The bars at the cursor's two ends.
 const EDGE: Style = Style::new().fg(ACCENT).bg(CURSOR).add_modifier(BOLD);
 /// The `‹` `›` `▲` `▼` for what is scrolled off: a solid cell, as a pill, found at a glance. Yellow, as the
@@ -1470,6 +1473,9 @@ const WASH: u32 = 12;
 /// And of the text colour in the cursor's: the most that every theme reads on and tells from a
 /// marked row's fill (`roles_are_told_apart`), about what an editor's cursor line has.
 const CURSOR_WASH: u32 = 8;
+/// And in the cursor's column: less than the row's, so the row stands out where they cross,
+/// and as much as tells it from the background in every theme (`the_column_reads`).
+const COLUMN_WASH: u32 = 6;
 /// And of a pill's colour in its fill behind a box, faded as the text around it.
 const PILL_FADE: u32 = 50;
 /// The mark colour in that fill with the terminal's own colours, which do not tell their slot 12.
@@ -1503,6 +1509,11 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>, sl
                 (cell.fg, cell.bg) = (cell.bg, Color::Reset);
             }
         }
+        // Nor a faint column: its cells are bold there.
+        if palette.is_none() && term_bg.is_none() && cell.bg == COLUMN {
+            cell.bg = Color::Reset;
+            cell.modifier.insert(BOLD);
+        }
         // The terminal's own colours with its background unknown have no faint fill: the cursor
         // is a reverse-video bar there, its two ends part of it and colours off it so it reads
         // as one. A pill in the accent keeps its fill.
@@ -1533,10 +1544,10 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>, sl
             (Color::Reset, ..) => bg.unwrap_or(Color::Reset),
             (c, Some(p), _) => fill(c, p),
             // The terminal does not tell its text colour: white on a dark background, else black.
-            (CURSOR, None, Some(b)) if cell.fg != Color::Black => {
-                wash(Color::from_u32(if lum(b) < 128.0 { 0xffffff } else { 0 }), b, CURSOR_WASH)
-            }
-            (_, None, Some(b)) if cell.fg != Color::Black => wash(Color::from_u32(TERM_MARK), b, WASH),
+            (c, None, Some(b)) if cell.fg != Color::Black => match grey(c) {
+                Some(share) => wash(Color::from_u32(if lum(b) < 128.0 { 0xffffff } else { 0 }), b, share),
+                None => wash(Color::from_u32(TERM_MARK), b, WASH),
+            },
             // A pill in a harness's colour (`chip`) is in the one its name has off it.
             (c, None, _) => resolve(c, None),
         };
@@ -1559,9 +1570,18 @@ fn lum(c: u32) -> f64 {
 /// A fill in a theme: a marked row's is the mark colour, the cursor's the text colour, each
 /// faint on the background.
 fn fill(c: Color, p: &Palette) -> Color {
+    match grey(c) {
+        Some(share) => wash(Color::from_u32(p.text), p.bg, share),
+        None => wash(resolve(c, Some(p)), p.bg, p.wash),
+    }
+}
+
+/// The share of the text colour in the cursor's fills, which are grey: its row's and its column's.
+fn grey(c: Color) -> Option<u32> {
     match c {
-        CURSOR => wash(Color::from_u32(p.text), p.bg, CURSOR_WASH),
-        c => wash(resolve(c, Some(p)), p.bg, p.wash),
+        CURSOR => Some(CURSOR_WASH),
+        COLUMN => Some(COLUMN_WASH),
+        _ => None,
     }
 }
 
@@ -2254,8 +2274,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         true => "▲",
         false => "",
     };
-    // The column under the cursor: its header reversed, its cells bold and a thick rule under it,
-    // as VisiData shows its current column; the values keep their colours.
+    // The column under the cursor: its header reversed, its cells on a faint fill (`COLUMN`)
+    // and a thick rule under it, as VisiData shows its current column; the values keep their
+    // colours.
     let header = |i: usize| {
         let style = fg(ACCENT).add_modifier(BOLD);
         if i == app.col { style.add_modifier(Modifier::REVERSED) } else { style }
@@ -2487,7 +2508,13 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     }
     if let Some((x, w)) = cur {
         let drawn = app.rows.len().saturating_sub(top).min(height) as u16;
-        restyle(buf, Rect::new(x, area.y + head, w, drawn).intersection(area), Style::new().add_modifier(BOLD));
+        // The cursor's column is a fainter fill than its row (`COLUMN`), on the rows with none of
+        // their own, so the row stays the one read and a marked row its blue.
+        cells(buf, Rect::new(x, area.y + head, w, drawn).intersection(area), |c| {
+            if c.bg == Color::Reset {
+                c.bg = COLUMN;
+            }
+        });
     }
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
     let bench = if let Input::Menu { col, .. } = &app.input { app.col_bench(*col) } else { None };
@@ -4255,7 +4282,7 @@ fn wrap_label(label: &str, w: usize) -> Vec<(usize, String)> {
 /// of each column in green, the worst in red, a `muted` model's row grey, its bests and worsts
 /// too, and Via last, the widest. A label wraps over the header's lines, so a column is as wide
 /// as its values. The cursor's column, `col` or the `jump`th label `query` finds, is marked
-/// under its label as in the table, and the one `sort` names, by its label and whether highest
+/// under its label and filled as in the table, and the one `sort` names, by its label and whether highest
 /// first, has `▼` or `▲`. When the columns do not all fit in `avail` cells, the view starts at
 /// column `first`, moved only as far as it takes to show the cursor's. Each model's row and
 /// each column's label goes to `spots`. `any` is whether you have access to a model, and `get`
@@ -4426,6 +4453,7 @@ fn compare(
             } else {
                 spans.push(Span::raw("  "));
             }
+            let from = spans.len();
             if left(c) {
                 if muted[i] {
                     spans.push(Span::styled(cell.to_string(), style));
@@ -4435,6 +4463,10 @@ fn compare(
                 spans.push(Span::raw(pad));
             } else {
                 spans.push(Span::styled(pad + cell, style));
+            }
+            // The cursor's column on a faint fill, as in the table, a chip keeping its own.
+            if c == col {
+                spans[from..].iter_mut().filter(|s| s.style.bg.is_none()).for_each(|s| s.style.bg = Some(COLUMN));
             }
         }
         spots.push(Spot { lines: out.len()..out.len() + 1, x: 0..usize::MAX, at: Stop::Compare(i) });
@@ -4867,6 +4899,17 @@ mod tests {
             if *name != "amber" {
                 far("yellow and plain text", of(MATCH), p.text, 100.0);
             }
+        }
+    }
+
+    /// The cursor's column is told from the background in every theme, its row more so.
+    #[test]
+    fn the_column_reads() {
+        for (name, p) in THEMES.iter().filter_map(|(n, p)| p.as_ref().map(|p| (n, p))) {
+            let [column, cursor] = [COLUMN, CURSOR].map(|c| hex(fill(c, p)));
+            let (col, row) = (apart(column, p.bg), apart(cursor, p.bg));
+            assert!(col >= 20.0, "{name}: the column's fill {column:06x} looks like the background, {col:.0}");
+            assert!(row > col, "{name}: the row's fill is no stronger than the column's");
         }
     }
 
@@ -5904,7 +5947,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_column_is_bold_with_a_thick_rule() {
+    fn selected_column_is_faint_with_a_thick_rule() {
         let mut a = app();
         a.col = ECI;
         let area = Rect::new(0, 0, 200, 4);
@@ -5916,7 +5959,16 @@ mod tests {
         assert_eq!(buf[(x, 1)].symbol(), "━", "a thick rule under the cursor's column");
         assert_eq!(buf[(x + w - 1, 1)].symbol(), "━");
         assert_eq!(buf[(px, 1)].symbol(), "─", "a thin one elsewhere");
-        assert!(buf[(x + w - 1, 3)].modifier.contains(BOLD), "its cells are bold");
+        assert_eq!(buf[(x + w - 1, 3)].bg, COLUMN, "its cells are filled");
+        assert_eq!(buf[(px + 1, 3)].bg, Color::Reset, "other columns are not");
+        let drawn = buf.clone();
+        recolor(&mut buf, None, Some(0x1e1e1e), None);
+        let cell = &buf[(x + w - 1, 3)];
+        assert!(cell.bg != Color::from_u32(0x1e1e1e) && !cell.modifier.contains(BOLD), "a faint fill, not bold");
+        let mut buf = drawn;
+        recolor(&mut buf, None, None, None);
+        let cell = &buf[(x + w - 1, 3)];
+        assert!(cell.bg == Color::Reset && cell.modifier.contains(BOLD), "bold with no faint fill to have");
         assert!(!buf[(px + 1, 3)].modifier.contains(BOLD), "other columns are not");
     }
 
@@ -6004,6 +6056,10 @@ mod tests {
             .map(|l| l.spans.iter().find(|s| s.content.trim().ends_with(['M', 'k'])).unwrap().style.fg)
             .collect();
         assert_eq!(fgs, [Some(GOOD), Some(BAD), Some(BAD)], "a column per value, a row per model");
+        // The cursor's column is filled in each model's row, as in the table, and not over it.
+        let filled = |l: &Line| l.spans.iter().any(|s| s.style.bg == Some(COLUMN) && !s.content.trim().is_empty());
+        assert!(lines[lines.len() - 3..].iter().all(filled), "{lines:#?}");
+        assert!(!lines[..lines.len() - 3].iter().any(filled), "not the header");
         // A harness left out in Via is grey, as in the table.
         let m = Model { name: "m".into(), via: vec!["codex".into(), "pi".into()], ..Default::default() };
         let mut store = Store::default();
