@@ -382,13 +382,14 @@ pub fn task_score(m: &Model, task: &str) -> Option<f64> {
 /// The items whose model no other beats on both `score` and blended price: the cheapest at
 /// every quality level. Scores compare as shown, whole points, so a fraction of a point never
 /// justifies a higher price. Free models count at $0; ties on both keep every tied item.
+/// Shown as `{:.0}` prints them, a half to even: 46.5 reads 46.
 pub fn frontier<'m, T: Copy>(
     items: &[T],
     model: impl Fn(T) -> &'m Model,
     score: impl Fn(&Model) -> Option<f64>,
 ) -> Vec<T> {
     let pts: Vec<Option<(f64, f64)>> =
-        items.iter().map(|&i| Some((score(model(i))?.round(), model(i).cost()?))).collect();
+        items.iter().map(|&i| Some((score(model(i))?.round_ties_even(), model(i).cost()?))).collect();
     let beats = |(s, c): (f64, f64), (t, d): (f64, f64)| s >= t && c <= d && (s > t || c < d);
     // ponytail: O(n²), fine for the few hundred rows the harnesses list.
     items
@@ -1448,7 +1449,7 @@ pub fn verdict(models: &[&Model], store: &Store) -> Vec<[String; 3]> {
 /// Whether `task` scores every one of `models` as overall does, as shown, so it adds nothing:
 /// vision, when they all take images.
 fn as_overall(models: &[&Model], task: &str) -> bool {
-    let shown = |m: &Model, t| task_score(m, t).map(f64::round);
+    let shown = |m: &Model, t| task_score(m, t).map(f64::round_ties_even);
     task != "overall" && models.iter().all(|m| shown(m, task) == shown(m, "overall"))
 }
 
@@ -1465,7 +1466,7 @@ fn paid(m: &Model) -> Option<f64> {
 fn task_verdict(models: &[&Model], paid: &[Option<f64>], t: &fit::Task, store: &Store) -> Option<[String; 3]> {
     // As shown: 60.6 and 61.4 both read 61. With the price, which the sort asks at every step.
     let mut scored: Vec<(&Model, f64, Option<f64>)> =
-        models.iter().zip(paid).filter_map(|(m, &c)| Some((*m, task_score(m, t.name)?.round(), c))).collect();
+        models.iter().zip(paid).filter_map(|(m, &c)| Some((*m, task_score(m, t.name)?.round_ties_even(), c))).collect();
     if scored.len() < 2 {
         return None;
     }
@@ -1844,6 +1845,23 @@ mod tests {
         assert_eq!(coding(&[&big, &listed], &store)[2], "90 ($10) vs 60", "a list price is not cheaper");
         store.toggle_favorite("coding:high", "mid");
         assert_eq!(coding(&[&big, &mid], &store)[2], "90 ($10) · ★ mid 70 ($5.0)", "your favorite has a ★");
+    }
+
+    #[test]
+    fn a_half_point_compares_as_it_reads() {
+        let mk = |n: &str, coding: f64, p: f64| Model {
+            key: n.into(),
+            name: n.into(),
+            fit: [("coding".to_string(), coding)].into(),
+            offers: vec![Offer { input: p, output: p, ..Default::default() }],
+            ..Default::default()
+        };
+        // 46.5 reads 46, as `{:.0}` rounds a half to even, so it is no better than 46.4.
+        let (dear, cheap) = (mk("dear", 46.5, 1.8), mk("cheap", 46.4, 1.0));
+        let (line, _) = task_frontier([&dear, &cheap].into_iter(), fit::task("coding").unwrap(), &[], &[], None);
+        assert_eq!(line.iter().map(|(m, _)| m.key.as_str()).collect::<Vec<_>>(), ["cheap"], "the cheaper of a tie");
+        let coding = verdict(&[&dear, &cheap], &Store::default()).into_iter().find(|r| r[0] == "coding").unwrap();
+        assert_eq!(coding, ["coding", "cheap", "46 ($1.0) vs 46"].map(String::from), "the score the row shows");
     }
 
     #[test]
