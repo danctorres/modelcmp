@@ -35,6 +35,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
 use std::ops::Range;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -94,6 +95,9 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     }
     let mut terminal =
         ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}), see modelcmp --help"))?;
+    TAKEN.store(true, Ordering::SeqCst);
+    #[cfg(unix)]
+    restore_on_signals();
     // ratatui's panic hook restores the terminal but leaves mouse reporting on, and bracketed
     // paste, which keeps pasted text (ctrl+v in some terminals) from arriving as keys. And the
     // cursor hidden, which only its terminal's drop shows again: a release build aborts instead.
@@ -105,15 +109,44 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     let res = if ask || new { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
         .and_then(|()| event_loop(&mut app, &mut terminal, rx, pre));
-    // The cursor too: the terminal shows it only when dropped, after an upgrade a ^C may end.
-    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, Show);
-    ratatui::restore();
+    restore();
     let Some((cmds, unsaved)) = res? else { return Ok(()) };
     // On the terminal's own screen, where the upgrade's output shows.
     if let Some(e) = unsaved {
         eprintln!("modelcmp: {e}");
     }
     upgrade(&cmds)
+}
+
+/// Whether the TUI has the terminal: raw, on its own screen, with mouse reporting on.
+static TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// Give the terminal back as the TUI found it. The cursor too: the terminal shows it only when
+/// dropped, after an upgrade a ^C may end. Only once, as leaving a screen it is no longer on
+/// moves the cursor back to where the TUI started, over what an upgrade wrote since. Quietly, as
+/// after a hang-up there is no terminal, and saying so on it panics, which aborts a release build.
+fn restore() {
+    if TAKEN.swap(false, Ordering::SeqCst) {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, Show);
+        let _ = ratatui::try_restore();
+    }
+}
+
+/// Killed from outside, by `kill`, `timeout` or a hang-up, the TUI gives the terminal back as a
+/// quit does, or the shell's prompt comes back on its screen with no cursor and the pointer's
+/// moves typed into it. Then it exits as the signal would, 128 and its number. A ^C in the TUI is
+/// a key, so only a SIGINT sent by another process comes here.
+#[cfg(unix)]
+fn restore_on_signals() {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) else { return };
+    std::thread::spawn(move || {
+        let Some(sig) = signals.forever().next() else { return };
+        // Held to the exit, so a frame being drawn cannot land on the shell's screen after it.
+        let _out = std::io::stdout().lock();
+        restore();
+        std::process::exit(128 + sig);
+    });
 }
 
 const REPO: &str = "https://github.com/danctorres/modelcmp";
@@ -4593,6 +4626,29 @@ mod tests {
     use crate::app::{Back, ECI, NCOLS};
     use crate::data::Offer;
     use ratatui::crossterm::event::KeyCode;
+
+    /// Killed from outside, the TUI gives the terminal back and exits as the signal would. The
+    /// signal ends the process, so the test runs itself in a child to be killed.
+    #[cfg(unix)]
+    #[test]
+    fn a_kill_gives_the_terminal_back() {
+        if std::env::var_os("MODELCMP_KILLED").is_some() {
+            TAKEN.store(true, Ordering::SeqCst);
+            restore_on_signals();
+            let _ = signal_hook::low_level::raise(signal_hook::consts::SIGTERM);
+            std::thread::sleep(Duration::from_secs(5));
+            return;
+        }
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tui::tests::a_kill_gives_the_terminal_back", "--nocapture"])
+            .env("MODELCMP_KILLED", "1")
+            .output()
+            .unwrap();
+        let screen = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(128 + 15), "the status a shell gives a SIGTERM");
+        assert!(screen.contains("\x1b[?1000l") && screen.contains("\x1b[?2004l"), "mouse reporting and paste off");
+        assert!(screen.contains("\x1b[?25h") && screen.contains("\x1b[?1049l"), "the cursor shown, the shell's screen");
+    }
 
     #[test]
     fn the_upgrade_is_the_installer_s() {
