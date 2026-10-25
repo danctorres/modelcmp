@@ -2178,9 +2178,16 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         }
         Ok(data)
     };
+    // Side by side, as each merges the whole of models.dev's list.
+    // ponytail: each parses it and builds the same rows. Build them once, joined to each source,
+    // if a refresh's merge shows.
+    let (of_epoch, of_aa) = std::thread::scope(|s| {
+        let of_aa = key.map(|_| s.spawn(by_aa));
+        (by_epoch(), of_aa.and_then(|t| t.join().ok()))
+    });
     let (data, other) = match src {
-        Source::Epoch => (by_epoch()?, key.map(|_| (Source::Aa, by_aa()))),
-        Source::Aa => (by_aa()?, Some((Source::Epoch, by_epoch()))),
+        Source::Epoch => (of_epoch?, of_aa.map(|d| (Source::Aa, d))),
+        Source::Aa => (of_aa.unwrap_or_else(by_aa)?, Some((Source::Epoch, of_epoch))),
     };
     Ok((data, other, [aa, epoch_pages, openrouter], release, late))
 }
