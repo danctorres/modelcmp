@@ -1323,7 +1323,13 @@ pub fn command(
         let kept = |h: &&str| !skip || !not.iter().any(|x| x == h);
         crate::data::first_party().chain(crate::data::vias()).filter(asked).filter(kept).find_map(has)
     };
-    first.iter().flatten().filter(|h| asked(h)).find_map(|h| has(h)).or_else(|| rest(true)).or_else(|| (!not.is_empty()).then(|| rest(false)).flatten())
+    first
+        .iter()
+        .flatten()
+        .filter(|h| asked(h))
+        .find_map(|h| has(h))
+        .or_else(|| rest(true))
+        .or_else(|| (!not.is_empty()).then(|| rest(false)).flatten())
 }
 
 /// The ways to get a model no runner on this machine has yet, each as its label and the
