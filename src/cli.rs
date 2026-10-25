@@ -165,9 +165,13 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
         pages: full.then(|| links.into_iter().collect()),
         eci: m.eci,
         source: crate::data::source().id(),
+        // As the table shows it, with the benchmark picked in the task's column.
         tasks: TASKS
             .iter()
-            .filter_map(|t| Some((t.name, (fit::shown(m, t, fit::fit(m, t)?) * 10.0).round() / 10.0)))
+            .filter_map(|t| {
+                let score = crate::view::line_score(m, t, crate::app::task_bench(s, t))?;
+                Some((t.name, (score * 10.0).round() / 10.0))
+            })
             .collect(),
         other_index: m.other_index,
         arena_agent: m.arena,
@@ -1987,6 +1991,17 @@ mod tests {
             (vec![false, false], 0),
             "mini scores 60 on coding"
         );
+    }
+
+    /// A model's `tasks` is the task's table column, so it shows the benchmark picked there.
+    #[test]
+    fn model_json_tasks_follow_a_benchmark_picked_in_the_tui() {
+        let mut m = model("mini", 60.0, 1.0);
+        m.scores.insert("FrontierSWE".into(), 0.7);
+        let mut store = Store::default();
+        store.bench.insert("coding".into(), "FrontierSWE".into());
+        let json = serde_json::to_value(out(&m, &store, false, false)).unwrap();
+        assert_eq!(json["tasks"]["coding"], 70.0, "FrontierSWE, not the coding score of 60");
     }
 
     #[test]
