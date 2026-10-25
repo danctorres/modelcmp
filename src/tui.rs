@@ -309,8 +309,13 @@ fn key_lines(typed: usize) -> Vec<Line<'static>> {
     let dots = "•".repeat(typed.min(what.width() - KEY_ASK.len() - 1));
     vec![
         what,
-        Line::from(" for more models and speed metrics "),
-        Line::from(" or skip it and all benchmarks come from Epoch AI "),
+        Line::from(" for newer benchmarks, covering the most models "),
+        // K is no key of this box: said in the sentence, not with the hints under it.
+        Line::from(vec![
+            Span::raw(" or skip it for Epoch AI and add it later with "),
+            Span::styled("K", fg(KEY).add_modifier(BOLD)),
+            Span::raw(" "),
+        ]),
         Line::default(),
         Line::from(format!("{KEY_ASK}{dots}")),
         key_line(" enter saves · esc skips · ctrl+c quits", &BTreeMap::new()),
@@ -3253,7 +3258,7 @@ fn choice_lines(
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
         Kind::Pick => " ↓ ↑ move · / search · space enter picks · esc close",
         Kind::Harness => " ↓ ↑ move · / search · space enter picks · esc P close",
-        Kind::FirstHarness => " ↓ ↑ move · / search · space enter picks · esc skips · P changes it later",
+        Kind::FirstHarness => " ↓ ↑ move · / search · space enter picks · esc skips",
         Kind::Bench => " ↓ ↑ move · / search · space enter picks · esc B close",
         Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",
@@ -3306,6 +3311,14 @@ fn choice_lines(
             lines.push(Line::from(format!("{:<width$}", format!(" … {rest} more"))).style(fg(MUTED)));
         }
         return lines;
+    }
+    // P is no key of this box: said in a sentence of its own, not with the hints under it.
+    if kind == Kind::FirstHarness {
+        let p = Span::styled(bound_keys("P", bound), fg(KEY).add_modifier(BOLD));
+        lines.extend([
+            Line::default(),
+            Line::from(vec![Span::raw(" you can change it later with "), p, Span::raw(" ")]).style(fg(MUTED)),
+        ]);
     }
     lines.push(match &list.edit {
         Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
