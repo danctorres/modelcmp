@@ -2848,7 +2848,8 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             | Input::DeleteTask(_)
             | Input::Key { .. }
             | Input::Choose { list: List { typing: false, .. }, .. }
-    ) {
+    ) && app.open_list().is_none_or(|l| l.query.is_empty())
+    {
         // The question is in a box in the middle of the screen. Under it, what a pick or a key
         // could not save, which the next key clears, else the start's warning, kept while the
         // first start's question is open.
@@ -2891,13 +2892,16 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             Input::Bound { col, .. } if crate::app::numeric(col).is_some_and(|c| c.id == "ctx") => "k",
             _ => "",
         };
-        let (menu, typing) = match &app.input {
-            Input::Menu { list, .. } => (true, list.typing),
-            Input::Choose { .. } => (true, true),
-            _ => (false, true),
+        // A choice list says its keys in its box, so the bar does not say them again.
+        let (choose, menu, typing) = match &app.input {
+            Input::Menu { list, .. } => (false, true, list.typing),
+            Input::Choose { list, .. } => (true, false, list.typing),
+            _ => (false, false, true),
         };
-        let toggles = matches!(app.input, Input::Menu { .. }) || app.choosing_favs() || app.choosing_cols();
+        // Not under a range, which esc cancels first and whose hint has no search.
+        let kept = app.open_list().is_some_and(|l| !l.query.is_empty() && l.visual.is_none());
         let hint = match (menu, typing) {
+            _ if choose => "",
             (true, false) if matches!(&app.input, Input::Menu { list, .. } if list.visual.is_some()) => {
                 "↓ ↑ extend  space enter toggle  e leave out  esc cancel"
             }
@@ -2908,13 +2912,14 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
                 "↓ ↑ move  / search  space enter toggle  e leave out  esc close"
             }
             (true, false) => "↓ ↑ move  / search  space enter toggle  esc close",
-            (true, true) if toggles => "↓ ↑ match  enter toggle  esc clear",
-            (true, true) => "↓ ↑ match  enter pick  esc clear",
+            (true, true) => "↓ ↑ match  enter apply  esc cancel",
             _ => "enter apply  esc cancel",
         };
+        let hint = if menu && kept && !typing { kept_hint(hint, "  ") } else { hint.to_string() };
+        let hint = hint.as_str();
         let width = |s: &str| Span::raw(s).width();
         // The hint shows only where it leaves the label and a few typed cells their room.
-        let fits = usize::from(x) + width(&label) + 8 + width(hint) < usize::from(area.right());
+        let fits = !hint.is_empty() && usize::from(x) + width(&label) + 8 + width(hint) < usize::from(area.right());
         let hx = if fits { area.right() - (width(hint) as u16 + 1) } else { area.right() };
         // Text too long for the room scrolls sideways, so the cursor stays in view.
         let room = usize::from(hx.saturating_sub(x));
@@ -3082,6 +3087,16 @@ fn fav_name_w(items: &[(String, Effect)]) -> usize {
     items.iter().map(|(label, _)| Span::raw(label.as_str()).width()).max().unwrap_or(0)
 }
 
+/// A list's hint, its keys apart by `sep`, while its search is kept, as enter keeps it: `n` `N`
+/// go to the matches and esc clears it.
+fn kept_hint(hint: &str, sep: &str) -> String {
+    let hint = hint.replace("/ search", "n N match");
+    match hint.rsplit_once(&format!("{sep}esc")) {
+        Some((keys, _)) => format!("{keys}{sep}esc clear"),
+        None => hint,
+    }
+}
+
 /// `f`'s grid: the tiers' heading, a row per task with a box for each tier,
 /// `✓` where the model is the favorite, `●` where another is, `☐` where none and `×` on a tier
 /// it is dearer than, which cannot take it (`view::over_cap`), bold where it is the favorite
@@ -3160,12 +3175,13 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     let own = items.iter().any(|(_, e)| matches!(e, Effect::Fav(_, t) if fit::task(t).is_none()));
     let hint = match (list.typing, own) {
         // While searching the letters are typed, as the status bar says.
-        (true, _) => " ↓ ↑ match · enter toggle · esc clear",
+        (true, _) => " ↓ ↑ match · enter apply · esc cancel",
         // `r` and `a` are said once there is a task of your own. `↓ ↑`, enter and esc work too,
         // left unsaid: with them the line is wider than 80 columns hold.
         (_, true) => " ← → tier · / search · space toggle · H harness · r rename · a about",
         _ => " ↓ ↑ ← → move · / search · space enter toggle · H harness · esc close",
     };
+    let hint = if list.typing || list.query.is_empty() { hint.to_string() } else { kept_hint(hint, " · ") };
     // As wide as the hint at most, so the box keeps its width as the cursor moves.
     let width = hint.chars().count();
     lines.push(Line::default());
@@ -3180,7 +3196,7 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     lines.push(match &list.edit {
         Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
         Some(_) => key_line(&format!("{:<width$}", " enter apply · esc cancel"), &app.store.keys),
-        None => key_line(hint, &app.store.keys),
+        None => key_line(&hint, &app.store.keys),
     });
     lines
 }
@@ -3277,8 +3293,7 @@ fn choice_lines(
         })
         .collect();
     let hint = match kind {
-        _ if typing && kind == Kind::Cols => " ↓ ↑ match · enter toggle · esc clear",
-        _ if typing => " ↓ ↑ match · enter pick · esc clear",
+        _ if typing => " ↓ ↑ match · enter apply · esc cancel",
         Kind::Cols => " ↓ ↑ move · / search · space enter toggle · esc | close",
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
@@ -3289,6 +3304,7 @@ fn choice_lines(
         Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",
     };
+    let hint = if typing || query.is_empty() { hint.to_string() } else { kept_hint(hint, " · ") };
     // A folder being written takes every key: what enter did not take says why, and tab what
     // the folder could be. As wide as the hint it stands for.
     let width = hint.chars().count();
@@ -3349,7 +3365,7 @@ fn choice_lines(
     lines.push(match &list.edit {
         Some(Edit { err: Some(err), .. }) => Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)),
         Some(_) => key_line(&format!("{:<width$}", " tab complete · enter opens · esc back"), bound),
-        None => key_line(hint, bound),
+        None => key_line(&hint, bound),
     });
     lines
 }
@@ -7076,5 +7092,13 @@ mod tests {
         // The key the warning names asks for it over the panel.
         a.key(KeyCode::Char('K').into());
         assert!(a.input != Input::None && a.view == View::Recommend, "{:?}", a.input);
+    }
+
+    #[test]
+    fn a_kept_search_keeps_the_list_keys() {
+        let theme = " ↓ ↑ preview · / search · space enter saves · esc t close";
+        assert_eq!(kept_hint(theme, " · "), " ↓ ↑ preview · n N match · space enter saves · esc clear");
+        let dev = "↓ ↑ move  / search  v range  space enter toggle  e leave out  esc close";
+        assert_eq!(kept_hint(dev, "  "), "↓ ↑ move  n N match  v range  space enter toggle  e leave out  esc clear");
     }
 }

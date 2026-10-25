@@ -527,8 +527,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("s", "sort by the column, press again to reverse"),
             ("/", "filter the models, or search in a panel or a list"),
-            ("n", "next match in a panel, also `↓` while typing"),
-            ("N", "previous match in a panel, also `↑` while typing"),
+            ("n", "next match in a panel or a list, also `↓` while typing"),
+            ("N", "previous match in a panel or a list, also `↑` while typing"),
             (">", "minimum for the column, e.g. `>` 60 `enter`"),
             ("<", "maximum for the column, or a tier's price cap in recommend"),
             ("d", "dropdown on a ▾ header or a recommend tier, `space` `enter` toggle"),
@@ -809,6 +809,10 @@ pub struct List {
     pub cur: usize,
     /// Typing into `query`, after `/`.
     pub typing: bool,
+    /// The search `/` started from, which esc while typing puts back.
+    pub was: String,
+    /// The cursor when `/` started, which esc while typing goes back to.
+    pub from: usize,
     /// The entry under the cursor being written in place, in `f`'s grid.
     pub edit: Option<Edit>,
     /// The box under the cursor along a row of `f`'s grid: its tier's, in `view::TIERS` order.
@@ -890,33 +894,36 @@ impl List {
         *self = List { sel: at, top: self.top, col: self.col, edit: Some(edit), ..Default::default() };
     }
 
-    /// The keys a list takes whatever it lists: `/` starts a search, which underlines what
-    /// matches and puts the cursor on the first, ↓ ↑ on the next / previous, as `n` `N` in a
-    /// panel: a list's search lasts while it is typed, enter picking. Esc drops it, the cursor
-    /// staying, and the rest is typed. `names` are
-    /// the entries'; with `any` the first is never a match, as a dropdown's "all". False when
-    /// the key is none of these.
+    /// The cursor to the `n`th next match of the search among `names`, as `n` does in a panel,
+    /// the `n`th previous for a negative `n`. `names` and `any` as for `key`.
+    fn hit(&mut self, names: &[&str], any: bool, n: isize) {
+        let hits = list_hits(names.iter().copied(), &self.query, any);
+        if let Some(r) = nth_hit(self.sel, names.len(), n, |i| hits.contains(i)) {
+            self.sel = r;
+        }
+    }
+
+    /// The keys a list takes whatever it lists, as a panel does: `/` starts a search, which
+    /// underlines what matches and puts the cursor on the first, ↓ ↑ on the next / previous.
+    /// Enter keeps it, esc goes back to the search and the cursor before it, and the rest is
+    /// typed. A search kept, esc clears it. `names` are the entries'; with `any` the first is
+    /// never a match, as a dropdown's "all". False when the key is none of these.
     fn key(&mut self, code: KeyCode, mods: KeyModifiers, names: &[&str], any: bool) -> bool {
         let hits = |q: &str| list_hits(names.iter().copied(), q, any);
-        let next = |list: &mut Self, n: isize| {
-            let hits = hits(&list.query);
-            if let Some(r) = nth_hit(list.sel, names.len(), n, |i| hits.contains(i)) {
-                list.sel = r;
-            }
-        };
         match code {
             // With nothing typed yet a move as ever, as in a panel.
             KeyCode::Down | KeyCode::Up if self.typing => {
                 let n = if code == KeyCode::Down { 1 } else { -1 };
-                if self.query.is_empty() { self.sel = step(self.sel, n, names.len()) } else { next(self, n) }
+                if self.query.is_empty() { self.sel = step(self.sel, n, names.len()) } else { self.hit(names, any, n) }
             }
+            KeyCode::Enter if self.typing => (self.typing, self.cur) = (false, 0),
             KeyCode::Esc if self.typing => {
-                (self.typing, self.cur) = (false, 0);
-                self.query.clear();
+                (self.typing, self.cur, self.sel) = (false, 0, self.from);
+                self.query = std::mem::take(&mut self.was);
             }
             _ if self.typing => {
                 let was = self.query.clone();
-                // The first match, so that enter picks it; a move within the text keeps the cursor.
+                // The first match; a move within the text keeps the cursor.
                 if edit(&mut self.query, &mut self.cur, code, mods, |_| true)
                     && self.query != was
                     && let Some(&first) = hits(&self.query).first()
@@ -924,8 +931,13 @@ impl List {
                     self.sel = first;
                 }
             }
-            // A search would change the entries under a range, so it ends it.
-            KeyCode::Char('/') => (self.typing, self.visual) = (true, None),
+            KeyCode::Esc if !self.query.is_empty() => self.query.clear(),
+            // A new search, as `/` again in the table. It would change the entries under a range,
+            // so it ends it.
+            KeyCode::Char('/') => {
+                self.was = std::mem::take(&mut self.query);
+                (self.typing, self.cur, self.from, self.visual) = (true, 0, self.sel, None);
+            }
             _ => return false,
         }
         true
@@ -3470,16 +3482,34 @@ impl App {
         self.status = format!("match {} of {}", at + 1, stops.len());
     }
 
-    /// A click is on its entry: a list's search that matches nothing, under which enter picks
-    /// nothing, goes, so the click picks.
+    /// `n` `N` in a list: the cursor to the `n`th next match of its search, as in a panel.
+    fn list_hit(&mut self, n: isize) {
+        let (list, names, any) = match &mut self.input {
+            Input::Menu { items, list, .. } => (list, names(items), true),
+            Input::Choose { items, list, .. } => (list, names(items), false),
+            _ => return,
+        };
+        if list.query.is_empty() {
+            return self.refuse("no search yet, / searches first");
+        }
+        if list.no_match(names.iter().copied(), any) {
+            let why = format!("nothing matches {}", list.query);
+            return self.refuse(why);
+        }
+        list.hit(&names, any, n);
+    }
+
+    /// A click is on its entry: a list's search being typed is kept, as enter keeps it, and one
+    /// that matches nothing, under which enter picks nothing, goes, so the click picks.
     fn drop_dead_search(&mut self) {
         let (list, names, any) = match &mut self.input {
             Input::Menu { items, list, .. } => (list, names(items), true),
             Input::Choose { items, list, .. } => (list, names(items), false),
             _ => return,
         };
+        (list.typing, list.cur) = (false, 0);
         if list.no_match(names, any) {
-            (list.query, list.cur) = (String::new(), 0);
+            list.query.clear();
         }
     }
 
@@ -3843,6 +3873,7 @@ impl App {
             {
                 self.jump_ticked(if c == ']' { n } else { -n })
             }
+            KeyCode::Char(c @ ('n' | 'N')) if list => self.list_hit(if c == 'n' { n } else { -n }),
             _ if list => return self.input_key(k.code, k.modifiers),
             _ => return self.table_key(k.code, n),
         }
@@ -3945,7 +3976,6 @@ impl App {
                     self.snap_fav_col();
                     None
                 }
-                // The search being typed stays, as a click on the entry leaves it.
                 Mouse::Exclude(n) => {
                     let Input::Menu { items, list, .. } = &mut self.input else { return None };
                     if n >= items.len() {
@@ -3953,13 +3983,7 @@ impl App {
                     }
                     list.sel = n;
                     self.drop_dead_search();
-                    let Input::Menu { list, .. } = &mut self.input else { return None };
-                    let typing = std::mem::take(&mut list.typing);
-                    let effect = self.input_key(KeyCode::Char('e'), KeyModifiers::NONE);
-                    if let Input::Menu { list, .. } = &mut self.input {
-                        list.typing = typing;
-                    }
-                    effect
+                    self.input_key(KeyCode::Char('e'), KeyModifiers::NONE)
                 }
                 Mouse::Cols(_) | Mouse::ToCol(..) => None,
                 // A click on another tab leaves the theme list for it, as `tab` does.
@@ -3968,11 +3992,11 @@ impl App {
                     self.input = Input::None;
                     self.on_mouse(m)
                 }
-                // Outside, or anything else that is not an entry: close it. A search takes an
-                // esc of its own first.
+                // Outside, or anything else that is not an entry: close it, with its search.
                 _ => {
-                    if typing {
-                        self.input_key(KeyCode::Esc, KeyModifiers::NONE);
+                    if let Input::Menu { list, .. } | Input::Choose { list, .. } = &mut self.input {
+                        (list.typing, list.cur) = (false, 0);
+                        list.query.clear();
                     }
                     self.input_key(KeyCode::Esc, KeyModifiers::NONE)
                 }
@@ -4972,11 +4996,9 @@ impl App {
                     // entry of the range `v` started, and `e` leaves them out, as space and `e`
                     // act on models: all of them, or none when all already are, which takes them
                     // back. A picked entry is no longer left out, and the other way round. "all"
-                    // drops the picks when it is alone, and the range ends. While searching,
-                    // space is typed. The dropdown stays open.
-                    KeyCode::Enter | KeyCode::Char(' ' | 'e')
-                        if matches!(*col, 1 | VIA) && (code == KeyCode::Enter || list.idle()) =>
-                    {
+                    // drops the picks when it is alone, and the range ends. While a search is typed,
+                    // enter keeps it and space is typed. The dropdown stays open.
+                    KeyCode::Enter | KeyCode::Char(' ' | 'e') if matches!(*col, 1 | VIA) && list.idle() => {
                         let (col, leave) = (*col, code == KeyCode::Char('e'));
                         let range = list.range().or(at.map(|i| i..=i))?;
                         list.visual = None;
@@ -5030,10 +5052,10 @@ impl App {
                         self.input = Input::Menu { col, items: self.menu_items(col).0, list: List::at(0) };
                         return save;
                     }
-                    // Enter does what space does; while searching, space is typed. On Price it
+                    // Enter does what space does, once a search is no longer typed. On Price it
                     // picks the level, or drops it when it is the picked one, and on a task's
                     // column its benchmark. The dropdown stays open.
-                    KeyCode::Enter | KeyCode::Char(' ') if code == KeyCode::Enter || !list.typing => {
+                    KeyCode::Enter | KeyCode::Char(' ') if !list.typing => {
                         let (i, price) = (at?, *col == PRICE);
                         if price {
                             // A level picked at or under the one left out would show nothing.
@@ -5084,18 +5106,14 @@ impl App {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     KeyCode::Char('q') if list.idle() => self.ask_quit(),
                     // Space ticks a column and keeps the list open, as in f's grid, and so does enter.
-                    KeyCode::Char(' ') | KeyCode::Enter
-                        if *kind == Kind::Cols && (code == KeyCode::Enter || !list.typing) =>
-                    {
+                    KeyCode::Char(' ') | KeyCode::Enter if *kind == Kind::Cols && !list.typing => {
                         let Some((_, Effect::Col(c))) = items.get(at?) else { return None };
                         let c = *c;
                         return self.toggle_col(c);
                     }
                     // Space ticks a task in f's grid and keeps it open, as in the Dev and Via
-                    // dropdowns, and so does enter. While searching, space is typed.
-                    KeyCode::Char(' ') | KeyCode::Enter
-                        if *kind == Kind::Fav && (code == KeyCode::Enter || !list.typing) =>
-                    {
+                    // dropdowns, and so does enter, once a search is no longer typed.
+                    KeyCode::Char(' ') | KeyCode::Enter if *kind == Kind::Fav && !list.typing => {
                         match items.get(at?) {
                             Some((_, Effect::Fav(key, task))) => {
                                 let (key, slot) = (key.clone(), box_slot(task, list.col));
@@ -5133,8 +5151,8 @@ impl App {
                             list.write(at?, edit);
                         }
                     }
-                    // Space picks as enter does, in every list. While searching, space is typed.
-                    KeyCode::Enter | KeyCode::Char(' ') if code == KeyCode::Enter || !list.typing => {
+                    // Space picks as enter does, in every list, once a search is no longer typed.
+                    KeyCode::Enter | KeyCode::Char(' ') if !list.typing => {
                         // A harness asks the folder to open it in, on its entry, starting
                         // from this one; a download is no harness.
                         if let Some((_, e @ Effect::Launch(cmd))) = items.get(at?)
@@ -5696,10 +5714,8 @@ mod tests {
         a.col = 1;
         press(&mut a, "d/zzz");
         a.mouse(Mouse::Item(1));
-        press(&mut a, "x");
-        let query = |a: &App| a.open_list().map(|l| l.query.clone());
-        assert_eq!(query(&a), Some("x".into()), "a click drops the search, and typing starts a new one");
-        code(&mut a, KeyCode::Esc);
+        let query = |a: &App| a.open_list().map(|l| (l.query.clone(), l.typing));
+        assert_eq!(query(&a), Some((String::new(), false)), "a click drops the search and picks");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "t/");
         let first = a.theme_preview();
@@ -5727,11 +5743,23 @@ mod tests {
         assert!(all(&a), "every theme stays listed");
         press(&mut a, "or");
         code(&mut a, KeyCode::Esc);
-        assert_eq!(a.theme_preview(), Some("nord"), "esc drops the search, keeping the theme under the cursor");
-        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.theme_preview(), Some(THEMES[0].0), "esc goes back to where the search started");
+        press(&mut a, "/light");
+        code(&mut a, KeyCode::Enter);
+        let first = a.theme_preview();
+        press(&mut a, "n");
+        assert!(a.theme_preview() != first, "n to the next match");
+        press(&mut a, "N");
+        assert_eq!(a.theme_preview(), first, "N back");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "/nor");
+        assert_eq!(code(&mut a, KeyCode::Enter), None, "enter keeps the search");
+        assert_eq!(a.open_list().map(|l| (l.query.as_str(), l.typing)), Some(("nor", false)));
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save), "and enter again picks");
         assert_eq!(a.store.theme, "nord");
         press(&mut a, "t/qqq");
         assert_eq!(a.theme_preview(), Some("nord"), "nothing matches, so the cursor stays");
+        code(&mut a, KeyCode::Enter);
         assert_eq!(code(&mut a, KeyCode::Enter), None, "and enter picks nothing");
         assert!(matches!(a.input, Input::Choose { .. }), "the list stays open");
         code(&mut a, KeyCode::Esc);
@@ -5743,6 +5771,7 @@ mod tests {
         assert!(matches!(&a.input, Input::Choose { items, list, .. } if none(items, &list.query)));
         code(&mut a, KeyCode::Esc);
         press(&mut a, "/codi");
+        code(&mut a, KeyCode::Enter);
         let ticked = |a: &App| match &a.input {
             Input::Choose { items, list, .. } => {
                 (items[list.sel].0.clone(), crate::store::task_slots("coding").any(|s| a.store.favorite(&s).is_some()))
@@ -5750,10 +5779,10 @@ mod tests {
             _ => (String::new(), false),
         };
         assert_eq!(ticked(&a), ("coding".into(), false));
-        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Char(' '));
         assert_eq!(ticked(&a), ("coding".into(), true), "ticked, and still under the cursor");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(ticked(&a), ("coding".into(), false), "enter again unticks it");
+        assert_eq!(ticked(&a), ("coding".into(), false), "enter unticks it");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         press(&mut a, "?/sort");
@@ -6450,6 +6479,7 @@ mod tests {
         assert_eq!(menu(&a), [("all", 3), ("codex", 2), ("opencode", 2), ("claude", 1)]);
         press(&mut a, "/cla");
         code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.store.via_pick.as_slice(), keys(&a)), (&["claude".to_string()][..], vec!["opus5"]));
@@ -6502,6 +6532,7 @@ mod tests {
         let pick = |a: &mut App, entry: &str| {
             press(a, "d");
             press(a, &format!("/{entry}"));
+            code(a, KeyCode::Enter);
             code(a, KeyCode::Enter);
             code(a, KeyCode::Esc);
             code(a, KeyCode::Esc);
@@ -6744,6 +6775,7 @@ mod tests {
         let remote = Effect::Bench(ECI + 4, Some("Remote Labor Index"));
         assert!(!a.ticked(&remote) && a.ticked(&Effect::Bench(ECI + 4, None)), "the task's score is ticked");
         code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Enter);
         assert_eq!((a.col, a.col_bench(ECI + 4)), (ECI + 4, Some("Remote Labor Index")));
         assert_eq!(a.input, Input::None);
         assert_eq!(a.status, "Agentic shows Remote Labor Index · Epoch AI");
@@ -6755,6 +6787,7 @@ mod tests {
         // A column hidden while the list is open is not picked in, nor is the cursor put on it.
         a.col = 0;
         press(&mut a, "B/remote");
+        code(&mut a, KeyCode::Enter);
         a.toggle_col(ECI + 4);
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.col, a.col_bench(ECI + 4)), (0, None), "{}", a.status);
@@ -6777,19 +6810,20 @@ mod tests {
         };
         assert_eq!(on(&a), ("openai".into(), "OPEN".into(), true), "the cursor on the first match");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.store.dev_pick, ["openai"], "enter toggles the first match");
-        assert!(
-            matches!(&a.input, Input::Menu { list: List { query, typing: true, .. }, .. } if query == "OPEN"),
-            "and the search stays"
-        );
+        assert_eq!(on(&a), ("openai".into(), "OPEN".into(), false), "enter keeps the search");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.store.dev_pick.as_slice(), on(&a).1.as_str()), (&["openai".to_string()][..], "OPEN"));
         code(&mut a, KeyCode::Esc);
+        assert_eq!(on(&a), ("openai".into(), String::new(), false), "esc clears the search kept");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "d/anth");
+        press(&mut a, "dj");
+        let from = on(&a).0;
+        press(&mut a, "/anth");
         code(&mut a, KeyCode::Backspace);
         code(&mut a, KeyCode::Esc);
-        assert_eq!(on(&a), ("anthropic".into(), String::new(), false), "esc drops the search, the cursor stays");
+        assert_eq!(on(&a), (from.clone(), String::new(), false), "esc goes back to where the search started");
         press(&mut a, "/zzz");
-        assert_eq!(on(&a).0, "anthropic", "no match leaves the cursor");
+        assert_eq!(on(&a).0, from, "no match leaves the cursor");
         press(&mut a, "gg");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "gg");
@@ -8784,8 +8818,8 @@ mod tests {
         press(&mut a, "/a");
         a.mouse(Mouse::Exclude(1));
         assert!(
-            a.store.dev_not.is_empty() && a.open_list().is_some_and(|l| l.typing),
-            "its ✗ again takes it back, searching too"
+            a.store.dev_not.is_empty() && a.open_list().is_some_and(|l| !l.typing && l.query == "a"),
+            "its ✗ again takes it back, the search kept as enter keeps it"
         );
         code(&mut a, KeyCode::Esc);
         a.mouse(Mouse::Exclude(0));
