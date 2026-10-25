@@ -720,7 +720,7 @@ fn event_loop(
                         }
                         // Not Homebrew's nor cargo's to replace: the release's page has the binaries.
                         let url = format!("{REPO}/releases/latest");
-                        app.report(match open::that_detached(&url) {
+                        off(&said_tx, &mut saying, move || match open::that_detached(&url) {
                             Ok(()) => Ok(format!("installed by hand, opening {url} for the new version")),
                             Err(e) => Err(format!("could not open {url}: {e}")),
                         });
