@@ -172,7 +172,7 @@ modelcmp memory 24                             # the GB your GPU has, when the o
 modelcmp select sonnet-5                       # shortlist it, list --selected shows them
 modelcmp note sonnet-5 "fast enough for refactors"
 modelcmp exclude llama-4-maverick              # have it, can't use it
-modelcmp harness opencode                      # your default harness
+modelcmp harness opencode                      # your default harness (`P` in the TUI)
 modelcmp harness claude opus-5.5 sonnet-5      # the harness these run on (`H` in the TUI)
 modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier of a task, at its price or under
 modelcmp tier mid 8                            # mid takes models up to $8, `modelcmp tier` shows every cap
@@ -319,7 +319,7 @@ which tasks a pick ranks. Each prices at its own cache share, the TUI's set with
    `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts
    opencode). It is an error when the harness lacks the model.
 2. The id the model's harness takes (`modelcmp harness claude opus-5.5`, `H`), while it has the model.
-3. The id your default harness takes (`modelcmp harness`), when it has the model.
+3. The id your default harness takes (`modelcmp harness`, `P`), when it has the model.
 4. The id its developer's own harness takes (claude for a Claude model), as `--cmd` starts it.
 5. The id the first harness to have the model takes, in Via's order: opencode, pi, omp, and for
    a model only your machine runs, the tag `ollama run` takes, or the repo (`-hf`) or file
@@ -329,7 +329,9 @@ which tasks a pick ranks. Each prices at its own cache share, the TUI's set with
 `--cmd` prints the command that starts the harness on the model instead (`claude --model
 claude-opus-5-5`). The harness is the model's, else your default one, else its developer's own
 (claude for a Claude model, codex for OpenAI's, gemini for Google's), else the first that has
-the model in Via's order, among `--via`'s when given. A model no harness has is an error.
+the model in Via's order, among `--via`'s when given. Without `--via` these last two skip a
+harness you left out in the TUI's Via dropdown while another has the model, for `--id` too. A
+model no harness has is an error.
 
 - With `--tier`, `--id` or `--cmd`, no match is an error (exit code 1), so a harness is never
   started on an empty model. Without them `list` says `no models match` and exits with 0.

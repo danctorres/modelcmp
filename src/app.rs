@@ -569,6 +569,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("o", "open the model's page on a site"),
             ("x", "open a harness on the model in a new terminal"),
             ("H", "choose the harness the model runs on, for `x`, `Y`, --cmd and agents"),
+            ("P", "choose your default harness, for a model with none of its own"),
         ],
     ),
     (
@@ -639,6 +640,9 @@ pub fn bound_keys(keys: &str, bound: &BTreeMap<char, char>) -> String {
 /// The Via dropdown's entries that are no harness, after the harnesses: the models your machine
 /// runs through ollama or llama.cpp, and the ones `x` can download.
 pub const DOWNLOAD: &str = "↓ downloadable";
+
+/// The first entry of `H`'s and `P`'s lists with no default harness: what a model runs on then (`command`).
+const ANY_HARNESS: &str = "any harness (the developer's own first)";
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
@@ -780,6 +784,10 @@ pub enum Kind {
     Via,
     /// `t`: the theme, previewed under the cursor.
     Theme,
+    /// `P`: your default harness.
+    Harness,
+    /// The same, asked at the first start (`App::ask_default`), which says `P` changes it later.
+    FirstHarness,
     /// `|`: the columns the table shows; space or enter ticks one and the list stays open.
     Cols,
     /// `d` on a tier in recommend: the model it picks, your favorite there or the recommended one.
@@ -1134,6 +1142,8 @@ pub enum Effect {
     NewTask(String),
     /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
+    /// Your default harness, or none; the `P` chooser's items, applied by `App` itself.
+    Harness(Option<&'static str>),
     /// The column at this cursor index; the `|` chooser's items, applied by `App` itself.
     Col(usize),
     /// The benchmark of the task column at cursor index `.0`, or none for its task's score; the
@@ -1286,7 +1296,8 @@ pub fn harness_cmd(
     listed: &BTreeMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
     let default = Some(store.harness.as_str()).filter(|h| !h.is_empty() && (!crate::data::runs_here(h) || m.local()));
-    command(m, &[runs_on(store, m), default], only, listed)
+    let not = if only.is_empty() { store.via_not.as_slice() } else { &[] };
+    command(m, &[runs_on(store, m), default], only, not, listed)
 }
 
 /// The id `Y` and `--id` give: the one the harness `harness_cmd` starts takes, else `model_id`.
@@ -1296,22 +1307,23 @@ pub fn harness_id(store: &Store, m: &Model, only: &[String], listed: &BTreeMap<S
 
 /// The command that starts a harness on `m`: the first of `first` to have the model (the
 /// model's harness, then your default one), else its developer's own, else the first that does,
-/// in Via's order and among `only` when it names any.
+/// in Via's order and among `only` when it names any. Those two skip the harnesses in `not`
+/// (left out in Via) while another has the model.
 pub fn command(
     m: &Model,
     first: &[Option<&str>],
     only: &[String],
+    not: &[String],
     listed: &BTreeMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
     let asked = |h: &&str| only.is_empty() || only.iter().any(|x| x.eq_ignore_ascii_case(h));
     let has = |h: &str| launch_cmd(m, h, listed);
     // Then its developer's own harness, claude for a Claude model, before one of anyone's models.
-    first
-        .iter()
-        .flatten()
-        .filter(|h| asked(h))
-        .find_map(|h| has(h))
-        .or_else(|| crate::data::first_party().chain(crate::data::vias()).filter(asked).find_map(has))
+    let rest = |skip: bool| {
+        let kept = |h: &&str| !skip || !not.iter().any(|x| x == h);
+        crate::data::first_party().chain(crate::data::vias()).filter(asked).filter(kept).find_map(has)
+    };
+    first.iter().flatten().filter(|h| asked(h)).find_map(|h| has(h)).or_else(|| rest(true)).or_else(|| (!not.is_empty()).then(|| rest(false)).flatten())
 }
 
 /// The ways to get a model no runner on this machine has yet, each as its label and the
@@ -3058,6 +3070,41 @@ impl App {
         Some(Effect::Save)
     }
 
+    /// The harnesses you have a model on and did not leave out in Via, and your default, in Via's order.
+    fn harnesses(&self) -> Vec<&'static str> {
+        let mine = |h: &&str| {
+            *h == self.store.harness
+                || !self.store.via_not.iter().any(|x| x == h)
+                    && self.data.models.iter().any(|m| m.via.iter().any(|v| v == h))
+        };
+        crate::data::vias().filter(mine).collect()
+    }
+
+    /// `P`: your default harness, after "any", with the cursor on it. It is the one `x`, `Y`,
+    /// `--cmd` and `--id` go by for a model with no harness of its own (`harness_cmd`).
+    fn ask_harness(&mut self, title: &'static str, kind: Kind) {
+        let items: Vec<_> = std::iter::once((ANY_HARNESS.to_string(), Effect::Harness(None)))
+            .chain(self.harnesses().into_iter().map(|h| (h.to_string(), Effect::Harness(Some(h)))))
+            .collect();
+        let has = |e: &Effect| matches!(e, Effect::Harness(Some(h)) if *h == self.store.harness);
+        let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
+        self.input = Input::choose(title, kind, items, sel);
+    }
+
+    /// A start with two harnesses or more asks for your default, once: the caller saves that it
+    /// asked. True when it asks.
+    pub fn ask_default(&mut self) -> bool {
+        if self.store.harness_asked || !self.store.harness.is_empty() || self.input != Input::None {
+            return false;
+        }
+        if self.harnesses().len() < 2 {
+            return false;
+        }
+        self.store.harness_asked = true;
+        self.ask_harness("which harness do you use by default?", Kind::FirstHarness);
+        true
+    }
+
     /// `H` on a model, or in `f`'s grid (`back`, its box): the harnesses that have the model
     /// `key`, to run it on one, as `x` lists them, after "any", with the cursor on the one it has.
     fn ask_via(&mut self, key: &str, back: Option<&str>) {
@@ -3069,7 +3116,14 @@ impl App {
             return self.refuse(format!("no harness has {}, Via shows where you have access", m.name));
         }
         let via = |h: Option<String>| Effect::Via(key.to_string(), h, back.map(String::from));
-        let items: Vec<_> = std::iter::once(("any harness".to_string(), via(None)))
+        // Your default, where it is the one the model runs on (`harness_cmd`).
+        let h = self.store.harness.as_str();
+        let any = if cmds.iter().any(|(c, _)| *c == h) && (!crate::data::runs_here(h) || m.local()) {
+            format!("any harness (default: {h})")
+        } else {
+            ANY_HARNESS.to_string()
+        };
+        let items: Vec<_> = std::iter::once((any, via(None)))
             .chain(cmds.into_iter().map(|(h, c)| (c.join(" "), via(Some(h.to_string())))))
             .collect();
         let has = |e: &Effect| matches!(e, Effect::Via(_, h, _) if h.as_deref() == self.store.runs_on(key));
@@ -4609,6 +4663,7 @@ impl App {
                 let key = self.current()?.key.clone();
                 self.ask_via(&key, None);
             }
+            KeyCode::Char('P') => self.ask_harness("default harness?", Kind::Harness),
             KeyCode::Enter if self.view == View::Recommend && !row => {
                 let Some(t) = self.cur_task() else {
                     // A task of your own has no line to rank: the table, on its cheapest model.
@@ -5119,6 +5174,11 @@ impl App {
                                 let shows = self.col_bench(c).map_or("its task's score".into(), bench_label);
                                 self.report(Ok(format!("{} shows {shows}", base_col_name(c))));
                             }
+                            Effect::Harness(h) => {
+                                self.store.harness = h.unwrap_or("").to_string();
+                                self.report(Ok(format!("default harness: {}", h.unwrap_or("any harness"))));
+                                return Some(Effect::Save);
+                            }
                             Effect::Via(key, h, back) => {
                                 self.store.set_runs_on(&key, h.as_deref());
                                 let name = self.data.models.iter().find(|m| m.key == key).map_or(&key, |m| &m.name);
@@ -5144,6 +5204,7 @@ impl App {
                     KeyCode::Char('t') if *kind == Kind::Theme => self.input = Input::None,
                     KeyCode::Char('|') if *kind == Kind::Cols => self.input = Input::None,
                     KeyCode::Char('B') if *kind == Kind::Bench => self.input = Input::None,
+                    KeyCode::Char('P') if *kind == Kind::Harness => self.input = Input::None,
                     // And it is a tab, which tab leaves for the next.
                     KeyCode::Tab | KeyCode::BackTab if *kind == Kind::Theme => {
                         return self.step_tab(code == KeyCode::BackTab);
@@ -5731,6 +5792,64 @@ mod tests {
         press(&mut a, "gg");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.store.runs_on(&key), None, "any harness: none");
+    }
+
+    #[test]
+    fn p_picks_the_default_harness_and_the_first_start_asks_for_it() {
+        let mut a = app();
+        let at = |a: &App| match &a.input {
+            Input::Choose { kind, items, list, .. } => Some((*kind, items.len(), list.sel)),
+            _ => None,
+        };
+        // With one harness there is nothing to choose.
+        for m in &mut a.data.models {
+            m.via = vec!["opencode".into()];
+        }
+        assert!(!a.ask_default() && !a.store.harness_asked, "one harness: not asked");
+        for m in &mut a.data.models {
+            m.via = vec!["opencode".into(), "codex".into()];
+            m.offers[0].via = m.via.clone();
+        }
+        press(&mut a, "H");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == ANY_HARNESS), "no default yet");
+        code(&mut a, KeyCode::Esc);
+        assert!(a.ask_default() && a.store.harness_asked, "two: asked");
+        assert_eq!(at(&a), Some((Kind::FirstHarness, 3, 0)), "any, opencode and codex: on any, it has none yet");
+        code(&mut a, KeyCode::Esc);
+        assert!(!a.ask_default(), "and it asks once");
+        // A harness left out in Via is not offered, and P closes its list.
+        a.store.via_not = vec!["opencode".into()];
+        press(&mut a, "P");
+        assert_eq!(at(&a), Some((Kind::Harness, 2, 0)), "any and codex");
+        press(&mut a, "P");
+        assert_eq!(a.input, Input::None, "P closes it");
+        a.store.via_not.clear();
+        press(&mut a, "P");
+        press(&mut a, "jj");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((a.store.harness.as_str(), a.status.as_str()), ("codex", "default harness: codex"));
+        press(&mut a, "x");
+        assert_eq!(at(&a), Some((Kind::Launch, 2, 1)), "x starts on it");
+        code(&mut a, KeyCode::Esc);
+        // H's list says what a model with no harness of its own runs on.
+        press(&mut a, "H");
+        let any = match &a.input {
+            Input::Choose { items, .. } => items[0].0.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(any, "any harness (default: codex)");
+        code(&mut a, KeyCode::Esc);
+        // A default the model is not on is not named.
+        a.store.harness = "pi".into();
+        press(&mut a, "H");
+        assert!(matches!(&a.input, Input::Choose { items, .. } if items[0].0 == ANY_HARNESS), "no pi for it");
+        code(&mut a, KeyCode::Esc);
+        a.store.harness = "codex".into();
+        press(&mut a, "P");
+        assert_eq!(at(&a), Some((Kind::Harness, 3, 2)), "on yours");
+        press(&mut a, "gg");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(a.store.harness, "", "any harness: none");
     }
 
     #[test]

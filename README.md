@@ -82,7 +82,7 @@ In the TUI, `R` recommends, `d` picks a tier's model there, `space` selects mode
 them, `f` sets your favorite for a task's tiers and `/` filters. `enter` shows everything about a
 model, `o` opens its page on a site like OpenRouter and `t` changes the theme. `x` opens a harness
 on the model, or downloads a local model and runs it with ollama or llama.cpp, installing the
-runner if you have neither, and `H` picks the harness the model runs on.
+runner if you have neither, and `H` picks the harness the model runs on, `P` your default one.
 Movement uses vim keys (`hjkl`, `gg`, `G`, counts like `3j`), and the arrows and mouse work too.
 `?` lists every key, and `enter` on one changes it. `qq` quits.
 

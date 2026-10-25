@@ -498,6 +498,7 @@ fn event_loop(
     // The last press on a cell, which a second one makes a double click (`double`), and the
     // screen row of the last press on a table row, which a drag extends from (`dragged`).
     let (mut click, mut press) = (None, None);
+    let mut ask_harness = true;
     loop {
         // Before the draw, so one that ended under the intro is in the first frame.
         let done = rx.as_ref().and_then(|r| match r.0.try_recv() {
@@ -548,6 +549,23 @@ fn event_loop(
         if progress != app.progress {
             app.progress = progress;
             dirty = true;
+        }
+        // A start with two harnesses asks for your default, on its first frame with nothing open
+        // (after the key prompt), and saves that it asked at once: later it would take keys meant
+        // for the table, and a quit would ask again.
+        if ask_harness && app.input == Input::None {
+            ask_harness = false;
+            let _lock = crate::store::lock(&crate::store::path());
+            if app.store.reload_if_changed() {
+                app.load_bounds();
+                app.set_cols();
+                app.rebuild_in_place();
+            }
+            if app.ask_default()
+                && let Err(e) = app.store.save()
+            {
+                app.report(Err(format!("could not save: {e}")));
+            }
         }
         if dirty {
             paint(terminal, app)?;
@@ -701,6 +719,7 @@ fn event_loop(
                         | Effect::Via(..)
                         | Effect::NewTask(_)
                         | Effect::Theme(_)
+                        | Effect::Harness(_)
                         | Effect::Col(_)
                         | Effect::Bench(..)
                         | Effect::Pick(..),
@@ -2742,7 +2761,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
-                Kind::Via => "HARNESS",
+                Kind::Via | Kind::Harness | Kind::FirstHarness => "HARNESS",
                 Kind::Fav => "FAV",
                 Kind::Theme => "THEME",
                 Kind::Cols => "COLUMNS",
@@ -3164,7 +3183,7 @@ fn choice_lines(
             // What has a colour in the table keeps it here: a harness. A site, a theme and a
             // source have none, so they take the text's and not one their name gives.
             let color = match effect {
-                Effect::Launch(_) | Effect::Via(_, Some(_), _) => via_color(out, harness),
+                Effect::Launch(_) | Effect::Via(_, Some(_), _) | Effect::Harness(Some(_)) => via_color(out, harness),
                 _ => Color::Reset,
             };
             // What the search found in the label, as the cursor goes by it, `at` chars into the line.
@@ -3172,7 +3191,7 @@ fn choice_lines(
                 |at: usize| found(label, query).into_iter().map(|r| r.start + at..r.end + at).collect::<Vec<_>>();
             // A name, then what follows it muted: a harness and the command that opens it.
             let name = match effect {
-                Effect::Launch(_) | Effect::Via(..) | Effect::Col(_) => {
+                Effect::Launch(_) | Effect::Via(_, Some(_), _) | Effect::Harness(Some(_)) | Effect::Col(_) => {
                     Some((label.find(' ').unwrap_or(label.len()), fg(color)))
                 }
                 _ => None,
@@ -3233,6 +3252,8 @@ fn choice_lines(
         Kind::Fav => unreachable!("f's grid has lines of its own, fav_lines"),
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
         Kind::Pick => " ↓ ↑ move · / search · space enter picks · esc close",
+        Kind::Harness => " ↓ ↑ move · / search · space enter picks · esc P close",
+        Kind::FirstHarness => " ↓ ↑ move · / search · space enter picks · esc skips · P changes it later",
         Kind::Bench => " ↓ ↑ move · / search · space enter picks · esc B close",
         Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",

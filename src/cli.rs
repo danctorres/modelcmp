@@ -1803,11 +1803,11 @@ mod tests {
     fn the_command_starts_the_harness_asked_for() {
         let mut m = model("gpt55", 90.0, 10.0);
         let none = BTreeMap::new();
-        assert_eq!(command(&m, &[], &[], &none), None, "no harness has it");
+        assert_eq!(command(&m, &[], &[], &[], &none), None, "no harness has it");
         m.offers[0].via = vec!["codex".into(), "opencode".into()];
         let cmd = |first: &[Option<&str>], only: &[&str]| {
             let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
-            command(&m, first, &only, &none).map(|c| c.join(" "))
+            command(&m, first, &only, &[], &none).map(|c| c.join(" "))
         };
         assert_eq!(cmd(&[], &[]).as_deref(), Some("codex --model gpt55"), "its developer's own, before Via's order");
         assert_eq!(cmd(&[], &["opencode"]).as_deref(), Some("opencode --model p/gpt55"), "--via's");
@@ -1826,12 +1826,22 @@ mod tests {
         assert_eq!(cmd(&[], &["Codex"]).as_deref(), Some("codex --model gpt55"), "--via's, in any case");
         let mut store = Store::default();
         assert_eq!(harness_id(&store, &m, &[], &none), "gpt55", "--id: the id of the one --cmd starts");
+        // A harness left out in Via is skipped while another has the model, and --via still asks for it.
+        store.via_not = vec!["codex".into()];
+        assert_eq!(harness_id(&store, &m, &[], &none), "p/gpt55", "codex left out: opencode's");
+        assert_eq!(harness_id(&store, &m, &["codex".into()], &none), "gpt55", "--via codex");
+        store.harness = "codex".into();
+        assert_eq!(harness_id(&store, &m, &[], &none), "gpt55", "your default, left out or not");
+        store.via_not = vec!["codex".into(), "opencode".into()];
+        store.harness.clear();
+        assert_eq!(harness_id(&store, &m, &[], &none), "gpt55", "every one left out: as if none were");
+        store.via_not.clear();
         m.offers[0].via.push(crate::data::OLLAMA.into());
         store.harness = crate::data::OLLAMA.into();
         let start = harness_cmd(&store, &m, &[], &none).map(|c| c.join(" "));
         assert_eq!(start.as_deref(), Some("codex --model gpt55"), "no ollama for one another harness runs in full");
         m.offers[0].via = vec!["pi".into(), "opencode".into()];
-        let cmd = command(&m, &[], &[], &none).map(|c| c.join(" "));
+        let cmd = command(&m, &[], &[], &[], &none).map(|c| c.join(" "));
         assert_eq!(cmd.as_deref(), Some("opencode --model p/gpt55"), "no developer's own: the first in Via's order");
     }
 

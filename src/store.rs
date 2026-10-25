@@ -76,9 +76,12 @@ pub struct Store {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub runs_on: BTreeMap<String, String>,
     /// The harness `--cmd` and `--id` go by when none is asked for and it has the model
-    /// (`modelcmp harness`); a model's own comes first.
+    /// (`P`, `modelcmp harness`); a model's own comes first.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub harness: String,
+    /// The TUI asked for `harness` at its first start with two harnesses or more.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub harness_asked: bool,
     /// The folder of the `.gguf` files you downloaded (`modelcmp models-dir`), read when
     /// llama.cpp's own `LLAMA_ARG_MODELS_DIR` is not set.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -557,7 +560,7 @@ mod tests {
             (r#"{"s": "z", "j": "3", "z": "s", "k": " "}"#, "sz"),
             (r#"{"s": "o"}"#, ""),
             (r#"{"s": "z", "o": "z"}"#, "sz"),
-            (r#"{"s": "z", "o": "z", "c": "s", "j": "P"}"#, "cs jP sz"),
+            (r#"{"s": "z", "o": "z", "c": "s", "j": "Q"}"#, "cs jQ sz"),
         ] {
             std::fs::write(&p, format!(r#"{{"keys": {keys}}}"#)).unwrap();
             let kept = kept.split_whitespace().map(|w| (w.as_bytes()[0] as char, w.as_bytes()[1] as char));

@@ -170,7 +170,7 @@ enum Cmd {
         #[arg(long)]
         rm: bool,
     },
-    /// Show or set your default harness, or the harness a model runs on (`H` in the TUI)
+    /// Show or set your default harness, or the harness a model runs on (`P` and `H` in the TUI)
     ///
     /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli. `list --cmd`, `list --id` and `pick` run a model on the harness you gave it, else on your default harness, else on its developer's own (claude for a Claude model), else on the first that has it. `modelcmp harness claude opus-5.5 sonnet-5` runs those two on claude
     Harness {
