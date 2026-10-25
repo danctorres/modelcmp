@@ -638,16 +638,18 @@ pub fn reach(m: &mut Model, harnesses: &[String]) -> bool {
 /// tier's pick starts where it costs what the tier allows: on opencode, which has it free, not
 /// on pi, which charges for it.
 pub fn within(store: &Store, tier: &str, m: &Model) -> Model {
-    let fit = |h: &String| {
-        let mut one = m.clone();
-        reach(&mut one, std::slice::from_ref(h)) && fits(store, tier, &one)
-    };
-    let ok: Vec<String> = m.offers.iter().flat_map(|o| &o.via).filter(|h| fit(h)).cloned().collect();
-    let mut m = m.clone();
-    for o in &mut m.offers {
+    let mut harnesses: Vec<&String> = m.offers.iter().flat_map(|o| &o.via).collect();
+    harnesses.sort();
+    harnesses.dedup();
+    // One copy, priced at each harness in turn: `reach` sets every offer's access anew.
+    let mut one = m.clone();
+    let fit = |h: &&String| reach(&mut one, std::slice::from_ref(*h)) && fits(store, tier, &one);
+    let ok: Vec<String> = harnesses.into_iter().filter(fit).cloned().collect();
+    for (o, was) in one.offers.iter_mut().zip(&m.offers) {
+        o.available = was.available;
         o.via.retain(|h| ok.contains(h));
     }
-    m
+    one
 }
 
 /// Why `m` can be no favorite for `slot`, a tier's it is dearer than (`fits`). None when it can.
