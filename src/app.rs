@@ -4194,8 +4194,6 @@ impl App {
         }
     }
 
-    /// The task and the tier under recommend's cursor, a task of one pick's the tier whose
-    /// favorite it shows, else high's.
     /// `m`, recommend's pick under the cursor, on the harnesses alone where its price fits the
     /// box's tier (`within`), for `x` and `Y` to start it where `--cmd` does. None elsewhere.
     fn capped(&self, m: &Model) -> Option<Model> {
@@ -4203,6 +4201,8 @@ impl App {
         Some(within(&self.store, TIERS[c].0, m))
     }
 
+    /// The task and the tier under recommend's cursor, a task of one pick's the tier whose
+    /// favorite it shows, else high's.
     fn tier_at(&self) -> Option<(&str, usize)> {
         let c = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps)?;
         let task = self.cur_task().map(|t| t.name).or(self.custom_at())?;
