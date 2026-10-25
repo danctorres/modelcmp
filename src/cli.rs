@@ -1,7 +1,7 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
 use crate::app::{
-    COLS, Col, TEXT, col_value, harness_cmd, harness_id, hidden, launch_cmd, on_price, shown, unmeasured,
+    COLS, Col, TEXT, col_value, harness_cmd, harness_id, hidden, launch_cmd, on_price, shown, stored_bench, unmeasured,
 };
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
@@ -189,12 +189,13 @@ fn print_json<T: Serialize>(v: &T) -> Result {
 }
 
 /// The TUI's columns, so both show the same thing: Model, Dev, every numeric column the
-/// source measures, Via.
+/// source measures, Via. A column shows the benchmark picked in its dropdown, as the bounds go by it.
 fn table(models: &[&Model], store: &Store, any: bool) {
     let cols: Vec<(usize, &Col)> =
         COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT) && !unmeasured(i + TEXT)).collect();
-    let cell = |m: &Model, &(i, c): &(usize, &Col)| {
-        (c.get)(m).map_or("-".into(), |v| shown(i, v, on_price(i) && m.listed(), None))
+    let cell = |m: &Model, &(i, _): &(usize, &Col)| {
+        let bench = stored_bench(store, i + TEXT);
+        col_value(m, i, store).map_or("-".into(), |v| shown(i, v, on_price(i) && m.listed(), bench))
     };
     let cells: Vec<Vec<String>> = models.iter().map(|m| cols.iter().map(|c| cell(m, c)).collect()).collect();
     let cols: Vec<&Col> = cols.into_iter().map(|(_, c)| c).collect();
@@ -409,9 +410,10 @@ fn matched<'a>(
         }
     } else {
         let mut models: Vec<&Model> = filtered().collect();
-        if let Some(c) = o.sort.map(|c| &COLS[c]) {
-            // Best first, names breaking ties.
-            models.sort_by(|a, b| by_value((c.get)(a), (c.get)(b), !c.lower_better).then_with(|| a.name.cmp(&b.name)));
+        if let Some(i) = o.sort {
+            // Best first, names breaking ties, by what the column shows, as the bounds go.
+            let (v, desc) = (|m: &Model| col_value(m, i, store), !COLS[i].lower_better);
+            models.sort_by(|a, b| by_value(v(a), v(b), desc).then_with(|| a.name.cmp(&b.name)));
         }
         models
     };
@@ -1694,6 +1696,21 @@ mod tests {
         );
         let pi = ListOpts { via: vec!["opencode".into()], cmd: false, ..o };
         assert_eq!(line(&pi).as_deref(), Some("p/hosted  -"), "a harness asked for: its own free pick");
+    }
+
+    /// `--sort` goes by the benchmark picked in a column, as the table, `--min` and `--max` do.
+    #[test]
+    fn a_column_sorts_by_the_benchmark_picked_in_it() {
+        let mut data =
+            Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
+        for (m, s) in data.models.iter_mut().zip([0.5, 0.7]) {
+            m.scores.insert("FrontierSWE".into(), s);
+        }
+        let mut store = Store::default();
+        store.bench.insert("coding".into(), "FrontierSWE".into());
+        let o = ListOpts { sort: COLS.iter().position(|c| c.id == "coding"), all: true, ..Default::default() };
+        let keys = matched(&data, &store, &o, None).ok().unwrap().0.iter().map(|m| m.key.clone()).collect::<Vec<_>>();
+        assert_eq!(keys, ["mini", "gpt55"], "mini scores 70 on FrontierSWE, gpt55 50");
     }
 
     #[test]
