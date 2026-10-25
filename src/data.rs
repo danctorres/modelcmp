@@ -1545,8 +1545,8 @@ fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &S
         Probe::Names(args) => Some(listing(bin, args, stop).and_then(|out| name_ids(&out)).unwrap_or_default()),
         Probe::Cache(args) => {
             let cmd = [llama_cmd()?, args].concat();
-            let cached = listing(cmd[0], &cmd[1..], stop).and_then(|out| cache_ids(&out)).unwrap_or_default();
-            Some(cached.into_iter().chain(gguf_ids()).collect())
+            let out = listing(cmd[0], &cmd[1..], stop)?;
+            Some(cache_ids(&out).unwrap_or_default().into_iter().chain(gguf_ids()).collect())
         }
         Probe::Json(args) => selector_ids(&listing(bin, args, stop)?),
         Probe::Copilot => copilot_ids(stop),
@@ -4538,6 +4538,20 @@ mod tests {
         let was = Listed::of(cache);
         assert_eq!(was.harness(false), BTreeMap::from([("opencode".to_string(), ids("google/flash"))]));
         assert_eq!(was.harness(true).len(), 2, "all of them for one still listing");
+    }
+
+    #[test]
+    fn a_llama_cache_that_does_not_answer_keeps_its_last_listing() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let llama = HARNESSES.iter().find(|h| h.0 == LLAMA).unwrap();
+        // Stopped, it is not asked: none, as a listing that fails or hangs gives, not an empty cache.
+        harness_models(&[llama], &AtomicBool::new(true), &Steps::default(), &tx);
+        drop(tx);
+        let now: BTreeMap<_, _> = rx.iter().collect();
+        assert_eq!(now[LLAMA], None);
+        let before = || BTreeMap::from([(LLAMA.to_string(), vec![format!("{LLAMA}/unsloth/Qwen3.5-4B-GGUF:Q4_K_M")])]);
+        let (kept, silent) = keep_listed(now, before);
+        assert_eq!((kept[LLAMA].len(), silent), (1, vec![LLAMA.to_string()]), "what it listed before, and said");
     }
 
     #[test]
