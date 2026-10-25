@@ -2386,7 +2386,8 @@ impl App {
                 self.fill_col(c);
             }
         }
-        self.bounds.clear();
+        // A size on Via is the session's own, which the store does not keep (`keep_bounds`).
+        self.bounds.retain(|b| b.0 == VIA);
         let at =
             |b: &Bound| Some(TEXT + COLS.iter().position(|c| c.id == b.col)?).filter(|&c| !pick_gone(&self.store, c));
         let saved = self.store.bounds.iter().filter_map(|b| Some(loaded(at(b)?, b)));
@@ -6419,9 +6420,13 @@ mod tests {
         assert_eq!(press(&mut a, "XX"), Some(Effect::Save));
         assert!(a.bounds.is_empty() && a.take_bounds_changed() && a.store.bounds.is_empty(), "XX takes it back");
         assert_eq!((a.only, keys(&a).len()), (None, 3), "and E, with nothing left to show");
-        // A reload of the store brings the bounds it has, as another TUI saved them.
+        // A reload of the store brings the bounds it has, as another TUI saved them, and keeps
+        // a size on Via, which only the session has.
         a.store.bounds = vec![Bound { col: "price".into(), min: None, max: Some(2.0) }];
+        a.bounds.push((VIA, f64::NEG_INFINITY, 8.0));
         a.load_bounds();
+        assert!(a.bounds.contains(&(VIA, f64::NEG_INFINITY, 8.0)), "{:?}", a.bounds);
+        a.bounds.retain(|b| b.0 != VIA);
         a.rebuild();
         assert_eq!((a.bounds.as_slice(), keys(&a).len()), (&[(PRICE, f64::NEG_INFINITY, 2.0)][..], 1));
         // Price hidden with `|`: the bound stays for when it is back, applying to none meanwhile.
