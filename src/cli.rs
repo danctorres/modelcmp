@@ -503,7 +503,7 @@ fn download_sizes(data: &Data, store: &Store) -> &'static HashMap<String, u64> {
             for (key, answer) in answers {
                 match answer {
                     Ok(Some(bytes)) => drop(sizes.insert(key.into(), bytes)),
-                    Ok(None) => crate::data::save_gone(&mut gone, key),
+                    Ok(None) => crate::data::save_gone(&mut gone, [key.into()]),
                     // Asked again next run.
                     Err(_) => {}
                 }

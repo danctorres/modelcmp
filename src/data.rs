@@ -707,9 +707,10 @@ pub fn load_gone() -> HashMap<String, u64> {
     gone
 }
 
-/// Hugging Face said just now that it has no GGUF copy of the model `key`: kept with `gone`.
-pub fn save_gone(gone: &mut HashMap<String, u64>, key: &str) {
-    gone.insert(key.into(), now());
+/// Hugging Face said just now that it has no GGUF copy of the models `keys`: kept with `gone`, in
+/// one write.
+pub fn save_gone(gone: &mut HashMap<String, u64>, keys: impl IntoIterator<Item = String>) {
+    gone.extend(keys.into_iter().map(|k| (k, now())));
     keep("gone.json", gone);
 }
 

@@ -522,6 +522,14 @@ fn event_loop(
     // The sizes of downloads Hugging Face is asked for (`Effect::Size`), and how many are awaited.
     let (size_tx, size_rx) = mpsc::channel::<(String, Download)>();
     let mut sizing = 0usize;
+    // What a copy, a new terminal or a page opened said, each done off the loop (`off`), and how
+    // many are awaited.
+    let (said_tx, said_rx) = mpsc::channel();
+    let mut saying = 0usize;
+    // The store's lock, from the first input of a batch to the save after its frame, so an agent's
+    // write cannot land in between (`relock`). What that save is to write: the store, and the sizes
+    // and the downloads with no copy that Hugging Face said meanwhile.
+    let (mut held, mut unsaved, mut sized, mut gone_now) = (None, false, false, vec![]);
     app.set_sizes(data::load_sizes());
     let mut gone = data::load_gone();
     app.set_gone(gone.keys().cloned());
@@ -580,18 +588,18 @@ fn event_loop(
         // One write and one rebuild for the answers that came together, not one each.
         let answers: Vec<(String, Download)> = size_rx.try_iter().collect();
         sizing -= answers.len();
-        let mut sized = false;
         for (key, answer) in &answers {
             dirty |= *answer != Download::NoAnswer;
             match answer {
                 Download::Size(_) => sized = true,
-                Download::Gone => data::save_gone(&mut gone, key),
+                Download::Gone => gone_now.push(key.clone()),
                 _ => {}
             }
         }
         app.sized(answers.iter().map(|(k, a)| (k.as_str(), *a)));
-        if sized {
-            data::save_sizes(&app.sizes());
+        for said in said_rx.try_iter() {
+            (saying, dirty) = (saying - 1, true);
+            app.report(said);
         }
         // The count of a refresh under way moves on its own, with no key pressed.
         let progress = rx.as_ref().map_or_else(String::new, |r| data::progress(&r.1));
@@ -604,34 +612,40 @@ fn event_loop(
         // for the table, and a quit would ask again.
         if ask_harness && app.input == Input::None {
             ask_harness = false;
-            let _lock = crate::store::lock(&crate::store::path());
-            if app.store.reload_if_changed() {
-                app.load_bounds();
-                app.set_cols();
-                app.rebuild_in_place();
-            }
-            if app.ask_default()
-                && let Err(e) = app.store.save()
-            {
-                app.report(Err(format!("could not save: {e}")));
-            }
+            relock(&mut held, app);
+            unsaved |= app.ask_default();
         }
         if dirty {
             paint(terminal, app)?;
         }
+        // Only now, after the frame: what the input changed shows at once, not after its write.
+        if std::mem::take(&mut unsaved)
+            && let Err(e) = app.store.save()
+        {
+            app.report(Err(format!("could not save: {e}")));
+            paint(terminal, app)?;
+        }
+        held = None;
+        if std::mem::take(&mut sized) {
+            data::save_sizes(&app.sizes());
+        }
+        if !gone_now.is_empty() {
+            data::save_gone(&mut gone, gone_now.drain(..));
+        }
         // Block on input; wake every 200ms while a refresh or the newest release is awaited, else
         // once a minute to repaint the data age in the frame.
-        // A size awaited is looked for often, as `x`'s list is open for it, and the ones still to
-        // ask for, of the local rows on screen and the ones Via marks `↓`, are asked once the
-        // cursor has rested, not for each row it passes.
+        // A size awaited is looked for often, as `x`'s list is open for it, and so is what a copy,
+        // a new terminal or a page opened says. The sizes still to ask for, of the local rows on
+        // screen and the ones Via marks `↓`, are asked once the cursor has rested, not for each
+        // row it passes.
         let rest = app.size_wanted();
-        let timeout = match (sizing > 0, rest, rx.is_some() || newest.is_some()) {
+        let timeout = match (sizing + saying > 0, rest, rx.is_some() || newest.is_some()) {
             (true, ..) => Duration::from_millis(30),
             (_, true, _) => Duration::from_millis(150),
             (.., true) => Duration::from_millis(200),
             _ => Duration::from_secs(60),
         };
-        dirty = rx.is_none() && newest.is_none() && sizing == 0 && !rest;
+        dirty = rx.is_none() && newest.is_none() && sizing + saying == 0 && !rest;
         let fire = rest && sizing == 0;
         // Handle every queued event before the next draw, so a held key never falls behind.
         let mut wait = timeout;
@@ -642,8 +656,6 @@ fn event_loop(
             }
             wait = Duration::ZERO;
             let size = terminal.size().map_err(|e| e.to_string())?;
-            // Held until the input's change is saved, so an agent's write cannot land in between.
-            let mut lock = None;
             let input = match event::read().map_err(|e| e.to_string())? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     click = None;
@@ -654,13 +666,7 @@ fn event_loop(
                     // agent's change of the marks are drawn first. A drag only extends the
                     // table's range, which goes by the rows, not the screen.
                     if matches!(e.kind, MouseEventKind::Down(_)) {
-                        lock = Some(crate::store::lock(&crate::store::path()));
-                        if app.store.reload_if_changed() {
-                            app.load_bounds();
-                            app.set_cols();
-                            app.rebuild_in_place();
-                            dirty = true;
-                        }
+                        dirty |= relock(&mut held, app);
                         if dirty {
                             paint(terminal, app)?;
                             dirty = false;
@@ -682,35 +688,27 @@ fn event_loop(
             };
             // An agent may have marked or noted a model meanwhile: act on its file, not a stale
             // copy. A click did so before finding what it is on.
-            let _lock = lock.unwrap_or_else(|| {
-                let held = crate::store::lock(&crate::store::path());
-                if app.store.reload_if_changed() {
-                    app.load_bounds();
-                    app.set_cols();
-                    app.rebuild_in_place();
-                }
-                held
-            });
+            relock(&mut held, app);
             let effect = match input {
                 Some(Ok(k)) => app.key(k),
                 Some(Err(m)) => app.mouse(m),
                 None => None,
             };
             // The bounds, wherever they changed, are kept for the CLI as the dropdowns' picks are.
-            if app.take_bounds_changed()
-                && effect != Some(Effect::Save)
-                && let Err(e) = app.store.save()
-            {
-                app.report(Err(format!("could not save: {e}")));
-            }
+            unsaved |= app.take_bounds_changed() || effect == Some(Effect::Save);
             {
                 match effect {
-                    Some(Effect::Quit) => return Ok(None),
+                    // No frame follows to save after.
+                    Some(Effect::Quit) => {
+                        save_now(app, unsaved)?;
+                        return Ok(None);
+                    }
                     Some(Effect::Upgrade) => {
                         // Unresolved when it cannot be, as replaced under a running TUI it cannot:
                         // its path still says what installed it.
                         let exe = std::env::current_exe().map(|p| p.canonicalize().unwrap_or(p)).unwrap_or_default();
                         if let Some(cmds) = app.data.update().and_then(|new| upgrade_cmds(&exe, new)) {
+                            save_now(app, unsaved)?;
                             return Ok(Some(cmds));
                         }
                         // Not Homebrew's nor cargo's to replace: the release's page has the binaries.
@@ -720,34 +718,28 @@ fn event_loop(
                             Err(e) => Err(format!("could not open {url}: {e}")),
                         });
                     }
-                    Some(Effect::Save) => {
-                        if let Err(e) = app.store.save() {
-                            app.report(Err(format!("could not save: {e}")));
-                        }
-                    }
-                    Some(Effect::Open(url)) => app.report(match open::that_detached(&url) {
+                    Some(Effect::Open(url)) => off(&said_tx, &mut saying, move || match open::that_detached(&url) {
                         // A browser is only asked to: what it does with the page is not known here.
                         Ok(()) => Ok(format!("opening {url}")),
                         Err(e) => Err(format!("could not open {url}: {e}")),
                     }),
-                    Some(Effect::Copy(text)) => app.report(if copy(&text) {
-                        Ok(format!("copied {text}"))
-                    } else {
-                        Err("no clipboard tool found".into())
+                    Some(Effect::Copy(text)) => off(&said_tx, &mut saying, move || {
+                        if copy(&text) { Ok(format!("copied {text}")) } else { Err("no clipboard tool found".into()) }
                     }),
                     Some(Effect::Refresh) => {
                         data::clear_gone(&mut gone);
                         rx = Some(spawn_refresh());
                     }
-                    Some(Effect::Launch(cmd)) => launch(app, &cmd, None),
-                    Some(Effect::LaunchIn(dir, cmd)) => launch(app, &cmd, Some(&dir)),
+                    Some(Effect::Launch(cmd)) => off(&said_tx, &mut saying, move || launch(&cmd, None)),
+                    Some(Effect::LaunchIn(dir, cmd)) => off(&said_tx, &mut saying, move || launch(&cmd, Some(&dir))),
                     // Off the loop: the list is open and takes the size when it comes.
                     Some(Effect::Size(key, base)) => {
                         sizing += 1;
                         ask_size(key, base);
                     }
                     Some(Effect::Source(src)) => {
-                        // The first start's question is answered: not asked again.
+                        // The first start's question is answered: not asked again. Saved now, for
+                        // its error to come before the start's warning, which closing it says.
                         if app.store.seen.is_empty() {
                             app.store.seen = env!("CARGO_PKG_VERSION").into();
                             if let Err(e) = app.store.save() {
@@ -764,7 +756,8 @@ fn event_loop(
                     }
                     // The app applies its own chooser items before they get here.
                     Some(
-                        Effect::Fav(..)
+                        Effect::Save
+                        | Effect::Fav(..)
                         | Effect::Via(..)
                         | Effect::NewTask(_)
                         | Effect::Theme(_)
@@ -796,6 +789,44 @@ fn event_loop(
             }
         }
     }
+}
+
+/// The store's lock for a batch of input, taken at its first (`held`): what an agent saved before
+/// then is read in, and from then to the save after the frame nothing lands in between. True when
+/// the store was read again.
+fn relock(held: &mut Option<std::io::Result<std::fs::File>>, app: &mut App) -> bool {
+    if held.is_some() {
+        return false;
+    }
+    *held = Some(crate::store::lock(&crate::store::path()));
+    let again = app.store.reload_if_changed();
+    if again {
+        app.load_bounds();
+        app.set_cols();
+        app.rebuild_in_place();
+    }
+    again
+}
+
+/// What the batch changed, saved before a quit or an upgrade leaves no frame to save after.
+fn save_now(app: &mut App, unsaved: bool) -> Result<(), String> {
+    if unsaved {
+        app.store.save().map_err(|e| format!("could not save: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Runs `f` off the loop, as the program it starts takes its time: clip.exe a tenth of a second,
+/// and under WSL a search of `PATH` through Windows's folders for wt.exe as long. What it says
+/// comes back on `tx`, `awaited` counting it until then.
+fn off(
+    tx: &mpsc::Sender<Result<String, String>>,
+    awaited: &mut usize,
+    f: impl FnOnce() -> Result<String, String> + Send + 'static,
+) {
+    *awaited += 1;
+    let tx = tx.clone();
+    std::thread::spawn(move || drop(tx.send(f())));
 }
 
 /// Draws the app, in the theme's colours.
@@ -1104,16 +1135,16 @@ fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Mouse {
 }
 
 /// Open `cmd` in a new terminal, in `dir` when one was written, and say how it went.
-fn launch(app: &mut App, cmd: &[String], dir: Option<&str>) {
+fn launch(cmd: &[String], dir: Option<&str>) -> Result<String, String> {
     let line = cmd.join(" ");
     let at = dir.map(|d| format!(", in {d}")).unwrap_or_default();
-    app.report(match new_terminal(cmd, dir) {
+    match new_terminal(cmd, dir) {
         Ok(()) => Ok(format!("opened {line} in a new terminal{at}")),
         Err(e) => {
             let hint = if e.kind() == std::io::ErrorKind::NotFound { ", set $TERMINAL" } else { "" };
             Err(format!("could not open a terminal for {line}: {e}{hint}"))
         }
-    });
+    }
 }
 
 /// Start `cmd` in a new terminal window in `dir`, else here, without waiting: Windows Terminal
