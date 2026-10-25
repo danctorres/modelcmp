@@ -1355,17 +1355,24 @@ impl Data {
         // Or as pi and omp name the provider, which is the id `pick` prints for them, or whole
         // as llama-cli's `-hf` takes it: "unsloth/Qwen3.8-GGUF:Q8_0".
         let pi = norm(&canonical("pi", query));
-        let by_id = |m: &&Model| {
-            m.offers.iter().any(|o| {
-                let full = norm(&format!("{}/{}", o.provider, o.id));
-                norm(&slug(&o.id)) == q || norm(&o.id) == q || full == q || full == pi
-            })
+        // Some(false) by a whole `provider/id`, Some(true) by a bare one only. Read as norm makes
+        // them, with no String for each of the thousands of offers: that took 8 ms.
+        let by_id = |m: &Model| {
+            let hit = |o: &Offer| {
+                let full = || normed(&o.provider).chain(normed(&o.id));
+                let whole = full().eq(q.bytes()) || full().eq(pi.bytes());
+                let bare = o.id.rsplit('/').next().unwrap_or(&o.id);
+                (whole || normed(bare).eq(q.bytes()) || normed(&o.id).eq(q.bytes())).then_some(!whole)
+            };
+            m.offers.iter().filter_map(hit).min()
         };
         // Or by the name shown, which says more than the key when it is Epoch's: "Kimi K2 (Sep 2025)".
-        let by_name = |m: &&Model| norm(&m.name) == q;
+        let by_name = |m: &&Model| normed(&m.name).eq(q.bytes());
         let all = || self.models.iter();
-        // Two models can go by one bare id at different providers: yours first.
-        let id = || all().filter(by_id).min_by_key(|m| !m.available);
+        // A whole `provider/id` names its model before another provider's bare id does: NanoGPT
+        // sells `google/gemini-3.1-pro-preview-customtools` under Gemini 3.1 Pro. Two models can go
+        // by one bare id at different providers: yours first.
+        let id = || all().filter_map(|m| Some(((by_id(m)?, !m.available), m))).min_by_key(|r| r.0).map(|r| r.1);
         if let Some(m) = all().find(|m| m.key == q).or_else(id).or_else(|| all().find(by_name)) {
             return Ok(m);
         }
@@ -3035,6 +3042,14 @@ fn aa_fold<'a>(entries: impl IntoIterator<Item = &'a AaEntry>) -> Option<AaEntry
 /// A "+" is "plus": "Command R+" == "command-r-plus", and is not Command R.
 pub fn norm(s: &str) -> String {
     s.replace('+', "plus").chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// The bytes of `norm(s)` one by one, to compare with no String made.
+fn normed(s: &str) -> impl Iterator<Item = u8> + '_ {
+    s.bytes().flat_map(|b| {
+        let plus = (b == b'+').then_some(*b"plus").into_iter().flatten();
+        plus.chain(b.is_ascii_alphanumeric().then(|| b.to_ascii_lowercase()))
+    })
 }
 
 /// "Anthropic: Claude Opus 4.5 (latest)" -> "Claude Opus 4.5". A trailing "Free" goes too, as
@@ -5398,6 +5413,46 @@ mod tests {
         assert_eq!(d.find("claudesonnet45").unwrap().key, "claudesonnet45", "an exact key wins");
         let d = Data { models: vec![mine("claudeopus5"), mine("claudefable5")], ..Default::default() };
         assert_eq!(d.find("claude").unwrap_err().len(), 2, "shorter is not enough: ambiguous");
+    }
+
+    #[test]
+    fn a_whole_provider_id_names_its_model_before_another_providers_bare_id() {
+        // NanoGPT sells the custom tools release under Gemini 3.1 Pro by the id opencode takes
+        // for Google's own: `list --via opencode --id` printed it for the custom tools one.
+        let offer = |p: &str, id: &str| Offer { provider: p.into(), id: id.into(), ..Default::default() };
+        let pro = Model {
+            key: "gemini31pro".into(),
+            available: true,
+            offers: vec![offer("nano-gpt", "google/gemini-3.1-pro-preview-customtools")],
+            ..Default::default()
+        };
+        let tools = Model {
+            key: "gemini31propreviewcustomtools".into(),
+            offers: vec![offer("google", "gemini-3.1-pro-preview-customtools")],
+            ..Default::default()
+        };
+        let d = Data { models: vec![pro, tools], ..Default::default() };
+        assert_eq!(
+            d.find("google/gemini-3.1-pro-preview-customtools").unwrap().key,
+            "gemini31propreviewcustomtools",
+            "Google's, though only the other is yours"
+        );
+        assert_eq!(d.find("nano-gpt/google/gemini-3.1-pro-preview-customtools").unwrap().key, "gemini31pro");
+    }
+
+    #[test]
+    fn find_reads_ids_as_norm_does() {
+        // An id or a name is compared byte by byte as norm makes them, with no String for each.
+        for s in ["Command R+", "c++", "IBM-Granite/granite-4.0", "Flash – Thinking", "日本", "--", ""] {
+            assert_eq!(normed(s).collect::<Vec<_>>(), norm(s).into_bytes(), "{s}");
+        }
+        let offer = Offer { provider: "cohere".into(), id: "cohere/Command-R+".into(), ..Default::default() };
+        let m = Model { key: "commandr".into(), name: "Cmd R+".into(), offers: vec![offer], ..Default::default() };
+        let d = Data { models: vec![m], ..Default::default() };
+        assert_eq!(d.find("command-r+").unwrap().key, "commandr", "bare, a + as plus");
+        assert_eq!(d.find("COHERE/cohere/command-r+").unwrap().key, "commandr", "as list --id prints");
+        assert_eq!(d.find("cmd r+").unwrap().key, "commandr", "by the name shown");
+        assert!(d.find("cohere/command").is_err(), "the whole id, not its start");
     }
 
     #[test]
