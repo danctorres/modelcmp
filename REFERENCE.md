@@ -506,10 +506,11 @@ The TUI's bottom border always shows the refresh state, one of these:
 - The data age alone, red once it is past 24h. The status bar then says it too, as `data 25h old`
   in red, with the hint `r refresh`.
 
-Each start repeats the issues in the status bar, and `!` or a click on the `⚠` lists them.
+`!` or a click on the `⚠` lists the issues, and the status bar hints `! issues` while there are
+any. The status bar itself says only what a key or a refresh you started did.
 
 When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no
-file for it, a warning names the benchmark at every start and command. It does so with Artificial
+file for it, a warning names the benchmark, in `!` and at every command. It does so with Artificial
 Analysis as the source too, since the Epoch AI benchmarks in the dropdowns still come from Epoch
 AI. With either source, the first start or command an hour later downloads the data again.
 

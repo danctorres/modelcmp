@@ -2541,17 +2541,11 @@ impl App {
             Ok(d) => {
                 self.old_key = None;
                 // An error still standing, as the start's of an unreadable user.json, is not
-                // replaced by the news that the refresh went well, nor by its warning. Why a
-                // key did nothing is. The news replaces no other message either: what a switch
-                // of source said stays when its download ends. The data keeps it for the frame.
-                let standing = self.failed && !self.refused;
-                match d.warning.clone() {
-                    Some(w) if standing => self.status = format!("{}, {w}", self.status),
-                    Some(w) => self.report(Err(w)),
-                    None if self.status.is_empty() || (self.failed && self.refused) => {
-                        self.report(Ok("data refreshed".into()));
-                    }
-                    None => {}
+                // replaced by the news that the refresh went well. Why a key did nothing is.
+                // The news replaces no other message either: what a switch of source said
+                // stays when its download ends. Its warnings are the frame's `⚠` and `!`'s.
+                if self.status.is_empty() || (self.failed && self.refused) {
+                    self.report(Ok("data refreshed".into()));
                 }
                 self.set_data(d);
             }
@@ -2697,9 +2691,6 @@ impl App {
         cached.keep_latest(&self.data.latest);
         self.set_data(cached);
         (self.refreshing, self.refresh_failed) = (fetch, false);
-        if let Some(w) = self.data.said().filter(|_| !fetch) {
-            self.report(Err(w));
-        }
         fetch
     }
 
@@ -8678,7 +8669,7 @@ mod tests {
         a.refreshed(Ok(Data::default()), tools());
         assert_eq!(a.status, "user.json is not valid", "an error still standing is not replaced by good news");
         a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }), tools());
-        assert_eq!(a.status, "user.json is not valid, pi did not list its models", "nor by a warning");
+        assert_eq!(a.status, "user.json is not valid", "nor by a warning, which `!` lists");
         // Why a key did nothing is red too, and no error: the refresh's outcome replaces it.
         press(&mut a, "u");
         assert!(a.failed && a.status.starts_with("no selected models"));
@@ -8686,7 +8677,7 @@ mod tests {
         assert_eq!((a.failed, a.status.as_str()), (false, "data refreshed"));
         press(&mut a, "u");
         a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }), tools());
-        assert_eq!(a.status, "pi did not list its models", "as its warning does");
+        assert_eq!((a.failed, a.status.as_str()), (false, "data refreshed"), "its warning is the frame's ⚠");
         // A message set under an open list is no error, whatever stood before it.
         a.first_start = true;
         a.switch(crate::data::source());

@@ -88,9 +88,8 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     }
     // After the refresh starts, which clears the status: it is your marks and notes that are at
     // stake. The first start keeps it until its key prompt closes, which has the status bar.
-    // What a cache read without a refresh says.
-    let unscored = rx.is_none().then(|| app.data.said()).flatten();
-    if !ask && let Some(w) = app.store.warning.take().or(unscored) {
+    // What the last refresh said is the frame's `⚠` and `!`'s.
+    if !ask && let Some(w) = app.store.warning.take() {
         app.report(Err(w));
     }
     let mut terminal =
@@ -1862,7 +1861,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             }
             (true, ..) => (refreshing(&app.progress), Color::Yellow),
             (_, true, _) => (format!("refresh failed · {age}"), BAD),
-            // Until a refresh without any, what it said is in the status bar at each start.
+            // Until a refresh without any: `!` lists them.
             (_, _, old) if app.data.warning.is_some() => {
                 (format!("⚠ refresh had issues · {age}"), if old { BAD } else { Color::Yellow })
             }
