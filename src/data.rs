@@ -591,12 +591,10 @@ pub fn memory() -> Option<u64> {
 const MEMORY_FILE: &str = "memory.json";
 const MEMORY_FOR: u64 = 7 * 24 * 3600;
 
-/// `memory`, looked up now.
+/// `memory`, looked up now. A wedged GPU driver can hang `nvidia-smi`, which the TUI's first
+/// frame waits on, so it is given up on at 5 s and the RAM counted.
 fn find_memory() -> Option<u64> {
-    let out = |bin: &str, args: &[&str]| {
-        let o = std::process::Command::new(bin).args(args).stderr(std::process::Stdio::null()).output().ok()?;
-        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
+    let out = |bin: &str, args: &[&str]| run(bin, args, Duration::from_secs(5), &AtomicBool::new(false));
     let nvidia = || {
         let mib = out("nvidia-smi", &["--query-gpu=memory.total", "--format=csv,noheader,nounits"])?;
         let all: u64 = mib.lines().filter_map(|l| l.trim().parse::<u64>().ok()).sum();
