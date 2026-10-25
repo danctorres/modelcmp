@@ -2077,7 +2077,7 @@ impl App {
         let marked = self.marked_models();
         let Some((label, desc)) = &self.compare_sort else { return marked };
         let cols = view::compare_cols(&marked, self.any_available(), &|m| self.download(m)).1;
-        view::compare_sorted(marked, &cols, (label, *desc))
+        view::compare_order(marked.len(), &cols, (label, *desc)).into_iter().map(|i| marked[i]).collect()
     }
 
     /// How many columns compare has, which depends on the data its models have.

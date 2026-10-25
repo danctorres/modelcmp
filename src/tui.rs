@@ -2113,7 +2113,7 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
             let searched = !app.overlay_query.is_empty();
             let sort = app.compare_sort.as_ref().map(|(l, d)| (l.as_str(), *d));
             let c = compare(
-                &app.compare_models(),
+                &app.marked_models(),
                 (app.any_available(), &|m| app.download(m), &app.store),
                 (app.compare_sel, (app.compare_col, app.compare_x), (jump && searched).then_some(n)),
                 (area.width.saturating_sub(4) as usize, sort),
@@ -4342,15 +4342,16 @@ fn wrap_label(label: &str, w: usize) -> Vec<(usize, String)> {
 
 /// The verdict, then a row per marked model and a column per value, as in the table: the best
 /// of each column in green, the worst in red, a `muted` model's row grey, its bests and worsts
-/// too, and Via last, the widest. A label wraps over the header's lines, so a column is as wide
-/// as its values. The cursor's column, `col` or the `jump`th label `query` finds, is marked
-/// under its label and filled as in the table, and the one `sort` names, by its label and whether highest
-/// first, has `▼` or `▲`. When the columns do not all fit in `avail` cells, the view starts at
-/// column `first`, moved only as far as it takes to show the cursor's. Each model's row and
-/// each column's label goes to `spots`. `any` is whether you have access to a model, and `get`
-/// the mark of a model's download, for Via to read as in the table.
+/// too, and Via last, the widest. A label wraps over the header's lines, so a column is as wide as
+/// its values. The cursor's column, `col` or the `jump`th label `query` finds, is marked under
+/// its label and filled as in the table, and the one `sort` names, by its label and whether
+/// highest first, has `▼` or `▲`, the `marked` models sorted by it as `App::compare_models`
+/// sorts them. When the columns do not all fit in `avail` cells, the view starts at column
+/// `first`, moved only as far as it takes to show the cursor's. Each model's row and each
+/// column's label goes to `spots`. `any` is whether you have access to a model, and `get` the
+/// mark of a model's download, for Via to read as in the table.
 fn compare(
-    models: &[&Model],
+    marked: &[&Model],
     (any, get, store): (bool, crate::view::Get, &Store),
     (sel, (col, first), jump): (usize, (usize, usize), Option<isize>),
     (avail, sort): (usize, Option<(&str, bool)>),
@@ -4358,7 +4359,16 @@ fn compare(
     muted: impl Fn(&Model) -> bool,
     spots: &mut Vec<Spot>,
 ) -> Compared {
-    let (names, mut cols) = crate::view::compare_cols(models, any, get);
+    let (mut names, mut cols) = crate::view::compare_cols(marked, any, get);
+    // Sorted here, so the rows are made once, as they are slow to make: their cells move with
+    // their models.
+    let mut models = marked.to_vec();
+    if let Some(sort) = sort {
+        let order = crate::view::compare_order(models.len(), &cols, sort);
+        std::iter::once(&mut names).chain(&mut cols).for_each(|r| r.reorder(&order));
+        models = order.into_iter().map(|i| marked[i]).collect();
+    }
+    let models = models.as_slice();
     // The sort's arrow before its label, as on the table's header.
     let arrow = |label: &str| match sort {
         Some((l, desc)) if l == label => {
@@ -6191,8 +6201,12 @@ mod tests {
         a.key(KeyCode::Char('s').into());
         assert_eq!((keys(&a), a.current().unwrap().key.as_str()), (vec!["flash".into(), "opus".into()], "opus"));
         term.draw(|f| draw(&mut a, f)).unwrap();
-        let screen = text(term.backend().buffer()).join("\n");
+        let lines = text(term.backend().buffer());
+        let screen = lines.join("\n");
         assert!(screen.contains("▲Price"), "{screen}");
+        // Drawn in that order, as clicks find them.
+        let row = |i| a.spots.iter().find(|s| s.1 == Stop::Compare(i)).map(|s| &lines[usize::from(s.0.y)]);
+        assert!(row(0).is_some_and(|l| l.contains("flash")) && row(1).is_some_and(|l| l.contains("opus")), "{screen}");
         a.key(KeyCode::Char('s').into());
         assert_eq!(keys(&a), ["opus", "flash"], "again reverses");
         a.key(KeyCode::Char('$').into());

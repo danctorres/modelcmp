@@ -1304,10 +1304,11 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get) -> Vec<Row> {
         Row { label: label.into(), cells, vals, ext, higher, ..Default::default() }
     }
     // A list price, yours having none, after a `~` as in the table, and as there neither the
-    // best nor the worst: it has no value to colour.
+    // best nor the worst: it has no value to colour. Found once for the four rows, as it is slow
+    // to find.
+    let quoted: Vec<_> = models.iter().map(|m| m.quoted()).collect();
     let price = |label: &str, f: fn(&Offer) -> f64| {
-        let quoted = models.iter().map(|m| m.quoted());
-        let offers: Vec<_> = quoted.map(|q| (q.map(|q| f(q.0)), q.is_some_and(|q| q.1))).collect();
+        let offers: Vec<_> = quoted.iter().map(|q| (q.map(|q| f(q.0)), q.is_some_and(|q| q.1))).collect();
         let mut r = row(label, offers.iter().map(|&(v, listed)| v.filter(|_| !listed)).collect(), money, false);
         for (c, v) in r.cells.iter_mut().zip(&offers).filter_map(|(c, &(v, listed))| Some((c, v.filter(|_| listed)?))) {
             *c = format!("~{}", money(v));
@@ -1389,17 +1390,28 @@ pub fn compare_cols(models: &[&Model], any: bool, get: Get) -> (Row, Vec<Row>) {
     (names, cols)
 }
 
-/// `models` in the order of the column labelled `label`, highest first when `desc`, a model
-/// with no value last, and a column of text A-Z. Models that tie keep their order.
-pub fn compare_sorted<'a>(models: Vec<&'a Model>, cols: &[Row], (label, desc): (&str, bool)) -> Vec<&'a Model> {
-    let Some(c) = cols.iter().find(|c| c.label == label) else { return models };
-    let mut order: Vec<usize> = (0..models.len()).collect();
+/// The order of `n` models by the column labelled `label`, highest first when `desc`, a model
+/// with no value last, and a column of text A-Z: the index of each in turn. Models that tie
+/// keep their order, as all do with no such column.
+pub fn compare_order(n: usize, cols: &[Row], (label, desc): (&str, bool)) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    let Some(c) = cols.iter().find(|c| c.label == label) else { return order };
     if c.vals.is_empty() {
         order.sort_by(|&a, &b| if desc { c.cells[b].cmp(&c.cells[a]) } else { c.cells[a].cmp(&c.cells[b]) });
     } else {
         order.sort_by(|&a, &b| by_value(c.vals[a], c.vals[b], desc));
     }
-    order.into_iter().map(|i| models[i]).collect()
+    order
+}
+
+impl Row {
+    /// The row with its models in `order` (`compare_order`), so it need not be made again.
+    pub fn reorder(&mut self, order: &[usize]) {
+        self.cells = order.iter().map(|&i| std::mem::take(&mut self.cells[i])).collect();
+        // Empty off the rows that have none.
+        self.vals = order.iter().filter_map(|&i| self.vals.get(i).copied()).collect();
+        self.listed = order.iter().filter_map(|&i| self.listed.get(i).copied()).collect();
+    }
 }
 
 /// The conclusion above a comparison, as `[question, winner, margin]`: which model is cheaper
@@ -1424,8 +1436,10 @@ pub fn verdict(models: &[&Model], store: &Store) -> Vec<[String; 3]> {
         on_price(best(models, "cheaper", cost, false, usd), &|m| m.cost()),
         on_price(best(models, "better value", value, true, |v| format!("{v:.0}")), &any_value),
     ];
+    // Each model's price once for every task, as it is slow to find.
+    let paid: Vec<Option<f64>> = models.iter().map(|m| paid(m)).collect();
     let tasks = TASKS.iter().filter(|t| t.name != "value" && !as_overall(models, t.name));
-    rows.extend(tasks.filter_map(|t| task_verdict(models, t, store)));
+    rows.extend(tasks.filter_map(|t| task_verdict(models, &paid, t, store)));
     rows
 }
 
@@ -1445,30 +1459,30 @@ fn paid(m: &Model) -> Option<f64> {
 /// For task `t`, the models worth paying for, best first: the best, then each cheaper one
 /// that scores less, cheaper than every one before it, so a dearer model that is no better
 /// is left out. The best alone is said against the runner-up. Your favorite for the task has
-/// a ★. None when fewer than two models have a score.
-fn task_verdict(models: &[&Model], t: &fit::Task, store: &Store) -> Option<[String; 3]> {
-    // As shown: 60.6 and 61.4 both read 61.
-    let mut scored: Vec<(&Model, f64)> =
-        models.iter().filter_map(|m| Some((*m, task_score(m, t.name)?.round()))).collect();
+/// a ★. None when fewer than two models have a score. `paid` is each model's (`paid`).
+fn task_verdict(models: &[&Model], paid: &[Option<f64>], t: &fit::Task, store: &Store) -> Option<[String; 3]> {
+    // As shown: 60.6 and 61.4 both read 61. With the price, which the sort asks at every step.
+    let mut scored: Vec<(&Model, f64, Option<f64>)> =
+        models.iter().zip(paid).filter_map(|(m, &c)| Some((*m, task_score(m, t.name)?.round(), c))).collect();
     if scored.len() < 2 {
         return None;
     }
     // Best first, the cheaper of a tie first, an unknown or list price last.
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(by_value(paid(a.0), paid(b.0), false)));
-    let mut front: Vec<(&Model, f64)> = vec![];
-    for &(m, v) in &scored {
-        let cheaper = |f: &Model| paid(m).is_some_and(|c| paid(f).is_none_or(|fc| c < fc));
-        if front.iter().all(|(f, _)| cheaper(f)) {
-            front.push((m, v));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(by_value(a.2, b.2, false)));
+    let mut front: Vec<(&Model, f64, Option<f64>)> = vec![];
+    for &(m, v, c) in &scored {
+        let cheaper = |fc: Option<f64>| c.is_some_and(|c| fc.is_none_or(|fc| c < fc));
+        if front.iter().all(|f| cheaper(f.2)) {
+            front.push((m, v, c));
         }
     }
     let name = |m: &Model| if store.is_favorite(Some(t), &m.key) { format!("★ {}", m.name) } else { m.name.clone() };
     let at = |m: &Model, v: f64| format!("{v:.0} ({})", price(m));
-    let (top, v) = front[0];
+    let (top, v, _) = front[0];
     let margin = match &front[1..] {
         [] => format!("{} vs {:.0}", at(top, v), scored[1].1),
         rest => {
-            let rest = rest.iter().map(|&(m, v)| format!("{} {}", name(m), at(m, v)));
+            let rest = rest.iter().map(|&(m, v, _)| format!("{} {}", name(m), at(m, v)));
             std::iter::once(at(top, v)).chain(rest).collect::<Vec<_>>().join(" · ")
         }
     };
