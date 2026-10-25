@@ -1664,18 +1664,35 @@ fn copilot_ids(stop: &AtomicBool) -> Option<Vec<String>> {
             "params": {"cwd": dir.to_str()?, "mcpServers": []}}),
     ];
     let asks = format!("{}\n{}\n", asks[0], asks[1]);
-    copilot_enabled(&answer("copilot", &["--acp"], &dir, &asks, 2, Duration::from_secs(30), stop)?)
+    let session = answer("copilot", &["--acp"], &dir, &asks, 2, Duration::from_secs(30), stop)?;
+    // Copilot keeps every session for you to resume, this one too, which is none of yours.
+    let home =
+        std::env::var_os("COPILOT_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".copilot")));
+    if let Some(kept) = copilot_session(&session, home) {
+        let _ = std::fs::remove_dir_all(kept);
+    }
+    copilot_enabled(&session)
+}
+
+/// The folder Copilot's CLI keeps the session of a new session's answer in, under its `home`:
+/// none for an id that is no plain name, which could name another folder.
+fn copilot_session(answer: &serde_json::Value, home: Option<PathBuf>) -> Option<PathBuf> {
+    let plain = |id: &&str| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    Some(home?.join("session-state").join(answer["result"]["sessionId"].as_str().filter(plain)?))
 }
 
 /// The ids of a new session's answer that Copilot's CLI takes, under models.dev's provider
-/// for them: the ones no policy keeps off, switched off or not yet on. None for an answer
-/// without models, as an error or the one of a CLI not logged in.
+/// for them: the ones no policy keeps off, switched off or not yet on. None for an error, as
+/// a CLI not logged in answers. A session without models is of a plan with Auto alone, which
+/// picks the model itself: it takes none.
 fn copilot_enabled(answer: &serde_json::Value) -> Option<Vec<String>> {
     let taken = |m: &&serde_json::Value| {
         let state = &m["_meta"]["copilotEnablement"];
         state.is_null() || state == "enabled"
     };
-    let ids = answer["result"]["models"]["availableModels"].as_array()?.iter().filter(taken);
+    let session = &answer["result"];
+    session["sessionId"].as_str()?;
+    let ids = session["models"]["availableModels"].as_array().into_iter().flatten().filter(taken);
     Some(ids.filter_map(|m| m["modelId"].as_str()).map(|id| format!("{COPILOT}/{id}")).collect())
 }
 
@@ -4398,10 +4415,29 @@ mod tests {
         }}});
         let ids = ["github-copilot/gpt-5-mini", "github-copilot/claude-haiku-4.5"].map(String::from).to_vec();
         assert_eq!(copilot_enabled(&session), Some(ids), "not the ones a policy keeps off");
-        let error = serde_json::json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "no"}});
-        assert_eq!(copilot_enabled(&error), None, "not a listing");
-        let out = serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s"}});
-        assert_eq!(copilot_enabled(&out), None, "nor is a session without models, as when logged out");
+        let out = serde_json::json!({"jsonrpc": "2.0", "id": 2,
+            "error": {"code": -32000, "message": "Authentication required"}});
+        assert_eq!(copilot_enabled(&out), None, "not a listing, as when logged out");
+        // Copilot 1.0.96's on a plan with Auto alone, trimmed.
+        let auto = serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"configOptions": [{"type": "select",
+            "id": "mode", "category": "mode",
+            "currentValue": "https://agentclientprotocol.com/protocol/session-modes#agent"}],
+            "sessionId": "e8c80308-7952-4ad2-96e8-4f323b297c22"}});
+        assert_eq!(copilot_enabled(&auto), Some(vec![]), "a session without models takes none");
+    }
+
+    #[test]
+    fn copilot_forgets_its_own_session_alone() {
+        let session = |id: &str| serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": id}});
+        let home = || Some(PathBuf::from("/h"));
+        let own = copilot_session(&session("e8c80308-7952-4ad2"), home());
+        assert_eq!(own, Some(PathBuf::from("/h/session-state/e8c80308-7952-4ad2")));
+        for id in ["", "..", "../x", "a/b", "/"] {
+            assert_eq!(copilot_session(&session(id), home()), None, "{id:?} names no session of its own");
+        }
+        let out = serde_json::json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "no"}});
+        assert_eq!(copilot_session(&out, home()), None, "an error has no session");
+        assert_eq!(copilot_session(&session("s"), None), None, "nor is there one with no home");
     }
 
     #[test]
