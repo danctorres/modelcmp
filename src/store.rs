@@ -230,6 +230,8 @@ impl Store {
     /// instead of being silently replaced by the next save. One whose fields mostly read keeps
     /// those, with a copy of the file as it was left aside the same way.
     pub fn load_from(path: PathBuf) -> Self {
+        // Written back through a link, as a save is.
+        let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         let mut s = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
             Err(e) => Store {
@@ -258,7 +260,7 @@ impl Store {
                         // would only warn and copy again.
                         let copied = std::fs::copy(&path, &bad).is_ok();
                         if copied && let Ok(json) = serde_json::to_string_pretty(&s) {
-                            let _ = write_atomic(&path, json.as_bytes());
+                            let _ = write_atomic(&real, json.as_bytes());
                         }
                         let aside =
                             if copied { "and a copy of the file is in" } else { "but no copy could be made in" };
@@ -266,7 +268,8 @@ impl Store {
                         Store { warning, ..s }
                     }
                     None => {
-                        let _ = std::fs::rename(&path, &bad);
+                        // Copied aside and emptied, not moved, so a link to it stays one.
+                        let _ = std::fs::copy(&path, &bad).and_then(|_| write_atomic(&real, b"{}"));
                         Store {
                             warning: Some(format!("{name} is not valid ({e}), so it was moved to {to}")),
                             ..Store::default()
@@ -320,7 +323,7 @@ impl Store {
             );
             s.warning = s.warning.or(Some(said));
             if let Ok(json) = serde_json::to_string_pretty(&s) {
-                let _ = write_atomic(&path, json.as_bytes());
+                let _ = write_atomic(&real, json.as_bytes());
             }
         }
         s.mtime = mtime(&path);
@@ -712,6 +715,31 @@ mod tests {
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 
+    /// A load that writes the file back keeps a link to it as a save does, so later saves still
+    /// go to the file it names: after a key binding it drops, one field of the wrong type, no JSON.
+    #[cfg(unix)]
+    #[test]
+    fn a_load_that_writes_back_keeps_the_link() {
+        for (name, json) in
+            [("linkkeys", r#"{"keys": {"s": "o"}}"#), ("linkfield", r#"{"memory": "x"}"#), ("linkjunk", "{")]
+        {
+            let p = tmp(name);
+            let real = p.with_file_name("dotfiles.json");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&real, json).unwrap();
+            let _ = std::fs::remove_file(&p);
+            std::os::unix::fs::symlink(&real, &p).unwrap();
+            let mut s = Store::load_from(p.clone());
+            assert!(s.warning.is_some(), "{name}");
+            s.toggle_marked("b");
+            s.save().unwrap();
+            assert!(std::fs::symlink_metadata(&p).unwrap().is_symlink(), "{name}");
+            let saved = std::fs::read_to_string(&real).unwrap();
+            assert!(saved.contains("\"b\""), "{name}: {saved}");
+            std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+        }
+    }
+
     #[test]
     fn another_writer_is_picked_up() {
         let p = tmp("reload");
@@ -766,7 +794,7 @@ mod tests {
         std::fs::write(&p, b"{not json").unwrap();
         let s = Store::load_from(p.clone());
         assert!(s.marked.is_empty());
-        assert!(!p.exists());
+        assert_eq!(std::fs::read(&p).unwrap(), b"{}");
         assert_eq!(std::fs::read(p.with_extension("json.bad")).unwrap(), b"{not json");
         assert!(s.warning.is_some_and(|w| w.contains("moved to")));
         std::fs::write(&p, b"{again").unwrap();
