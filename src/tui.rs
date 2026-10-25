@@ -177,8 +177,8 @@ fn upgrade(cmds: &[Vec<String>]) -> Result<(), String> {
 /// not asked: one may answer here and still garble them. It says so in `COLORTERM`, or, as `ssh`
 /// and `sudo` drop that, with a `TERM` only a terminal that draws them sets. Under WSL neither is
 /// set, and every Windows console that runs it draws them.
-/// ponytail: a reply later than the wait is read as keys by the table, where its `e` excludes a
-/// model; ask the terminal ahead of a slow link's round trip if one is slower than a second.
+/// ponytail: a reply later than the wait, a second here and two over ssh, is read as keys by the
+/// table, where its `e` excludes a model. Ask the terminal ahead of the first frame if one is slower.
 fn terminal_colors() -> (Option<u32>, Option<[u32; 16]>) {
     use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use std::io::{ErrorKind, Read, Write};
@@ -203,9 +203,10 @@ fn terminal_colors() -> (Option<u32>, Option<[u32; 16]>) {
     let mut reply = Vec::new();
     let ask: String = (0..16).map(|i| format!("\x1b]4;{i};?\x07")).collect();
     if out.write_all(format!("\x1b]11;?\x07{ask}\x1b[6n").as_bytes()).and_then(|()| out.flush()).is_ok() {
-        // The most the first frame waits for them: a terminal here answers in a few milliseconds,
-        // one over ssh in a round trip, which a slow link takes most of a second for.
-        let wait = Duration::from_millis(if std::env::var_os("SSH_CONNECTION").is_some() { 1000 } else { 200 });
+        // The most the first frame waits for them, which a terminal that answers ends at once: one
+        // here in a few milliseconds, more under a loaded WSL, one over ssh in a round trip. A
+        // reply later than that is read as keys, so the wait is long.
+        let wait = Duration::from_secs(if std::env::var_os("SSH_CONNECTION").is_some() { 2 } else { 1 });
         let (end, mut buf) = (Instant::now() + wait, [0; 1024]);
         // ponytail: looked at every millisecond rather than waited on, as poll(2) is unsafe code.
         while !positioned(&String::from_utf8_lossy(&reply)) && Instant::now() < end {
