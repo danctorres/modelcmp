@@ -127,6 +127,9 @@ struct ModelOut<'a> {
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     providers: Option<Vec<Price<'a>>>,
+    /// With `list --tier`, the bytes the pick needs to download when it is not on your machine
+    #[serde(skip_serializing_if = "Option::is_none")]
+    download: Option<u64>,
 }
 
 fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
@@ -181,6 +184,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
         ttft_seconds: m.ttft,
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
+        download: None,
     }
 }
 
@@ -557,14 +561,9 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
         return Err(format!("{NO_HARNESS}, so there is no model to start (--all lists every model)").into());
     }
     if o.json {
-        let out = |m: &&Model| {
-            let mut v = serde_json::to_value(out(m, store, any, false)).unwrap_or_default();
-            if let Some(b) = download {
-                v["download"] = b.into();
-            }
-            v
-        };
-        return print_json(&models.iter().map(out).collect::<Vec<_>>());
+        return print_json(
+            &models.iter().map(|m| ModelOut { download, ..out(m, store, any, false) }).collect::<Vec<_>>(),
+        );
     }
     if o.id || o.cmd {
         // All or none: a script must not start on the first of two commands.
@@ -1924,6 +1923,16 @@ mod tests {
             (&price["provider"], &price["input_per_mtok"], &price["listed"]),
             (&"p".into(), &2.0.into(), &true.into())
         );
+    }
+
+    /// `list --tier` adds the download its pick needs after the fields, in the order `show` has them.
+    #[test]
+    fn list_json_adds_the_download_after_the_fields() {
+        let store = Store::default();
+        let m = model("gpt55", 80.0, 2.0);
+        let shown = serde_json::to_string(&out(&m, &store, false, false)).unwrap();
+        let listed = serde_json::to_string(&ModelOut { download: Some(5), ..out(&m, &store, false, false) }).unwrap();
+        assert_eq!(listed, format!("{},\"download\":5}}", shown.strip_suffix('}').unwrap()));
     }
 
     #[test]
