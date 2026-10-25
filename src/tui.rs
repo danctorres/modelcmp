@@ -109,8 +109,11 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // The cursor too: the terminal shows it only when dropped, after an upgrade a ^C may end.
     let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, Show);
     ratatui::restore();
-    let Some(cmds) = res? else { return Ok(()) };
+    let Some((cmds, unsaved)) = res? else { return Ok(()) };
     // On the terminal's own screen, where the upgrade's output shows.
+    if let Some(e) = unsaved {
+        eprintln!("modelcmp: {e}");
+    }
     upgrade(&cmds)
 }
 
@@ -513,12 +516,15 @@ fn spawn_refresh() -> Refresh {
 
 /// Returns at a quit, or with the commands of an upgrade to run once the screen is restored.
 /// `pre`: the first start's download for the default source, held until a source is picked.
+/// What a quit for an upgrade leaves to do: its commands, and a save that failed, said first.
+type Upgrading = (Vec<Vec<String>>, Option<String>);
+
 fn event_loop(
     app: &mut App,
     terminal: &mut DefaultTerminal,
     mut rx: Option<Refresh>,
     mut pre: Option<Refresh>,
-) -> Result<Option<Vec<Vec<String>>>, String> {
+) -> Result<Option<Upgrading>, String> {
     let mut dirty = true;
     // The sizes of downloads Hugging Face is asked for (`Effect::Size`), and how many are awaited.
     let (size_tx, size_rx) = mpsc::channel::<(String, Download)>();
@@ -709,8 +715,8 @@ fn event_loop(
                         // its path still says what installed it.
                         let exe = std::env::current_exe().map(|p| p.canonicalize().unwrap_or(p)).unwrap_or_default();
                         if let Some(cmds) = app.data.update().and_then(|new| upgrade_cmds(&exe, new)) {
-                            save_now(app, unsaved)?;
-                            return Ok(Some(cmds));
+                            // A save that fails keeps no upgrade from running: it is said before.
+                            return Ok(Some((cmds, save_now(app, unsaved).err())));
                         }
                         // Not Homebrew's nor cargo's to replace: the release's page has the binaries.
                         let url = format!("{REPO}/releases/latest");
