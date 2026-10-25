@@ -161,6 +161,17 @@ pub fn lock(p: &Path) -> std::io::Result<std::fs::File> {
     Ok(f)
 }
 
+/// Where a file that does not parse is kept: `user.json.bad`, else one named for the time, as an
+/// earlier one may hold the last good favorites and notes.
+fn bad_path(path: &Path) -> PathBuf {
+    let bad = path.with_extension("json.bad");
+    if !bad.exists() {
+        return bad;
+    }
+    let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    path.with_extension(format!("json.{t}.bad"))
+}
+
 pub fn path() -> PathBuf {
     dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join("user.json")
 }
@@ -227,12 +238,7 @@ impl Store {
                 ..Store::default()
             },
             Ok(bytes) => serde_json::from_slice::<Store>(&bytes).unwrap_or_else(|e| {
-                let mut bad = path.with_extension("json.bad");
-                // An earlier one may hold the last good favorites and notes: keep both.
-                if bad.exists() {
-                    let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                    bad = path.with_extension(format!("json.{t}.bad"));
-                }
+                let bad = bad_path(&path);
                 // One bad field must not take the favorites and exclusions with it.
                 let fields = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).ok();
                 let kept = fields.and_then(|mut f| {
@@ -336,15 +342,31 @@ impl Store {
     }
 
     /// Read the file again if another process wrote it since this one last did (an agent's
-    /// `modelcmp mark` while the TUI is open), so the TUI's next save does not undo that.
-    /// A file that does not parse is left alone until the next start. True when reloaded.
+    /// `modelcmp mark` while the TUI is open), so the TUI's next save does not undo that. One
+    /// whose fields partly read keeps those, as at a start. One that is no JSON object, a hand
+    /// edit's stray comma, is copied aside before the next save writes this session's settings
+    /// over it, and with no copy is not saved over. True when reloaded.
     pub fn reload_if_changed(&mut self) -> bool {
         let now = mtime(&self.path);
         if now == self.mtime {
             return false;
         }
         let parses = match std::fs::read(&self.path) {
-            Ok(b) => serde_json::from_slice::<Store>(&b).is_ok(),
+            Ok(b) => serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b)
+                .map_err(|e| {
+                    let (name, bad) = (self.path.display(), bad_path(&self.path));
+                    let aside = match std::fs::copy(&self.path, &bad) {
+                        Ok(_) => {
+                            format!("this session's settings are kept, and a copy of the file is in {}", bad.display())
+                        }
+                        Err(c) => {
+                            self.unreadable = Some(c.to_string());
+                            "no copy of it could be made, so changes will not be saved".into()
+                        }
+                    };
+                    self.warning = Some(format!("{name} is not valid ({e}): {aside}"));
+                })
+                .is_ok(),
             Err(e) => e.kind() == std::io::ErrorKind::NotFound,
         };
         if parses {
@@ -705,6 +727,24 @@ mod tests {
         assert!(tui.reload_if_changed());
         assert_eq!(tui.marked, ["a", "b"]);
         assert_eq!(tui.warning.as_deref(), Some("said at the start"), "a warning not yet said is kept");
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_broken_edit_is_copied_aside_before_a_save() {
+        let p = tmp("broken");
+        let mut tui = Store::load_from(p.clone());
+        tui.toggle_marked("a");
+        tui.save().unwrap();
+        // A hand edit with a stray comma, while the TUI is open.
+        write_atomic(&p, br#"{"marked": ["a", "b"],}"#).unwrap();
+        assert!(!tui.reload_if_changed());
+        assert_eq!(tui.marked, ["a"], "the session's settings are kept");
+        tui.toggle_marked("c");
+        tui.save().unwrap();
+        let bad = std::fs::read_to_string(p.with_extension("json.bad")).unwrap();
+        assert!(bad.contains(r#""b"],}"#), "the edit is kept aside: {bad}");
+        assert!(tui.warning.as_deref().is_some_and(|w| w.contains("json.bad")));
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 
