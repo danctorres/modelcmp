@@ -1843,7 +1843,7 @@ impl App {
         }
     }
 
-    /// `]` `[` in `f`'s grid and the dropdowns: the cursor to the `n`th ticked entry
+    /// `]` `[` in `f`'s grid, the `|` and `B` lists and the dropdowns: the cursor to the `n`th ticked entry
     /// below it, up for a negative `n`, as `jump` moves it in the table.
     fn jump_ticked(&mut self, n: isize) {
         let (ticked, what): (Vec<bool>, _) = match &self.input {
@@ -3887,7 +3887,9 @@ impl App {
                 }
             }
             KeyCode::Char(c @ (']' | '['))
-                if self.choosing_favs() || self.choosing_cols() || matches!(self.input, Input::Menu { .. }) =>
+                if self.choosing_favs()
+                    || self.choosing_cols()
+                    || matches!(self.input, Input::Choose { kind: Kind::Bench, .. } | Input::Menu { .. }) =>
             {
                 self.jump_ticked(if c == ']' { n } else { -n })
             }
@@ -6856,6 +6858,25 @@ mod tests {
         a.task = crate::fit::task("coding");
         press(&mut a, "B");
         assert!(a.input == Input::None && a.status.starts_with("a task is in use"), "{}", a.status);
+    }
+
+    /// `]` `[` in the `B` list go round the benchmarks the columns show, as in `|`'s list.
+    #[test]
+    fn brackets_go_round_the_ticked_benchmarks() {
+        let mut a = app();
+        a.col = 0;
+        press(&mut a, "B");
+        let sel = |a: &App| match &a.input {
+            Input::Choose { kind: Kind::Bench, list, .. } => list.sel,
+            _ => panic!("{:?}", a.input),
+        };
+        // Each column shows its task's score, its first entry: 0, 5 and 10.
+        press(&mut a, "]");
+        assert_eq!(sel(&a), 5, "] to the next ticked one");
+        press(&mut a, "]]");
+        assert_eq!(sel(&a), 0, "wrapping from the last to the first");
+        press(&mut a, "[");
+        assert_eq!(sel(&a), 10, "[ the other way round");
     }
 
     #[test]
