@@ -4375,16 +4375,32 @@ mod tests {
         use std::io::{Read, Write};
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", server.local_addr().unwrap());
+        // It answers by the path asked for, not by the connection: a signal, as when a process
+        // another test started ends, can cut a read short, and the download is then asked for
+        // again on a new connection.
+        let (tx, gone) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for (stream, reply) in server.incoming().zip(["503 Busy", "200 OK", "404 Not Found", "200 OK"]) {
-                let mut stream = stream.unwrap();
-                let _ = stream.read(&mut [0; 1024]);
+            let mut busy = true;
+            for stream in server.incoming() {
+                let (mut stream, mut head) = (stream.unwrap(), [0; 1024]);
+                let n = stream.read(&mut head).unwrap_or(0);
+                let reply = if head[..n].starts_with(b"GET /gone ") {
+                    let _ = tx.send(());
+                    "404 Not Found"
+                } else if std::mem::take(&mut busy) {
+                    "503 Busy"
+                } else {
+                    "200 OK"
+                };
                 let _ = write!(stream, "HTTP/1.1 {reply}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
             }
         });
         let s5 = Duration::from_secs(5);
         assert_eq!(request(&url, None, s5).unwrap(), b"ok", "a 503 is tried again");
-        assert!(matches!(request(&url, None, s5), Err(ureq::Error::StatusCode(404))), "a 404 is not");
+        let missing = request(&format!("{url}gone"), None, s5);
+        // Asked for again only after a read cut short, not all the tries.
+        let asked = gone.try_iter().count();
+        assert!(matches!(missing, Err(ureq::Error::StatusCode(404))) && asked < TRIES as usize, "a 404 is not");
     }
 
     #[test]
@@ -4599,22 +4615,20 @@ mod tests {
 
     #[test]
     fn a_harness_is_logged_out_only_when_sure() {
-        use std::os::unix::fs::PermissionsExt;
         let home = std::env::temp_dir().join(format!("modelcmp-login-{}", std::process::id()));
-        let bin = home.join("bin");
-        for dir in [&bin, &home.join(".codex"), &home.join(".gemini")] {
+        for dir in [&home.join(".codex"), &home.join(".gemini")] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        // As the real ones answer, exiting 1: claude on stdout, codex on stderr.
-        for (name, says) in [("claude", r#"echo "{\"loggedIn\": $IN}""#), ("codex", r#"echo "$SAYS" >&2"#)] {
-            std::fs::write(bin.join(name), format!("#!/bin/sh\n{says}\nexit 1\n")).unwrap();
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        // As the real ones answer, exiting 1: claude on stdout, codex on stderr. Functions, not
+        // files: a file just written cannot run while a process another test starts still holds
+        // it open, and sh then runs the real one further on `PATH`.
+        let fakes = r#"claude() { echo "{\"loggedIn\": $IN}"; return 1; }; codex() { echo "$SAYS" >&2; return 1; }"#;
+        let path = std::env::var("PATH").unwrap_or_default();
         let out = |harness: &str, env: &[(&str, &str)]| {
             let Some((_, Probe::Provider(_, line))) = HARNESSES.iter().find(|h| h.0 == harness) else { panic!() };
             let mut sh = std::process::Command::new("sh");
-            sh.args(["-c", line]).env_clear().env("HOME", &home).env("PATH", &path).envs(env.iter().copied());
+            sh.args(["-c", &format!("{fakes}\n{line}")]);
+            sh.env_clear().env("HOME", &home).env("PATH", &path).envs(env.iter().copied());
             sh.status().unwrap().success()
         };
         let write = |file: &str, text: &str| std::fs::write(home.join(file), text).unwrap();
@@ -4759,13 +4773,18 @@ mod tests {
         let (go, dir, s5) = (&AtomicBool::new(false), std::env::temp_dir(), Duration::from_secs(5));
         let ask =
             |bin: &str, args: &[&str], limit, stop| answer(bin, args, &dir, "{\"id\":1}\n{\"id\":2}\n", 2, limit, stop);
-        // It answers once it has read both lines, after a notification and a request of its own.
+        // It answers once it has read both lines, after a notification and a request of its own,
+        // and once its input closes makes the file it is given.
         let cli = r#"read a; read b; echo '{"id":1,"result":1}'; echo '{"method":"session/update"}'
-            echo '{"id":2,"method":"ask"}'; echo "not json"; echo '{"id":2,"result":{"cwd":"'$PWD'"}}'; cat >/dev/null"#;
+            echo '{"id":2,"method":"ask"}'; echo "not json"; echo '{"id":2,"result":{"cwd":"'$PWD'"}}'
+            cat >/dev/null; : >"$1""#;
+        let ended = dir.join(format!("modelcmp-{}-ended", std::process::id()));
         let t = Instant::now();
-        let cwd = ask("sh", &["-c", cli], s5, go).map(|v| v["result"]["cwd"].as_str().map(PathBuf::from));
+        let cwd = ask("sh", &["-c", cli, "sh", ended.to_str().unwrap()], s5, go);
+        let cwd = cwd.map(|v| v["result"]["cwd"].as_str().map(PathBuf::from));
         assert_eq!(cwd.flatten().and_then(|p| p.canonicalize().ok()), dir.canonicalize().ok(), "run in its cwd");
-        assert!(t.elapsed() < Duration::from_secs(1), "it ends when its input closes, with no wait to kill it");
+        // By the file, not the time it took, which a busy machine stretches past any bound.
+        assert!(std::fs::remove_file(&ended).is_ok(), "it ends when its input closes, with no wait to kill it");
         assert_eq!(ask("sh", &["-c", "echo '{\"id\":1}'"], s5, go), None, "one that exits without answering");
         assert_eq!(ask("no-such-binary-xyz", &[], s5, go), None, "so does a missing harness");
         assert_eq!(ask("sleep", &["10"], Duration::from_millis(200), go), None, "a hang is killed");
