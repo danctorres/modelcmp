@@ -2415,7 +2415,8 @@ impl App {
         self.bounds.extend(saved.collect::<Vec<_>>());
     }
 
-    /// Recompute the visible rows after any filter, sort or data change, keeping the selection.
+    /// Recompute the visible rows after any filter or data change, in the sort's order, keeping
+    /// the selection.
     pub fn rebuild(&mut self) {
         self.keep_bounds();
         let marked = || self.data.models.iter().filter(|m| self.store.is_marked(&m.key));
@@ -2427,12 +2428,6 @@ impl App {
         let excluded = self.data.models.iter().enumerate().any(|(i, m)| self.in_excluded(i, m));
         (self.fav_shown, self.excluded_shown) = (fav, excluded);
         self.only = self.only.filter(|&i| [self.any_marked(), fav, excluded][i - MARKED]);
-        // The rows move, so the selection follows its models by key and drops the ones filtered out.
-        let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
-        let anchor = self.visual.and_then(key_of);
-        let range: Vec<String> = self.visual_range().into_iter().flatten().filter_map(key_of).collect();
-        let picked: Vec<String> = self.picked.iter().filter_map(|&k| key_of(k)).collect();
-        let keep = key_of(self.selected());
         let matching = |app: &Self| -> Vec<usize> { app.filtered(usize::MAX).map(|(i, _)| i).collect() };
         self.typos = false;
         let mut rows = matching(self);
@@ -2469,13 +2464,37 @@ impl App {
         let usable: Vec<bool> = self.data.models.iter().map(|m| self.usable(m)).collect();
         self.fronts = TASKS.iter().map(|t| self.front(t, pool, &usable)).collect();
         self.set_locals();
-        let ms = &self.data.models;
         // `F` and `E` keep theirs off the line too: one out of reach or excluded is on none.
         if let Some(t) = self.task.filter(|_| !matches!(self.only, Some(FAV | EXCLUDED))) {
             // The same line the recommend panel and `list --task` show.
             let front = &self.fronts[TASKS.iter().position(|x| x.name == t.name).unwrap_or(0)].0;
             rows.retain(|i| front.iter().any(|(k, _)| k == i));
         }
+        self.sort_rows(rows);
+        let ms = &self.data.models;
+        // Among the models to use: a muted row is grey throughout, so it holds no extreme, nor does a list price.
+        self.ext = std::array::from_fn(|c| {
+            if !COLS[c].ranked {
+                return None;
+            }
+            let own = |r: usize| !(self.listed[r] && on_price(c));
+            let mut it = self.rows.iter().filter(|&&r| !self.muted(&ms[r]) && own(r)).filter_map(|&r| self.vals[r][c]);
+            let first = it.next()?;
+            let (lo, hi) = it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            (lo != hi).then_some(if COLS[c].lower_better { (lo, hi) } else { (hi, lo) })
+        });
+    }
+
+    /// Puts `rows` in the sort's order as the table's, keeping the selection: all a sort changes,
+    /// as its rows are the same models.
+    fn sort_rows(&mut self, mut rows: Vec<usize>) {
+        // The rows move, so the selection follows its models by key and drops the ones filtered out.
+        let key_of = |k: usize| self.rows.get(k).and_then(|&i| self.data.models.get(i)).map(|m| m.key.clone());
+        let anchor = self.visual.and_then(key_of);
+        let range: Vec<String> = self.visual_range().into_iter().flatten().filter_map(key_of).collect();
+        let picked: Vec<String> = self.picked.iter().filter_map(|&k| key_of(k)).collect();
+        let keep = key_of(self.selected());
+        let ms = &self.data.models;
         if numeric(self.sort_col).is_some() {
             // Names breaking ties.
             rows.sort_by(|&a, &b| {
@@ -2505,17 +2524,6 @@ impl App {
                 rows.reverse();
             }
         }
-        // Among the models to use: a muted row is grey throughout, so it holds no extreme, nor does a list price.
-        self.ext = std::array::from_fn(|c| {
-            if !COLS[c].ranked {
-                return None;
-            }
-            let own = |r: usize| !(self.listed[r] && on_price(c));
-            let mut it = rows.iter().filter(|&&r| !self.muted(&ms[r]) && own(r)).filter_map(|&r| self.vals[r][c]);
-            let first = it.next()?;
-            let (lo, hi) = it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
-            (lo != hi).then_some(if COLS[c].lower_better { (lo, hi) } else { (hi, lo) })
-        });
         self.rows = rows;
         let pos = |k: &str| self.rows.iter().position(|&i| self.data.models[i].key == k);
         let sel = keep.and_then(|k| pos(&k)).unwrap_or(0);
@@ -4447,7 +4455,7 @@ impl App {
                     self.sort_col = self.col;
                     self.descending = numeric(self.col).is_some_and(|c| !c.lower_better);
                 }
-                self.rebuild();
+                self.sort_rows(self.rows.clone());
             }
             KeyCode::Char(c @ ('>' | '<')) if table && (numeric(self.col).is_some() || self.col == VIA) => {
                 self.input = Input::Bound { col: self.col, min: c == '>', text: String::new(), cur: 0 };
@@ -4805,12 +4813,15 @@ impl App {
             }
             // A new search starts empty; esc brings the previous one back.
             KeyCode::Char('/') => {
-                self.input = Input::Search { cur: 0, was: std::mem::take(self.search_target()) };
+                let was = std::mem::take(self.search_target());
+                // An empty search hides no row, so taking it changes none.
+                let cleared = !was.is_empty();
+                self.input = Input::Search { cur: 0, was };
                 let (hit, scroll, among, task_cur, task_sel) =
                     (self.hit.0, self.scroll, self.among, self.task_cur, self.task_sel);
                 let (help_sel, caps) = (self.help_sel, self.caps);
                 self.search_from = SearchFrom { hit, scroll, among, caps, task_cur, task_sel, help_sel };
-                if table {
+                if table && cleared {
                     self.rebuild();
                 }
             }
@@ -8289,6 +8300,17 @@ mod tests {
                 assert_eq!(now, before, "sorted by {}", a.col_name(col));
             }
         }
+    }
+
+    #[test]
+    fn a_sort_and_a_search_after_none_find_no_rows_again() {
+        let mut a = app();
+        // Finding the rows, the tasks' lines and the local bests is slow (`rebuild`), and a sort
+        // keeps the same models, as `/` does with no search to take away.
+        a.fronts.clear();
+        press(&mut a, "s/");
+        assert!(a.fronts.is_empty(), "no task's line is found again");
+        assert_eq!(keys(&a), ["mini", "gpt55", "opus5"], "the rows are sorted all the same");
     }
 
     #[test]
