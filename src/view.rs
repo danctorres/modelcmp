@@ -756,8 +756,8 @@ pub fn fav_pick(store: &Store, task: &str, tier: &str, m: &Model, one: bool) -> 
 /// to be near the best on (`fit::add_lag`), unless your favorites give its tiers models of their own.
 pub fn one_pick(task: &str, picks: &[Option<(&Model, f64)>; TIERS.len()]) -> bool {
     let key = |i: usize| picks[i].map(|e| e.0.key.as_str());
-    // `free` with no free model is no pick of its own.
-    task == "value" && (1..TIERS.len()).all(|i| key(i) == key(1)) && key(0).is_none_or(|free| Some(free) == key(1))
+    // A tier with no model, as `free` with no free one, is no pick of its own. The one is `high`'s.
+    task == "value" && (0..TIERS.len()).all(|i| key(i).is_none_or(|k| Some(k) == key(TIERS.len() - 1)))
 }
 
 /// `$1.5`, or `free`.
@@ -1662,6 +1662,18 @@ mod tests {
         assert_eq!(picked, Some("opus"), "your cap for mid");
         assert_eq!(key(&front[1..], "free"), None, "and none for free: it never costs");
         assert_eq!(key(&[], "low"), None);
+    }
+
+    /// Value's one model stays one pick when the tiers under its price have none, as free has
+    /// none with no free model, and it is high's pick, which the one box shows.
+    #[test]
+    fn a_tier_with_no_model_is_no_pick_of_its_own() {
+        let (m, other) = (Model { key: "argon".into(), ..Default::default() }, Model::default());
+        let (k, o) = (Some((&m, 0.0)), Some((&other, 0.0)));
+        assert!(one_pick("value", &[None, k, k, k]) && one_pick("value", &[None, None, k, k]), "none up to $2");
+        assert!(one_pick("value", &[None; TIERS.len()]), "no pick at all");
+        assert!(!one_pick("value", &[k, None, None, None]), "high has none");
+        assert!(!one_pick("value", &[None, o, k, k]) && !one_pick("coding", &[k; TIERS.len()]));
     }
 
     #[test]
