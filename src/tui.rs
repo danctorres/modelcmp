@@ -3896,7 +3896,11 @@ fn recommend(
     let cur = (app.among.is_none() && !app.caps).then_some((app.task_cur, app.task_sel));
     for (i, (t, row)) in tasks.iter().zip(grid).enumerate() {
         let y = v.len();
-        let name = truncate(t.0, w);
+        // Cut to the cells the column has, as it is sized: a wide character takes two.
+        let mut name = truncate(t.0, w);
+        while Span::raw(name.as_str()).width() > w {
+            name = truncate(&name, name.chars().count() - 1);
+        }
         let pad = w.saturating_sub(Span::raw(name.as_str()).width());
         let name = Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD));
         let mut first = cursor(cur == Some((i, 0)), lit_span(name, &app.overlay_query));
@@ -7350,6 +7354,26 @@ mod tests {
         // The key the warning names asks for it over the panel.
         a.key(KeyCode::Char('K').into());
         assert!(a.input != Input::None && a.view == View::Recommend, "{:?}", a.input);
+    }
+
+    #[test]
+    fn a_wide_task_name_keeps_its_boxes_under_the_tiers() {
+        let mut a = app();
+        // 13 characters in 26 cells, more than the 20 the names' column takes: cut, its ▾s are
+        // drawn where a click opens their dropdowns.
+        a.store.set_about("コードレビューと修正の作業", "reviewing code");
+        a.store.toggle_favorite("コードレビューと修正の作業:high", "opus");
+        a.view = View::Recommend;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 60)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let buf = term.backend().buffer();
+        let off: Vec<String> = (a.spots.iter())
+            .filter(|(r, s)| matches!(s, Stop::Menu(..)) && buf[(r.x, r.y)].symbol() != "▾")
+            .map(|(r, s)| format!("{s:?} at {},{} is on {:?}", r.x, r.y, buf[(r.x, r.y)].symbol()))
+            .collect();
+        assert!(off.is_empty(), "{}", off.join("\n"));
+        let lines = recommend(&a, 200, &mut vec![]).0;
+        assert!(lines.iter().any(|l| l.to_string().contains(" コードレビューと修… ")), "cut where it says so");
     }
 
     #[test]
