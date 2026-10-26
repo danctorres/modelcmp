@@ -3922,7 +3922,7 @@ impl App {
         // A prompt over the panel and the panel's filter take an esc of their own first. The
         // details' search is their own, the compare they were opened from getting its back as
         // esc leaves them. An entry or a note being written is only left, its panel staying open.
-        let writing = self.editing() || matches!(self.input, Input::Note { .. } | Input::Task(_));
+        let writing = self.editing() || matches!(self.input, Input::Note { .. } | Input::Task(_) | Input::Cap { .. });
         if m == Mouse::Close && !writing {
             // The key prompt stays open: closing it would skip the key, for Epoch AI. Not `K`'s.
             if !self.input.leavable() {
@@ -8097,6 +8097,21 @@ mod tests {
         assert!(a.caps, "and esc back to the header");
         a.mouse(Mouse::Model(Stop::Cap(2)));
         assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "a click on mid's header");
+    }
+
+    /// A click outside recommend while a tier cap is written only leaves the cap, as for a task's name.
+    #[test]
+    fn a_click_outside_recommend_only_leaves_the_tier_cap_being_written() {
+        let mut a = app();
+        press(&mut a, "Rjl");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "9");
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "59".into(), cur: 2 });
+        a.mouse(Mouse::Close);
+        assert_eq!((&a.view, &a.input, a.caps), (&View::Recommend, &Input::None, true), "still on mid's header");
+        assert_eq!(a.store.tier_cap("mid"), 5.0, "as it was");
+        a.mouse(Mouse::Close);
+        assert_eq!(a.view, View::Table, "the next click closes it");
     }
 
     #[test]
