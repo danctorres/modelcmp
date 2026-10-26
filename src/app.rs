@@ -5028,7 +5028,7 @@ impl App {
                     let (col, min, text) = (*col, *min, std::mem::take(text));
                     self.input = Input::None;
                     // Via's in GB, as its `↓` says the size.
-                    let gb = || text.parse().ok().filter(|v: &f64| *v >= 0.0);
+                    let gb = || text.parse().ok().filter(|v: &f64| v.is_finite() && *v >= 0.0);
                     match numeric(col).map_or_else(gb, |c| (c.read)(&text, !min)) {
                         Some(v) => {
                             let (lo, hi) = if min { (v, f64::INFINITY) } else { (f64::NEG_INFINITY, v) };
@@ -5470,7 +5470,16 @@ mod tests {
         press(&mut a, "<8");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), vec!["mini"], "the one over 8 GB and the one of unknown size hidden");
-        assert_eq!(view::bound_said("size", VIA, f64::NEG_INFINITY, 8.0, None), "size≤8.0 GB");
+        assert_eq!(
+            view::bound_said("Via", VIA, f64::NEG_INFINITY, 8.0, None),
+            "size≤8.0 GB",
+            "named size wherever said"
+        );
+        press(&mut a, "E");
+        let gpt = a.rows.iter().position(|&i| a.data.models[i].key == "gpt55").unwrap();
+        a.select(gpt);
+        assert_eq!(a.hidden_by().as_deref(), Some("size≤8.0 GB"), "E says why with the same words");
+        press(&mut a, "E");
         let asked: Vec<_> = a.size_ask().into_iter().map(|q| q.0).collect();
         assert_eq!(asked, ["opus5", "llama4"], "asked, hidden ones too");
         a.sized([("opus5", Download::Size(2_000_000_000))]);
@@ -5491,6 +5500,9 @@ mod tests {
         press(&mut a, ">1-2");
         code(&mut a, KeyCode::Enter);
         assert!(a.failed, "not a size");
+        press(&mut a, &format!("<{}", "9".repeat(310)));
+        code(&mut a, KeyCode::Enter);
+        assert!(a.failed && a.status.ends_with("not a valid value for size"), "nor one past f64: {}", a.status);
     }
 
     /// `--min ctx=600` and `--min ctx=600000` are the same 600,000 tokens.

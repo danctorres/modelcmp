@@ -1032,6 +1032,8 @@ pub fn bounds_said(store: &Store) -> impl Iterator<Item = String> {
 /// A bound as the status bar says it, `Coding≥60` or `Price≤2.0`, `name` the header of the
 /// column at cursor index `col`, `bench` picked in its dropdown.
 pub fn bound_said(name: &str, col: usize, lo: f64, hi: f64, bench: Option<&str>) -> String {
+    // Via's bound is on the download's size, wherever it is said.
+    let name = if col == crate::app::VIA { "size" } else { name };
     let (sign, v) = if lo.is_finite() { ("≥", lo) } else { ("≤", hi) };
     // The level label would repeat what the number says.
     let shown = match crate::app::numeric(col) {
