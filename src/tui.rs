@@ -19,6 +19,7 @@ use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, NO_ACCESS, OUT_OF_REACH, Palette, THEMES, TIERS, age, detail_rows, hits, level,
     level_label, short, truncate, verdict, via_names, via_text,
 };
+use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
@@ -30,9 +31,9 @@ use ratatui::layout::{Alignment, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::{Frame, Terminal};
 use std::collections::{BTreeMap, HashMap};
-use std::io::IsTerminal;
+use std::io::{BufWriter, IsTerminal, Stdout};
 use std::ops::Range;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,11 +94,14 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     if !ask && let Some(w) = app.store.warning.take() {
         app.report(Err(w));
     }
-    let mut terminal =
-        ratatui::try_init().map_err(|e| format!("the TUI needs a terminal ({e}), see modelcmp --help"))?;
+    // ratatui's setup (raw mode, the alternate screen, its panic hook), and a terminal of our own
+    // that writes each frame in one go.
+    let fail = |e| format!("the TUI needs a terminal ({e}), see modelcmp --help");
+    ratatui::try_init().map_err(fail)?;
     TAKEN.store(true, Ordering::SeqCst);
     #[cfg(unix)]
     restore_on_signals();
+    let mut terminal = Terminal::new(buffered(std::io::stdout())).map_err(fail)?;
     // ratatui's panic hook restores the terminal but leaves mouse reporting on, and bracketed
     // paste, which keeps pasted text (ctrl+v in some terminals) from arriving as keys. And the
     // cursor hidden, which only its terminal's drop shows again: a release build aborts instead.
@@ -147,6 +151,15 @@ fn restore_on_signals() {
         restore();
         std::process::exit(128 + sig);
     });
+}
+
+/// The terminal drawn on.
+type Term = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
+
+/// `out` behind a buffer that holds a whole frame, which ratatui flushes once it is drawn.
+/// `Stdout` alone passes a frame on a kilobyte at a time, a write(2) each.
+fn buffered<W: std::io::Write>(out: W) -> CrosstermBackend<BufWriter<W>> {
+    CrosstermBackend::new(BufWriter::with_capacity(1 << 17, out))
 }
 
 const REPO: &str = "https://github.com/danctorres/modelcmp";
@@ -462,7 +475,7 @@ fn wordmark(buf: &mut Buffer, a: Rect, (x, y, under, logo): At, typed: usize, st
 /// skips it, and is not passed on. A window too small for the wordmark has the small one, and one
 /// too small for that skips it too. On the first start it stops above the question that follows
 /// (`splash`), and stays.
-fn intro(app: &App, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+fn intro(app: &App, terminal: &mut Term) -> std::io::Result<()> {
     // The hue wheel up to the accent, so the last step into magenta is a small one.
     const RAINBOW: [Color; 5] = [Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue];
     /// Columns the rainbow crosses per frame.
@@ -553,7 +566,7 @@ type Upgrading = (Vec<Vec<String>>, Option<String>);
 
 fn event_loop(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Term,
     mut rx: Option<Refresh>,
     mut pre: Option<Refresh>,
 ) -> Result<Option<Upgrading>, String> {
@@ -869,7 +882,7 @@ fn off(
 }
 
 /// Draws the app, in the theme's colours.
-fn paint(terminal: &mut DefaultTerminal, app: &mut App) -> Result<(), String> {
+fn paint(terminal: &mut Term, app: &mut App) -> Result<(), String> {
     terminal
         .draw(|f| {
             draw(app, f);
@@ -6840,6 +6853,29 @@ mod tests {
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bar: String = (0..100).map(|x| edge(&term, x, 9)).collect();
         assert!(bar.starts_with(" HELP "), "{bar}");
+    }
+
+    #[test]
+    fn a_frame_reaches_the_terminal_in_one_write() {
+        // Each write as the terminal gets it, a write(2) on `Stdout`.
+        struct Writes<'a>(&'a std::cell::RefCell<Vec<usize>>);
+        impl std::io::Write for Writes<'_> {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().push(b.len());
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let writes = std::cell::RefCell::new(Vec::new());
+        let viewport = ratatui::Viewport::Fixed(Rect::new(0, 0, 200, 50));
+        let mut term =
+            Terminal::with_options(buffered(Writes(&writes)), ratatui::TerminalOptions { viewport }).unwrap();
+        term.draw(|f| draw(&mut app(), f)).unwrap();
+        let lens = writes.take();
+        assert_eq!(lens.len(), 1, "{lens:?}");
+        assert!(lens[0] > 1024, "more than `Stdout` holds: {lens:?}");
     }
 
     #[test]
