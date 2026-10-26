@@ -2891,7 +2891,7 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     let hide = &app.store.hide;
     let bounds = app.bounds.iter().filter(|b| crate::app::bound_applies(b.0, hide));
     let bounds =
-        bounds.map(|&(col, lo, hi)| crate::view::bound_said(app.col_name(col), col, lo, hi, app.col_bench(col)));
+        bounds.map(|&(col, lo, hi)| crate::view::bound_said(app.bound_name(col), col, lo, hi, app.col_bench(col)));
     for said in crate::view::picks_said(&app.store).into_iter().chain(bounds) {
         parts.push(part(said, Color::Yellow));
     }
@@ -2982,7 +2982,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         }
         Input::Note { text, cur, .. } => Some(("note: ".to_string(), text, *cur)),
         Input::Bound { col, min, text, cur } => {
-            Some((format!("{} {} ", app.col_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
+            Some((format!("{} {} ", app.bound_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
         }
         Input::Menu { col, list, .. } => Some(match (list.typing, list.query.is_empty()) {
             (false, true) => (format!("{} ▾", base_col_name(*col)), &list.query, list.cur),
@@ -3003,9 +3003,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         | Input::None => None,
     };
     if let Some((label, typed, cur)) = prompt {
-        // Ctx is bounded in thousands of tokens, as its cells read: `Ctx ≥ 200k`.
+        // Ctx is bounded in thousands of tokens, as its cells read: `Ctx ≥ 200k`, and Via by the
+        // download's size in GB, `size ≤ 8 GB`. The number stays as typed until enter.
         let unit = match app.input {
             Input::Bound { col, .. } if crate::app::numeric(col).is_some_and(|c| c.id == "ctx") => "k",
+            Input::Bound { col: VIA, .. } => " GB",
             _ => "",
         };
         // A choice list says its keys in its box, so the bar does not say them again.
@@ -3039,7 +3041,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         let hx = if fits { area.right() - (width(hint) as u16 + 1) } else { area.right() };
         // Text too long for the room scrolls sideways, so the cursor stays in view.
         let room = usize::from(hx.saturating_sub(x));
-        let start = scrolled(width(&label), typed, cur, room);
+        let start = scrolled(width(&label) + width(unit), typed, cur, room);
         let text = format!("{label}{}{unit}", &typed[start..]);
         put(buf, x, area.y, &text, room, Style::new());
         if fits {
@@ -6250,6 +6252,14 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
         assert_eq!(status(&mut buf, Rect::new(0, 0, 60, 1), &a), Some(8 + 6 + 3), "the k is after the cursor");
         assert_eq!((0..18).map(|x| buf[(x, 0)].symbol()).collect::<String>(), " BOUND  Ctx ≥ 200k", "in thousands");
+        a.input = Input::Bound { col: VIA, min: false, text: "8".into(), cur: 1 };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
+        assert_eq!(status(&mut buf, Rect::new(0, 0, 60, 1), &a), Some(8 + 7 + 1), "the GB is after the cursor");
+        assert_eq!(
+            (0..20).map(|x| buf[(x, 0)].symbol()).collect::<String>(),
+            " BOUND  size ≤ 8 GB ",
+            "the download's size"
+        );
     }
 
     #[test]

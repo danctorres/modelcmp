@@ -1791,6 +1791,12 @@ impl App {
         self.col_bench(col).unwrap_or_else(|| base_col_name(col))
     }
 
+    /// What a bound on the column at cursor index `col` is on, as the status bar and the errors
+    /// say it: `size` on Via, whose bound is the download's size, else `col_name`.
+    pub fn bound_name(&self, col: usize) -> &'static str {
+        if col == VIA { "size" } else { self.col_name(col) }
+    }
+
     /// What the column at cursor index `col` means.
     pub fn col_about(&self, col: usize) -> String {
         let about = match self.col_bench(col) {
@@ -5022,7 +5028,7 @@ impl App {
                     let (col, min, text) = (*col, *min, std::mem::take(text));
                     self.input = Input::None;
                     // Via's in GB, as its `↓` says the size.
-                    let gb = || text.parse().ok().filter(|v: &f64| !v.is_nan());
+                    let gb = || text.parse().ok().filter(|v: &f64| *v >= 0.0);
                     match numeric(col).map_or_else(gb, |c| (c.read)(&text, !min)) {
                         Some(v) => {
                             let (lo, hi) = if min { (v, f64::INFINITY) } else { (f64::NEG_INFINITY, v) };
@@ -5040,7 +5046,7 @@ impl App {
                             }
                         }
                         None if text.is_empty() => {}
-                        None => self.report(Err(format!("{text} is not a valid value for {}", self.col_name(col)))),
+                        None => self.report(Err(format!("{text} is not a valid value for {}", self.bound_name(col)))),
                     }
                     self.rebuild();
                 }
@@ -5425,7 +5431,7 @@ mod tests {
         press(&mut a, "<8");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), vec!["mini"], "the one over 8 GB and the one of unknown size hidden");
-        assert_eq!(view::bound_said("Via", VIA, f64::NEG_INFINITY, 8.0, None), "Via≤8.0 GB");
+        assert_eq!(view::bound_said("size", VIA, f64::NEG_INFINITY, 8.0, None), "size≤8.0 GB");
         let asked: Vec<_> = a.size_ask().into_iter().map(|q| q.0).collect();
         assert_eq!(asked, ["opus5", "llama4"], "asked, hidden ones too");
         a.sized([("opus5", Download::Size(2_000_000_000))]);
