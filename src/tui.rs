@@ -905,8 +905,8 @@ fn more_at(buf: &Buffer) -> Vec<(u16, u16, Mouse)> {
             }
             let (x, y) = buf.pos_of(i);
             let m = match cell.symbol() {
-                "▲" => Mouse::Scroll(-3),
-                "▼" => Mouse::Scroll(3),
+                "▲" => Mouse::Scroll(-1),
+                "▼" => Mouse::Scroll(1),
                 "‹" => Mouse::Cols(-1),
                 "›" => Mouse::Cols(1),
                 _ => return None,
@@ -5273,6 +5273,24 @@ mod tests {
         assert!(matches!(a.input, Input::Search { .. }));
         a.mouse(click(&a, -1).unwrap());
         assert_eq!(a.input, Input::None);
+    }
+
+    #[test]
+    fn a_click_on_the_down_marker_moves_one_page() {
+        // As `PgDn` does: a page, not the wheel's three of them.
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        data.models.extend((0..40).map(|i| model(&format!("m{i}"), "x", Some(i as f64), 1.0)));
+        a.set_data(data);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        a.more = more_at(term.backend().buffer());
+        let &(column, row, _) = a.more.iter().find(|&&(x, ..)| x == 0).expect("a ▼ on the left border");
+        let e =
+            MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
+        let before = a.table.selected().unwrap_or(0);
+        a.mouse(hit(&a, Rect::new(0, 0, 80, 16), e).unwrap());
+        assert_eq!(a.table.selected().unwrap_or(0) - before, a.page as usize);
     }
 
     #[test]
