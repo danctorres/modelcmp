@@ -1992,8 +1992,9 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
     }
     let buf = f.buffer_mut();
-    // Help shows over the panel it was opened from, as every box over what is behind it.
-    if app.view == View::Help {
+    // Help and the issues show over the panel they were opened from, as every box over what is
+    // behind it.
+    if matches!(app.view, View::Help | View::Issues) {
         app.under_help(|app| {
             panel(app, buf, area, body);
         });

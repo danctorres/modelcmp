@@ -1528,6 +1528,8 @@ pub struct App {
     back_query: (String, isize),
     /// What help was opened over, its scroll, search and match, for closing help to go back to.
     help_back: Option<(View, u16, String, isize)>,
+    /// What the issues were opened over, as `help_back` is for help.
+    issues_back: Option<(View, u16, String, isize)>,
     /// Which match of a panel's search `n` `N` are on, and whether the renderer has yet to
     /// scroll to it, as it alone knows which lines match. Recommend moves its own cursor.
     pub hit: (isize, bool),
@@ -1628,6 +1630,7 @@ impl App {
             overlay_query: String::new(),
             back_query: (String::new(), 0),
             help_back: None,
+            issues_back: None,
             hit: (0, false),
             search_from: SearchFrom::default(),
             page: 20,
@@ -3690,15 +3693,21 @@ impl App {
         keys.iter().find(|&(_, &k)| k == c).map(|(&d, _)| d).or((!keys.contains_key(&c)).then_some(c))
     }
 
-    /// Close help for what it was opened over, at its scroll and search.
+    /// What help, or the issues when they are open, were opened over.
+    fn back(&mut self) -> &mut Option<(View, u16, String, isize)> {
+        if self.view == View::Issues { &mut self.issues_back } else { &mut self.help_back }
+    }
+
+    /// Close help or the issues for what they were opened over, at its scroll and search.
     fn close_help(&mut self) {
-        let (view, scroll, query, hit) = self.help_back.take().unwrap_or((View::Table, 0, String::new(), 0));
+        let (view, scroll, query, hit) = self.back().take().unwrap_or((View::Table, 0, String::new(), 0));
         (self.view, self.scroll, self.overlay_query, self.hit.0) = (view, scroll, query, hit);
     }
 
-    /// `f` on what help was opened over, as it was, for drawing it behind help, which stays open.
+    /// `f` on what help or the issues were opened over, as it was, for drawing it behind them,
+    /// which stay open.
     pub fn under_help(&mut self, f: impl FnOnce(&mut Self)) {
-        let Some(mut back) = self.help_back.take() else { return };
+        let Some(mut back) = self.back().take() else { return };
         // A match help's search jumps to is help's to scroll to.
         let jump = std::mem::replace(&mut self.hit.1, false);
         let swap = |a: &mut Self, b: &mut (View, u16, String, isize)| {
@@ -3710,7 +3719,7 @@ impl App {
         swap(self, &mut back);
         f(self);
         swap(self, &mut back);
-        (self.hit.1, self.help_back) = (jump, Some(back));
+        (self.hit.1, *self.back()) = (jump, Some(back));
     }
 
     /// Enter on the row of `?` under the cursor: a key waits for its new one, `↺` puts every key
@@ -4503,7 +4512,7 @@ impl App {
                 } else if let View::Detail(Back::Recommend(scroll)) = self.view {
                     (self.view, self.scroll) = (View::Recommend, scroll);
                     (self.overlay_query, self.hit.0) = std::mem::take(&mut self.back_query);
-                } else if self.view == View::Help {
+                } else if matches!(self.view, View::Help | View::Issues) {
                     self.close_help();
                 } else if !table {
                     self.view = View::Table;
@@ -4525,9 +4534,11 @@ impl App {
             KeyCode::Char('!') if self.view != View::Issues && self.issues().is_none() => {
                 self.refuse("no issues to list");
             }
+            KeyCode::Char('!') if self.view == View::Issues => self.close_help(),
             KeyCode::Char('!') => {
-                self.view = if self.view == View::Issues { View::Table } else { View::Issues };
-                self.overlay_query.clear();
+                let view = std::mem::replace(&mut self.view, View::Issues);
+                let query = std::mem::take(&mut self.overlay_query);
+                self.issues_back = Some((view, self.scroll, query, self.hit.0));
                 self.scroll = 0;
             }
             KeyCode::Char('?') if self.view == View::Help => self.close_help(),
@@ -5533,6 +5544,28 @@ mod tests {
         assert_eq!(a.view, View::Recommend, "and from help's tab, a click outside");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "?");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Table, "from the table, back to it");
+    }
+
+    #[test]
+    fn closing_the_issues_goes_back_to_the_panel_they_were_opened_over() {
+        let mut a = app();
+        a.data.warning = Some("claude is not logged in".into());
+        press(&mut a, "R");
+        a.scroll = 3;
+        press(&mut a, "!");
+        assert_eq!((&a.view, a.scroll), (&View::Issues, 0));
+        press(&mut a, "!");
+        assert_eq!((&a.view, a.scroll), (&View::Recommend, 3), "! closes them for recommend");
+        press(&mut a, "!");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Recommend, "and so does esc");
+        press(&mut a, "!");
+        a.mouse(Mouse::Close);
+        assert_eq!(a.view, View::Recommend, "and a click outside");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "!");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table, "from the table, back to it");
     }
