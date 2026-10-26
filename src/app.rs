@@ -4868,12 +4868,14 @@ impl App {
                     KeyCode::Esc => {
                         *query = std::mem::take(was);
                         self.input = Input::None;
-                        // A panel goes back to where the search started, as in vim.
+                        // A panel goes back to where the search started, as in vim, with no match
+                        // count left in the status bar.
                         if overlay {
                             let SearchFrom { hit, scroll, among, caps, task_cur, task_sel, help_sel } =
                                 self.search_from;
                             (self.hit, self.scroll, self.among, self.caps) = ((hit, false), scroll, among, caps);
                             (self.task_cur, self.task_sel, self.help_sel) = (task_cur, task_sel, help_sel);
+                            self.status.clear();
                             return None;
                         }
                     }
@@ -5872,6 +5874,19 @@ mod tests {
         assert_eq!((&a.view, a.overlay_query.as_str()), (&View::Help, ""), "esc clears the search first");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Table);
+    }
+
+    #[test]
+    fn esc_on_a_panel_search_being_typed_leaves_no_match_count() {
+        let mut a = app();
+        // In the help and in recommend, the count of a search esc took back goes with it.
+        for keys in ["?/sort", "R/reason"] {
+            press(&mut a, keys);
+            assert!(a.status.starts_with("match 1 of "), "{keys}: {}", a.status);
+            code(&mut a, KeyCode::Esc);
+            assert_eq!((a.overlay_query.as_str(), a.status.as_str()), ("", ""), "{keys}");
+            code(&mut a, KeyCode::Esc);
+        }
     }
 
     #[test]
