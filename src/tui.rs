@@ -3554,10 +3554,12 @@ fn scrolled(before: usize, text: &str, cur: usize, room: usize) -> usize {
     start
 }
 
-/// Where an overlay with these lines sits: centred, as wide as its widest line or title.
+/// Where an overlay with these lines sits: centred, as wide as its widest line or title, or as
+/// `area` where that would leave one cell on a side, the table's border showing there by its own.
 fn overlay_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
     let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
-    let w = (widest + 4).max(title.chars().count() as u16 + 6).min(area.width);
+    let w = (widest + 4).max(title.chars().count() as u16 + 6);
+    let w = if w + 4 > area.width { area.width } else { w };
     let h = (lines.len() as u16 + 2).min(area.height);
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
@@ -6996,6 +6998,25 @@ mod tests {
         .unwrap();
         let left: Vec<_> = (r.y..r.bottom()).map(|y| term.backend().buffer()[(r.x, y)].symbol()).collect();
         assert_eq!(left, ["╭", "│", "╰"]);
+    }
+
+    #[test]
+    fn a_box_nearly_as_wide_as_the_screen_spans_it() {
+        // Recommend wraps its text to the screen, which leaves its box a cell or so short of it
+        // at many widths: there it spans the screen, so the table's border shows nowhere beside
+        // the box's own, as `╮╮` or `││`.
+        let mut a = app();
+        a.view = View::Recommend;
+        for w in 60..=200 {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 30)).unwrap();
+            term.draw(|f| draw(&mut a, f)).unwrap();
+            let row = text(term.backend().buffer()).into_iter().find(|l| l.contains("╭ recommend ")).unwrap();
+            // Its corners, by cell: the row has no wide character.
+            let cells: Vec<char> = row.chars().collect();
+            let left = row[..row.find("╭ recommend ").unwrap()].chars().count();
+            let right = usize::from(w) - 1 - (left..cells.len()).find(|&x| cells[x] == '╮').unwrap();
+            assert!((left, right) == (0, 0) || left.min(right) >= 2, "{w} wide: {row}");
+        }
     }
 
     #[test]
