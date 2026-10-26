@@ -502,6 +502,10 @@ fn gguf_named(list: &[u8], base: &str, key: &str) -> Option<String> {
 
 /// A file of modelcmp's cache folder.
 fn cache_file(name: &str) -> PathBuf {
+    // Tests keep a cache of their own, never reading or writing yours.
+    #[cfg(test)]
+    return std::env::temp_dir().join("modelcmp-test").join(name);
+    #[cfg(not(test))]
     dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("modelcmp").join(name)
 }
 
@@ -1916,12 +1920,19 @@ fn progress_text(total: usize, awaited: &[&str]) -> String {
     if names.is_empty() || names.len() > 2 { count } else { format!("{count}, waiting for {}", names.join(", ")) }
 }
 
+/// `refresh_held` under the cache's lock: the TUI's refresh and a command's (`load`) run one at
+/// a time, and a command that comes second reads what the first wrote.
+pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
+    let _held = crate::store::lock(&cache_path(source()));
+    refresh_held(steps, early)
+}
+
 /// Download the sources and ask the harnesses in parallel, merge, write cache. `steps` counts
 /// them for `progress`. `early` gets the data as soon as it is downloaded, when harnesses are
 /// still listing their models, which have the ones the cache had until the whole answer: they
 /// are not waited for to show the rest. Nor is Arena's leaderboard, whose column has the scores
 /// the cache had until it is in.
-pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
+fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
     load_repos();
     let src = source();
     // Asked for under Epoch too when it is there: one refresh serves both sources.
@@ -2348,7 +2359,7 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
             };
             // A refresh can take up to a minute, which with nothing said looks like a hang.
             eprintln!("downloading model data, cached for 24h...");
-            match refresh(&Steps::default(), None::<fn(Data)>) {
+            match refresh_held(&Steps::default(), None::<fn(Data)>) {
                 Ok(mut d) => {
                     let w = d.warning.take();
                     Ok((d, w))
@@ -4525,6 +4536,22 @@ mod tests {
         crate::store::write_atomic(&p, b"{}").unwrap();
         assert_ne!(written(&p), read, "written again, though with the same bytes");
         std::fs::remove_file(p).unwrap();
+    }
+
+    /// A refresh waits for the one under way, the TUI's as a command's: two at once would each
+    /// download everything and ask every harness, and a command would not read what the first wrote.
+    #[test]
+    fn a_refresh_waits_for_the_one_under_way() {
+        let held = crate::store::lock(&cache_path(Source::Aa)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Artificial Analysis without a key: it ends as soon as it has the lock, with no download.
+            set_source(Source::Aa);
+            let _ = tx.send(refresh(&Steps::default(), None::<fn(Data)>).err());
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "it waits while the lock is held");
+        drop(held);
+        assert_eq!(rx.recv().unwrap(), Some(Failure::NoKey));
     }
 
     #[test]
