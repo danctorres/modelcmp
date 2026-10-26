@@ -1231,11 +1231,14 @@ pub fn detail_rows(
             used.extend(used_benches(t));
         }
     }
-    let mut other = m.scores.iter().filter(|(b, _)| !used.contains(&b.as_str())).peekable();
-    if other.peek().is_some() {
-        v.push(String::new());
-        v.push(format!("  other benchmarks ({}, best reasoning setting):", source.label()));
-        v.extend(other.map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
+    let mine = m.scores.iter().filter(|(b, _)| !used.contains(&b.as_str())).collect();
+    // Then every one of the other source's, with its data at hand too, as a task column can show them.
+    for (src, other) in [(source, mine), (source.other(), m.other_scores.iter().collect::<Vec<_>>())] {
+        if !other.is_empty() {
+            v.push(String::new());
+            v.push(format!("  other benchmarks ({}, best reasoning setting):", src.label()));
+            v.extend(other.into_iter().map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
+        }
     }
     v.push(String::new());
     // A page per line, as the details panel cuts a line at its width. Down here, as `o` opens them.
@@ -1586,6 +1589,18 @@ mod tests {
         assert_eq!(at("    FrontierSWE"), at("  other benchmarks") + 1, "not the task's score");
         assert_eq!(at("    scicode"), at("  other benchmarks") + 2);
         assert!(!lines.iter().any(|l| l.starts_with("    FrontierCode")), "the task's score, the same number again");
+    }
+
+    /// With both sources' data a task column can show the other's benchmarks, so the details list them too.
+    #[test]
+    fn details_list_the_other_sources_benchmarks_too() {
+        let scores = [("FrontierSWE".to_string(), 0.4)].into();
+        let other_scores = [("scicode".to_string(), 0.669)].into();
+        let m = Model { scores, other_scores, ..Default::default() };
+        let lines = detail_lines(&m, &Store::default(), false);
+        let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
+        assert_eq!(at("    FrontierSWE"), at("  other benchmarks (Epoch AI") + 1);
+        assert_eq!(lines[at("  other benchmarks (Artificial Analysis") + 1], format!("    {:<36} 66.9%", "scicode"));
     }
 
     #[test]
