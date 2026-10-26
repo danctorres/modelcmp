@@ -4747,8 +4747,9 @@ impl App {
                     let line = self.custom_at().map_or(vec![], |t| self.custom_line(t));
                     let first = line.first().map(|m| (m.key.clone(), m.name.clone()));
                     let key = first.as_ref().map(|(k, _)| k.clone());
-                    // A built-in task picked before would keep the table to its line, as esc undoes.
-                    if self.task.take().is_some() {
+                    // With no model to go to, recommend stays on the task, where d on a tier gives it
+                    // one. A built-in task picked before would keep the table to its line, as esc undoes.
+                    if first.is_some() && self.task.take().is_some() {
                         (self.sort_col, self.descending) = default_sort();
                         self.rebuild();
                     }
@@ -4763,7 +4764,9 @@ impl App {
                         }
                         (None, _) => Err(format!("{task} has no model you can use")),
                     });
-                    self.view = View::Table;
+                    if first.is_some() {
+                        self.view = View::Table;
+                    }
                     if let Some(n) = row {
                         self.deselect();
                         self.select(n);
@@ -7715,6 +7718,21 @@ mod tests {
         let mut a = app();
         press(&mut a, "j ggC");
         assert_eq!((press(&mut a, "e"), a.store.excluded.is_empty()), (None, true));
+    }
+
+    #[test]
+    fn enter_on_a_task_of_your_own_with_no_model_stays_in_recommend() {
+        let mut a = app();
+        a.store.set_about("tool-dispatch", "routing tool calls");
+        a.rebuild();
+        // Recommend stays open, where d on a tier gives it one, and the table keeps the line of
+        // the built-in task picked before.
+        press(&mut a, "R2gg");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "RGk");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((&a.view, a.custom_at(), a.task.is_some()), (&View::Recommend, Some("tool-dispatch"), true));
+        assert_eq!(a.status, "tool-dispatch has no model yet, press d on a tier to choose one");
     }
 
     #[test]
