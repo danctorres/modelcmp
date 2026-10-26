@@ -598,6 +598,12 @@ pub fn list(data: &Data, store: &Store, o: &ListOpts) -> Result {
 /// with the same model share a line, and tasks with the same lines share them (`grouped`).
 /// The models `not` names are left out, as ones a note rules out.
 pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result {
+    println!("{}", picked(data, store, o, not)?.join("\n"));
+    Ok(())
+}
+
+/// The lines `pick` prints.
+fn picked(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result<Vec<String>> {
     let not = not.iter().map(|q| Ok(resolve(data, q)?.key.clone())).collect::<Result<Vec<_>>>()?;
     let store = &flagged(store, o);
     say_filters(store, "--via and --min");
@@ -632,8 +638,9 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
                 ..o.clone()
             };
             let line = tier_line(data, store, &o, &known)?;
-            // Most tasks have no free model: no line for it, unless it is the tier asked for.
-            if *tier == TIERS[0].0 && !asked && line.starts_with(NO_MODEL) {
+            // Most tasks have no free model: no line for it, unless it is the tier asked for or
+            // has your favorite on another harness.
+            if *tier == TIERS[0].0 && !asked && !has_model(&line) {
                 continue;
             }
             match lines.last_mut() {
@@ -641,8 +648,7 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
                 _ => lines.push(((*tier).into(), line)),
             }
         }
-        // A favorite on another harness is a model too, and its line the one to relay.
-        found |= lines.iter().any(|(_, l)| !l.starts_with(NO_MODEL) || l.contains("★ favorite"));
+        found |= lines.iter().any(|(_, l)| has_model(l));
         said.push((format!("{name}: {when}"), lines.iter().map(|(tiers, l)| format!("  {tiers}  {l}")).collect()));
     }
     // `no model` on every line would send an agent from task to task for nothing.
@@ -656,8 +662,13 @@ pub fn pick(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result 
         let why = if local { ". A model your machine runs is only picked as a favorite (modelcmp fav)" } else { "" };
         return Err(format!("no task has a model for this request{why}. Do not choose a model, tell the user").into());
     }
-    println!("{}", grouped(said).join("\n"));
-    Ok(())
+    Ok(grouped(said))
+}
+
+/// Whether a line of `pick` has a model to run: a favorite on another harness is a model too,
+/// and its line the one to relay.
+fn has_model(line: &str) -> bool {
+    !line.starts_with(NO_MODEL) || line.contains("★ favorite")
 }
 
 /// The lines of `pick`: each task's head, then its tiers' lines. Tasks with the same lines are
@@ -1719,6 +1730,25 @@ mod tests {
             assert_eq!(run(cmd), Some(format!("{QUIET} {said} \"<prompt>\"")));
         }
         assert_eq!(run(&["llama-server", "-hf", "a/b"]), None, "a server runs no prompt");
+    }
+
+    /// `pick --via pi` keeps the free line of a favorite only another harness has, though pi has
+    /// no free model: the line says where the favorite runs, as on the other tiers.
+    #[test]
+    fn pick_keeps_the_free_line_of_a_favorite_on_another_harness() {
+        let mut data = Data { models: vec![model("mini", 60.0, 0.0), model("gpt55", 90.0, 2.0)], ..Default::default() };
+        for (m, h) in data.models.iter_mut().zip(["opencode", "pi"]) {
+            (m.available, m.via, m.offers[0].via) = (true, vec![h.into()], vec![h.into()]);
+        }
+        let mut store = Store::default();
+        store.set_favorite("coding:free", "mini");
+        let o = ListOpts { custom: Some("coding".into()), via: vec!["pi".into()], ..Default::default() };
+        on_via(&mut data, &o.via);
+        let lines = picked(&data, &store, &o, &[]).ok().unwrap();
+        let free = format!(
+            "  free  no model  (★ favorite mini is not on pi, run it with: {QUIET} opencode run --model p/mini \"<prompt>\")"
+        );
+        assert!(lines.contains(&free), "{lines:?}");
     }
 
     /// A model on your machine that scores higher than the free tier's pick takes it, run on
