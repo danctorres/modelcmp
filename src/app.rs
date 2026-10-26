@@ -3091,10 +3091,14 @@ impl App {
     /// `f`: favorite the model `key` for the slot, a task, one tier of it or a task of your own,
     /// or unfavorite it when it already is.
     fn fav(&mut self, key: &str, task: &str) -> Option<Effect> {
-        let m = self.data.models.iter().find(|m| m.key == key)?;
-        let name = m.name.clone();
+        let m = self.data.models.iter().find(|m| m.key == key);
+        // A favorite whose model has left the data is still cleared, named by its key.
+        if m.is_none() && self.store.favorite(task) != Some(key) {
+            return None;
+        }
+        let name = m.map_or(key, |m| &m.name).to_string();
         // A tier is a budget: a model dearer than it is no favorite for it.
-        if let Err(why) = crate::view::can_fav(&self.store, task, m) {
+        if let Some(Err(why)) = m.map(|m| crate::view::can_fav(&self.store, task, m)) {
             self.refuse(why);
             return None;
         }
@@ -4361,8 +4365,10 @@ impl App {
                 self.refuse(NO_ACCESS);
                 return None;
             }
-            // A tab's key leaves recommend for it, as a click on it does.
-            (KeyCode::Char(c), _) if self.view == View::Recommend && TABS[..RECOMMEND].iter().any(|t| t.1 == c) => {
+            // A tab's key leaves recommend for it, as a click on it does, theme's too.
+            (KeyCode::Char(c), _)
+                if self.view == View::Recommend && TABS[..RECOMMEND].iter().chain([&TABS[THEME]]).any(|t| t.1 == c) =>
+            {
                 return self.set_tab(TABS.iter().position(|t| t.1 == c).unwrap_or(MINE));
             }
             (KeyCode::Char('<'), _) if self.view == View::Recommend => {
@@ -7638,6 +7644,8 @@ mod tests {
         assert_eq!((&a.view, a.all), (&View::Table, true));
         press(&mut a, "RS");
         assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, NO_SELECTED), "an empty one keeps the panel");
+        press(&mut a, "t");
+        assert!(a.view == View::Table && a.theme_preview().is_some(), "theme's key opens its list over the table");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "m");
         press(&mut a, "R2gg");
@@ -8259,6 +8267,22 @@ mod tests {
         );
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         assert_eq!(a.store.favorite("coding:mid"), Some("gpt55"));
+    }
+
+    #[test]
+    fn d_clears_a_favorite_whose_model_left_the_data() {
+        let mut a = app();
+        // Its model gone, as a harness logged out takes its models: recommended clears it all the same.
+        a.store.set_favorite("coding:high", "gone");
+        a.rebuild_in_place();
+        press(&mut a, "Rjj");
+        (a.task_cur, a.task_sel) = (TASKS.iter().position(|t| t.name == "coding").unwrap(), 4);
+        press(&mut a, "d");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!(
+            (a.store.favorite("coding:high"), a.status.as_str()),
+            (None, "gone is no longer the favorite for coding:high")
+        );
     }
 
     #[test]
