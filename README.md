@@ -103,7 +103,7 @@ recommend or in the grid `f` opens on a model, or use the command line:
 
 ```sh
 modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"   # a new task, with its model
-modelcmp fav debugging 3.7-flash --tier low                                      # a cheaper model for its low tier
+modelcmp fav debugging gemini-3.7-flash --tier low                               # a cheaper model for its low tier
 ```
 
 Agents choose a task by what you wrote in `--about`, and your tasks show up last in recommend.

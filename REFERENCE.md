@@ -175,13 +175,13 @@ modelcmp note sonnet-5 "fast enough for refactors"
 modelcmp exclude llama-4-maverick              # have it, can't use it
 modelcmp harness opencode                      # your default harness (`P` in the TUI)
 modelcmp harness claude opus-5.5 sonnet-5      # the harness these run on (`H` in the TUI)
-modelcmp fav coding 3.7-flash --tier low       # your favorite for one tier of a task, at its price or under
+modelcmp fav coding gemini-3.7-flash --tier low   # your favorite for one tier of a task, at its price or under
 modelcmp tier mid 8                            # mid takes models up to $8, `modelcmp tier` shows every cap
 
 # tasks of your own
 modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"
 modelcmp fav debugging --about "bugs and flaky tests"   # rewrite what it is about, "" clears it
-modelcmp fav debugging 3.7-flash --tier low    # its model for one tier
+modelcmp fav debugging gemini-3.7-flash --tier low   # its model for one tier
 modelcmp fav debugging --rename triage         # another name, its models stay
 
 # recommendations
