@@ -56,6 +56,7 @@ The source in use is Artificial Analysis when its key is there and works, else E
   agent session. `%` in the TUI or `--cache` changes the share.
 - A provider without a cache price pays full input.
 - A provider that charges more past a context size is priced as at 100k tokens.
+- A provider that charges more for output while the model thinks is priced at that.
 - A price after a `~` is other providers' list price, as yours lists none.
 
 ### Task columns

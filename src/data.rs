@@ -100,8 +100,9 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// 32: a row keeps the vendor most offers name it with. 33: an Arena row dated in brackets is of
 /// that release. 34: Artificial Analysis's scores too are of the release a row's offers are, an
 /// Arena name with its vendor first is of its model, a merged row takes its dated release's Arena
-/// rating, and volcengine's ids are ByteDance's.
-const FORMAT: u32 = 34;
+/// rating, and volcengine's ids are ByteDance's. 35: an offer's output is at its reasoning price
+/// where that is higher.
+const FORMAT: u32 = 35;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -3482,6 +3483,8 @@ struct MdLimit {
 struct MdCost {
     input: f64,
     output: f64,
+    /// The output's price while the model thinks, when it differs.
+    reasoning: Option<f64>,
     cache_read: Option<f64>,
     #[serde(deserialize_with = "tiers")]
     tiers: Vec<MdTier>,
@@ -3500,6 +3503,7 @@ fn tiers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<MdTier>, D::Error
 struct MdTier {
     input: Option<f64>,
     output: Option<f64>,
+    reasoning: Option<f64>,
     cache_read: Option<f64>,
     tier: MdTierFrom,
 }
@@ -3522,16 +3526,22 @@ impl MdCost {
     /// (input, output, cache read) at `AGENT_CONTEXT`: of the last tier it reaches, else the
     /// first prices. A tier never costs less, so one priced below them is none. Its cache price
     /// is its own: without one the cache costs as input, not the first prices' cache, unless
-    /// the input's price stays too.
+    /// the input's price stays too. The output is at the reasoning price where that is higher, as
+    /// an agent runs the model thinking: Alibaba bills all of such a reply at it. A lower one,
+    /// Perplexity's for the thinking apart from the answer, or a 0 placeholder, is none.
     fn agent(&self) -> (f64, f64, Option<f64>) {
-        let prices = |t: &MdTier| (t.input.unwrap_or(self.input), t.output.unwrap_or(self.output));
+        let thinking = |output: f64, reasoning: Option<f64>| output.max(reasoning.unwrap_or(0.0));
+        let output = thinking(self.output, self.reasoning);
+        let prices = |t: &MdTier| {
+            (t.input.unwrap_or(self.input), thinking(t.output.unwrap_or(self.output), t.reasoning.or(self.reasoning)))
+        };
         let reached = |t: &&MdTier| {
-            let (input, output) = prices(t);
-            t.tier.kind == "context" && t.tier.size <= AGENT_CONTEXT && input >= self.input && output >= self.output
+            let (input, out) = prices(t);
+            t.tier.kind == "context" && t.tier.size <= AGENT_CONTEXT && input >= self.input && out >= output
         };
         match self.tiers.iter().filter(reached).max_by(|a, b| a.tier.size.total_cmp(&b.tier.size)) {
             Some(t) => (prices(t).0, prices(t).1, t.cache_read.or(self.cache_read.filter(|_| t.input.is_none()))),
-            None => (self.input, self.output, self.cache_read),
+            None => (self.input, output, self.cache_read),
         }
     }
 }
@@ -6034,6 +6044,25 @@ mod tests {
         assert_eq!(price("m4"), (1.0, 2.0, None), "tiers in another shape are none, and the rest is read");
         assert_eq!(price("m5"), (2.0, 2.0, None), "a price the tier does not list stays as it was");
         assert_eq!(price("m6"), (1.0, 4.0, Some(0.1)), "the input's too, and its cache price with it");
+    }
+
+    #[test]
+    fn a_reply_costs_its_thinking_price() {
+        // Alibaba bills all of a thinking reply at its reasoning price, as an agent runs the model
+        // its scores are of. Perplexity's lower one is for the thinking apart from the answer, and
+        // a 0 is a placeholder.
+        let json = br#"{"p": {"models": {
+            "q-1": {"name": "Q 1", "cost": {"input": 0.4, "output": 1.2, "reasoning": 4}},
+            "q-2": {"name": "Q 2", "cost": {"input": 0.4, "output": 1.2, "reasoning": 4, "tiers": [
+                {"input": 0.8, "output": 2.4, "reasoning": 8, "tier": {"type": "context", "size": 32000}}]}},
+            "s-1": {"name": "S 1", "cost": {"input": 2, "output": 8, "reasoning": 3}},
+            "o-1": {"name": "O 1", "cost": {"input": 4, "output": 20, "reasoning": 0}}}}}"#;
+        let d = merge(json, &Scores::default(), None).unwrap();
+        let output = |k: &str| d.models.iter().find(|m| m.key == k).unwrap().offers[0].output;
+        assert_eq!(output("q1"), 4.0);
+        assert_eq!(output("q2"), 8.0, "a tier's own, as the session reaches it");
+        assert_eq!(output("s1"), 8.0, "the answer still costs its output price");
+        assert_eq!(output("o1"), 20.0);
     }
 
     #[test]
