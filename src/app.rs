@@ -4140,8 +4140,13 @@ impl App {
                 self.deselect();
                 self.select(n);
                 let m = self.current()?;
-                let h = m.via.get(j)?;
-                return launch_cmd(m, h, &self.data.harness).map(Effect::Launch);
+                let cmd = Effect::Launch(launch_cmd(m, m.via.get(j)?, &self.data.harness)?);
+                // As `x` and a pick of the harness, which asks the folder on its entry.
+                let size = self.table_key(KeyCode::Char('x'), 1);
+                if let Input::Choose { items, list, .. } = &mut self.input {
+                    list.sel = items.iter().position(|(_, e)| *e == cmd)?;
+                }
+                return self.input_key(KeyCode::Enter, KeyModifiers::NONE).or(size);
             }
             Mouse::Cell(n, col) if n < self.rows.len() => {
                 self.deselect();
@@ -6855,6 +6860,23 @@ mod tests {
         a.select(llama);
         assert_eq!(press(&mut a, "x"), None);
         assert!(a.status.starts_with("no harness has"), "{}", a.status);
+    }
+
+    /// A double click on a harness in Via is `x` and a pick of it, so it asks the folder too.
+    #[test]
+    fn a_double_click_on_a_harness_asks_the_folder_as_x_does() {
+        let mut a = app();
+        for m in &mut a.data.models {
+            let via = m.via.clone();
+            m.offers[0].via = via;
+        }
+        a.dir = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(a.mouse(Mouse::Harness(0, 1)), None, "nothing opens yet");
+        let edit = a.open_list().and_then(|l| Some((l.sel, l.edit.as_ref()?.text.clone())));
+        assert_eq!(edit, Some((1, a.dir.clone())), "the folder is written on opencode's entry");
+        let here = std::fs::canonicalize(&a.dir).unwrap().to_string_lossy().into_owned();
+        let run = vec!["opencode".into(), "--model".into(), "p/gpt55".into()];
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::LaunchIn(here, run)), "enter opens it there");
     }
 
     /// `B` finds a benchmark of any task column, from any column, and shows it in its own.
