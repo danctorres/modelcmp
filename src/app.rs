@@ -5182,6 +5182,45 @@ impl App {
                 match code {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     KeyCode::Char('q') if list.idle() => self.ask_quit(),
+                    // `y` copies the name of the model a list is about and `Y` its id, as on a row:
+                    // the entry's in `f`'s grid and a tier's dropdown, else the row's. In `x`'s
+                    // list `y` copies the command under the cursor, a download's without the
+                    // TUI's `--pause`, and `Y` the id its harness takes.
+                    KeyCode::Char(c @ ('y' | 'Y'))
+                        if list.idle()
+                            && matches!(kind, Kind::Fav | Kind::Open | Kind::Launch | Kind::Via | Kind::Pick) =>
+                    {
+                        let (_, e) = items.get(at?)?;
+                        let key = match e {
+                            Effect::Launch(cmd) if c == 'y' => {
+                                let shown: Vec<_> = cmd.iter().filter(|a| *a != "--pause").cloned().collect();
+                                return Some(Effect::Copy(shown.join(" ")));
+                            }
+                            Effect::Launch(cmd) => match got(e) {
+                                Some(k) => k.to_string(),
+                                None => return Some(Effect::Copy(cmd.last()?.clone())),
+                            },
+                            Effect::Pick(_, Some(key)) | Effect::Fav(key, _) => key.clone(),
+                            // `recommended:` names the tier's pick with no favorite.
+                            Effect::Pick(..) => {
+                                let (_, tier) = self.tier_at()?;
+                                let picked = self.cur_task().and_then(|t| self.recommended(t, TIERS[tier].0).0);
+                                let Some((m, _)) = picked else {
+                                    self.refuse("this tier recommends no model");
+                                    return None;
+                                };
+                                m.key.clone()
+                            }
+                            _ => self.current()?.key.clone(),
+                        };
+                        let m = self.data.models.iter().find(|m| m.key == key)?;
+                        return Some(Effect::Copy(if c == 'y' {
+                            m.name.clone()
+                        } else {
+                            let capped = self.capped(m);
+                            harness_id(&self.store, capped.as_ref().unwrap_or(m), &[], &self.data.harness)
+                        }));
+                    }
                     // Space ticks a column and keeps the list open, as in f's grid, and so does enter.
                     KeyCode::Char(' ') | KeyCode::Enter if *kind == Kind::Cols && !list.typing => {
                         let Some((_, Effect::Col(c))) = items.get(at?) else { return None };
@@ -6690,7 +6729,10 @@ mod tests {
         let get = |k: &str| Effect::Launch(["modelcmp", "get", k, "--via", "ollama"].map(String::from).to_vec());
         let run = Effect::Launch(vec!["codex".into(), "--model".into(), "mini".into()]);
         let items = vec![("codex".to_string(), run), ("get".into(), get("mini")), ("other".into(), get("llama4"))];
-        a.input = Input::choose("open in which harness?", Kind::Launch, items, 0);
+        a.input = Input::choose("open in which harness?", Kind::Launch, items, 1);
+        let got = Some(Effect::Copy("modelcmp get mini --via ollama".into()));
+        assert_eq!(press(&mut a, "y"), got, "y on a download copies its command, without the TUI's --pause");
+        assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/mini".into())), "Y the model's id");
         a.sized([("mini", Download::Size(2_500_000_000))]);
         a.sized([("llama4", Download::Gone)]);
         let Input::Choose { items, .. } = &a.input else { panic!("the list stays open") };
@@ -8007,6 +8049,9 @@ mod tests {
             _ => None,
         };
         assert!(sel(&a).is_some_and(|c| c.starts_with("opencode")), "{:?}", sel(&a));
+        let cmd = sel(&a).unwrap();
+        assert_eq!(press(&mut a, "y"), Some(Effect::Copy(cmd)), "y in the list copies its command");
+        assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/mini".into())), "Y the id it takes");
         code(&mut a, KeyCode::Esc);
         assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/mini".into())), "opencode's id");
         // In the table, with no tier, x starts on your default.
@@ -8238,6 +8283,11 @@ mod tests {
         let Effect::Pick(_, Some(key)) = &items.last().unwrap().1 else { panic!() };
         let key = key.clone();
         assert_ne!(Some(&key), was.as_ref(), "the worst is not the pick");
+        let top = a.recommended(a.cur_task().unwrap(), "high").0.map(|(m, _)| m.name.clone());
+        assert_eq!(press(&mut a, "y"), top.map(Effect::Copy), "y on recommended copies that model's name");
+        let worst = a.data.models.iter().find(|m| m.key == key).unwrap().name.clone();
+        assert_eq!(press(&mut a, "Gy"), Some(Effect::Copy(worst)), "y in the dropdown copies its model's name");
+        press(&mut a, "gg");
         press(&mut a, "G");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!((&a.input, a.store.favorite(&slot)), (&Input::None, Some(key.as_str())));
@@ -8886,6 +8936,9 @@ mod tests {
         assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/gpt55".into())));
         a.data.models[0].name = "GPT 5.5".into();
         assert_eq!(press(&mut a, "y"), Some(Effect::Copy("GPT 5.5".into())));
+        assert_eq!(press(&mut a, "oy"), Some(Effect::Copy("GPT 5.5".into())), "in o's list too");
+        assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/gpt55".into())), "with its id");
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Open, .. }), "the list stays open");
     }
 
     #[test]
