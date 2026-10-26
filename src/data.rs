@@ -1562,8 +1562,12 @@ fn harness_models(asked: &[&(&'static str, Probe)], stop: &AtomicBool, steps: &S
             Some(out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect())
         }
         Probe::Table(args) => table_ids(&listing(bin, args, stop)?),
-        // One that does not answer runs none: no model is kept for a server that is down.
-        Probe::Names(args) => Some(listing(bin, args, stop).and_then(|out| name_ids(&out)).unwrap_or_default()),
+        // A server that is down says so at once and runs none: no model is kept for it. One that
+        // hangs cannot tell, so it keeps its last listing as the others do.
+        Probe::Names(args) => {
+            let out = listing("sh", &["-c", &format!("{bin} {} || true", args.join(" "))], stop)?;
+            Some(name_ids(&out).unwrap_or_default())
+        }
         Probe::Cache(args) => {
             let cmd = [llama_cmd()?, args].concat();
             let out = listing(cmd[0], &cmd[1..], stop)?;
@@ -4666,6 +4670,20 @@ mod tests {
         let before = || BTreeMap::from([(LLAMA.to_string(), vec![format!("{LLAMA}/unsloth/Qwen3.5-4B-GGUF:Q4_K_M")])]);
         let (kept, silent) = keep_listed(now, before);
         assert_eq!((kept[LLAMA].len(), silent), (1, vec![LLAMA.to_string()]), "what it listed before, and said");
+    }
+
+    #[test]
+    fn an_ollama_that_does_not_answer_keeps_its_last_listing() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ollama = HARNESSES.iter().find(|h| h.0 == OLLAMA).unwrap();
+        // Stopped, it is not asked: none, as a listing that hangs gives, not a server that is down.
+        harness_models(&[ollama], &AtomicBool::new(true), &Steps::default(), &tx);
+        drop(tx);
+        let now: BTreeMap<_, _> = rx.iter().collect();
+        assert_eq!(now[OLLAMA], None);
+        let before = || BTreeMap::from([(OLLAMA.to_string(), vec![format!("{OLLAMA}/qwen3.5:4b")])]);
+        let (kept, silent) = keep_listed(now, before);
+        assert_eq!((kept[OLLAMA].len(), silent), (1, vec![OLLAMA.to_string()]), "what it listed before, and said");
     }
 
     #[test]
