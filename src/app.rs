@@ -2062,8 +2062,8 @@ impl App {
         self.current().map(|m| vec![m.key.clone()]).unwrap_or_default()
     }
 
-    /// Sets a flag on every target, or clears it when all of them have it. Ends a visual range
-    /// and says what happened when it was more than one model.
+    /// Sets a flag on every target, or clears it when all of them have it. Ends the table's
+    /// highlight when it acted on it, and says what happened when it was more than one model.
     fn flag(
         &mut self,
         has: fn(&Store, &str) -> bool,
@@ -2080,7 +2080,10 @@ impl App {
         if keys.len() > 1 {
             self.status = format!("{} {} models", if on { done } else { undone }, keys.len());
         }
-        self.deselect();
+        // A panel's model is not the highlight, which stays as `space` there leaves it.
+        if self.view == View::Table {
+            self.deselect();
+        }
         self.rebuild_in_place();
         (!keys.is_empty()).then_some(Effect::Save)
     }
@@ -8608,6 +8611,19 @@ mod tests {
             (&View::Compare, 2),
             "C compares the range alone, the earlier mark dropped"
         );
+    }
+
+    #[test]
+    fn e_in_a_panel_keeps_the_tables_highlight() {
+        let mut a = app();
+        press(&mut a, "vj");
+        code(&mut a, KeyCode::Enter);
+        let key = a.current().unwrap().key.clone();
+        // e in the details is for their model alone, so the range stays for the table, as space leaves it.
+        assert_eq!(press(&mut a, "e"), Some(Effect::Save));
+        assert!(a.store.excluded.iter().eq([&key]));
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((&a.view, a.visual_range()), (&View::Table, Some(0..=1)));
     }
 
     #[test]
