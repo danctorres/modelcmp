@@ -1802,6 +1802,22 @@ fn cells(buf: &mut Buffer, r: Rect, mut f: impl FnMut(&mut Cell)) {
     }
 }
 
+/// `r` emptied for a box drawn over it, and a glyph of two cells its left edge cuts blanked: a
+/// frame never sends the cell after such a glyph, so the terminal would show the glyph's right
+/// half where the box's left border is.
+fn clear(buf: &mut Buffer, r: Rect) {
+    cells(buf, r, Cell::reset);
+    let r = r.intersection(buf.area);
+    if r.x > buf.area.x {
+        for y in r.top()..r.bottom() {
+            let c = &mut buf[(r.x - 1, y)];
+            if c.cell_width() > 1 {
+                c.set_symbol(" ");
+            }
+        }
+    }
+}
+
 /// `Buffer::set_style`, quicker (`cells`).
 fn restyle(buf: &mut Buffer, r: Rect, style: impl Into<Style>) {
     let style = style.into();
@@ -2730,7 +2746,7 @@ fn dropdown(
     let inner = block.inner(rect);
     // What is behind the box fades, as behind every box.
     restyle(buf, area, Style::new().add_modifier(Modifier::DIM));
-    cells(buf, rect, Cell::reset);
+    clear(buf, rect);
     block.render(rect, buf);
     for (i, (label, n)) in items.iter().enumerate().skip(top).take(shown) {
         let y = inner.y + (i - top) as u16;
@@ -3596,7 +3612,7 @@ fn overlay(
     let text = rect.inner(ratatui::layout::Margin::new(2, 1));
     // What is behind the box fades, so the box is what shows.
     restyle(buf, area, Style::new().add_modifier(Modifier::DIM));
-    cells(buf, rect, Cell::reset);
+    clear(buf, rect);
     block.render(rect, buf);
     let (above, below) = (*scroll > 0, *scroll as usize + shown < lines.len());
     for (line, y) in lines.into_iter().skip(top).take(shown).chain(pin).zip(text.y..text.bottom()) {
@@ -6952,6 +6968,29 @@ mod tests {
         .lines;
         assert!(rows[0].to_string().starts_with("verdict"), "the verdict comes first");
         assert!(rows.iter().any(|l| l.to_string().starts_with("Model")));
+    }
+
+    #[test]
+    fn a_box_over_a_wide_glyph_shows_its_left_border() {
+        // A CJK note behind the box, its last glyph cut by the box's left edge: the terminal is
+        // sent the border, not the glyph's right half.
+        let area = Rect::new(0, 0, 30, 6);
+        let lines = vec![Line::from("q confirms")];
+        let r = overlay_rect(area, "quit?", &lines);
+        let note = |buf: &mut Buffer| {
+            for y in 0..6 {
+                buf.set_string(r.x - 1, y, "日本語", Style::new());
+            }
+        };
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 6)).unwrap();
+        term.draw(|f| note(f.buffer_mut())).unwrap();
+        term.draw(|f| {
+            note(f.buffer_mut());
+            overlay(f.buffer_mut(), area, "quit?", lines.clone(), &mut 0, (0, 0, 0..0));
+        })
+        .unwrap();
+        let left: Vec<_> = (r.y..r.bottom()).map(|y| term.backend().buffer()[(r.x, y)].symbol()).collect();
+        assert_eq!(left, ["╭", "│", "╰"]);
     }
 
     #[test]
