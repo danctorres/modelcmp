@@ -1,5 +1,6 @@
 //! Text shared by the CLI and the TUI: number formatting, the detail page, the comparison grid.
 
+use crate::app::found;
 use crate::data::{Data, Model, Offer, norm};
 use crate::fit::{self, TASKS};
 use crate::store::Store;
@@ -812,7 +813,18 @@ fn or_dash(s: &str) -> &str {
 pub fn hits<const N: usize>(q: &str, fields: [&str; N], typos: bool) -> Option<[Vec<Range<usize>>; N]> {
     let mut out = [(); N].map(|_| vec![]);
     // A "+" is dropped, not spelled out as in a key: `word_hit` reads the fields without it.
-    for t in q.split_whitespace().map(|w| norm(&w.replace('+', ""))).filter(|t| !t.is_empty()) {
+    for w in q.split_whitespace().map(|w| w.replace('+', "")) {
+        let t = norm(&w);
+        // A word of letters `norm` drops, as "日本語" or "é", is found as typed, as a panel's search
+        // finds it. One of punctuation alone is left out.
+        if t.is_empty() {
+            if w.chars().any(char::is_alphanumeric) {
+                let (i, r) =
+                    fields.iter().enumerate().find_map(|(i, s)| Some((i, found(s, &w).into_iter().next()?)))?;
+                out[i].push(r);
+            }
+            continue;
+        }
         let find = |typo| fields.iter().enumerate().find_map(|(i, s)| Some((i, word_hit(s, &t, typo)?)));
         let fuzzy = typos && t.len() >= 3 && t.bytes().all(|b| b.is_ascii_alphabetic());
         let (i, r) = find(false).or_else(|| fuzzy.then(|| find(true)).flatten())?;
@@ -1691,6 +1703,15 @@ mod tests {
         assert_eq!(hits("a22b", qwen, false), Some([vec![11..15], vec![]]));
         assert_eq!(hits("qwen3235", qwen, false), Some([vec![0..9], vec![]]), "across the dash");
         assert_eq!(hits("turbo", ["Kimi — Turbo", ""], false), Some([vec![7..12], vec![]]), "in chars, not bytes");
+    }
+
+    #[test]
+    fn a_search_word_of_letters_past_ascii_is_found_as_typed() {
+        // A note in another language: its words have no letter `norm` keeps.
+        let note = ["GPT-5 mini", "openai", "", "日本語のメモ"];
+        assert_eq!(hits("メモ mini", note, false), Some([vec![6..10], vec![], vec![], vec![4..6]]));
+        assert!(hits("é", note, false).is_none(), "a word no field has matches no model");
+        assert!(hits("— mini", note, false).is_some(), "punctuation alone is still left out");
     }
 
     #[test]
