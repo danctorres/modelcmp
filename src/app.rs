@@ -4798,6 +4798,11 @@ impl App {
                                 t.name
                             ))
                         }
+                        // The models are there, the search, a dropdown, a bound or `S` hides them.
+                        None if self.filtered_too() || self.only == Some(MARKED) => {
+                            let c = self.key_of('c');
+                            self.refuse(format!("no model shown has data for {}, {c} clears the filters", t.name))
+                        }
                         None => self.refuse(format!("no model has data for {}", t.name)),
                     },
                 }
@@ -7444,6 +7449,24 @@ mod tests {
         assert!(a.task.is_none());
         assert_eq!(a.rows.len(), 3);
         assert_eq!((a.sort_col, a.descending), default_sort(), "c restores the default sort");
+    }
+
+    #[test]
+    fn enter_on_a_task_the_filters_leave_no_model_says_so() {
+        // opus5 alone shows and has no coding score, while gpt55 and mini have one.
+        let mut a = app();
+        press(&mut a, "/opus");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "R2gg");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.status, "no model shown has data for coding, c clears the filters");
+        // And so with the selected ones only.
+        let mut a = app();
+        a.store.toggle_marked("opus5");
+        a.rebuild();
+        press(&mut a, "SR2gg");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.status, "no model shown has data for coding, c clears the filters");
     }
 
     /// A favorite whose developer the Dev dropdown leaves out is off its task's line, as `recommend` has it.
