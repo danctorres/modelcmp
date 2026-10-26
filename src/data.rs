@@ -1440,21 +1440,36 @@ fn written(p: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
+/// The cache of the source other than `src`, as much of it as `lending` takes.
+fn lent_cache(src: Source) -> Option<LentData> {
+    serde_json::from_slice(&std::fs::read(cache_path(src.other())).ok()?).ok()
+}
+
+/// What the rows of data fetched at `fetched` borrow from the other source (`Data::borrow`):
+/// its data this refresh downloaded, else its `cached` data, unless fetched more than a day
+/// apart, as its numbers would be older than the table says. A refresh that could not download
+/// it lends its cache too, which it leaves as it was, as the next start would.
+fn lending(downloaded: Option<&Data>, cached: impl FnOnce() -> Option<LentData>, fetched: u64) -> Option<Vec<Lent>> {
+    if let Some(o) = downloaded {
+        return Some(o.models.iter().map(Lent::from).collect());
+    }
+    let o = cached()?;
+    (o.format == FORMAT && o.fetched.abs_diff(fetched) <= MAX_AGE.as_secs()).then_some(o.models)
+}
+
 pub fn load_cache() -> Option<Data> {
     load_repos();
     // The other source's, read beside this one's: each is milliseconds of parsing.
-    let other_path = cache_path(source().other());
     let (d, other) = std::thread::scope(|s| {
-        let other = s.spawn(|| serde_json::from_slice::<LentData>(&std::fs::read(other_path).ok()?).ok());
+        let other = s.spawn(|| lent_cache(source()));
         let bytes = std::fs::read(cache_path(source())).ok();
         // One written in another format reads wrong here (a missing price as free), so it is no fallback.
         let d = bytes.and_then(|b| serde_json::from_slice::<Data>(&b).ok()).filter(|d| d.format == FORMAT);
         (d, other.join().ok().flatten())
     });
     let mut d = d?;
-    // Unless fetched more than a day apart: its numbers would be older than the table says.
-    let other = other.filter(|o| o.format == FORMAT && o.fetched.abs_diff(d.fetched) <= MAX_AGE.as_secs());
-    d.borrow(source(), other.map(|o| o.models));
+    let lent = lending(None, || other, d.fetched);
+    d.borrow(source(), lent);
     // Value is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
@@ -1933,8 +1948,8 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
         }
     };
     // Before the early data, so the other source's columns do not go to come back.
-    let lent: Option<Vec<Lent>> =
-        other.as_ref().and_then(|(_, o)| Some(o.as_ref().ok()?.models.iter().map(Lent::from).collect()));
+    let downloaded = other.as_ref().and_then(|(_, o)| o.as_ref().ok());
+    let lent = lending(downloaded, || lent_cache(src), data.fetched);
     data.borrow(src, lent);
     // Only links hang on them, so without one the refresh still succeeds, and says so.
     let text = |xml: Result<Vec<u8>, Failure>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
@@ -4565,6 +4580,21 @@ mod tests {
         d.borrow(Source::Epoch, None);
         assert_eq!((got(&d, 0), d.lent), ((None, None), false));
         assert_eq!(d.models[0].bench("scicode"), None);
+    }
+
+    #[test]
+    fn a_refresh_that_could_not_download_the_other_source_lends_its_cache() {
+        // Artificial Analysis down under Epoch: its cache, which the refresh leaves as it was,
+        // keeps its columns, as at the next start, while it is of the same day.
+        let a = Model { key: "a".into(), eci: Some(60.0), tps: Some(90.0), ..Default::default() };
+        let cached = |fetched| Some(LentData { format: FORMAT, fetched, models: vec![Lent::from(&a)] });
+        let keys = |l: Option<Vec<Lent>>| l.map(|l| l.into_iter().map(|l| l.key).collect::<Vec<_>>());
+        let day = MAX_AGE.as_secs();
+        assert_eq!(keys(lending(None, || cached(10 * day), 10 * day + 3600)), Some(vec!["a".to_string()]));
+        assert_eq!(keys(lending(None, || cached(10 * day), 12 * day)), None, "older than the table says");
+        let downloaded = Data { models: vec![Model { key: "b".into(), ..Default::default() }], ..Default::default() };
+        let got = lending(Some(&downloaded), || cached(10 * day), 10 * day);
+        assert_eq!(keys(got), Some(vec!["b".to_string()]), "the download, not the cache");
     }
 
     #[test]
