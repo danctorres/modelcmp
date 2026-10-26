@@ -587,8 +587,6 @@ pub fn download_size(base: &str, key: &str) -> Result<Option<u64>, String> {
 // ponytail: other GPUs (AMD, Intel) count as RAM, and a model split between GPU and RAM runs
 // slower than one that fits: `modelcmp memory` sets it by hand.
 pub fn memory() -> Option<u64> {
-    #[cfg(test)]
-    MEMORY_ASKED.set(true);
     static MEMORY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *MEMORY.get_or_init(|| {
         if cfg!(test) {
@@ -607,10 +605,6 @@ pub fn memory() -> Option<u64> {
         Some(found)
     })
 }
-
-// Whether a test's thread asked for `memory`, which it finds none of.
-#[cfg(test)]
-thread_local!(pub static MEMORY_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
 
 /// Where `memory` keeps what it found, and for how long, in seconds.
 const MEMORY_FILE: &str = "memory.json";
@@ -715,19 +709,6 @@ pub fn save_sizes(sizes: &HashMap<String, u64>) {
 /// The file of `load_sizes`. Not `sizes.json`, whose sizes were of a file guessed from the
 /// repo's list, a draft model's at times (`gguf_size`).
 const SIZES: &str = "gguf-sizes.json";
-
-/// Whether Hugging Face left every size the CLI asked for unanswered within the hour: it asks
-/// none then (`cli::download_sizes`), so an offline run waits on nothing.
-pub fn sizes_failing() -> bool {
-    now().saturating_sub(kept::<u64>(SIZES_FAILED).get("at").copied().unwrap_or(0)) < 3600
-}
-
-/// Hugging Face answered none of the sizes asked just now.
-pub fn sizes_failed() {
-    keep(SIZES_FAILED, &HashMap::from([("at".to_string(), now())]));
-}
-
-const SIZES_FAILED: &str = "gguf-failed.json";
 
 /// How long Hugging Face's "no GGUF copy" of a model is gone by before it is asked again, in
 /// seconds: one may be uploaded since.

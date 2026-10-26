@@ -1481,9 +1481,9 @@ pub struct App {
     /// Per task of `TASKS`. Set by `rebuild`, as each is a pass over every model and recommend
     /// draws them all.
     fronts: Vec<Front>,
-    /// Per task of `TASKS`, the best model your machine runs or can download
-    /// (`view::local_best`), as (index into `data.models`, score). Set by `rebuild`, and again
-    /// when sizes come (`sized`).
+    /// Per task of `TASKS`, the best model your machine runs, on `all` one it can download too
+    /// (`view::local_best`), as (index into `data.models`, score). Set by `rebuild`, which a
+    /// size that comes on `all` runs again (`sized`).
     locals: Vec<Option<(usize, f64)>>,
     pub table: TableState,
     /// How many marks are of models the data has: the ones `S`, `C` and `u` act on, as a
@@ -1986,20 +1986,19 @@ impl App {
         self.cached(t).map_or(vec![], |f| f.1.iter().map(|&i| self.data.models[i].key.as_str()).collect())
     }
 
-    /// The best model for `t` your machine runs or can download (`view::local_best`), excluded
-    /// ones aside. As of the last `rebuild` or size that came.
+    /// The best model for `t` your machine runs, on `all` one it can download too
+    /// (`view::local_best`), excluded ones aside. As of the last `rebuild`.
     pub fn local_best(&self, t: &Task) -> Option<(&Model, f64)> {
         let (i, s) = (*self.locals.get(TASKS.iter().position(|x| x.name == t.name)?)?)?;
         Some((&self.data.models[i], s))
     }
 
-    /// Among the models recommend ranks, the search, the tab and the filters' (`rebuild`'s pool),
-    /// whatever their reach, as a download is in no harness yet.
-    fn set_locals(&mut self) {
-        let only = self.only.filter(|&o| o < FAV);
-        let pool: Vec<usize> =
-            self.filtered_as(usize::MAX, only, false).filter(|(_, m)| !self.excluded(m)).map(|(i, _)| i).collect();
-        let room = view::room(&self.store);
+    /// Among `pool`, the models every task's line is drawn from (`rebuild`), excluded ones aside.
+    /// A download counts on `all` and among the `✓ selected`, not on `mine`: there a model not on
+    /// your machine is not one you have.
+    fn set_locals(&mut self, pool: &[usize]) {
+        let pool: Vec<usize> = pool.iter().copied().filter(|&i| !self.excluded(&self.data.models[i])).collect();
+        let room = view::room(&self.store).filter(|_| self.downloads_count());
         self.locals = TASKS
             .iter()
             .map(|t| {
@@ -2008,6 +2007,12 @@ impl App {
                 Some((pool.iter().copied().find(|&i| std::ptr::eq(&self.data.models[i], m))?, s))
             })
             .collect();
+    }
+
+    /// Whether recommend's tiers weigh a download that fits (`set_locals`): on `all` and among the
+    /// `✓ selected`, where you put it, not on `mine`.
+    fn downloads_count(&self) -> bool {
+        self.all || self.only == Some(MARKED)
     }
 
     /// The built-in task under recommend's cursor, which runs over `TASKS` and then your own.
@@ -2469,7 +2474,7 @@ impl App {
         // Once for every task, as it is slow to find.
         let usable: Vec<bool> = self.data.models.iter().map(|m| self.usable(m)).collect();
         self.fronts = TASKS.iter().map(|t| self.front(t, pool, &usable)).collect();
-        self.set_locals();
+        self.set_locals(pool);
         // `F` and `E` keep theirs off the line too: one out of reach or excluded is on none.
         if let Some(t) = self.task.filter(|_| !matches!(self.only, Some(FAV | EXCLUDED))) {
             // The same line the recommend panel and `list --task` show.
@@ -2791,7 +2796,8 @@ impl App {
         let sorting = self.by_size() && !self.awaited();
         let shown = self.rows.iter().filter(move |_| sorting).map(|&i| &self.data.models[i]);
         // Recommend's tiers weigh the best model your machine can download (`local_best`).
-        let local = self.view == View::Recommend && view::room(&self.store).is_some() && !self.awaited();
+        let local = self.view == View::Recommend && self.downloads_count() && view::room(&self.store).is_some();
+        let local = local && !self.awaited();
         let local = self.data.models.iter().filter(move |m| local && view::wants_size(m, &self.store));
         self.current().into_iter().chain(seen).chain(all).chain(shown).chain(local).filter(new)
     }
@@ -2822,13 +2828,14 @@ impl App {
     /// Hugging Face's answers on the downloads of models, by key, which `x` goes by from now
     /// on. Its open list says them too, on the entries, which stay where they are under the cursor.
     pub fn sized<'a>(&mut self, answers: impl IntoIterator<Item = (&'a str, Download)>) {
-        let (mut again, mut sized) = (false, false);
+        let mut again = false;
         for (key, answer) in answers {
             self.downloads.insert(key.into(), answer);
-            sized |= matches!(answer, Download::Size(_));
-            // Via sorts by it, and a model with no copy leaves the ones picked by `DOWNLOAD`.
+            // Via sorts by it, a model with no copy leaves the ones picked by `DOWNLOAD`, and
+            // recommend's tiers weigh the download where it counts (`set_locals`).
             let picked = answer == Download::Gone && self.store.via_pick.iter().any(|v| v == DOWNLOAD);
-            again |= picked || (self.sort_col == VIA || self.size_bound()) && matches!(answer, Download::Size(_));
+            let sized = matches!(answer, Download::Size(_));
+            again |= picked || (self.sort_col == VIA || self.size_bound() || self.downloads_count()) && sized;
             let said = match answer {
                 Download::Size(b) => format!(" ({})", crate::data::gb(b)),
                 Download::Gone => " (no GGUF copy)".into(),
@@ -2843,8 +2850,6 @@ impl App {
         // Once for the answers that came together, not once each.
         if again {
             self.rebuild();
-        } else if sized {
-            self.set_locals();
         }
     }
 
@@ -2860,7 +2865,6 @@ impl App {
     /// The sizes kept by a run before.
     pub fn set_sizes(&mut self, sizes: std::collections::HashMap<String, u64>) {
         self.downloads.extend(sizes.into_iter().map(|(k, b)| (k, Download::Size(b))));
-        self.set_locals();
     }
 
     /// The size of the model's GGUF copy on Hugging Face, once known, which its details say.
@@ -3073,8 +3077,7 @@ impl App {
         let on_box = tier.is_some();
         let slot = tier.unwrap_or_else(|| fav.map(String::as_str).or(at).unwrap_or(TASKS[0].name).to_string());
         self.fav_at(key, &slot);
-        // A tier the model is dearer than, as a download that took it, cannot take it: said, as
-        // the cursor moves to a box that can.
+        // A tier the model is dearer than cannot take it: said, as the cursor moves to a box that can.
         let m = self.data.models.iter().find(|m| m.key == key).filter(|_| on_box);
         if let Some(Err(why)) = m.map(|m| crate::view::can_fav(&self.store, &slot, m)) {
             self.refuse(why);
@@ -5430,30 +5433,41 @@ mod tests {
         assert!(pick_gone(&store, coding), "one no list has any more is gone");
     }
 
-    /// Recommend's free tier takes a model your machine can download once its size is known,
-    /// kept from a run before or come since.
+    /// On `all`, and among the `✓ selected` when it is one, recommend's free tier takes a model
+    /// your machine can download once its size is known, kept from a run before or come since. On
+    /// `mine` it never does: a model not on your machine is not one you have.
     #[test]
-    fn a_download_that_fits_takes_the_free_tier() {
+    fn a_download_that_fits_takes_the_free_tier_on_all_and_selected() {
         let mut a = app();
         a.data.models[2].hf = Some("meta/llama4".into());
         a.store.memory = Some(10.0);
         let coding = TASKS.iter().position(|t| t.name == "coding").unwrap();
         let free = |a: &App| a.tier_picks(coding)[0].map(|p| p.0.key.clone());
-        assert_eq!(free(&a), None, "no size known yet");
         a.set_sizes([("llama4".into(), 4_000_000_000)].into());
-        assert_eq!(free(&a).as_deref(), Some("llama4"), "4 GB fits in 8 of 10");
+        a.rebuild();
+        assert_eq!(free(&a), None, "4 GB fits in 8 of 10, but on mine it is not downloaded");
+        assert_eq!(a.tier_picks_took(coding).1, [false; 4]);
         assert_eq!(a.fits_here(&a.data.models[2]), Some(true), "its size in the text's colour");
         assert_eq!(a.fits_here(&a.data.models[0]), None, "no size known");
+        press(&mut a, "a");
+        assert_eq!(free(&a).as_deref(), Some("llama4"), "on all it takes the tier");
         assert_eq!(a.tier_picks_took(coding).1, [true, false, false, false], "marked free, to download");
         assert_eq!(a.tier_picks(coding)[3].unwrap().0.key, "gpt55", "high's own pick scores higher");
         a.sized([("llama4", Download::Size(9_000_000_000))]);
         assert_eq!((free(&a), a.fits_here(&a.data.models[2])), (None, Some(false)), "9 GB does not, grey");
-        // Among the models recommend ranks only: not when the selected ones are, without it.
         a.sized([("llama4", Download::Size(4_000_000_000))]);
+        assert_eq!(free(&a).as_deref(), Some("llama4"), "a size that came weighs at once");
+        // Among the models recommend ranks only: the selected ones when it is one of them.
         a.store.toggle_marked("gpt55");
         a.only = Some(MARKED);
         a.rebuild();
         assert_eq!(free(&a), None, "among ✓ selected, it is not one");
+        a.store.toggle_marked("llama4");
+        a.rebuild();
+        assert_eq!(free(&a).as_deref(), Some("llama4"), "selected, it is");
+        a.only = None;
+        a.set_tab(MINE);
+        assert_eq!(free(&a), None, "back on mine");
     }
 
     /// `>` `<` on Via bound the size of a model's GGUF copy, in GB, and the bound asks the size
@@ -9395,14 +9409,15 @@ mod tests {
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 1, .. }, .. }), "low's box, not high's");
     }
 
-    /// A download that took a tier it lists a price above: f says it cannot take it, on the
-    /// next box that can.
+    /// A model your machine runs that took a tier it lists a price above: f says it cannot
+    /// take it, on the next box that can.
     #[test]
     fn f_says_a_tier_the_model_is_dearer_than_cannot_take_it() {
         let mut a = app();
-        a.data.models[2].hf = Some("meta/llama4".into());
-        a.store.memory = Some(10.0);
-        a.set_sizes([("llama4".into(), 4_000_000_000)].into());
+        // In reach, as `apply_available` makes a model a runner has.
+        a.data.models[2].available = true;
+        a.data.models[2].via.push(crate::data::OLLAMA.into());
+        a.rebuild();
         press(&mut a, "R");
         let coding = TASKS.iter().position(|t| t.name == "coding").unwrap();
         (a.among, a.task_cur, a.task_sel) = (None, coding, 1);

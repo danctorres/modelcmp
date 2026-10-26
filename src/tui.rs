@@ -3728,7 +3728,7 @@ fn to_hit(app: &mut App, hits: &[usize]) -> Option<usize> {
 
 /// What a box of recommend's grid shows.
 const TIER_LEGEND: &str = "the best model for each task at each price, or ★ your favorite, shown as name · $ per 1M tokens · score. \
-                           ↓ marks a local model that x downloads first.";
+                           On all, ↓ marks a model that x downloads first.";
 
 /// What recommend leaves out, and how to pick it anyway.
 const UNRATED: &str =
@@ -4146,11 +4146,11 @@ fn entry(
     };
     let fav = crate::view::fav_pick(&app.store, task, TIERS[col].0, m, one);
     let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
-    // The best model your machine runs is free there, and downloaded by `x` when not on it yet.
-    let out = out_of_reach(app, m).filter(|_| !local);
+    let out = out_of_reach(app, m);
     let price = pick_color(app, m, local, off);
     let score = crate::view::scored(s);
     let (cost, score) = match built_in {
+        // On `all`, a download that fits is free here too, once `x` fetches it.
         Some(_) if local => {
             let at = app.size(m).filter(|_| !m.here()).map_or("here".into(), |b| format!("↓ {}", crate::data::gb(b)));
             (format!(" free {at} "), score)

@@ -43,7 +43,7 @@ enum Cmd {
         /// The best model at each price level for a task (overall, coding, agentic, reasoning, vision, value), cheapest first: each row costs more and scores higher than the one before (`R` then `enter` on a task in the TUI). Excluded models are left out. A task of your own (see `fav`) lists the favorites you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
-        /// Print one model from the task's list: your favorite for the tier, if it costs no more than the tier's cap. Otherwise the best model the tier allows: free = only free models, low = up to $2 per 1M tokens, mid = up to $5 (`modelcmp tier` changes these), high = any price. It fails when no model fits the tier. When that model is not your favorite, a model your machine runs or can download (`modelcmp memory`) replaces it if it scores higher, since it runs for free. A task of your own gives the tier's favorite
+        /// Print one model from the task's list: your favorite for the tier, if it costs no more than the tier's cap. Otherwise the best model the tier allows: free = only free models, low = up to $2 per 1M tokens, mid = up to $5 (`modelcmp tier` changes these), high = any price. It fails when no model fits the tier. When that model is not your favorite, a model your machine runs replaces it if it scores higher, since it runs for free. A task of your own gives the tier's favorite
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
         /// Sort by a column, best first: cheapest, or highest score (`s` in the TUI)
@@ -206,7 +206,7 @@ enum Cmd {
     },
     /// Show or set the memory local models run in, in GB: your GPU's, or a Mac's RAM
     ///
-    /// A tier takes the best model your machine runs or can download when it scores higher than the tier's pick. A download fits when it takes at most 80% of this memory, leaving the rest for its context. When not set, it is the memory of your NVIDIA GPUs, else the RAM
+    /// On the TUI's all and selected tabs, a tier takes the best model your machine can download when it scores higher than the tier's pick. A download fits when it takes at most 80% of this memory, leaving the rest for its context, and a size that does not is grey in Via. When not set, it is the memory of your NVIDIA GPUs, else the RAM
     Memory {
         #[arg(conflicts_with = "rm")]
         gb: Option<f64>,

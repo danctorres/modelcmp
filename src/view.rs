@@ -481,10 +481,11 @@ pub fn room(store: &Store) -> Option<u64> {
     Some((memory(store)? as f64 * HEADROOM) as u64)
 }
 
-/// The best model for `t` among `models` that your machine runs: one on it already, or one
-/// whose download (`size`, in bytes) is at most `room`, which `x` and `modelcmp get` fetch.
-/// Scored as the full model, a quantized copy scoring a little lower. None for "value", a
-/// rank per dollar that a copy of your own has none of.
+/// The best model for `t` among `models` that your machine runs: one on it already, or with
+/// `room` (the TUI's `all` tab, `list --all`) one whose download (`size`, in bytes) is at most
+/// that, which `x` and `modelcmp get` fetch. With no `room` a download `x` has yet to fetch never
+/// takes a tier. Scored as the full model, a quantized copy scoring a little lower. None for
+/// "value", a rank per dollar that a copy of your own has none of.
 pub fn local_best<'a>(
     models: impl Iterator<Item = &'a Model>,
     t: &fit::Task,
@@ -776,8 +777,7 @@ pub const RECOMMEND_LEGEND: &str = "The best model for each task at each price: 
      Each line shows name [key] · $ per 1M tokens · score on the task. ★ marks your favorite, \
      with \"not recommended\" when it is not among the task's best models. \
      Under a favorite, recommended: names the model the tier would pick without it. \
-     A model that runs free on your machine takes a tier when it scores higher, \
-     and ↓ with its size means it needs a download first (modelcmp memory).";
+     A model that runs free on your machine takes a tier when it scores higher.";
 
 /// What a task of your own says of itself, where a built-in one says what it measures.
 pub const CUSTOM_ABOUT: &str = "your own task";
@@ -1624,7 +1624,7 @@ mod tests {
         let all: Vec<&Model> = ms.iter().chain([&ollama]).collect();
         assert_eq!(best(&all, Some(20)).as_deref(), Some("fits"), "not big, whose download is over the room");
         assert_eq!(best(&all, Some(40)).as_deref(), Some("big"));
-        assert_eq!(best(&all, None).as_deref(), Some("pulled"), "no memory known: only the one on your machine");
+        assert_eq!(best(&all, None).as_deref(), Some("pulled"), "no room, as on mine: only the one on your machine");
         let left = |entry: &str| {
             let mut s = Store::default();
             s.via_not = vec![entry.into()];

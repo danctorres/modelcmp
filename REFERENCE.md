@@ -268,10 +268,11 @@ in use, hides nothing and is kept for when the column is back.
 `recommend` gives the same picks as the TUI's `R` on the `mine` tab with no search, as the TUI
 keeps neither its tab nor its search. The commands ignore a pick of `↓ downloadable` in Via, as
 only the TUI knows what can be downloaded, and leaving it out only keeps the downloads off the
-tiers. A benchmark picked in a task column's dropdown ranks that task in both, and a bound on that
-column is on the benchmark. Both are kept across restarts until `c`, and the commands say on stderr
-which tasks a pick ranks. Each prices at its own cache share, the TUI's set with `%` or
-`--cache`, so with different shares a Price level or bound can hide different models.
+tiers of its `all` and `✓ selected` tabs. A benchmark picked in a task column's dropdown ranks
+that task in both, and a bound on that column is on the benchmark. Both are kept across restarts
+until `c`, and the commands say on stderr which tasks a pick ranks. Each prices at its own cache
+share, the TUI's set with `%` or `--cache`, so with different shares a Price level or bound can
+hide different models.
 
 ### Tiers
 
@@ -290,8 +291,8 @@ which tasks a pick ranks. Each prices at its own cache share, the TUI's set with
   than `mid`. The list splits at the caps too, so a tier picks the best model up to its cap.
 - Two tiers pick the same model when the higher tier's cap lets in no better one. A tier never
   takes a worse model just to differ from the next.
-- A model your machine runs, or can download, takes a tier when it scores higher than the
-  tier's pick, as it is free there. See [models on your machine](#models-on-your-machine).
+- A model your machine runs takes a tier when it scores higher than the tier's pick, as it is
+  free there. See [models on your machine](#models-on-your-machine).
 - A tier never holds a model dearer than its cap, your favorite included. With no model at its
   price it has none, as `free` does when there is no free model, and `pick` says `no model` there.
 - A tier goes by the price paid where the model runs. With `--via` that is what those harnesses
@@ -367,8 +368,6 @@ harness you left out in the TUI's Via dropdown while another has the model, for 
   opencode/ling-3.1-flash-free "<prompt>")`.
 - `--min` and `--not` leave a favorite out too. A tier's favorite they leave out gives way to
   the tier's pick, and a task of your own whose model is out says `no model`.
-- A line with a model to download says so in place of the command: `not on your machine, ask
-  the user to download it (17.4 GB): modelcmp get qwen3827b`.
 - When no task has a model (`--via ollama`, whose copies are picked only as favorites, or a
   `--min` nothing meets), `pick` fails and tells the agent to choose no model and tell the
   user. With `--task`, it tells the agent to try another task.
@@ -423,25 +422,26 @@ llama.cpp's `llama-cli` (else its `llama` or `llama-server`), must be on `PATH`,
 Then run `modelcmp --refresh`, which opens the TUI, or `modelcmp list --refresh` in a script.
 
 A tier takes the best model your machine runs when it scores higher than the tier's pick, as it
-is free there. That is a model already on your machine, or one whose download takes at most 80% of
-its memory, leaving the rest for the context. `recommend` marks it `↓` with the size when
-`modelcmp get` or `x` has to download it first, and `recommend --json` names it under `local` for
-each task. `pick` and `--cmd` start such a model on your machine with ollama or llama.cpp, even
-when a harness offers it at a price.
+is free there, and `recommend --json` names it under `local` for each task. `pick` and `--cmd`
+start such a model on your machine with ollama or llama.cpp, even when a harness offers it at a
+price. On `mine`, which `recommend` and `pick` are, a model you have not downloaded never takes a
+tier, however well it would fit: it is not one you have. On the TUI's `all` tab, and on
+`✓ selected` when you selected it, a model whose download takes at most 80% of your machine's
+memory, leaving the rest for the context, takes a tier too, marked `↓` with the size, as
+`modelcmp get` or `x` has to download it first.
 
 The memory is that of the NVIDIA GPUs (`nvidia-smi`, looked up once a week), else the RAM, which a
 Mac's GPU shares. `modelcmp memory 24` sets it by hand, in GB as a GPU's memory is given, for
-another GPU or a model split between GPU and RAM, and `modelcmp memory` shows it. The CLI asks
-Hugging Face for the sizes it lacks for up to 15 seconds a run. When none of its requests get an
-answer, it asks for no sizes for an hour. The TUI shows a download's size in Via, in `x` and in the
-details, grey when it is over that 80% and in the text colour when it fits, on a greyed row too.
+another GPU or a model split between GPU and RAM, and `modelcmp memory` shows it. The TUI shows a
+download's size in Via, in `x` and in the details, grey when it is over that 80% and in the text
+colour when it fits, on a greyed row too.
 
 The scores are those of the full weights, which a quantized copy falls a little short of, and the
 context shown is not the copy's either. With `--via` a tier never takes a local model this way, and
 `--via ollama` and `--via llama-cli` on a task pick a copy only as your favorite. Leaving out
 `ollama` and `llama-cli` in the TUI's Via dropdown keeps the models on your machine off the tiers,
-and leaving out `↓ downloadable` does the same for the ones to download, in `recommend` and `pick`
-too.
+in `recommend` and `pick` too, and leaving out `↓ downloadable` does the same for the downloads on
+`all` and `✓ selected`.
 
 `ollama run` and `llama-cli` answer a prompt with text alone. For the model to edit files and run
 commands, as an agent, run it in pi, opencode or omp. Add your runner to the harness's config

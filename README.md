@@ -112,7 +112,7 @@ To get a local model, press `a` in the TUI to list every model, then `x` on one 
 `download and run` entry, or run `modelcmp get <model>`. Via shows how big each download is, and
 `<` `8` on Via hides the models over 8 GB. Models on your machine show as free, and
 [run as agents in pi](REFERENCE.md#models-on-your-machine) once you add your runner to it.
-A model that fits your GPU takes a tier in recommend when it scores higher, marked `↓` with its size when it needs a download.
+A model on your machine takes a tier in recommend when it scores higher. On `all` and among the selected, a model that fits your GPU does too, marked `↓` with its size, as it needs a download first.
 
 ## For agents
 
