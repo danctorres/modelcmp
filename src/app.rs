@@ -1035,6 +1035,12 @@ fn nth_hit(cur: usize, len: usize, n: isize, hit: impl Fn(&usize) -> bool) -> Op
     to.filter(|&r| r != cur)
 }
 
+/// The `n`th match on, `at` being the first one a move reaches: round again past either end as
+/// often as it takes, so a count costs one move.
+fn round(at: usize, n: isize, len: usize) -> usize {
+    (at as isize + n - n.signum()).rem_euclid(len as isize) as usize
+}
+
 /// Index `i` moved by `n` in a list of `len`: a move stops at an end, and one that starts
 /// there wraps around to the other end.
 fn step(i: usize, n: isize, len: usize) -> usize {
@@ -3449,6 +3455,7 @@ impl App {
                 1.. => stops.iter().position(|&s| s > cur).unwrap_or(0),
                 _ => stops.iter().rposition(|&s| s < cur).unwrap_or(last),
             };
+            let at = round(at, n, stops.len());
             self.help_sel = stops[at];
             self.status = format!("match {} of {}", at + 1, stops.len());
             return;
@@ -3480,6 +3487,7 @@ impl App {
             (1.., Some(c)) => stops.iter().position(|&s| s > c).unwrap_or(0),
             (_, Some(c)) => stops.iter().rposition(|&s| s < c).unwrap_or(last),
         };
+        let at = round(at, n, stops.len());
         let (t, b) = stops[at];
         self.task_to(t);
         self.task_sel = b;
@@ -4609,7 +4617,7 @@ impl App {
                 }
             }
             // The next / previous match of a panel's search, as in vim, `3n` the third.
-            KeyCode::Char(c @ ('n' | 'N')) => (0..n).for_each(|_| self.next_hit(if c == 'n' { 1 } else { -1 })),
+            KeyCode::Char(c @ ('n' | 'N')) => self.next_hit(if c == 'n' { n } else { -n }),
             KeyCode::Char('i') if row => {
                 let m = self.current()?;
                 let text = self.store.note(&m.key).unwrap_or("").to_string();
@@ -7101,6 +7109,29 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "i");
         assert!(matches!(a.input, Input::Note { .. }));
+    }
+
+    #[test]
+    fn a_count_before_n_goes_round_the_matches_in_one_move() {
+        // Help and recommend build their matches for each move, so `99999n`, the biggest count,
+        // made one move at a time would freeze the TUI for a minute.
+        for open in ["?", "R"] {
+            let mut a = app();
+            press(&mut a, &format!("{open}/a"));
+            code(&mut a, KeyCode::Enter);
+            let at = |a: &App| -> (usize, usize) {
+                let (k, of) = a.status.strip_prefix("match ").unwrap().split_once(" of ").unwrap();
+                (k.parse().unwrap(), of.parse().unwrap())
+            };
+            let (k, of) = at(&a);
+            assert!(of > 1, "{open}: {}", a.status);
+            let start = std::time::Instant::now();
+            press(&mut a, "99999n");
+            assert!(start.elapsed().as_secs() < 1, "{open}: took {:?}", start.elapsed());
+            assert_eq!(at(&a), ((k - 1 + 99_999) % of + 1, of), "{open}: round again as often as it takes");
+            press(&mut a, "99999N");
+            assert_eq!(at(&a), (k, of), "{open}: and N as far back");
+        }
     }
 
     #[test]
