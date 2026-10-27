@@ -28,7 +28,7 @@ installed, shows which one has each model, and starts it on the model you pick.
 - **Your agent** gets a CLI to find the favorite or recommended model for a task,
   for each price tier. In a multi-agent setup, the CLI allows an orchestrator in one
   harness (e.g. `Opus 5.5` in `Claude Code`) to find and hand a subtask to a cheaper model in another harness (e.g.
-  `DeepSeek V4 Pro` in `pi`), or even to a local one (e.g. `Qwen3.8 Flash Next` from `llama.cpp`, in `pi`).
+  `GLM-5.3` in `pi`), or even to a local one (e.g. `Qwen3.8 27B` in `ollama`).
 
 ![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
 
@@ -75,13 +75,14 @@ npx skills add danctorres/modelcmp -g
 
 ### TUI
 
-Run `modelcmp` to start it. `R` recommends, `d` picks a tier's model there, `space` selects
-models, `C` compares them, `f` sets your favorite for a task's tiers and `/` filters. `enter` shows
-everything about a model, `o` opens its page on a site like OpenRouter and `t` changes the theme.
-`x` opens a harness on the model, or downloads a local model and runs it with ollama or llama.cpp,
-installing the runner if you have neither, and `H` picks the harness the model runs on, `P` your
-default one. Movement uses vim keys (`hjkl`, `gg`, `G`, counts like `3j`), and the arrows and mouse
-work too. `?` lists every key, and `enter` on one changes it. `qq` quits.
+```sh
+modelcmp   # start the TUI
+```
+
+Navigate with vim keys, the arrow keys or the mouse. `R` recommends, `/` filters, `space` selects
+models and `C` compares them. `enter` shows everything about a model, `f` makes it your favorite
+for a task and `x` starts it in a harness, or downloads and runs a local one. `?` lists every key,
+and `qq` quits.
 
 ![The model recommended for each task and tier](https://github.com/user-attachments/assets/781a6bce-e79b-4a00-af14-4cdd3c3767c5)
 
@@ -91,8 +92,8 @@ In recommend, the tier header changes a tier's price cap. To add a task of your 
 `+ new task` there or in the grid `f` opens on a model.
 
 To get a local model, press `a` to list every model, then `x` on one and pick its
-`download and run` entry. Via shows how big each download is, and `<` `8` on Via hides the models
-over 8 GB. Models on your machine show as free.
+`download and run` entry. Via shows how big each download is.
+Models on your machine show as free.
 
 ### CLI
 
@@ -101,9 +102,7 @@ modelcmp recommend                         # best model per price for each task
 modelcmp list --task coding                # best model per price for coding, cheapest first
 modelcmp compare sonnet-5 gpt-5            # side by side, with a verdict
 modelcmp show sonnet-5                     # everything about one model
-modelcmp open sonnet-5 --on openrouter     # its page there, or on models.dev, Hugging Face, ...
 modelcmp fav coding sonnet-5 --tier mid    # set your favorite for coding's mid tier
-modelcmp tier mid 8                        # mid takes models up to $8 per 1M tokens
 modelcmp get gemma-3-4b-it                 # download a model and run it on your machine
 ```
 
