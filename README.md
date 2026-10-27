@@ -65,6 +65,12 @@ cargo install --locked --path .   # or cargo build --release, for target/release
 
 The TUI says when a newer version is out, and `UU` upgrades to it.
 
+To let your agent use it, install the skill too:
+
+```sh
+npx skills add danctorres/modelcmp -g
+```
+
 ## Usage
 
 ```sh
@@ -117,11 +123,10 @@ A model on your machine takes a tier in recommend when it scores higher. On `all
 ## For agents
 
 ```sh
-npx skills add danctorres/modelcmp -g                        # install the skill for your agent
-modelcmp pick                                                # what the skill runs: every task and tier, with the command to run
+modelcmp pick   # what the skill runs: every task and tier, with the command to run
 ```
 
-The [skill](skills/modelcmp/SKILL.md) lets an orchestrator agent choose the model for each subtask.
+The [skill](skills/modelcmp/SKILL.md), set up in [Install](#install), lets an orchestrator agent choose the model for each subtask.
 It runs `modelcmp pick` and starts the subtask on that model, in the harness you chose for it (`H`),
 else in its developer's own (Claude Code for Claude) or whichever has it, even a
 local model from ollama or llama.cpp that you made your favorite.
