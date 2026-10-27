@@ -18,17 +18,13 @@
 </p>
 
 Frontier models can cost ten times as much as smaller ones, and many tasks do not need them.
-`modelcmp` puts prices and benchmarks side by side and, for each kind of task (coding, agentic
-runs, reasoning, ...), recommends the best model at each price. It reads the harnesses you have
-installed, shows which one has each model, and starts it on the model you pick.
+`modelcmp` puts prices and benchmarks side by side, shows which of your harnesses has each model
+and recommends the best one at each price for each kind of task (coding, agentic runs, reasoning, ...).
 
-- **You** get a TUI to filter, sort, compare and see recommended models for each task.
-  You can set your favorite model for a task, exclude models you cannot use, write notes, start a
-  harness or download and run a local model.
-- **Your agent** gets a CLI to find the favorite or recommended model for a task,
-  for each price tier. In a multi-agent setup, the CLI allows an orchestrator in one
-  harness (e.g. `Opus 5.5` in `Claude Code`) to find and hand a subtask to a cheaper model in another harness (e.g.
-  `GLM-5.3` in `pi`), or even to a local one (e.g. `Qwen3.8 27B` in `ollama`).
+- **You** get a TUI to compare models, set your favorites and see the recommended ones for each task.
+- **Your agent** gets a CLI to find your favorite or the recommended model for each task and price
+  tier. An orchestrator in one harness (e.g. `Opus 5.5` in `Claude Code`) can then hand a subtask to
+  a cheaper model in another (e.g. `GLM-5.3` in `pi`), or to a local one (e.g. `Qwen3.8 27B` in `ollama`).
 
 ![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
 
