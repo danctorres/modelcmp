@@ -17,9 +17,8 @@
   <a href="REFERENCE.md">Reference</a>
 </p>
 
-Frontier models can cost ten times as much as smaller ones, and many tasks do not need them.
-`modelcmp` puts prices and benchmarks side by side, shows which of your harnesses has each model
-and recommends the best one at each price for each kind of task (coding, agentic runs, reasoning, ...).
+`modelcmp` puts model benchmarks and prices side by side and recommends the best model at each
+price for each task.
 
 - **You** get a TUI to compare models, set your favorites and see the recommended ones for each task.
 - **Your agent** gets a CLI to find your favorite or the recommended model for each task and price
