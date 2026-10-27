@@ -1,6 +1,6 @@
 ---
 name: modelcmp
-description: "Before you name a model for a subagent, a delegated task, an Orca agent or a harness run (opencode, pi, omp, codex, claude, gemini, copilot), run `modelcmp pick` and follow this skill instead of choosing from memory. Also use when the user asks which model to use for a task, which is cheapest or best, or to compare models: it answers from the models the user has, with their prices, benchmarks and favorites."
+description: "Before you start a subagent, an Orca agent or a harness run (opencode, pi, omp, codex, claude, gemini, copilot) for any work (a review, a fix, a parallel run), run `modelcmp pick` and give it the model this skill says, even when your subagent tool has a default. Also use when the user asks which model to use for a task, which is cheapest or best, or to compare models: it answers from the models the user has, with their prices, benchmarks and favorites."
 ---
 
 `modelcmp` joins the models the user can call with their prices, benchmark scores and the user's own choices. If the command is not found, tell the user to install it (`brew install danctorres/tap/modelcmp`), choose no model and do not look for a copy.
