@@ -17,7 +17,7 @@
   <a href="REFERENCE.md">Reference</a>
 </p>
 
-`modelcmp` picks the model for each of your agents, by benchmarks and price.
+`modelcmp` picks the LLM for each of your agents, by benchmarks and price.
 
 - **You** get a TUI to compare models, set your favorites and see the recommended ones for each task.
 - **Your agents** get a CLI and a skill, so an orchestrator picks a model for each subtask by itself,
