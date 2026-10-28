@@ -22,9 +22,9 @@ price for each task.
 
 - **You** get a TUI to compare models, set your favorites and see the recommended ones for each task.
 - **Your agent** gets a CLI and a skill to find your favorite or the recommended model for each task
-  and price tier. An orchestrator in one harness (e.g. `Opus 5.5` in `Claude Code`) can then hand a
-  subtask to a cheaper model in another (e.g. `GLM-5.3` in `pi`), or to a local one
-  (e.g. `Qwen3.8 27B` in `ollama`).
+  and price tier. An orchestrator in one harness can then hand a subtask to a cheaper model in
+  another, or to a local one, say from `Opus 5.5` in `Claude Code` to `GLM-5.3` in `pi` or to
+  `Qwen3.8 27B` in `ollama`.
 
 ![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
 
