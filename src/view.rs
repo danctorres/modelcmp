@@ -1306,7 +1306,9 @@ pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
 
 /// Rows for side-by-side comparison, named and ordered as the table's columns, with the
 /// model's first; Via as the table shows it (`shown_via`), and a task as its line ranks it with
-/// `store`'s picks (`line_score`).
+/// `store`'s picks (`line_score`). A model with no value in a row has a `-` there, so no column
+/// of the table seems to be missing. Only Arena, a task and the speeds are left out, when no
+/// model has a value for them.
 pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
         let mut it = vals.iter().flatten();
@@ -1403,14 +1405,10 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
 }
 
 /// The TUI's compare: the model row, which names its rows, and its columns, the other rows of
-/// `compare_rows`. A column with fewer than two values compares
-/// nothing, and is left out.
+/// `compare_rows`.
 pub fn compare_cols(models: &[&Model], any: bool, get: Get, store: &Store) -> (Row, Vec<Row>) {
     let mut cols = compare_rows(models, any, get, store);
     let names = cols.remove(0);
-    let via = cols.pop().expect("Via is the last row");
-    cols.retain(|c| c.cells.iter().filter(|v| *v != "-").count() >= 2);
-    cols.push(via);
     (names, cols)
 }
 
@@ -1778,14 +1776,15 @@ mod tests {
     }
 
     #[test]
-    fn compare_leaves_out_a_column_with_one_value() {
+    fn compare_keeps_a_column_with_one_value() {
         let (a, b) =
             (Model { eci: Some(150.0), context: 1, ..Default::default() }, Model { context: 2, ..Default::default() });
-        let labels = |ms: &[&Model]| {
-            compare_cols(ms, false, &|_| None, &Store::default()).1.into_iter().map(|c| c.label).collect::<Vec<_>>()
-        };
-        assert_eq!(labels(&[&a, &b]), ["Ctx", "Via"], "ECI has one value, so nothing to compare, and Via stays");
-        assert!(labels(&[&a, &a]).contains(&"ECI".to_string()));
+        let cols = compare_cols(&[&a, &b], false, &|_| None, &Store::default()).1;
+        let eci = cols.iter().find(|c| c.label == "ECI").expect("ECI stays with one value");
+        assert_eq!(eci.cells, ["150.0", "-"], "the model without shows -");
+        let price = cols.iter().find(|c| c.label == "Price").expect("Price stays with no value");
+        assert_eq!(price.cells, ["-", "-"], "neither has an offer");
+        assert_eq!(cols.last().unwrap().label, "Via");
     }
 
     #[test]

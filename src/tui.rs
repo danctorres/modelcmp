@@ -6374,7 +6374,7 @@ mod tests {
         assert_eq!(a.compare_col, a.compare_cols() - 1, "$ to the last column");
         a.mouse(Mouse::Open(Stop::CompareCol(4)));
         assert_eq!(a.compare_col, 4, "a click on a label sorts by it");
-        assert!(a.compare_sort.as_ref().is_some_and(|s| s.0 != "$in"));
+        assert!(a.compare_sort.as_ref().is_some_and(|s| s.0 == "Ctx"), "the fifth column, after the four prices");
     }
 
     #[test]
