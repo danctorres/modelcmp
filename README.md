@@ -1,6 +1,6 @@
 <h1 align="center"><img src="https://github.com/user-attachments/assets/175d7284-8b17-4ce4-bfd9-36790017ccca" alt="modelcmp" width="480"></h1>
 
-<p align="center"><b>The right model for each agent, automatically.</b></p>
+<p align="center"><b>The right AI model for each agent, automatically.</b></p>
 
 <p align="center">
   <a href="https://github.com/danctorres/modelcmp/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danctorres/modelcmp/ci.yml?branch=main&event=push&label=ci" alt="CI"></a>
@@ -17,7 +17,7 @@
   <a href="REFERENCE.md">Reference</a>
 </p>
 
-`modelcmp` picks the LLM for each of your agents, by benchmarks and price.
+`modelcmp` picks the AI model for each of your agents, by benchmarks and price.
 
 - **You** get a TUI to compare models, set your favorites and see the recommended ones for each task.
 - **Your agents** get a CLI and a skill, so an orchestrator picks a model for each subtask by itself,
