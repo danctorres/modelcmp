@@ -98,14 +98,8 @@ modelcmp list --task coding                # best model per price for coding, ch
 modelcmp compare sonnet-5 gpt-5            # side by side, with a verdict
 modelcmp show sonnet-5                     # everything about one model
 modelcmp fav coding sonnet-5 --tier mid    # set your favorite for coding's mid tier
+modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"   # a task of your own, agents pick it by its about
 modelcmp get gemma-3-4b-it                 # download a model and run it on your machine
-```
-
-A task of your own needs a description in `--about`, and agents choose a task by it:
-
-```sh
-modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"   # a new task, with its model
-modelcmp fav debugging gemini-3.7-flash --tier low                               # a cheaper model for its low tier
 ```
 
 ### How recommendations work
