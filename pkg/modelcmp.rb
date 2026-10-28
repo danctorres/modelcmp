@@ -1,7 +1,7 @@
 # Homebrew formula template. The release workflow fills in the version and the
 # checksum placeholders and pushes it to danctorres/homebrew-tap.
 class Modelcmp < Formula
-  desc "Compare models, pick favorites, get recommendations"
+  desc "Pick the right model for each agent, by benchmarks and price"
   homepage "https://github.com/danctorres/modelcmp"
   license "MIT"
 

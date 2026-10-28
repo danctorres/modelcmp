@@ -1,6 +1,6 @@
 <h1 align="center"><img src="https://github.com/user-attachments/assets/175d7284-8b17-4ce4-bfd9-36790017ccca" alt="modelcmp" width="480"></h1>
 
-<p align="center"><b>Compare models, pick favorites, get recommendations.</b></p>
+<p align="center"><b>The right model for each agent, automatically.</b></p>
 
 <p align="center">
   <a href="https://github.com/danctorres/modelcmp/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danctorres/modelcmp/ci.yml?branch=main&event=push&label=ci" alt="CI"></a>
@@ -17,13 +17,12 @@
   <a href="REFERENCE.md">Reference</a>
 </p>
 
-`modelcmp` puts model benchmarks and prices side by side and recommends the best model at each
-price for each task.
+`modelcmp` picks the model for each of your agents, by benchmarks and price.
 
 - **You** get a TUI to compare models, set your favorites and see the recommended ones for each task.
-- **Your agent** gets a CLI and a skill to find your favorite or the recommended model for each task
-  and price tier. An orchestrator in one harness can then hand a subtask to a cheaper model in
-  another, or to a local one, say from `Opus 5.5` in `Claude Code` to `GLM-5.3` in `pi` or to
+- **Your agents** get a CLI and a skill, so an orchestrator picks a model for each subtask by itself,
+  your favorite or the recommended one for its price tier, and hands the subtask to a cheaper model in
+  another harness, or to a local one, say from `Opus 5.5` in `Claude Code` to `GLM-5.3` in `pi` or to
   `Qwen3.8 27B` in `ollama`.
 
 ![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
@@ -122,8 +121,8 @@ up last in recommend.
 ## For agents
 
 The [skill](skills/modelcmp/SKILL.md), set up in [Install](#install), lets an orchestrator agent run a
-multi-agent workflow: it picks a model for each subtask, hands the subtask to it and has another model
-review the work.
+multi-agent workflow without being told which models to use: it picks a model for each subtask, hands
+the subtask to it and has another model review the work.
 
 ![An agent using the modelcmp skill to pick a model for a deadlock fix and a different one for the review](https://github.com/user-attachments/assets/19fb06aa-d46c-4184-9a6d-ea315ba61973)
 

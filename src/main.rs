@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use cli::Exit;
 use store::Store;
 
-/// Pick the right LLM: prices from models.dev and benchmarks from Epoch AI or Artificial Analysis,
+/// Pick the right model for each agent: prices from models.dev and benchmarks from Epoch AI or Artificial Analysis,
 /// for the models you can already use. Those are the models opencode, pi and omp list, Anthropic's
 /// for claude, OpenAI's for codex, Google's for gemini, the ones your Copilot plan includes, and the
 /// ones ollama and llama-cli have on your machine. The Via column shows which

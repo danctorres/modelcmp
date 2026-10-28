@@ -338,7 +338,7 @@ fn link() -> Style {
 }
 
 /// Under the wordmark, after a blank row.
-const TAGLINE: &str = "compare models, pick favorites, get recommendations";
+const TAGLINE: &str = "the right model for each agent, automatically";
 
 /// Where the wordmark `logo` goes in `a`: its corner, and the rows under it that the tagline and
 /// the version take, as far as there is room for them (0, 2 or 3). It is centred with `below` more
