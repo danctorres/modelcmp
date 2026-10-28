@@ -120,8 +120,9 @@ up last in recommend.
 
 ## For agents
 
-The [skill](skills/modelcmp/SKILL.md), set up in [Install](#install), lets an orchestrator agent choose
-a model for each subtask, hand the subtask to it and have another model review the work.
+The [skill](skills/modelcmp/SKILL.md), set up in [Install](#install), lets an orchestrator agent run a
+multi-agent workflow: it picks a model for each subtask, hands the subtask to it and has another model
+review the work.
 
 ![An agent using the modelcmp skill to pick a model for a deadlock fix and a different one for the review](https://github.com/user-attachments/assets/19fb06aa-d46c-4184-9a6d-ea315ba61973)
 
