@@ -121,11 +121,11 @@ up last in recommend.
 ## For agents
 
 The [skill](skills/modelcmp/SKILL.md), set up in [Install](#install), lets an orchestrator agent choose
-a model for each subtask and hand the subtask to it.
+a model for each subtask, hand the subtask to it and have another model review the work.
 
-![An agent using the modelcmp skill to pick a free model for the unit tests and the best one for a race condition](https://github.com/user-attachments/assets/d2c5349e-0cc6-475c-b978-9897ca203bdf)
+![An agent using the modelcmp skill to pick a model for a deadlock fix and a different one for the review](https://github.com/user-attachments/assets/19fb06aa-d46c-4184-9a6d-ea315ba61973)
 
-<p align="center"><i>An agent uses the modelcmp skill to pick a free model for the unit tests and the best one for a race condition.</i></p>
+<p align="center"><i>An agent uses the modelcmp skill to pick a model for a deadlock fix and a different one for the review, then reports which model did what.</i></p>
 
 ## Data
 
