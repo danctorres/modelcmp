@@ -628,11 +628,14 @@ pub enum Input {
         cur: usize,
         was: String,
     },
-    /// `key`: the model the note is for, as the rows can move under the prompt.
+    /// `key`: the model the note is for, as the rows can move under it. Written in its Notes
+    /// cell in the table and on its `note:` line in details, else in the status bar. `back`: the
+    /// column and the sideways scroll enter and esc go back to, as `i` moves to Notes.
     Note {
         key: String,
         text: String,
         cur: usize,
+        back: (usize, usize),
     },
     /// Typing a minimum (`>`) or maximum (`<`) for column `col`.
     Bound {
@@ -1468,6 +1471,8 @@ pub struct App {
     pub panel: Option<ratatui::layout::Rect>,
     /// The columns of the frame's `⚠ refresh had issues` as last drawn, which a click opens.
     pub issues_at: Option<std::ops::Range<u16>>,
+    /// Whether the last frame drew the note being written in its place, so the status bar does not.
+    pub note_shown: bool,
     /// Search of the open panel, compare, help, details or recommend, typed with `/` in any.
     pub overlay_query: String,
     /// The search of the panel details were opened from and the match it was on, for esc to
@@ -1567,6 +1572,7 @@ impl App {
             more: vec![],
             panel: None,
             issues_at: None,
+            note_shown: false,
             overlay_query: String::new(),
             back_query: (String::new(), 0),
             help_back: None,
@@ -4561,7 +4567,12 @@ impl App {
             KeyCode::Char('i') if row => {
                 let m = self.current()?;
                 let text = self.store.note(&m.key).unwrap_or("").to_string();
-                self.input = Input::Note { key: m.key.clone(), cur: text.len(), text };
+                let back = (self.col, self.hscroll);
+                self.input = Input::Note { key: m.key.clone(), cur: text.len(), text, back };
+                // Written in its cell, which the cursor goes to.
+                if table && !hidden(NOTES) {
+                    self.col = NOTES;
+                }
             }
             KeyCode::Char('o') if row => {
                 let m = self.current()?;
@@ -4823,16 +4834,20 @@ impl App {
                     self.next_hit(0);
                 }
             }
-            Input::Note { key, text, cur } => match code {
+            Input::Note { key, text, cur, back } => match code {
                 KeyCode::Enter => {
                     let (key, text) = (std::mem::take(key), std::mem::take(text));
+                    (self.col, self.hscroll) = *back;
                     self.input = Input::None;
                     self.store.set_note(&key, &text);
                     // Search and the Notes sort read notes.
                     self.rebuild_in_place();
                     return Some(Effect::Save);
                 }
-                KeyCode::Esc => self.input = Input::None,
+                KeyCode::Esc => {
+                    (self.col, self.hscroll) = *back;
+                    self.input = Input::None;
+                }
                 _ => drop(edit(text, cur, code, mods, |_| true)),
             },
             Input::Task(e) => match code {
@@ -6787,16 +6802,17 @@ mod tests {
     #[test]
     fn ctrl_w_deletes_a_word_in_every_prompt() {
         let mut a = app();
+        let back = (a.col, a.hscroll);
         press(&mut a, "ifast enough  ");
         ctrl(&mut a, 'w');
         assert_eq!(
             a.input,
-            Input::Note { key: "gpt55".into(), text: "fast ".into(), cur: 5 },
+            Input::Note { key: "gpt55".into(), text: "fast ".into(), cur: 5, back },
             "trailing spaces go with the word"
         );
         ctrl(&mut a, 'w');
         ctrl(&mut a, 'w');
-        assert_eq!(a.input, Input::Note { key: "gpt55".into(), text: String::new(), cur: 0 });
+        assert_eq!(a.input, Input::Note { key: "gpt55".into(), text: String::new(), cur: 0, back });
         code(&mut a, KeyCode::Esc);
         press(&mut a, "/gpt 5");
         ctrl(&mut a, 'w');
@@ -6817,7 +6833,7 @@ mod tests {
             Input::Note { text, cur, .. } => (text.clone(), *cur),
             _ => unreachable!(),
         };
-        a.input = Input::Note { key: "gpt55".into(), text: "über fast".into(), cur: 9 };
+        a.input = Input::Note { key: "gpt55".into(), text: "über fast".into(), cur: 9, back: (0, 0) };
         let alt = |a: &mut App, c: char| a.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
         alt(&mut a, 'b');
         assert_eq!(note(&a), ("über fast".into(), 6), "alt-b to the word start");
@@ -8866,8 +8882,13 @@ mod tests {
         let key = a.data.models[a.rows[2]].key.clone();
         a.store.set_note(&key, "slow");
         a.mouse(Mouse::Row(0));
+        let back = (a.col, a.hscroll);
         assert_eq!(a.mouse(Mouse::Cell(2, NOTES)), None);
-        assert_eq!(a.input, Input::Note { key: key.clone(), text: "slow".into(), cur: 4 }, "a note: written, as i");
+        assert_eq!(
+            a.input,
+            Input::Note { key: key.clone(), text: "slow".into(), cur: 4, back },
+            "a note: written, as i"
+        );
         assert_eq!(a.mouse(Mouse::Scroll(1)), None);
         assert!(matches!(a.input, Input::Note { .. }), "the wheel keeps it open");
         a.mouse(Mouse::Row(0));
@@ -9088,9 +9109,9 @@ mod tests {
     #[test]
     fn ctrl_w_takes_a_word_after_a_wide_space() {
         let mut a = app();
-        a.input = Input::Note { key: "gpt55".into(), text: "a\u{3000}b".into(), cur: 5 };
+        a.input = Input::Note { key: "gpt55".into(), text: "a\u{3000}b".into(), cur: 5, back: (0, 0) };
         ctrl(&mut a, 'w');
-        assert_eq!(a.input, Input::Note { key: "gpt55".into(), text: "a\u{3000}".into(), cur: 4 });
+        assert_eq!(a.input, Input::Note { key: "gpt55".into(), text: "a\u{3000}".into(), cur: 4, back: (0, 0) });
     }
 
     #[test]

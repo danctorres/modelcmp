@@ -1129,6 +1129,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     let tier = app.task_sel.checked_sub(1).filter(|_| app.among.is_none() && !app.caps && !app.on_new_task());
     let cap = if tier.is_some_and(|c| crate::view::capped(TIERS[c].0)) { vec!["< price cap"] } else { vec![] };
     let groups: Vec<Vec<&'static str>> = match app.view {
+        _ if note_in_place(app) => vec![vec!["enter apply", "esc cancel"]],
         View::Table if app.selecting() => {
             vec![vec!["↓ ↑ G extend"], vec!["C compare"], actions("space f e"), vec!["esc cancel", "q quit"]]
         }
@@ -1220,6 +1221,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
     // drops last. Off the table only the panels', whose keys work there. `? help` goes after
     // the way back, so it is the last to go.
+    if written_in_place(app) {
+        return groups.join(&SEP);
+    }
     let (mut cut, last) = (vec![], groups.len() - 1);
     for (i, (&(_, _, hint), end)) in TABS.iter().zip(tab_ends(app)).enumerate() {
         if end >= usize::from(width)
@@ -1295,7 +1299,7 @@ fn hint_layout(app: &App, parts: &[Line], width: u16) -> (Vec<&'static str>, u16
 
 /// A click on the status bar at column `x` presses the key of the hint under it, as in tuiman.
 fn hint_at(app: &App, width: u16, x: u16) -> Option<KeyCode> {
-    if app.input != Input::None {
+    if app.input != Input::None && !written_in_place(app) {
         return None;
     }
     let (hints, mut start) = hint_layout(app, &parts(app), width);
@@ -1741,6 +1745,8 @@ fn draw(app: &mut App, f: &mut Frame) {
     if area.height < 4 || area.width < 4 {
         return;
     }
+    // The text cursor of a note written in its cell in the table.
+    let note_at;
     // The tabs have the first two lines, the frame the rest down to the status bar.
     let body = Rect { y: area.y + 2, height: area.height - 3, ..area };
     let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
@@ -1812,7 +1818,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             x = start + room.saturating_sub(about.chars().count()) / 2;
         }
         put(buf, body.x + x as u16, body.y, about, end.saturating_sub(x), fg(MUTED));
-        let (right, above, below) = table(buf, inner, app);
+        let (right, above, below, typing) = table(buf, inner, app);
+        note_at = typing;
         if right && inner.height > 0 {
             // Columns cut off on the right: `l` scrolls to them.
             put(buf, body.right() - 1, inner.y, "›", 1, MORE);
@@ -1835,9 +1842,11 @@ fn draw(app: &mut App, f: &mut Frame) {
         });
     }
     let text = panel(app, buf, area, body);
-    // Where the text cursor goes: in the status bar's prompt, or on an entry written in a list.
-    // After the panel's lines, as finding its search's match says so there.
-    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y));
+    app.note_shown = note_at.is_some() || matches!((&app.input, text), (Input::Note { .. }, Some(Some(_))));
+    // Where the text cursor goes: in the status bar's prompt, on a note written in its place, on
+    // a cap in recommend or on an entry written in a list. After the panel's lines, as finding
+    // its search's match says so there.
+    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y)).or(note_at);
     if let Some(at) = text {
         cursor = at;
     }
@@ -1918,15 +1927,16 @@ fn draw(app: &mut App, f: &mut Frame) {
 }
 
 /// The open panel's box over the table in `body`, and the text cursor recommend has on a cap
-/// being written: `None` leaves the status bar's cursor, `Some(None)` hides it, the cap's line
-/// being scrolled off.
+/// being written, or details on the note: `None` leaves the status bar's cursor, `Some(None)`
+/// hides it, the line being scrolled off.
 fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Option<(u16, u16)>> {
     let mut cursor = None;
     // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
     let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
     // The line of a panel's search `n` `N` are on, which has the cursor.
     let mut hit_line = None;
-    // Recommend's text cursor, on the header of a tier whose cap is written.
+    // The text cursor, on the header of a tier whose cap is written in recommend, or on the
+    // note's line in details.
     let mut text_at = None;
     let lines = match app.view {
         View::Table => None,
@@ -1968,9 +1978,34 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
         View::Detail(_) => {
             let get = |m| (app.download(m), app.size(m));
             let lines = app.current().map(|m| detail(m, &app.store, app.any_available(), get(m)));
-            lines.map(|(title, lines)| {
+            lines.map(|(title, mut lines)| {
+                // The note being written on its `note:` line, kept in view. The box keeps the
+                // width it has with the note as kept, the text scrolling sideways in it to keep
+                // the text cursor in view.
+                let mut writing = None;
+                if let Input::Note { text, cur, .. } = &app.input
+                    && let Some(l) = lines.iter().position(|l| l.spans.first().is_some_and(|s| s.content == "  note:"))
+                {
+                    let room = usize::from(overlay_rect(body, &title, &lines).width).saturating_sub(4);
+                    let v = &lines[l].spans[1].content;
+                    let pad = v.len() - v.trim_start().len();
+                    let lead = lines[l].spans[0].width() + pad;
+                    let start = scrolled(lead, text, *cur, room);
+                    let mut w = lead;
+                    let fits = |c: &char| {
+                        w += Span::raw(c.to_string()).width();
+                        w <= room
+                    };
+                    let shown: String = text[start..].chars().take_while(fits).collect();
+                    lines[l].spans[1] = Span::raw(format!("{}{shown}", " ".repeat(pad)));
+                    text_at = Some((l, lead + Span::raw(&text[start..*cur]).width()));
+                    let shown = usize::from(body.height.saturating_sub(2)).max(1);
+                    app.scroll = (app.scroll as usize).clamp((l + 1).saturating_sub(shown), l) as u16;
+                    writing = Some(l);
+                }
                 let (lines, hits) = lit_lines(lines, &app.overlay_query);
-                hit_line = to_hit(app, &hits);
+                let hit = to_hit(app, &hits);
+                hit_line = writing.or(hit);
                 (title, lines)
             })
         }
@@ -2144,9 +2179,13 @@ fn layout(width: u16, app: &App) -> Layout {
         ms.iter().map(listed).chain(got).chain(out.then_some(OUT_OF_REACH.len())).max().unwrap_or(0).max(6) as u16;
     // As wide as drawn: a CJK character or an emoji takes two cells. Of the models the data has,
     // found from the few notes rather than from every model.
-    let noted = app.store.notes.iter().filter(|(k, _)| ms.iter().any(|m| m.key == **k));
+    // A note being written in its cell is as wide as it would be once kept, a cell more for the
+    // cursor, in place of the one it had.
+    let typed = note_in_table(app);
+    let noted =
+        app.store.notes.iter().filter(|(k, _)| typed.is_none_or(|t| t.0 != *k) && ms.iter().any(|m| m.key == **k));
     let notes_w = noted.map(|(_, s)| Span::raw(s).width()).max().unwrap_or(0);
-    let notes_w = notes_w.clamp(6, 40) as u16;
+    let notes_w = notes_w.max(typed.map_or(0, |t| Span::raw(t.1).width() + 1)).clamp(NOTE_MIN, 40) as u16;
     // Of the models listed, not of all: one long name filtered out leaves no gap before Dev.
     let longest = app.rows.iter().map(|&r| ms[r].name.chars().count()).max().unwrap_or(0) as u16;
     // Row numbers as wide as the last one, a space, then the checkbox, the ☆ and the ✗ box,
@@ -2238,10 +2277,11 @@ fn head(app: &App) -> u16 {
 }
 
 /// Header plus as many rows as fit in `area`, scrolled so the selection stays in view. Says
-/// whether columns are cut off on the right and rows above and below, for the caller's border.
-fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
+/// whether columns are cut off on the right and rows above and below, for the caller's border,
+/// and where the text cursor of a note written in its cell is.
+fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool, Option<(u16, u16)>) {
     if area.height == 0 {
-        return (false, false, false);
+        return (false, false, false, None);
     }
     let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, next, seps } = layout(area.width, app);
     app.hscroll = first;
@@ -2336,6 +2376,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
     // A glyph with the gap after it, short of the frame's border on a table too narrow for both.
     let gap = |x: u16| usize::from(area.right().saturating_sub(x)).min(2);
     let faint = palette(app).is_some() || app.term_bg.is_some();
+    let mut typing = None;
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + head + (k - top) as u16;
         let m = &app.data.models[r];
@@ -2446,8 +2487,18 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
                 put(buf, x, y, get, end.saturating_sub(x) as usize, style);
             }
         }
-        let note = app.store.note(&m.key).unwrap_or("");
+        let mut note = app.store.note(&m.key).unwrap_or("");
         if let Some((x, w)) = notes {
+            // The note being written, scrolled sideways in its cell to keep the text cursor in view.
+            // A cell cut narrower leaves it to the status bar.
+            if let Some((key, written, cur)) = note_in_table(app)
+                && key == m.key
+                && usize::from(w) >= NOTE_MIN
+            {
+                let start = scrolled(0, written, cur, w as usize);
+                note = &written[start..];
+                typing = Some((area.x + x + Span::raw(&written[start..cur]).width() as u16, y));
+            }
             put(buf, area.x + x, y, note, w as usize, text.add_modifier(Modifier::ITALIC));
         }
         if excluded {
@@ -2508,7 +2559,7 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool) {
         };
         dropdown(buf, area, menu_x(area, &l, *col), *col, items, list, picked, &not, faint);
     }
-    (more, top > 0, top + height < app.rows.len())
+    (more, top > 0, top + height < app.rows.len(), typing)
 }
 
 /// Screen column where the dropdown of `col` opens: under its header, or Dev's when scrolled off.
@@ -2776,6 +2827,30 @@ fn mode(app: &App) -> (&'static str, Color) {
     }
 }
 
+/// Whether the note being written was drawn in its place, the table's Notes cell or the
+/// details' `note:` line, rather than in the status bar: compare and recommend show no note, `|`
+/// may leave Notes out, a narrow table has no room for it and its row may be scrolled off.
+fn note_in_place(app: &App) -> bool {
+    matches!(app.input, Input::Note { .. }) && app.note_shown
+}
+
+/// Whether text is written on its entry, a note in its place, a tier's cap or a task of your own:
+/// the status bar has only its keys, which a click presses, every other key typing.
+fn written_in_place(app: &App) -> bool {
+    note_in_place(app) || matches!(app.input, Input::Cap { .. } | Input::Task(_))
+}
+
+/// The note being written in the table's Notes cell: its model's key, its text and its cursor.
+fn note_in_table(app: &App) -> Option<(&str, &str, usize)> {
+    match &app.input {
+        Input::Note { key, text, cur, .. } if app.view == View::Table => Some((key, text, *cur)),
+        _ => None,
+    }
+}
+
+/// Notes is never narrower than this, so it is the least a note is written in.
+const NOTE_MIN: usize = 6;
+
 /// Returns the cursor column while a search, note or bound is being typed.
 fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let width = area.width as usize;
@@ -2807,6 +2882,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
             Some(("/".to_string(), q, *cur))
         }
+        Input::Note { .. } if note_in_place(app) => None,
         Input::Note { text, cur, .. } => Some(("note: ".to_string(), text, *cur)),
         Input::Bound { col, min, text, cur } => {
             Some((format!("{} {} ", app.bound_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
@@ -5899,11 +5975,11 @@ mod tests {
         data.models.push(model("mini", "openai", Some(100.0), 0.5));
         a.set_data(data);
         let mut buf = Buffer::empty(Rect::new(0, 0, 46, 3));
-        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, false, true), "one row hidden below");
+        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, false, true, None), "one row hidden below");
         a.key(KeyCode::Char('G').into());
-        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, true, false), "then above");
+        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, true, false, None), "then above");
         let mut buf = Buffer::empty(Rect::new(0, 0, 46, 9));
-        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false), "all rows fit");
+        assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false, None), "all rows fit");
         assert!(lines[3].ends_with("? help"), "{}", lines[3]);
         assert!(!lines[3].contains("space select"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Model, Dev too; Model stays.
@@ -6379,8 +6455,8 @@ mod tests {
     fn a_long_prompt_scrolls_and_keeps_its_cursor_off_the_hint() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
         let mut a = app();
-        a.key(KeyCode::Char('i').into());
-        for c in "🔥 a note far longer than the room it has".chars() {
+        a.key(KeyCode::Char('/').into());
+        for c in "🔥 a search far longer than the room it has".chars() {
             a.key(KeyCode::Char(c).into());
         }
         term.draw(|f| draw(&mut a, f)).unwrap();
@@ -6389,6 +6465,78 @@ mod tests {
         let buf = term.backend().buffer();
         let line: String = (0..60).map(|x| buf[(x, pos.y)].symbol()).collect();
         assert!(pos.x < hint && line.contains("room it has"), "cursor at {} on {line:?}", pos.x);
+    }
+
+    #[test]
+    fn a_note_is_written_in_its_cell_and_on_its_details_line() {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 8)).unwrap();
+        let mut a = app();
+        let (col, typed) = (a.col, "🔥 a note far longer than the room it has");
+        a.key(KeyCode::Char('i').into());
+        for c in typed.chars() {
+            a.key(KeyCode::Char(c).into());
+        }
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let pos = term.get_cursor_position().unwrap();
+        let buf = term.backend().buffer();
+        let row = |y: u16| (0..70).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert_eq!(a.col, NOTES, "the cursor goes to the Notes cell");
+        assert!(pos.y < 7 && row(pos.y).contains("room it has"), "on its row: {}", row(pos.y));
+        assert_eq!(buf[(pos.x - 1, pos.y)].symbol(), "s", "the text cursor after the text");
+        // Only the keys that work while typing, which a click presses.
+        let bar = row(7);
+        assert!(!bar.contains("note:") && bar.contains("esc cancel") && !bar.contains("help"), "{bar}");
+        let keys: Vec<_> = (0..70).filter_map(|x| hint_at(&a, 70, x)).collect();
+        assert!(keys.contains(&KeyCode::Enter) && keys.contains(&KeyCode::Esc), "{keys:?}");
+        a.key(KeyCode::Esc.into());
+        assert_eq!(a.col, col, "esc puts the column back");
+
+        // Details on a wide screen: the box keeps its width, the note scrolling in it.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 40)).unwrap();
+        a.key(KeyCode::Enter.into());
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let wide = a.panel.unwrap();
+        a.key(KeyCode::Char('i').into());
+        for _ in 0..300 {
+            a.key(KeyCode::Char('x').into());
+        }
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let pos = term.get_cursor_position().unwrap();
+        let buf = term.backend().buffer();
+        let row = |y: u16| (0..200).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert!(matches!(a.view, View::Detail(_)));
+        assert_eq!(a.panel, Some(wide), "the box keeps its width");
+        assert!(row(pos.y).contains("note:") && row(pos.y).contains("xxx"), "{}", row(pos.y));
+        assert_eq!((buf[(pos.x - 1, pos.y)].symbol(), buf[(pos.x, pos.y)].symbol()), ("x", " "), "after the text");
+        assert!(pos.x < wide.right() - 2, "inside the box");
+        assert!(!row(39).contains("note:"), "{}", row(39));
+        a.key(KeyCode::Enter.into());
+        assert_eq!((a.col, a.store.note(&a.current().unwrap().key)), (col, Some("x".repeat(300).as_str())));
+    }
+
+    #[test]
+    fn a_note_with_no_place_shown_is_written_in_the_status_bar() {
+        // A table with no room for Notes, or one too narrow to write in, and compare, which shows
+        // no note.
+        for (w, view) in [(28, View::Table), (31, View::Table), (60, View::Compare)] {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 8)).unwrap();
+            let mut a = app();
+            a.store.marked = vec!["opus".into(), "flash".into()];
+            if view == View::Table {
+                a.key(KeyCode::Char('i').into());
+                for c in "abc".chars() {
+                    a.key(KeyCode::Char(c).into());
+                }
+            } else {
+                a.view = view;
+                let back = (a.col, a.hscroll);
+                a.input = Input::Note { key: "opus".into(), text: "abc".into(), cur: 3, back };
+            }
+            term.draw(|f| draw(&mut a, f)).unwrap();
+            let pos = term.get_cursor_position().unwrap();
+            let bar: String = (0..w).map(|x| term.backend().buffer()[(x, 7)].symbol()).collect();
+            assert!(pos.y == 7 && bar.contains("note: abc"), "{w} {:?}: {bar}", a.view);
+        }
     }
 
     #[test]
