@@ -1191,7 +1191,7 @@ pub fn detail_rows(
     }
     if !m.scores.is_empty() {
         v.push(String::new());
-        v.push("  benchmarks (Epoch AI, best reasoning setting):".into());
+        v.push("  benchmarks (Epoch AI, best reasoning setting, OpenRouter's where it says so):".into());
         v.extend(m.scores.iter().map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
     }
     v.push(String::new());

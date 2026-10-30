@@ -128,6 +128,8 @@ the subtask to it and has another model review the work.
 - [models.dev](https://models.dev): prices, context windows and what each model can do
   (tools, reasoning, vision).
 - [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks.
+- [OpenRouter](https://openrouter.ai/benchmarks/gpqa-diamond) (CC BY 4.0): GPQA diamond
+  results, for the models Epoch AI has not run it on.
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions,
   chat and web development (the Arena column).
 
@@ -141,4 +143,4 @@ None needs an API key. Data is cached for 24 hours.
 
 ## License
 
-[MIT](LICENSE). Benchmark data from Epoch AI and Arena is licensed CC-BY.
+[MIT](LICENSE). Benchmark data from Epoch AI and Arena is licensed CC-BY, and OpenRouter's CC BY 4.0.

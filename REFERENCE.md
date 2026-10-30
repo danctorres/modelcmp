@@ -69,6 +69,8 @@ What a refresh downloads:
 - Epoch AI's benchmark data.
 - Epoch AI's and Artificial Analysis's sitemaps, to link the models that have a page there (`o`).
 - OpenRouter's list of models, for the Hugging Face repo it names for each.
+- OpenRouter's benchmark leaderboard (<https://openrouter.ai/api/v1/datasets/exports/README.md>,
+  CC BY 4.0), for its GPQA diamond results. A refresh that cannot get it says so and goes on.
 - For an open model OpenRouter names no repo for, the Hugging Face repo under an id a provider
   gives it. Hugging Face is asked once the early data is in, for up to 400 ids a refresh, and an
   id with no repo is asked about again a month later.
@@ -86,6 +88,15 @@ Epoch AI (<https://epoch.ai/data/benchmark_data.zip>):
   gets an estimate.
 - A task's benchmarks are in its column's dropdown (`d`). `B` finds a benchmark of any task
   without knowing which task it is for.
+
+OpenRouter (its benchmark leaderboard, updated daily):
+
+- A model Epoch AI has no GPQA diamond score for, and OpenRouter has run it on, gets
+  OpenRouter's accuracy as its GPQA diamond score, named `GPQA diamond · OpenRouter` in `show`.
+  It is the median over the providers that ran the model in the last 90 days, as a broken
+  provider scores near 0, or OpenRouter's auto-routing run when no provider has one. It is
+  scored on Epoch's curve for GPQA diamond, so it feeds the overall estimate of a model with no
+  ECI. Its tau-bench results are not used.
 
 Arena (its Agent, Text and WebDev leaderboards):
 
