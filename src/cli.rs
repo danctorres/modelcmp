@@ -1866,11 +1866,11 @@ mod tests {
     fn the_command_starts_the_harness_asked_for() {
         let mut m = model("gpt55", 90.0, 10.0);
         let none = BTreeMap::new();
-        assert_eq!(command(&m, &[], &[], &[], &none), None, "no harness has it");
+        assert_eq!(command(&m, &[], &[], &[], None, &none), None, "no harness has it");
         m.offers[0].via = vec!["codex".into(), "opencode".into()];
         let cmd = |first: &[Option<&str>], only: &[&str]| {
             let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
-            command(&m, first, &only, &[], &none).map(|c| c.join(" "))
+            command(&m, first, &only, &[], None, &none).map(|c| c.join(" "))
         };
         assert_eq!(cmd(&[], &[]).as_deref(), Some("codex --model gpt55"), "its developer's own, before Via's order");
         assert_eq!(cmd(&[], &["opencode"]).as_deref(), Some("opencode --model p/gpt55"), "--via's");
@@ -1904,8 +1904,13 @@ mod tests {
         let start = harness_cmd(&store, &m, &[], &none).map(|c| c.join(" "));
         assert_eq!(start.as_deref(), Some("codex --model gpt55"), "no ollama for one another harness runs in full");
         m.offers[0].via = vec!["pi".into(), "opencode".into()];
-        let cmd = command(&m, &[], &[], &[], &none).map(|c| c.join(" "));
+        let cmd = command(&m, &[], &[], &[], None, &none).map(|c| c.join(" "));
         assert_eq!(cmd.as_deref(), Some("opencode --model p/gpt55"), "no developer's own: the first in Via's order");
+        let cmd = command(&m, &[], &[], &[], Some("pi"), &none).map(|c| c.join(" "));
+        assert_eq!(cmd.as_deref(), Some("pi --model p/gpt55"), "the harness running modelcmp, before Via's order");
+        m.offers[0].via.push("codex".into());
+        let cmd = command(&m, &[], &[], &[], Some("pi"), &none).map(|c| c.join(" "));
+        assert_eq!(cmd.as_deref(), Some("codex --model gpt55"), "after its developer's own");
     }
 
     #[test]

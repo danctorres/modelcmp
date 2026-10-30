@@ -1368,7 +1368,7 @@ pub fn harness_cmd(
 ) -> Option<Vec<String>> {
     let default = Some(store.harness.as_str()).filter(|h| !h.is_empty() && (!crate::data::runs_here(h) || m.local()));
     let not = if only.is_empty() { store.via_not.as_slice() } else { &[] };
-    command(m, &[runs_on(store, m), default], only, not, listed)
+    command(m, &[runs_on(store, m), default], only, not, crate::data::orchestrator(), listed)
 }
 
 /// The id `Y` and `--id` give: the one the harness `harness_cmd` starts takes, else `model_id`.
@@ -1377,22 +1377,24 @@ pub fn harness_id(store: &Store, m: &Model, only: &[String], listed: &BTreeMap<S
 }
 
 /// The command that starts a harness on `m`: the first of `first` to have the model (the
-/// model's harness, then your default one), else its developer's own, else the first that does,
-/// in Via's order and among `only` when it names any. Those two skip the harnesses in `not`
-/// (left out in Via) while another has the model.
+/// model's harness, then your default one), else its developer's own, else `ours` (the harness
+/// running modelcmp), else the first that does, in Via's order and among `only` when it names
+/// any. Those three skip the harnesses in `not` (left out in Via) while another has the model.
 pub fn command(
     m: &Model,
     first: &[Option<&str>],
     only: &[String],
     not: &[String],
+    ours: Option<&'static str>,
     listed: &BTreeMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
     let asked = |h: &&str| only.is_empty() || only.iter().any(|x| x.eq_ignore_ascii_case(h));
     let has = |h: &str| launch_cmd(m, h, listed);
-    // Then its developer's own harness, claude for a Claude model, before one of anyone's models.
+    // Then its developer's own harness, claude for a Claude model, then the one running modelcmp,
+    // before one of anyone's models.
     let rest = |skip: bool| {
         let kept = |h: &&str| !skip || !not.iter().any(|x| x == h);
-        crate::data::first_party().chain(crate::data::vias()).filter(asked).filter(kept).find_map(has)
+        crate::data::first_party().chain(ours).chain(crate::data::vias()).filter(asked).filter(kept).find_map(has)
     };
     first
         .iter()

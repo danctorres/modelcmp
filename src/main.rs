@@ -79,7 +79,7 @@ enum Cmd {
         /// Ignore your favorites and print the tier's best model, for when the favorite is on no harness you can start
         #[arg(long, requires = "tier")]
         no_fav: bool,
-        /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the model (`modelcmp harness <harness> <model>`), else your default harness, else the model's developer's own (claude for a Claude model), else the first one that has the model, out of the --via ones when given. With --tier, only one whose own price fits the tier counts
+        /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the model (`modelcmp harness <harness> <model>`), else your default harness, else the model's developer's own (claude for a Claude model), else the harness running modelcmp, as an agent's, else the first one that has the model, out of the --via ones when given. With --tier, only one whose own price fits the tier counts
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
     },
@@ -172,7 +172,7 @@ enum Cmd {
     },
     /// Show or set your default harness, or the harness a model runs on (`P` and `H` in the TUI)
     ///
-    /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli. `list --cmd`, `list --id` and `pick` run a model on the harness you gave it, else on your default harness, else on its developer's own (claude for a Claude model), else on the first that has it. `modelcmp harness claude opus-5.5 sonnet-5` runs those two on claude
+    /// One of opencode, pi, omp, claude, codex, gemini, copilot, ollama, llama-cli. `list --cmd`, `list --id` and `pick` run a model on the harness you gave it, else on your default harness, else on its developer's own (claude for a Claude model), else on the harness running modelcmp, else on the first that has it. `modelcmp harness claude opus-5.5 sonnet-5` runs those two on claude
     Harness {
         name: Option<String>,
         /// The models to run on it, else it is your default harness

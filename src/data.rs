@@ -830,6 +830,23 @@ pub fn vias() -> impl Iterator<Item = &'static str> {
     HARNESSES.iter().map(|h| h.0)
 }
 
+/// The harness running modelcmp, as an agent's `pick` does, told by a variable it sets for
+/// its commands. Copilot sets none, and omp's goes before pi's as it is pi's fork.
+pub fn orchestrator() -> Option<&'static str> {
+    static OURS: std::sync::LazyLock<Option<&str>> = std::sync::LazyLock::new(|| {
+        let vars = [
+            ("CLAUDECODE", "claude"),
+            ("OPENCODE", "opencode"),
+            ("OMPCODE", "omp"),
+            ("PI_CODING_AGENT", "pi"),
+            ("CODEX_THREAD_ID", "codex"),
+            ("GEMINI_CLI", "gemini"),
+        ];
+        vars.into_iter().find(|(v, _)| std::env::var_os(v).is_some_and(|x| !x.is_empty())).map(|(_, h)| h)
+    });
+    *OURS
+}
+
 /// The harnesses that have only their developer's models (claude, codex, gemini): the one of a
 /// model's own developer runs it, before a harness of anyone's models.
 pub fn first_party() -> impl Iterator<Item = &'static str> {
