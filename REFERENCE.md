@@ -586,7 +586,7 @@ A task of your own follows the built-in ones with the same fields and `"custom":
 
 | Field | What it is |
 |---|---|
-| `about` | what the user wrote, `your own task` when nothing |
-| `when` | says it wins over a built-in task that fits too |
+| `about` | `your own task` |
+| `when` | what the user wrote, and that it wins over a built-in task that fits too |
 | `tier_favorites` | the models the user gave its tiers |
 | `frontier` | those models, cheapest first, with a null `score` |

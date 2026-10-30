@@ -557,7 +557,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("✗", "excluded: you have it but cannot use it, and recommendations skip it"),
             ("space", "select the model, `C` compares the selected"),
             ("f", "favorite the model for a task's tier, or for a task you add"),
-            ("f: r a", "in `f`, rename a task you added or write what it is about"),
+            ("T", "edit a task you added in `R` or `f`: its name, then its description"),
             ("R: D", "delete a task you added, asks first"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
@@ -778,6 +778,18 @@ pub enum Input {
     },
 }
 
+/// What enter in a task's name comes to (`App::named`).
+enum Named {
+    /// On to what the task is about.
+    Next,
+    /// A new task with nothing written: none.
+    Nothing,
+    /// A new task named as the one there is, which is gone to.
+    Taken(String),
+    /// A name that cannot be, and why.
+    Wrong(String),
+}
+
 /// What a choice list chooses: the key that opened it.
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum Kind {
@@ -844,12 +856,10 @@ pub struct Edit {
 /// What an `Edit` writes.
 #[derive(PartialEq, Debug)]
 pub enum What {
-    /// The name of a new task, on `+ new task`.
-    New,
-    /// Another name for this task.
-    Rename(String),
-    /// What this task is about.
-    About(String),
+    /// A task's name and what it is about, written together: of the task of your own `was`
+    /// (`T`), or of a new one (`+ new task`). `text` is the field the cursor is in, what it is
+    /// about when `about`, and `other` the other field's.
+    Task { was: Option<String>, other: String, about: bool },
     /// The folder to open this command in, on a harness of `x`'s list, the folders tab could
     /// not choose between, and the one of them tab is on, which the text ends with.
     Dir(Vec<String>, Vec<String>, Option<usize>),
@@ -861,11 +871,46 @@ impl Edit {
         Edit { what, cur: text.len(), text, err: None }
     }
 
+    /// `T` on the task of your own `task`: its name and what it is about, as they are, the
+    /// cursor on the name.
+    fn task(task: String, store: &Store) -> Self {
+        let other = store.about(&task).unwrap_or("").to_string();
+        Edit::new(What::Task { was: Some(task.clone()), other, about: false }, task)
+    }
+
+    /// `+ new task`: both fields empty.
+    fn new_task() -> Self {
+        Edit::new(What::Task { was: None, other: String::new(), about: false }, String::new())
+    }
+
+    /// A task's name and what it is about, whichever field the cursor is in.
+    pub fn fields(&self) -> Option<(&str, &str)> {
+        let What::Task { other, about, .. } = &self.what else { return None };
+        Some(if *about { (other, &self.text) } else { (&self.text, other) })
+    }
+
+    /// Tab: the cursor to the other field of a task, at its end.
+    fn switch(&mut self) {
+        if let What::Task { other, about, .. } = &mut self.what {
+            std::mem::swap(&mut self.text, other);
+            *about = !*about;
+            (self.cur, self.err) = (self.text.len(), None);
+        }
+    }
+
+    /// Why enter did not take a task, the cursor in the field it is about.
+    fn fail(&mut self, about: bool, err: String) {
+        if matches!(self.what, What::Task { about: on, .. } if on != about) {
+            self.switch();
+        }
+        self.err = Some(err);
+    }
+
     /// A key typed into a task's name, or what it is about: `:` sets a tier apart, so no name
     /// has one.
     fn key(&mut self, code: KeyCode, mods: KeyModifiers) {
         self.err = None;
-        let about = matches!(self.what, What::About(_));
+        let about = matches!(self.what, What::Task { about: true, .. });
         edit(&mut self.text, &mut self.cur, code, mods, |c| about || c != ':');
     }
 }
@@ -1504,6 +1549,9 @@ pub struct App {
     pub picked: Vec<usize>,
     pub view: View,
     pub input: Input,
+    /// A task being written that an agent renamed or deleted meanwhile, ended on the reload
+    /// before a key: that key was typed for it, and is no command.
+    ended: bool,
     /// Scroll offset of the detail, compare and help views. The renderer clamps it.
     pub scroll: u16,
     /// The row of `HELP` under the cursor in `?`.
@@ -1622,6 +1670,7 @@ impl App {
             picked: vec![],
             view: View::Table,
             input: Input::None,
+            ended: false,
             scroll: 0,
             help_sel: 0,
             compare_sel: 0,
@@ -2450,9 +2499,15 @@ impl App {
         // A task of your own is gone with its model, from under recommend's cursor too, which
         // is then on `+ new task`.
         self.task_cur = self.task_cur.min(self.task_count());
-        // A task an agent added while a new one is being named leaves the cursor on the name.
-        if matches!(self.input, Input::Task(_)) {
-            self.task_cur = self.task_count();
+        // A task an agent added while one is being written leaves the cursor on the text, and
+        // one it renamed or deleted ends the writing.
+        match self.edit_row() {
+            Some(at) => self.task_cur = at,
+            None if matches!(self.input, Input::Task(_)) => {
+                (self.input, self.ended) = (Input::None, true);
+                self.report(Err("the task was renamed or deleted meanwhile".into()));
+            }
+            None => {}
         }
         // Before a task keeps only its line: the models every task's line is drawn from. `F` and
         // `E` narrow none, as a favorite already takes its own tier and an excluded model is never
@@ -3190,44 +3245,143 @@ impl App {
         self.relist(key, slot, None);
     }
 
-    /// Enter on recommend's `+ new task`: a name there already goes to its task, a new one asks
-    /// what it is about on the row, which makes the task, as agents choose it by that and it
-    /// has no model yet. `d` on its tiers gives it some.
+    /// Enter on a task written in recommend, under the grid (`task_enter`).
     fn new_task(&mut self) -> Option<Effect> {
-        let Input::Task(e) = &mut self.input else { return None };
-        match &e.what {
-            What::New => {
-                // No name names no task.
-                let Ok(name) = crate::store::task_name(&e.text) else {
-                    self.input = Input::None;
-                    return None;
-                };
-                let mut names = TASKS.iter().map(|t| t.name).chain(self.store.custom_tasks());
-                if let Some(at) = names.position(|t| t == name) {
-                    self.input = Input::None;
-                    self.task_to(at);
-                    self.task_sel = 0;
-                    self.report(Err(format!("a task named {name} already exists")));
-                    return None;
-                }
-                *e = Edit::new(What::About(name), String::new());
-                None
-            }
-            What::About(task) => {
-                if e.text.trim().is_empty() {
-                    e.err = Some("write what the task is about to add it".into());
-                    return None;
-                }
-                let task = task.clone();
-                self.store.set_about(&task, &e.text);
-                self.input = Input::None;
-                self.back_on(Some(task.clone()));
-                self.task_sel = 0;
-                self.report(Ok(format!("added {task}, press d on a tier to choose its model")));
-                Some(Effect::Save)
-            }
-            _ => None,
+        let Input::Task(e) = std::mem::replace(&mut self.input, Input::None) else { return None };
+        let (effect, back) = self.task_enter(e, None);
+        if let Some(e) = back {
+            self.input = Input::Task(e);
         }
+        effect
+    }
+
+    /// Enter on a task written in `f`'s grid for the model `key` (`task_enter`), the list staying
+    /// open on it.
+    fn edited(&mut self, key: &str, e: Edit) -> Option<Effect> {
+        let (effect, back) = self.task_enter(e, Some(key));
+        if let (Some(e), Input::Choose { list, .. }) = (back, &mut self.input) {
+            list.edit = Some(e);
+        }
+        effect
+    }
+
+    /// Enter on a task written in recommend, or in `f`'s grid for the model `key`: its name and
+    /// what it is about, together. In the name it goes on to what the task is about once the name
+    /// can be, and there saves both or neither. A new task named as one there is, with nothing
+    /// written about it, goes to that one. The edit comes back when writing goes on, with why
+    /// enter did not take it.
+    fn task_enter(&mut self, mut e: Edit, key: Option<&str>) -> (Option<Effect>, Option<Edit>) {
+        let (Some((name, about)), What::Task { was, about: on_about, .. }) = (e.fields(), &e.what) else {
+            return (None, Some(e));
+        };
+        let (name, about, was, on_about) = (name.to_string(), about.to_string(), was.clone(), *on_about);
+        let done = match self.named(&e) {
+            Named::Nothing => Ok(None),
+            Named::Taken(name) => Ok(self.go_to_named(key, &name)),
+            Named::Wrong(err) => Err((false, err)),
+            Named::Next if !on_about => {
+                e.switch();
+                return (None, Some(e));
+            }
+            Named::Next => match (was, key) {
+                (Some(was), _) => self.save_task(&was, &name, &about).map(|saved| {
+                    let name = saved?;
+                    // `f`'s grid on it, on the box the cursor was on.
+                    if let Some(key) = key {
+                        let col = self.open_list().map_or(0, |l| l.col);
+                        self.relist(key, &box_slot(&name, col), None);
+                    }
+                    Some(Effect::Save)
+                }),
+                (None, Some(key)) => Ok(self.fav_task(key, &name, &about)),
+                (None, None) => self.add_task(&name, &about),
+            },
+        };
+        match done {
+            Ok(effect) => (effect, None),
+            Err((on_about, err)) => {
+                e.fail(on_about, err);
+                (None, Some(e))
+            }
+        }
+    }
+
+    /// A task of your own added in recommend, named `name` and about `about`, which it needs, as
+    /// agents choose it by that and it has no model yet: `d` on its tiers gives it some.
+    fn add_task(&mut self, name: &str, about: &str) -> Result<Option<Effect>, (bool, String)> {
+        let name = crate::store::task_name(name).map_err(|e| (false, e))?;
+        if about.trim().is_empty() {
+            return Err((true, "write what the task is about to add it".into()));
+        }
+        self.store.set_about(&name, about);
+        self.back_on(Some(name.clone()));
+        self.task_sel = 0;
+        self.report(Ok(format!("added {name}, press d on a tier to choose its model")));
+        Ok(Some(Effect::Save))
+    }
+
+    /// What enter in a task's name comes to. A task of your own that an agent renamed or deleted
+    /// meanwhile is no task to save.
+    fn named(&self, e: &Edit) -> Named {
+        let (Some((name, about)), What::Task { was, .. }) = (e.fields(), &e.what) else { return Named::Next };
+        if let Some(was) = was.as_deref().filter(|w| !self.store.custom_tasks().contains(w)) {
+            return Named::Wrong(format!("{was} was renamed or deleted meanwhile"));
+        }
+        if was.is_none() && name.trim().is_empty() && about.trim().is_empty() {
+            return Named::Nothing;
+        }
+        match crate::store::task_name(name) {
+            Err(err) => Named::Wrong(err),
+            Ok(n) if was.as_ref() == Some(&n) || !self.store.has_task(&n) => Named::Next,
+            // A new task named as one there is, with nothing written about it, is that one.
+            Ok(n) if was.is_none() && about.trim().is_empty() => Named::Taken(n),
+            Ok(n) => Named::Wrong(format!("a task named {n} already exists")),
+        }
+    }
+
+    /// The task named `name`, there already, gone to: in `f`'s grid for the model `key` its row,
+    /// on the box the model has there, its tiers keeping their favorites, else in recommend.
+    fn go_to_named(&mut self, key: Option<&str>, name: &str) -> Option<Effect> {
+        match key {
+            Some(key) => {
+                let mut slots = crate::store::task_slots(name);
+                let slot = slots.find(|s| self.store.favorite(s) == Some(key)).unwrap_or(name.to_string());
+                self.relist(key, &slot, None);
+            }
+            None => _ = self.go_to_task(name),
+        }
+        None
+    }
+
+    /// Recommend's cursor to the task named `name` when there is one, saying it is there already.
+    fn go_to_task(&mut self, name: &str) -> bool {
+        let mut names = TASKS.iter().map(|t| t.name).chain(self.store.custom_tasks());
+        let Some(at) = names.position(|t| t == name) else { return false };
+        self.task_to(at);
+        self.task_sel = 0;
+        self.report(Err(format!("a task named {name} already exists")));
+        true
+    }
+
+    /// The row of recommend whose task is written under the grid: a task of your own's, none once
+    /// that task is gone, and `+ new task`'s, the last, for a new one.
+    pub fn edit_row(&self) -> Option<usize> {
+        let Input::Task(Edit { what: What::Task { was, .. }, .. }) = &self.input else { return None };
+        let own = self.store.custom_tasks();
+        match was {
+            Some(t) => own.iter().position(|x| x == t).map(|at| TASKS.len() + at),
+            None => Some(TASKS.len() + own.len()),
+        }
+    }
+
+    /// Why `T` does not edit the built-in `task`.
+    fn built_in(&self, task: &str) -> String {
+        format!("{task} is built in, {} only works on a task you added", self.key_of('T'))
+    }
+
+    /// The task of your own whose name recommend's cursor is on.
+    fn own_name(&self) -> Option<&str> {
+        self.custom_at().filter(|_| self.among.is_none() && !self.caps && self.task_sel == 0)
     }
 
     /// Recommend's cursor back on the task of your own it was `on`, after a change to them: they
@@ -3290,6 +3444,7 @@ impl App {
             // way, past the last to the first.
             KeyCode::Tab | KeyCode::BackTab => {
                 let e = list.edit.as_mut()?;
+                e.switch();
                 if let What::Dir(_, more, on) = &mut e.what {
                     if more.is_empty() {
                         (e.text, *more) = crate::data::complete(&e.text);
@@ -3342,66 +3497,52 @@ impl App {
         None
     }
 
-    /// Enter on an entry written in `f`'s grid for the model `key`: the task is named, renamed
-    /// or described, and the list stays open on it.
-    fn edited(&mut self, key: &str, e: Edit) -> Option<Effect> {
-        // The box the cursor was on, which a name or an about leaves where it is.
-        let col = self.open_list().map_or(0, |l| l.col);
-        let name = crate::store::task_name(&e.text);
-        match e.what {
-            What::New => {
-                // No name names no task.
-                let name = name.ok()?;
-                // A task there is already is only gone to, on the box the model has there, and its
-                // tiers keep their favorites. A new one has the model at high, which takes any
-                // price, so agents can use it at once.
-                let had = crate::fit::task(&name).is_some() || self.store.custom_tasks().contains(&name.as_str());
-                let slot = if had {
-                    crate::store::task_slots(&name)
-                        .find(|s| self.store.favorite(s) == Some(key))
-                        .unwrap_or(name.clone())
-                } else {
-                    box_slot(&name, BOXES - 1)
-                };
-                let saved = if had { None } else { self.fav(key, &slot) };
-                // What a new one is about is asked next, on its entry: agents pick the task by it.
-                let next = (!had).then(|| Edit::new(What::About(name.clone()), String::new()));
-                self.relist(key, &slot, next);
-                saved
-            }
-            What::Rename(was) => {
-                let name = name.ok().filter(|n| *n != was)?;
-                let on = self.custom_at().map(|t| if t == was { name.clone() } else { t.to_string() });
-                if let Err(err) = self.store.rename_task(&was, &name) {
-                    // Said under the list, the name still there to change.
-                    if let Input::Choose { list, .. } = &mut self.input {
-                        list.edit = Some(Edit { what: What::Rename(was), err: Some(err), ..e });
-                    }
-                    return None;
-                }
-                self.back_on(on);
-                self.report(Ok(format!("{was} renamed to {name}")));
-                self.relist(key, &box_slot(&name, col), None);
-                Some(Effect::Save)
-            }
-            // Enter on a folder never gets here: `edit_key` opens the harness in it.
-            What::Dir(..) => None,
-            What::About(task) => {
-                let was = self.store.about(&task).unwrap_or("").to_string();
-                self.store.set_about(&task, &e.text);
-                let now = self.store.about(&task).unwrap_or("").to_string();
-                if now == was {
-                    return None;
-                }
-                self.report(Ok(if now.is_empty() {
-                    format!("{task} has no description now")
-                } else {
-                    format!("{task}: {now}")
-                }));
-                self.relist(key, &box_slot(&task, col), None);
-                Some(Effect::Save)
-            }
+    /// A new task named in `f`'s grid for the model `key`, which has it at high, as that takes
+    /// any price, so agents can use it at once.
+    fn fav_task(&mut self, key: &str, name: &str, about: &str) -> Option<Effect> {
+        let name = crate::store::task_name(name).ok()?;
+        let slot = box_slot(&name, BOXES - 1);
+        // Recommend's cursor stays on the task it was on, which a new one before it would move.
+        let on = self.custom_at().map(String::from);
+        self.store.set_about(&name, about);
+        let saved = self.fav(key, &slot);
+        self.back_on(on);
+        self.relist(key, &slot, None);
+        saved.or((!about.trim().is_empty()).then_some(Effect::Save))
+    }
+
+    /// The task of your own `was` named `name` and about `about`, both saved or neither: the name
+    /// the task has then when either changed. An error says why, and whether about what it is
+    /// about. A task with no model has only that, so it is not emptied: `D` deletes the task,
+    /// asking first. Recommend's cursor stays on the task it was on.
+    fn save_task(&mut self, was: &str, name: &str, about: &str) -> Result<Option<String>, (bool, String)> {
+        let name = crate::store::task_name(name).map_err(|e| (false, e))?;
+        if about.trim().is_empty() && !self.store.tasks_with_models().contains(&was) {
+            let d = self.key_of('D');
+            return Err((
+                true,
+                format!("a task with no model keeps its description, {d} in recommend deletes the task"),
+            ));
         }
+        let renamed = name != was;
+        if renamed {
+            let on = self.custom_at().map(|t| if t == was { name.clone() } else { t.to_string() });
+            self.store.rename_task(was, &name).map_err(|e| (false, e))?;
+            self.back_on(on);
+        }
+        let before = self.store.about(&name).map(String::from);
+        self.store.set_about(&name, about);
+        let now = self.store.about(&name);
+        let mut said = if renamed { format!("{was} renamed to {name}") } else { name.clone() };
+        match now {
+            _ if now == before.as_deref() && !renamed => return Ok(None),
+            _ if now == before.as_deref() => {}
+            Some(now) => said += &format!(": {now}"),
+            None if renamed => said += ", with no description now",
+            None => said += " has no description now",
+        }
+        self.report(Ok(said));
+        Ok(Some(name))
     }
 
     /// The open dropdown's or choice list's cursor and search.
@@ -3666,6 +3807,9 @@ impl App {
     }
 
     pub fn key(&mut self, mut k: KeyEvent) -> Option<Effect> {
+        if std::mem::take(&mut self.ended) {
+            return None;
+        }
         // Where letters run as keys, the one pressed is the default key of the action you put on
         // it, and one whose action you moved is no key.
         if let KeyCode::Char(c) = k.code
@@ -3934,6 +4078,8 @@ impl App {
     /// compare and recommend a click moves the cursor to the model or task, and a double click
     /// does what enter does.
     pub fn mouse(&mut self, m: Mouse) -> Option<Effect> {
+        // A click is no key typed for the task that was ended.
+        self.ended = false;
         let effect = self.on_mouse(m);
         self.follow();
         effect
@@ -4606,14 +4752,27 @@ impl App {
             }
             // Enter on `+ new task` writes the name there, and then what the task is about.
             KeyCode::Enter if self.view == View::Recommend && self.among.is_none() && self.on_new_task() => {
-                self.input = Input::Task(Edit::new(What::New, String::new()));
+                self.input = Input::Task(Edit::new_task());
             }
-            KeyCode::Char('D') if self.view == View::Recommend => {
-                match self.custom_at().filter(|_| self.among.is_none() && !self.caps && self.task_sel == 0) {
-                    Some(task) => self.input = Input::DeleteTask(task.to_string()),
-                    None => self.refuse("D deletes a task you added, put the cursor on its name"),
+            // `T` writes the name of the task of your own on the cursor's row and what it is about
+            // together, under the grid, where they show.
+            KeyCode::Char('T') if self.view == View::Recommend => {
+                let on = self.among.is_none() && !self.caps;
+                match (self.custom_at().filter(|_| on), self.cur_task().filter(|_| on)) {
+                    (Some(task), _) => self.input = Input::Task(Edit::task(task.to_string(), &self.store)),
+                    (_, Some(t)) => self.refuse(self.built_in(t.name)),
+                    _ => self.refuse(format!("{} edits a task you added, put the cursor on it", self.key_of('T'))),
                 }
             }
+            // Elsewhere it says where it works.
+            KeyCode::Char('T') => {
+                let (t, r, f) = (self.key_of('T'), self.key_of('R'), self.key_of('f'));
+                self.refuse(format!("{t} edits a task you added, in recommend ({r}) or the favorites grid ({f})"));
+            }
+            KeyCode::Char('D') if self.view == View::Recommend => match self.own_name() {
+                Some(task) => self.input = Input::DeleteTask(task.to_string()),
+                None => self.refuse("D deletes a task you added, put the cursor on its name"),
+            },
             // Enter on a task's name is below; on a tier with no model it has none to show either.
             KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H') | KeyCode::Enter
                 if self.view == View::Recommend && !row && (code != KeyCode::Enter || self.task_sel > 0) =>
@@ -5007,6 +5166,8 @@ impl App {
             Input::Task(e) => match code {
                 KeyCode::Esc => self.input = Input::None,
                 KeyCode::Enter => return self.new_task(),
+                // The other field: the name, or what the task is about.
+                KeyCode::Tab | KeyCode::BackTab => e.switch(),
                 _ => e.key(code, mods),
             },
             Input::Cap { tier, text, cur } => match code {
@@ -5247,7 +5408,7 @@ impl App {
                                 return self.fav(&key, &slot);
                             }
                             // The name of a new task is written right there, the list open.
-                            Some((_, Effect::NewTask(_))) => list.write(at?, Edit::new(What::New, String::new())),
+                            Some((_, Effect::NewTask(_))) => list.write(at?, Edit::new_task()),
                             _ => {}
                         }
                     }
@@ -5258,24 +5419,22 @@ impl App {
                             self.ask_via(&key, Some(&slot));
                         }
                     }
-                    // `r` renames the task of your own under the cursor and `a` writes what it is
-                    // about, both on its row; a built-in one keeps both, and one with nothing
+                    // `T` writes the name of the task of your own under the cursor and what it is
+                    // about together, on its row. A built-in one keeps both, and one with nothing
                     // ticked is no task yet.
-                    KeyCode::Char(c @ ('r' | 'a')) if *kind == Kind::Fav && !list.typing => {
-                        let Some((_, Effect::Fav(_, task))) = items.get(at?) else { return None };
+                    KeyCode::Char('T') if *kind == Kind::Fav && !list.typing => {
+                        // `+ new task`, or no entry the search matches, is no task to edit.
+                        let Some((_, Effect::Fav(_, task))) = at.and_then(|at| items.get(at)) else {
+                            self.refuse(format!("{} edits a task you added, put the cursor on it", self.key_of('T')));
+                            return None;
+                        };
                         let task = task.clone();
                         if crate::fit::task(&task).is_some() {
-                            self.refuse(format!("{task} is built in, r and a only work on a task you added"));
+                            self.refuse(self.built_in(&task));
                         } else if !self.store.custom_tasks().contains(&task.as_str()) {
                             self.refuse(format!("{task} has no favorite left, tick one of its tiers first"));
                         } else {
-                            let edit = if c == 'r' {
-                                Edit::new(What::Rename(task.clone()), task)
-                            } else {
-                                let about = self.store.about(&task).unwrap_or("").to_string();
-                                Edit::new(What::About(task), about)
-                            };
-                            list.write(at?, edit);
+                            list.write(at?, Edit::task(task, &self.store));
                         }
                     }
                     // Space picks as enter does, in every list, once a search is no longer typed.
@@ -6103,10 +6262,10 @@ mod tests {
         press(&mut a, "/selected");
         code(&mut a, KeyCode::Enter);
         assert!(a.help_sel < mark, "a new search starts from the top, as in recommend, ✓'s row matching too");
-        press(&mut a, "/f: r");
+        press(&mut a, "/R: D");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.status, "to change f: r a, change each key on its own row");
+        assert_eq!(a.status, "to change R: D, change each key on its own row");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "ggj");
         assert_eq!((code(&mut a, KeyCode::Enter), &a.input), (None, &Input::Reset), "↺ asks first");
@@ -6260,35 +6419,56 @@ mod tests {
     #[test]
     fn recommend_names_a_task_with_no_model() {
         let mut a = app();
+        let fields = |a: &App| match &a.input {
+            Input::Task(e) => e.fields().map(|(n, x)| (n.to_string(), x.to_string())),
+            _ => None,
+        };
+        let err = |a: &App| match &a.input {
+            Input::Task(e) => e.err.clone(),
+            _ => None,
+        };
+        let on_about = |a: &App| matches!(&a.input, Input::Task(Edit { what: What::Task { about: true, .. }, .. }));
         press(&mut a, "RG");
         assert!(a.on_new_task(), "G goes to + new task, after the last task");
         assert_eq!(press(&mut a, " "), None, "nothing saved yet");
-        assert_eq!(a.input, Input::Task(Edit::new(What::New, String::new())), "space writes the name, as enter does");
+        assert_eq!(a.input, Input::Task(Edit::new_task()), "space writes it, as enter does");
         code(&mut a, KeyCode::Esc);
         a.mouse(Mouse::MarkModel(Stop::Recommend(a.task_count(), 0)));
-        assert_eq!(a.input, Input::Task(Edit::new(What::New, String::new())), "and a right click, as space");
+        assert_eq!(a.input, Input::Task(Edit::new_task()), "and a right click, as space");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.input, Input::Task(Edit::new(What::New, String::new())));
-        // A task an agent adds meanwhile leaves the cursor on the name.
+        assert_eq!(a.input, Input::Task(Edit::new_task()));
+        // A task an agent adds meanwhile leaves the cursor on the task being written.
         a.store.toggle_favorite("api:high", "mini");
         a.rebuild();
         assert!(a.on_new_task());
         a.store.clear_favorite("api:high");
         a.rebuild();
         a.paste("Bug Hunt:");
-        assert_eq!(code(&mut a, KeyCode::Enter), None, "what it is about is asked next");
-        assert!(matches!(&a.input, Input::Task(Edit { what: What::About(t), .. }) if t == "bug-hunt"));
-        // With no model, what it is about is the task.
-        code(&mut a, KeyCode::Enter);
-        assert!(matches!(&a.input, Input::Task(Edit { err: Some(_), .. })) && a.store.custom_tasks().is_empty());
+        // Enter goes from the name to what it is about. With no model, that is the task: enter
+        // there asks for it.
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert!(err(&a).is_none() && on_about(&a));
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert!(err(&a).is_some() && on_about(&a) && a.store.custom_tasks().is_empty());
         a.paste("finding bugs");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(
             (a.input == Input::None, a.custom_at(), a.store.about("bug-hunt")),
             (true, Some("bug-hunt"), Some("finding bugs"))
         );
-        // A name there is already goes to its task, and esc leaves the row as it was.
+        // Tab goes from one field to the other, keeping both, and esc adds nothing.
+        press(&mut a, "G");
+        code(&mut a, KeyCode::Enter);
+        a.paste("x");
+        code(&mut a, KeyCode::Tab);
+        a.paste("y");
+        code(&mut a, KeyCode::BackTab);
+        assert_eq!((fields(&a), on_about(&a)), (Some(("x".into(), "y".into())), false));
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.input == Input::None, a.store.custom_tasks()), (true, vec!["bug-hunt"]));
+        // A name there is already, with nothing written about it, goes to its task. With a
+        // description it is said, in the name's field, and so is one an agent adds meanwhile.
         press(&mut a, "G");
         code(&mut a, KeyCode::Enter);
         a.paste("coding");
@@ -6296,16 +6476,86 @@ mod tests {
         assert_eq!((a.input == Input::None, a.cur_task().map(|t| t.name)), (true, Some("coding")));
         press(&mut a, "G");
         code(&mut a, KeyCode::Enter);
-        a.paste("x");
+        a.paste("api");
+        code(&mut a, KeyCode::Tab);
+        a.paste("mine");
+        a.store.set_about("api", "the agent's");
+        a.rebuild();
+        assert!(a.on_new_task(), "the writing stays on + new task");
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!((err(&a).as_deref(), on_about(&a)), (Some("a task named api already exists"), false));
+        assert_eq!(a.store.about("api"), Some("the agent's"));
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.input == Input::None, a.store.custom_tasks()), (true, vec!["bug-hunt"]));
+        a.store.delete_task("api");
+        // `T` anywhere on its row writes its name and what it is about together, under the grid,
+        // and enter saves both.
+        a.store.set_about("bug-hunt-a", "other");
+        a.rebuild();
+        press(&mut a, "Gkk0lT");
+        assert_eq!((fields(&a), on_about(&a)), (Some(("bug-hunt".into(), "finding bugs".into())), false));
+        assert_eq!(a.edit_row(), Some(a.task_cur), "for its own row");
+        code(&mut a, KeyCode::Tab);
+        a.paste(" fast");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((a.input == Input::None, a.store.about("bug-hunt")), (true, Some("finding bugs fast")));
+        assert_eq!(a.status, "bug-hunt: finding bugs fast");
+        // With no model it is its description, so that is not emptied: D deletes it.
+        press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
+        ctrl(&mut a, 'u');
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert!(err(&a).is_some() && on_about(&a) && a.store.about("bug-hunt").is_some());
+        code(&mut a, KeyCode::Esc);
+        // A name another task has is said, in the name's field, and neither is saved.
+        press(&mut a, "T");
+        a.paste("-a");
+        code(&mut a, KeyCode::Tab);
+        a.paste(" now");
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!((err(&a).as_deref(), on_about(&a)), (Some("a task named bug-hunt-a already exists"), false));
+        assert_eq!(a.store.about("bug-hunt"), Some("finding bugs fast"));
+        // Put right, both are, and the cursor goes along to the task.
+        code(&mut a, KeyCode::Backspace);
+        code(&mut a, KeyCode::Backspace);
+        a.paste("s");
+        assert_eq!(code(&mut a, KeyCode::Enter), None, "on to what it is about");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((a.custom_at(), a.store.about("bug-hunts")), (Some("bug-hunts"), Some("finding bugs fast now")));
+        assert_eq!(
+            (a.input == Input::None, a.status.as_str()),
+            (true, "bug-hunt renamed to bug-hunts: finding bugs fast now")
+        );
+        // No name is said too.
+        press(&mut a, "T");
+        ctrl(&mut a, 'u');
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!(err(&a).as_deref(), Some("a task needs a name"));
+        code(&mut a, KeyCode::Esc);
+        // One an agent renames or deletes meanwhile ends the writing.
+        press(&mut a, "T");
+        a.store.rename_task("bug-hunts", "elsewhere").unwrap();
+        a.rebuild();
+        assert_eq!((a.input == Input::None, a.status.as_str()), (true, "the task was renamed or deleted meanwhile"));
+        // The key typed for it, after the reload that ended it, is no command and keeps that said.
+        assert_eq!(
+            (press(&mut a, "D"), &a.input, a.status.as_str()),
+            (None, &Input::None, "the task was renamed or deleted meanwhile")
+        );
+        a.store.rename_task("elsewhere", "bug-hunts").unwrap();
+        a.store.delete_task("bug-hunt-a");
+        a.rebuild();
+        // On a built-in task, or off the tasks, T says it can't.
+        press(&mut a, "ggjjT");
+        assert!(a.failed && a.input == Input::None && a.status.contains("is built in"), "{}", a.status);
+        press(&mut a, "ggT");
+        assert!(a.failed && a.input == Input::None);
         // D on it asks, then deletes it. On a built-in task it says it can't.
         press(&mut a, "GklD");
         assert!(a.failed && a.input == Input::None, "D on a tier deletes nothing");
         press(&mut a, "0D");
-        assert_eq!(a.input, Input::DeleteTask("bug-hunt".into()));
+        assert_eq!(a.input, Input::DeleteTask("bug-hunts".into()));
         assert_eq!(press(&mut a, "D"), Some(Effect::Save));
-        assert!(a.store.custom_tasks().is_empty() && a.store.about("bug-hunt").is_none());
+        assert!(a.store.custom_tasks().is_empty() && a.store.about("bug-hunts").is_none());
         press(&mut a, "ggjjD");
         assert!(a.failed && a.input == Input::None);
     }
@@ -7895,78 +8145,105 @@ mod tests {
     fn a_task_of_your_own_has_the_model_you_give_it() {
         let mut a = app();
         let on = a.current().unwrap().key.clone();
-        // The last entry of f's grid takes the name of a new task right there, the list open.
+        // The last entry of f's grid takes a new task right there, its name and what it is
+        // about, the list open.
         press(&mut a, "fG");
         assert_eq!(code(&mut a, KeyCode::Enter), None);
-        let edit =
-            |a: &App| a.open_list().and_then(|l| l.edit.as_ref().map(|e| (format!("{:?}", e.what), e.text.clone())));
+        let edit = |a: &App| {
+            let e = a.open_list()?.edit.as_ref()?;
+            e.fields().map(|(n, x)| (n.to_string(), x.to_string()))
+        };
+        let err = |a: &App| a.open_list().and_then(|l| l.edit.as_ref()?.err.clone());
         let under = |a: &App| match &a.input {
             Input::Choose { items, list, .. } => items[list.sel].0.clone(),
             _ => String::new(),
         };
         let ticked = |a: &App| crate::store::task_slots("tool-dispatch").any(|s| a.store.favorite(&s).is_some());
-        assert_eq!(edit(&a), Some(("New".into(), String::new())));
+        assert_eq!(edit(&a), Some((String::new(), String::new())));
         a.paste("Tool Dispatch:");
+        // Enter goes from the name to what it is about, and there adds the task.
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!(edit(&a), Some(("Tool Dispatch".into(), String::new())), "no : in a name");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(
             a.store.favorite("tool-dispatch:high"),
             Some(on.as_str()),
             "no : in it, on the cheapest tier it fits"
         );
-        // The list is on the new task, where what it is about is written next; left empty,
-        // nothing is saved.
-        assert_eq!(
-            (under(&a).as_str(), edit(&a)),
-            ("tool-dispatch", Some((r#"About("tool-dispatch")"#.into(), String::new())))
-        );
-        assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.about("tool-dispatch")), (None, None, None));
+        // The list is on the new task, which has the model and needs no description.
+        assert_eq!((under(&a).as_str(), edit(&a), a.store.about("tool-dispatch")), ("tool-dispatch", None, None));
         assert!(a.choosing_favs(), "the list is open still");
-        // a on it writes it, starting from what it says, and its entry shows it.
-        press(&mut a, "a");
+        // T on it writes its name and what it is about together, starting from what they are,
+        // tab going from one to the other, and its entry shows them.
+        press(&mut a, "T");
+        assert_eq!(edit(&a), Some(("tool-dispatch".into(), String::new())));
+        code(&mut a, KeyCode::Tab);
         a.paste("routing tool calls");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!((a.store.about("tool-dispatch"), under(&a).as_str()), (Some("routing tool calls"), "tool-dispatch"));
         // While writing, the keys that move are text, the wheel is still and esc leaves the entry alone.
-        press(&mut a, "ajk");
+        press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
+        press(&mut a, "jk");
         a.mouse(Mouse::Scroll(-3));
-        assert_eq!(edit(&a), Some((r#"About("tool-dispatch")"#.into(), "routing tool callsjk".into())));
+        assert_eq!(edit(&a), Some(("tool-dispatch".into(), "routing tool callsjk".into())));
         code(&mut a, KeyCode::Esc);
         assert_eq!(
             (edit(&a), a.choosing_favs(), a.store.about("tool-dispatch")),
             (None, true, Some("routing tool calls"))
         );
-        // Unticked it stays for what it is about, and with neither it is gone, but keeps its row
-        // while the grid is open; r and a say what it lacks.
+        // Unticked it stays for what it is about, which T then does not empty. With neither it
+        // is gone, but keeps its row while the grid is open, and T says what it lacks.
         press(&mut a, " ");
         assert_eq!(a.store.custom_tasks(), ["tool-dispatch"]);
+        press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
+        ctrl(&mut a, 'u');
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert!(err(&a).is_some_and(|e| e.starts_with("a task with no model keeps its description")), "{:?}", err(&a));
+        code(&mut a, KeyCode::Esc);
         a.store.set_about("tool-dispatch", "");
         assert_eq!((a.store.custom_tasks().len(), under(&a).as_str()), (0, "tool-dispatch"));
-        press(&mut a, "r");
+        press(&mut a, "T");
         assert_eq!(
             (edit(&a), a.status.as_str()),
             (None, "tool-dispatch has no favorite left, tick one of its tiers first")
         );
         press(&mut a, " ");
         assert!(ticked(&a) && under(&a) == "tool-dispatch");
-        // r writes another name on it, starting from its own; one a task has is said under the
+        // T writes another name on it, starting from its own; one a task has is said under the
         // list, the name still there to change.
-        press(&mut a, "r");
-        assert_eq!(edit(&a), Some((r#"Rename("tool-dispatch")"#.into(), "tool-dispatch".into())));
+        press(&mut a, "T");
         ctrl(&mut a, 'u');
         a.paste("coding");
         assert_eq!(code(&mut a, KeyCode::Enter), None);
-        let err = |a: &App| a.open_list().and_then(|l| l.edit.as_ref()?.err.clone());
         assert_eq!(
-            (err(&a).as_deref(), edit(&a).unwrap().1.as_str()),
+            (err(&a).as_deref(), edit(&a).unwrap().0.as_str()),
             (Some("a task named coding already exists"), "coding")
         );
         ctrl(&mut a, 'u');
         a.paste("Dispatch");
-        assert_eq!((err(&a), code(&mut a, KeyCode::Enter)), (None, Some(Effect::Save)));
-        assert_eq!((a.store.custom_tasks(), under(&a).as_str()), (vec!["dispatch"], "dispatch"));
+        assert_eq!((err(&a), code(&mut a, KeyCode::Enter)), (None, None));
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((a.store.custom_tasks(), under(&a).as_str(), edit(&a)), (vec!["dispatch"], "dispatch", None));
         assert_eq!(a.status, "tool-dispatch renamed to dispatch");
-        press(&mut a, "ggr");
-        assert_eq!((edit(&a), a.failed), (None, true), "overall is built in, and r says so");
+        // One an agent renames meanwhile is said under the list, and not written back under the
+        // name it had.
+        press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
+        a.store.rename_task("dispatch", "elsewhere").unwrap();
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!(
+            (err(&a).as_deref(), a.store.custom_tasks()),
+            (Some("dispatch was renamed or deleted meanwhile"), vec!["elsewhere"])
+        );
+        code(&mut a, KeyCode::Esc);
+        a.store.rename_task("elsewhere", "dispatch").unwrap();
+        // On + new task T says where it works.
+        press(&mut a, "GT");
+        assert!(a.failed && edit(&a).is_none(), "{}", a.status);
+        press(&mut a, "ggT");
+        assert_eq!((edit(&a), a.failed), (None, true), "overall is built in, and T says so");
         assert!(a.status.starts_with("overall is built in"), "{}", a.status);
         code(&mut a, KeyCode::Esc);
         a.store.rename_task("dispatch", "tool-dispatch").unwrap();
@@ -7994,11 +8271,17 @@ mod tests {
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.task_cur, ticked(&a)), (TASKS.len(), false));
-        // An empty name names no task.
+        // Nothing written adds nothing, and a description with no name says it needs one.
         press(&mut a, "2ggfG");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(edit(&a), Some(("New".into(), String::new())));
+        assert_eq!(edit(&a), Some((String::new(), String::new())));
         assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.custom_tasks().len()), (None, None, 0));
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Tab);
+        a.paste("calls");
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert_eq!((err(&a).as_deref(), a.store.custom_tasks().len()), (Some("a task needs a name"), 0));
+        code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         // Each tier of it takes a model of its own, as a built-in task's: in recommend its low
         // tier has that model, high the other and the rest none.
@@ -8015,7 +8298,8 @@ mod tests {
             ("tool-dispatch", Some(3)),
             "l: past the tiers it is dearer than, to high"
         );
-        press(&mut a, "a");
+        press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
         a.paste(" fast");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.open_list().map(|l| l.col), Some(3), "what it is about leaves the cursor on its box");
@@ -8026,11 +8310,11 @@ mod tests {
         // A task named before it in the order leaves recommend's cursor on its own.
         code(&mut a, KeyCode::Enter);
         a.paste("api");
-        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Tab);
+        a.paste("http calls");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!((a.store.custom_tasks(), a.custom_at()), (vec!["api", "tool-dispatch"], Some("tool-dispatch")));
         // Without its model it stays, for what it is about.
-        a.paste("http calls");
-        code(&mut a, KeyCode::Enter);
         a.store.clear_favorite("api:high");
         assert_eq!(a.store.custom_tasks(), ["api", "tool-dispatch"]);
     }
@@ -9414,6 +9698,7 @@ mod tests {
         press(&mut a, "G");
         code(&mut a, KeyCode::Enter);
         a.paste("triage");
+        code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.store.favorite("triage:low"), a.store.favorite("triage:high")), (None, Some("mini")));
     }

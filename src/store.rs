@@ -472,6 +472,11 @@ impl Store {
         v
     }
 
+    /// Whether a task, built in or your own, is named `name`.
+    pub fn has_task(&self, name: &str) -> bool {
+        crate::fit::task(name).is_some() || self.custom_tasks().contains(&name)
+    }
+
     /// Delete a task of your own: its models, their harnesses and what it is about.
     pub fn delete_task(&mut self, task: &str) {
         task_slots(task).for_each(|s| _ = self.clear_favorite(&s));
@@ -483,7 +488,7 @@ impl Store {
         if !self.custom_tasks().contains(&old) {
             return Err(format!("{old} is not a task of your own"));
         }
-        if crate::fit::task(new).is_some() || self.custom_tasks().contains(&new) {
+        if self.has_task(new) {
             return Err(format!("a task named {new} already exists"));
         }
         for (from, to) in task_slots(old).zip(task_slots(new)) {

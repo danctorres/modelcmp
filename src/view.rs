@@ -785,6 +785,12 @@ pub const CUSTOM_ABOUT: &str = "your own task";
 /// When a task of your own is the one to pick, where a built-in one has its `when`.
 pub const CUSTOM_WHEN: &str = "work that fits it, even when a built-in task fits too";
 
+/// When agents use the task of your own `t`: what you wrote, over a built-in task that fits too,
+/// which the TUI leaves unsaid.
+pub fn custom_when(store: &Store, t: &str) -> String {
+    store.about(t).map_or(CUSTOM_WHEN.into(), |a| format!("{a}, even when a built-in task fits too"))
+}
+
 /// `name · $price · score` for a frontier entry, `name [key] · $price · score` with `keyed`,
 /// `★ name ...` when it is your favorite for the task, `· -` for a favorite with no score.
 pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
@@ -1229,7 +1235,7 @@ pub fn detail_rows(
     for t in TASKS {
         if let Some(s) = fit::fit(m, t) {
             fits.push((v.len(), t.name));
-            v.push(format!("    {:<13}{:>4.0}  {}", t.name, fit::shown(m, t, s), t.about));
+            v.push(format!("    {:<13}{:>4.0}  {}", t.name, fit::shown(m, t, s), t.about_ranked()));
             used.extend(used_benches(t));
         }
     }

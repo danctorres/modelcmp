@@ -25,6 +25,8 @@ pub struct Task {
     pub about: &'static str,
     /// When a model high on this task is the right pick.
     pub when: &'static str,
+    /// What ranks it when that is not a score of its own, said in recommend as `ranked by`.
+    pub ranked: Option<&'static str>,
     /// Epoch's benchmarks about the task, still run on new models: the first is the task's
     /// score, shown as is, and the column's dropdown lists the others.
     pub benches: &'static [&'static str],
@@ -38,6 +40,14 @@ pub struct Task {
 }
 
 impl Task {
+    /// What it is about, and what ranks it where that is not a score of its own.
+    pub fn about_ranked(&self) -> String {
+        match self.ranked {
+            Some(r) => format!("{}, ranked by {r}", self.about),
+            None => self.about.to_string(),
+        }
+    }
+
     /// With `src`: the benchmark the task's score is, and the others about the task.
     pub fn of(&self, src: crate::data::Source) -> (Option<&'static str>, &'static [&'static str]) {
         match (src, self.benches.split_first()) {
@@ -87,6 +97,7 @@ pub const TASKS: &[Task] = &[
         name: "overall",
         about: "general capability, from ECI or AAII",
         when: "a tiebreaker, or work that fits no other task",
+        ranked: None,
         need: Need::None,
         aa: None,
         aa_more: &[],
@@ -96,6 +107,7 @@ pub const TASKS: &[Task] = &[
         name: "coding",
         about: "writing and fixing code",
         when: "fixing a bug, adding a feature to an existing repo, refactors",
+        ranked: None,
         need: Need::None,
         aa: Some(AA_CODING),
         aa_more: &["terminalbench_v4_0", "scicode"],
@@ -105,6 +117,7 @@ pub const TASKS: &[Task] = &[
         name: "agentic",
         about: "multi-step tool use, long autonomous tasks",
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
+        ranked: None,
         need: Need::Tools,
         aa: Some("terminalbench_v4_0"),
         aa_more: &[],
@@ -114,6 +127,7 @@ pub const TASKS: &[Task] = &[
         name: "reasoning",
         about: "hard math and science questions, puzzles, abstraction",
         when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
+        ranked: None,
         need: Need::None,
         aa: Some("hle"),
         aa_more: &["lcr"],
@@ -133,8 +147,9 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "vision",
-        about: "image input (ranked by overall capability)",
+        about: "image input",
         when: "screenshots, UI mockups, diagrams as input",
+        ranked: Some("overall"),
         need: Need::Vision,
         aa: None,
         aa_more: &[],
@@ -142,8 +157,9 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "value",
-        about: "coding per dollar, among the models close to your best on coding",
+        about: "the models close to your best on coding",
         when: "routine coding that needs no top reasoning",
+        ranked: Some("coding per dollar"),
         need: Need::Coder,
         aa: None,
         aa_more: &[],

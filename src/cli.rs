@@ -9,9 +9,9 @@ use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot, task_slots};
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front,
-    custom_line, detail_lines, excluded, fits, left_out, left_out_by, local_best, one_pick, or_local, over_cap, price,
-    priced, reach, shown_via, task_line, tier_pick, tier_picks, truncate, used_benches, verdict, via, visible,
-    with_local, within,
+    custom_line, custom_when, detail_lines, excluded, fits, left_out, left_out_by, local_best, one_pick, or_local,
+    over_cap, price, priced, reach, shown_via, task_line, tier_pick, tier_picks, truncate, used_benches, verdict, via,
+    visible, with_local, within,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1262,7 +1262,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
         let tier_favs = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
         let (own, off) = custom_front(&line);
         let tiers = tiers(tier_picks(&own, &off, store, t), t);
-        serde_json::json!({"name": t, "custom": true, "about": store.about(t).unwrap_or(CUSTOM_ABOUT), "when": CUSTOM_WHEN, "benchmarks": [], "tier_favorites": tier_favs, "tiers": tiers, "frontier": front})
+        serde_json::json!({"name": t, "custom": true, "about": CUSTOM_ABOUT, "when": custom_when(store, t), "benchmarks": [], "tier_favorites": tier_favs, "tiers": tiers, "frontier": front})
     });
     TASKS
         .iter()
@@ -1277,7 +1277,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             // The key of the best model your machine runs.
             let local = local.map(|(m, _)| &m.key);
             let tiers = tiers(picks, t.name);
-            serde_json::json!({"name": t.name, "about": t.about, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
+            serde_json::json!({"name": t.name, "about": t.about_ranked(), "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -1310,8 +1310,9 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         }
     };
     for t in TASKS {
-        // A task ranked by a benchmark picked in its column in the TUI says so, as there.
-        let by = crate::app::task_bench(store, t).map(|b| format!(", ranked by {b}")).unwrap_or_default();
+        // What ranks it where that is not its own score, as in the TUI: a benchmark picked in its
+        // column, or what a task with none goes by.
+        let by = crate::app::task_bench(store, t).or(t.ranked).map(|b| format!(", ranked by {b}")).unwrap_or_default();
         println!("{}  {}{by}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
@@ -1342,8 +1343,9 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!();
     }
     for t in store.tasks_with_models() {
-        println!("{t}  {}  (modelcmp list --task {t})", store.about(t).unwrap_or(CUSTOM_ABOUT));
-        println!("  use for:         {CUSTOM_WHEN}");
+        // What you wrote about it is when to use it.
+        println!("{t}  {CUSTOM_ABOUT}  (modelcmp list --task {t})");
+        println!("  use for:         {}", custom_when(store, t));
         let line = custom_line(usable(data, store), store, t);
         let (own, off) = custom_front(&line);
         show(t, tier_picks(&own, &off, store, t), &|m, _, _| format!("★ {} [{}] {}", m.name, m.key, price(m)));
@@ -2027,10 +2029,13 @@ mod tests {
             (&"debugging".into(), &serde_json::json!({"high": "gpt55"}), vec!["gpt55".into()])
         );
         assert_eq!(own["frontier"][0]["score"], Value::Null, "no benchmark scores it");
-        // What it is about is yours to write; agents pick it over a built-in task that fits too.
+        // When to use it is yours to write; agents pick it over a built-in task that fits too.
         assert_eq!((&own["about"], &own["when"]), (&CUSTOM_ABOUT.into(), &CUSTOM_WHEN.into()));
         store.set_about("debugging", "finding and fixing a bug");
-        assert_eq!(recommend_json(&data, &store).last().unwrap()["about"], "finding and fixing a bug");
+        assert_eq!(
+            recommend_json(&data, &store).last().unwrap()["when"],
+            "finding and fixing a bug, even when a built-in task fits too"
+        );
         // A tier of it has a model of its own, as a built-in task's: both on its line, cheapest first.
         store.toggle_excluded("mini");
         store.toggle_favorite("debugging:low", "mini");
