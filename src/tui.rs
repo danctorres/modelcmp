@@ -2829,7 +2829,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
-                Kind::Via | Kind::Harness | Kind::FirstHarness => "HARNESS",
+                Kind::Via | Kind::PickedVia | Kind::Harness | Kind::FirstHarness => "HARNESS",
                 Kind::Fav => "FAV",
                 Kind::Theme => "THEME",
                 Kind::Cols => "COLUMNS",
@@ -2957,10 +2957,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     ) && app.open_list().is_none_or(|l| l.query.is_empty())
     {
         // The question is in a box in the middle of the screen. Under it, what a pick or a key
-        // could not save, which the next key clears, else the start's warning, kept while the
-        // first start's question is open.
-        if let Some(w) = app.failed.then_some(app.status.as_str()).or(app.store.warning.as_deref()) {
-            put(buf, x, area.y, w, usize::from(area.right().saturating_sub(x)), fg(BAD));
+        // did or could not do, which the next key clears, as a pick that opens another list
+        // says what it saved, else the start's warning, kept while the first start's question is open.
+        let said = (!app.status.is_empty()).then(|| (app.status.as_str(), if app.failed { fg(BAD) } else { fg(GOOD) }));
+        if let Some((w, style)) = said.or(app.store.warning.as_deref().map(|w| (w, fg(BAD)))) {
+            put(buf, x, area.y, w, usize::from(area.right().saturating_sub(x)), style);
         }
         return None;
     }
@@ -3403,7 +3404,7 @@ fn choice_lines(
         Kind::Theme => " ↓ ↑ preview · / search · space enter saves · esc t close",
         Kind::Pick => " ↓ ↑ move · / search · space enter picks · esc close",
         Kind::Harness => " ↓ ↑ move · / search · space enter picks · esc P close",
-        Kind::FirstHarness => " ↓ ↑ move · / search · space enter picks · esc skips",
+        Kind::FirstHarness | Kind::PickedVia => " ↓ ↑ move · / search · space enter picks · esc skips",
         Kind::Bench => " ↓ ↑ move · / search · space enter picks · esc B close",
         Kind::Via => " ↓ ↑ move · / search · space enter picks · esc back",
         Kind::Open | Kind::Launch => " ↓ ↑ move · / search · space enter opens · esc close",
