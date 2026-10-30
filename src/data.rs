@@ -99,8 +99,10 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// that release. 34: Artificial Analysis's scores too are of the release a row's offers are, an
 /// Arena name with its vendor first is of its model, a merged row takes its dated release's Arena
 /// rating, and volcengine's ids are ByteDance's. 35: an offer's output is at its reasoning price
-/// where that is higher. 36: no Artificial Analysis scores, nor `Model::tps` and `ttft`.
-const FORMAT: u32 = 36;
+/// where that is higher. 36: no Artificial Analysis scores, nor `Model::tps` and `ttft`. 37: the
+/// task scores are on the ECI scale, with what they are from (`fit::Basis`), `Model::scores` has
+/// every benchmark of Epoch's index, and no `Model::shown`.
+const FORMAT: u32 = 37;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -120,8 +122,8 @@ pub fn cached() -> f64 {
     f64::from_bits(CACHED.load(Relaxed))
 }
 
-/// Set the cache share, clamped to 0..1. Prices derived from it (`fit::add_value`,
-/// `App::vals`) must be recomputed by the caller.
+/// Set the cache share, clamped to 0..1. Prices derived from it (`App::vals`) must be recomputed
+/// by the caller.
 pub fn set_cached(share: f64) {
     let bits = share.clamp(0.0, 1.0).to_bits();
     #[cfg(test)]
@@ -701,19 +703,14 @@ pub struct Model {
     #[serde(default)]
     pub hf: Option<String>,
     pub offers: Vec<Offer>,
-    /// Epoch Capabilities Index: overall capability, roughly 100..170.
+    /// Epoch Capabilities Index: overall capability, roughly 100..175.
     pub eci: Option<f64>,
-    /// Benchmark name -> best score (0..1) across reasoning-effort settings.
+    /// Benchmark name -> best score across reasoning-effort settings, as Epoch scales it,
+    /// 0..1 or as `score_ceiling` says, of every benchmark in Epoch's index.
     pub scores: BTreeMap<String, f64>,
-    /// Task name -> 0..100 percentile (see fit.rs), which ranks it.
-    pub fit: BTreeMap<String, f64>,
-    /// Task name -> the value it shows: the task's benchmark score, 0..100. See `fit::shown`.
-    #[serde(default)]
-    pub shown: BTreeMap<String, f64>,
-    /// Task name -> months of progress behind the source's best (`fit::add_lag`), which the
-    /// tiers go by.
-    #[serde(skip)]
-    pub lag: BTreeMap<String, f64>,
+    /// Task name -> its score on the ECI scale and what it is from (`fit::scored`), which
+    /// ranks it.
+    pub fit: crate::fit::Fit,
     /// The model's page name on artificialanalysis.ai, when it has one (`aa_pages`).
     #[serde(default)]
     pub aa: Option<String>,
@@ -1035,10 +1032,6 @@ impl Data {
             }
             m.available = !m.via.is_empty();
         }
-        // Value counts the models close to your best on coding, and ranks the price you would
-        // pay, which availability picks.
-        crate::fit::add_lag(&mut self.models, now() as f64);
-        crate::fit::add_value(&mut self.models);
     }
 
     /// Resolve a user-typed model name. Err = list of candidates (empty if none). A partial
@@ -1132,7 +1125,6 @@ pub fn load_cache() -> Option<Data> {
     let bytes = std::fs::read(cache_path()).ok()?;
     // One written in another format reads wrong here (a missing price as free), so it is no fallback.
     let mut d = serde_json::from_slice::<Data>(&bytes).ok().filter(|d| d.format == FORMAT)?;
-    // Value is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
 }
@@ -1878,6 +1870,9 @@ fn download(steps: &Steps) -> Result<Downloaded, String> {
     let mut data = merge(&models?, &ep)?;
     epoch_named(&mut data.models, &ep);
     data.missed.clone_from(&ep.missed);
+    for m in &mut data.models {
+        m.fit = crate::fit::scored(m.eci, &m.scores, &ep.benches);
+    }
     Ok((data, [aa, epoch_pages, openrouter], release, late))
 }
 
@@ -2078,10 +2073,18 @@ fn hf_listed(models: &mut [Model], list: &[u8]) -> bool {
 /// longer publishes is not shown as today's.
 const ARENA_MAX_AGE: f64 = 2.0;
 
+/// A release date, "2026-09-18" or "2026-09", in months since 1970.
+// ponytail: months of the mean length, so a day or two off; nothing here turns on a day.
+fn months(date: &str) -> Option<f64> {
+    let mut parts = date.split('-').map(|p| p.parse::<f64>().ok());
+    let (year, month, day) = (parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(15.0));
+    Some((year - 1970.0) * 12.0 + (month - 1.0) + (day - 1.0) / 30.44)
+}
+
 /// Whether a leaderboard of `date` was published within `ARENA_MAX_AGE` of `now`, in seconds
 /// since 1970.
 fn fresh(date: &str, now: u64) -> bool {
-    let age = crate::fit::months(date).map(|then| now as f64 / (30.44 * 86400.0) - then);
+    let age = months(date).map(|then| now as f64 / (30.44 * 86400.0) - then);
     age.is_some_and(|a| a <= ARENA_MAX_AGE)
 }
 
@@ -3098,22 +3101,11 @@ struct Scores {
     org: HashMap<String, String>,
     /// Developer (`dev_key`) -> its country.
     country: HashMap<String, String>,
-    /// group -> task -> percentile, and the value it shows.
-    fit: crate::fit::Fit,
+    /// The benchmarks of Epoch's index, by the name `groups` score them under, with their
+    /// curves in Epoch's model of scores (`fit::scored`).
+    benches: HashMap<String, crate::fit::Bench>,
     /// The task benchmarks no row scored (`Data::missed`).
     missed: Vec<String>,
-}
-
-impl Scores {
-    /// Rank each group's scores among them all (`fit::scored`).
-    fn rank(&mut self) {
-        let pools = crate::fit::pools(self.groups.values().map(|(_, i, s)| (*i, s)));
-        for (key, (_, i, s)) in &self.groups {
-            let (fit, shown) = crate::fit::scored(*i, s, &pools);
-            self.fit.0.insert(key.clone(), fit);
-            self.fit.1.insert(key.clone(), shown);
-        }
-    }
 }
 
 /// Whether `provider` is the developer itself, not a reseller of its models.
@@ -3352,13 +3344,19 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         version_group.get(version).cloned().unwrap_or_else(|| version.split('_').next().unwrap_or(version).to_string())
     };
 
-    let task_benches = crate::fit::task_benches();
+    // The curves of Epoch's model of scores, by the benchmark's long name.
+    let mut curves: HashMap<String, (f64, f64)> = HashMap::new();
+    for r in csv_rows(&mut zip, "epoch_capabilities_index/edi_scores.csv").unwrap_or_default() {
+        let num = |c: &str| col(&r, c)?.parse::<f64>().map_err(|e| format!("epoch csv: {c}: {e}"));
+        if let (Ok(edi), Ok(slope)) = (num("edi"), num("estimated_slope_scaled")) {
+            curves.insert(col(&r, "benchmark_name")?.to_string(), (edi, slope));
+        }
+    }
     let mut unscored: HashMap<String, BTreeSet<String>> = HashMap::new();
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
     for b in &benches {
         let (file, score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
-        let bench = SHORT_NAMES.iter().find(|(long, _)| *long == bench).map_or(bench, |(_, short)| short);
-        if file.is_empty() || score_col.is_empty() {
+        if file.is_empty() || score_col.is_empty() || col(b, "in_eci")? != "True" {
             continue;
         }
         // "nan" and "inf" parse as numbers, and are none.
@@ -3366,7 +3364,17 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             |c: &str, or: f64| b.get(c).and_then(|v| v.parse().ok()).filter(|v: &f64| v.is_finite()).unwrap_or(or);
         col(b, "scale")?;
         let scale = num("scale", 1.0);
-        let task = task_benches.contains(&bench);
+        // One in the index but with no curve, as SuperGLUE, scores nothing.
+        let curve = curves.get(bench).map(|&(edi, slope)| crate::fit::Bench {
+            edi,
+            slope,
+            baseline: num("random_baseline", 0.0),
+            ceiling: num("score_ceiling", 1.0),
+        });
+        let bench = SHORT_NAMES.iter().find(|(long, _)| *long == bench).map_or(bench, |(_, short)| short);
+        if let Some(curve) = curve {
+            ep.benches.insert(bench.to_string(), curve);
+        }
         let Some(rows) = csv_rows(&mut zip, file) else { continue };
         for r in &rows {
             // A row without a version is no model's: together they would be one that outscores most.
@@ -3375,12 +3383,12 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             };
             let Some(s) = s.trim_end_matches('%').parse::<f64>().ok().filter(|s| s.is_finite()) else { continue };
             let g = group_of(v);
-            // The ids its task scores are of, else those of any score.
-            let scored = if task { &mut ep.versions } else { &mut unscored };
+            // The ids its scores are of, else those of any result.
+            let scored = if curve.is_some() { &mut ep.versions } else { &mut unscored };
             scored.entry(norm(&g)).or_default().insert(v.clone());
-            // Any benchmark result may give the model a page on Epoch; only a task's scores it.
+            // Any benchmark result may give the model a page on Epoch; only one with a curve scores it.
             let e = ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new()));
-            if !task {
+            if curve.is_none() {
                 continue;
             }
             let best = e.2.entry(bench.to_string()).or_insert(0.0);
@@ -3391,7 +3399,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         ep.versions.entry(g).or_insert(versions);
     }
     let scored = |b: &str| ep.groups.values().any(|g| g.2.contains_key(b));
-    ep.missed = task_benches.iter().filter(|b| !scored(b)).map(ToString::to_string).collect();
+    ep.missed = crate::fit::task_benches().iter().filter(|b| !scored(b)).map(ToString::to_string).collect();
     for r in csv_rows(&mut zip, "epoch_capabilities_index/eci_scores.csv").unwrap_or_default() {
         let Some(eci) = col(&r, "eci")?.parse::<f64>().ok().filter(|e| e.is_finite()) else { continue };
         let g = col(&r, "Model")?.to_string();
@@ -3453,7 +3461,6 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     if ep.groups.values().all(|(_, eci, scores)| eci.is_none() && scores.is_empty()) {
         return Err("epoch zip: no benchmark data found".into());
     }
-    ep.rank();
     Ok(ep)
 }
 
@@ -3701,8 +3708,6 @@ fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
                 m.developer = short_org(o);
             }
             (m.eci, m.scores) = (*eci, scores.clone());
-            m.fit = ep.fit.0.get(k).cloned().unwrap_or_default();
-            m.shown = ep.fit.1.get(k).cloned().unwrap_or_default();
         }
     }
     unify_developers(&mut models);
@@ -5032,7 +5037,7 @@ mod tests {
         }
         let paid =
             |p: &str| Offer { provider: p.into(), id: "m".into(), input: 1.0, output: 1.0, ..Default::default() };
-        let fit = BTreeMap::from([("coding".to_string(), 50.0)]);
+        let fit = BTreeMap::from([("coding".to_string(), (50.0, crate::fit::Basis::Benches(1)))]);
         let m = |key: &str, p: &str| Model {
             key: key.into(),
             offers: vec![paid(p)],
@@ -5058,7 +5063,6 @@ mod tests {
         let phi = &d.models[2];
         assert_eq!((phi.cost(), phi.local()), (Some(0.0), true), "a plain tag is the instruct model, free here alone");
         assert_eq!(phi.price_page(), None, "models.dev has no page for your machine");
-        assert_eq!((phi.fit.get("value"), d.models[0].fit.contains_key("value")), (None, true), "nor a value");
         for tag in ["hf.co/bartowski/Llama3.2-1B-Instruct-GGUF:Q4_K_M", "someone/llama3.2:1b-instruct-f16"] {
             assert_eq!(local_key(tag), "llama321binstruct", "{tag} whoever it is from");
         }
@@ -5197,7 +5201,7 @@ mod tests {
         assert_eq!((m.cost(), m.listed()), (None, false), "another provider's free tier is not your price");
         let marked: Vec<_> =
             crate::app::COLS.iter().enumerate().filter(|c| crate::app::on_price(c.0)).map(|c| c.1.id).collect();
-        assert_eq!(marked, ["price", "in", "cache", "out", "value"], "the columns a ~ goes on");
+        assert_eq!(marked, ["price", "in", "cache", "out"], "the columns a ~ goes on");
     }
 
     #[test]
@@ -5349,8 +5353,14 @@ mod tests {
             );
             file(
                 "benchmark_metadata.csv",
-                b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\nswe.csv,score,FrontierSWE,1\nhle.csv,Accuracy,HLE,1\n\
-                  fm.csv,score,FrontierMath-Tier-4-v2-Private,1\n",
+                b"source_file,score_column,benchmark,scale,in_eci,random_baseline,score_ceiling\n\
+                  ocr.csv,score,Some OCR,1,True,0,1\nswe.csv,score,FrontierSWE,1,True,0,1\n\
+                  hle.csv,Accuracy,HLE,1,False,0,1\nfm.csv,score,FrontierMath-Tier-4-v2-Private,1,True,0,1\n",
+            );
+            file(
+                "epoch_capabilities_index/edi_scores.csv",
+                b"benchmark_name,edi,estimated_slope_scaled\nFrontierSWE,164.5,0.15\n\
+                  FrontierMath-Tier-4-v2-Private,158.3,0.25\n",
             );
             file(
                 "ocr.csv",
@@ -5369,8 +5379,10 @@ mod tests {
         assert_eq!(ep.alias["flash9"], "flash9jun2025", "the release filed under the bare id, not the newest");
         let missed = |b: &str| ep.missed.iter().any(|m| m == b);
         assert!(!missed("FrontierSWE") && missed("MirrorCode"), "a task benchmark no row scored, as one with no file");
-        assert!(!missed("HLE") && !ep.groups["foo2sep2025"].2.contains_key("HLE"), "Epoch dropped it from its tasks");
+        assert!(!missed("HLE") && !ep.groups["foo2sep2025"].2.contains_key("HLE"), "not in Epoch's index");
         assert_eq!(ep.groups["foo2sep2025"].2.get("FrontierMath T4"), Some(&0.8), "under its short name");
+        assert_eq!(ep.benches["FrontierMath T4"].edi, 158.3, "with its curve, under that name too");
+        assert!(!ep.benches.contains_key("Some OCR"), "in the index but with no curve: pages alone");
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
         assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
         assert_eq!(ep.alias["bar3"], "bar3jul2025", "and before a newer one scored on a task");
@@ -5399,7 +5411,10 @@ mod tests {
                 "model_metadata.csv",
                 b"model_version,model_group,date\nnew_high,New,2026-09-01\nother_high,Other,2026-08-01\nold,Old,2026-01-01\n",
             );
-            file("benchmark_metadata.csv", b"source_file,score_column,benchmark,scale\nocr.csv,score,Some OCR,1\n");
+            file(
+                "benchmark_metadata.csv",
+                b"source_file,score_column,benchmark,scale,in_eci\nocr.csv,score,Some OCR,1,True\n",
+            );
             file("ocr.csv", b"Model version,score\nother_high,0.5\n");
             file("epoch_capabilities_index/eci_scores.csv", b"Model,eci\nOld,150\n");
             z.finish().unwrap();

@@ -37,7 +37,7 @@ enum Cmd {
     /// List the models you have access to (every model with --all), filtered, sorted or ranked for a task
     #[command(alias = "ls")]
     List {
-        /// The best model at each price level for a task (overall, coding, agentic, reasoning, vision, value), cheapest first: each row costs more and scores higher than the one before (`R` then `enter` on a task in the TUI). Excluded models are left out. A task of your own (see `fav`) lists the favorites you gave it
+        /// The best model at each price level for a task (overall, coding, agentic, vision), cheapest first: each row costs more and scores higher than the one before (`R` then `enter` on a task in the TUI). Excluded models are left out. A task of your own (see `fav`) lists the favorites you gave it
         #[arg(short, long, value_parser = store::task_name, conflicts_with = "sort")]
         task: Option<String>,
         /// Print one model from the task's list: your favorite for the tier, if it costs no more than the tier's cap. Otherwise the best model the tier allows: free = only free models, low = up to $2 per 1M tokens, mid = up to $5 (`modelcmp tier` changes these), high = any price. It fails when no model fits the tier. When that model is not your favorite, a model your machine runs replaces it if it scores higher, since it runs for free. A task of your own gives the tier's favorite
@@ -115,7 +115,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Compare models side by side, starting with a verdict: cheapest, best value, and per task the best then each cheaper one worth paying for
+    /// Compare models side by side, starting with a verdict: cheapest, and per task the best then each cheaper one worth paying for
     Compare {
         #[arg(num_args = 2.., required = true)]
         models: Vec<String>,
@@ -215,7 +215,7 @@ enum Cmd {
     ///
     /// It must fit the tier's price. `list --tier` and `pick` choose it, and `recommend` marks it ★. With no task, shows every favorite
     Fav {
-        /// overall, coding, agentic, reasoning, vision or value. Any other name is a task of your own, e.g. debugging, whose only models are the favorites you give it
+        /// overall, coding, agentic or vision. Any other name is a task of your own, e.g. debugging, whose only models are the favorites you give it
         #[arg(value_parser = store::task_name)]
         task: Option<String>,
         #[arg(requires_all = ["task", "tier"], conflicts_with = "rm")]

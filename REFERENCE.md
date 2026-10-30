@@ -18,10 +18,9 @@ means. Green and red mark the best and worst value in a column, here and in comp
 | $cache | $ per 1M cached input tokens, `$in` when a provider has no discount |
 | $out | $ per 1M output tokens |
 | Ctx | context window, in tokens |
-| ECI | Epoch Capabilities Index. From Epoch AI |
+| ECI | Epoch Capabilities Index. From Epoch AI, or grey when estimated from the model's benchmarks |
 | Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard, and its chat and WebDev ratings in the dropdown |
-| Coding, Agentic, Reason | the [task scores](#task-columns) |
-| Value | coding score per dollar of Price, as a percentile (0-100) |
+| Coding, Agentic | the [task scores](#task-columns) |
 | Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare. The one the model runs on (`H`) is dark on its colour, here, in the details and compare |
 | Notes | your note on it |
 
@@ -38,18 +37,26 @@ The table starts sorted by ECI. In the TUI, `|` picks the columns to show.
 
 ### Task columns
 
-A task column is a benchmark score, 0-100, blank for a model not tested on it: one widely run
-benchmark of Epoch AI's about the task.
+A task column is a score on Epoch AI's ECI scale (about 100 to 175), blank for a model Epoch
+AI has not scored. It is the capability Epoch's own model of benchmark scores fits to the task's
+benchmarks the model has, the ones in the column's dropdown:
 
-- Coding: FrontierCode
-- Agentic: APEX-Agents
-- Reason: LMCA
+- Coding: FrontierCode, FrontierSWE, MirrorCode, SWE-Bench verified, Aider polyglot, Terminal
+  Bench, GSO-Bench, WeirdML v3, WeirdML and Surface Evolver Bench
+- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, OSWorld, EBR-bench, SpireClimb, METR
+  Time Horizons, The Agent Company, GDPval and Terminal Bench
+
+A model with none of a task's benchmarks takes the overall score, in grey. The overall score, in
+ECI, is Epoch's own ECI, or in grey the same fit over every benchmark the model has. Vision is
+ranked by overall. At the same score, a value of the task's own benchmarks or a measured ECI sorts
+before a grey one. `modelcmp show` says what each task's score is from, as `--json`'s `basis`.
 
 A row has no scores when its offers are another release than the one scored, as a `-latest`
 id is.
 
-`modelcmp recommend --json` names each task's benchmark in `benchmarks`: one of the above. A
-benchmark picked in the task's column in the TUI takes its place.
+`modelcmp recommend --json` names each task's benchmarks in `benchmarks`. A benchmark picked in
+the task's column in the TUI takes their place, and the column then shows that benchmark's
+score alone, 0-100.
 
 [Scores](#scores) says how each of these numbers is obtained.
 
@@ -69,11 +76,16 @@ What a refresh downloads:
 Epoch AI (<https://epoch.ai/data/benchmark_data.zip>):
 
 - ECI is Epoch's Capabilities Index as Epoch publishes it. modelcmp does not compute it.
-- A benchmark score is the best one Epoch lists for any version of the model.
-- Coding, Agentic and Reason are one benchmark's score as published, 0-100. modelcmp does not
-  compute them.
-- A task's other benchmarks are in its column's dropdown (`d`), only those Epoch still runs on
-  new models. `B` finds a benchmark of any task without knowing which task it is for.
+- A benchmark score is the best one Epoch lists for any version of the model, of every
+  benchmark in Epoch's index.
+- A task score is computed by modelcmp with Epoch's own model of benchmark scores: each
+  benchmark has a difficulty and a slope on the ECI scale (`edi_scores.csv`), a score is
+  normalized between the benchmark's random baseline and its ceiling, and the task's score is
+  the capability that fits the model's scores on the task's benchmarks. Over every benchmark it
+  recovers Epoch's ECI within a point for most models, so a model Epoch has not given an ECI yet
+  gets an estimate.
+- A task's benchmarks are in its column's dropdown (`d`). `B` finds a benchmark of any task
+  without knowing which task it is for.
 
 Arena (its Agent, Text and WebDev leaderboards):
 
@@ -92,12 +104,8 @@ Arena (its Agent, Text and WebDev leaderboards):
   also empty once Arena's newest leaderboard is more than two months old.
 - The TUI shows the table before Arena has answered, with the last refresh's scores until then.
 
-Of every model:
-
-- Value is computed by modelcmp: the model's coding percentile divided by its price, ranked
-  0-100 among the models that have both. Free models rank above every priced one.
-- A row has the scores of the model Epoch lists under its name, else under the id most of the
-  row's offers are sold as, and none when those offers are another release.
+A row has the scores of the model Epoch lists under its name, else under the id most of the
+row's offers are sold as, and none when those offers are another release.
 
 ## Commands
 
@@ -165,8 +173,8 @@ weigh a note when choosing.
 
 ### Tasks
 
-The built-in tasks are `overall`, `coding`, `agentic`, `reasoning`, `vision` and `value`. For a
-large prompt, bound the context instead: `--min ctx=200`.
+The built-in tasks are `overall`, `coding`, `agentic` and `vision`. For a large prompt, bound
+the context instead: `--min ctx=200`.
 
 Any other name given to `fav` is a task of your own (`debugging`, and `"Tool Dispatch"` is
 stored as `tool-dispatch`).
@@ -193,7 +201,7 @@ stored as `tool-dispatch`).
 | `price`, `in`, `cache`, `out` | $ per 1M tokens |
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
-| `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores, in whole points as the table shows them |
+| `eci`, `coding`, `agentic` | the scores, in whole points as the table shows them |
 | `arena` | from Arena's Agent leaderboard, in percent |
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
@@ -245,10 +253,6 @@ hide different models.
   charge, which the Price column, `--max price` and the JSON's `price` show too. `--id`, `--cmd`
   and `pick` start a tier's pick on a harness whose own price fits the tier, among `--via`'s when
   given, so a model opencode has free runs there and not on pi, which charges for it.
-- `value` lists the models within 8 months of progress of your best on coding. A month of
-  progress is a twelfth of what the best coding score rose in the last year, among the models
-  listed here that Epoch scored. A benchmark scored for 6 to 12 months is measured over those
-  months.
 
 ### Favorites
 
@@ -488,8 +492,9 @@ Each model carries these fields:
 | `tool_call`, `reasoning`, `vision`, `open_weights` | what it can do, true or false |
 | `release`, `knowledge` | its release date and knowledge cutoff, empty when unknown |
 | `url` | its page, the first of `pages` below, null when no site has one |
-| `eci` | the Epoch Capabilities Index |
-| `tasks` | each task's table column: the 0-100 score of its benchmark, overall and vision the `eci`, value a 0-100 percentile |
+| `eci` | the Epoch Capabilities Index, as Epoch publishes it |
+| `tasks` | each task's table column: its score on the ECI scale, or a benchmark's 0-100 score when one is picked in the TUI |
+| `basis` | what each task's score is from: `ECI`, `3 benchmarks` (its own) or `overall` |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `arena_chat`, `arena_webdev` | Arena's chat and WebDev ratings, when Arena rates the model |
 

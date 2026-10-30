@@ -1,22 +1,18 @@
 //! Task fit: which model is good for what.
 //!
-//! A task's score is one benchmark's, a widely run one of Epoch's about the task. It is ranked
-//! as a percentile (0..100) among the models scored on it, and shown as that score, in percent.
+//! A task's score is on Epoch's ECI scale (about 100 to 175): the capability that Epoch's own
+//! model of benchmark scores fits to the task's benchmarks the model has (`estimate`). Overall
+//! is Epoch's ECI when it has one, else that estimate over every benchmark, and a task with none
+//! of its benchmarks takes the overall score, marked as such (`Basis`).
 
 use crate::data::Model;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-
-/// Most months over which the source's best score is taken to have risen steadily (`add_lag`).
-const WINDOW: f64 = 12.0;
 
 pub enum Need {
     None,
     Tools,
     Vision,
-    /// No further behind your best on coding than a task's line allows (`view::FLOOR`): cheap alone is not
-    /// enough. A cut of the task's line (`view::task_frontier`), not of the score: none makes
-    /// the line while coding has no pace to tell by (`add_lag`).
-    Coder,
 }
 
 pub struct Task {
@@ -26,8 +22,8 @@ pub struct Task {
     pub when: &'static str,
     /// What ranks it when that is not a score of its own, said in recommend as `ranked by`.
     pub ranked: Option<&'static str>,
-    /// Epoch's benchmarks about the task, still run on new models: the first is the task's
-    /// score, shown as is, and the column's dropdown lists the others.
+    /// Epoch's benchmarks about the task, as `benchmark_metadata.csv` names them: the score is
+    /// the estimate over the ones the model has, and the column's dropdown lists them all.
     pub benches: &'static [&'static str],
     pub need: Need,
 }
@@ -40,27 +36,14 @@ impl Task {
             None => self.about.to_string(),
         }
     }
-
-    /// The benchmark the task's score is, and the others about the task.
-    pub fn own(&self) -> (Option<&'static str>, &'static [&'static str]) {
-        match self.benches.split_first() {
-            Some((own, more)) => (Some(*own), more),
-            None => (None, &[]),
-        }
-    }
 }
 
-/// A task is a capability software engineering needs, judged by `when`; its benchmarks need
-/// not be about code. Factual recall and math that most models max out stay out, and those Epoch
-/// no longer runs on new models: SWE-Bench verified, Terminal Bench, GSO-Bench, DeepResearch
-/// Bench, and WeirdML for WeirdML v3 (2026-10).
-/// "overall" = Epoch Capabilities Index. "value" = coding per dollar (computed after prices are known).
-/// Listed with the general pick first, then the ones a tier picks for, coding, agentic, reasoning and vision, and last
-/// the cheaper pick, which has one model and not one per tier.
+/// A task is a capability software engineering needs, judged by `when`. Listed with the general
+/// pick first, then the ones a tier picks for, coding, agentic and vision.
 pub const TASKS: &[Task] = &[
     Task {
         name: "overall",
-        about: "general capability, from ECI",
+        about: "general capability",
         when: "a tiebreaker, or work that fits no other task",
         ranked: None,
         need: Need::None,
@@ -72,7 +55,18 @@ pub const TASKS: &[Task] = &[
         when: "fixing a bug, adding a feature to an existing repo, refactors",
         ranked: None,
         need: Need::None,
-        benches: &["FrontierCode", "WeirdML v3", "FrontierSWE", "MirrorCode", "Surface Evolver Bench"],
+        benches: &[
+            "FrontierCode",
+            "FrontierSWE",
+            "MirrorCode",
+            "SWE-Bench verified",
+            "Aider polyglot",
+            "Terminal Bench",
+            "GSO-Bench",
+            "WeirdML v3",
+            "WeirdML",
+            "Surface Evolver Bench",
+        ],
     },
     Task {
         name: "agentic",
@@ -80,26 +74,17 @@ pub const TASKS: &[Task] = &[
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         ranked: None,
         need: Need::Tools,
-        benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0", "EBR-bench", "SpireClimb"],
-    },
-    Task {
-        name: "reasoning",
-        about: "hard math and science questions, puzzles, abstraction",
-        when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
-        ranked: None,
-        need: Need::None,
         benches: &[
-            "LMCA",
-            "GPQA diamond",
-            "ARC-AGI-2",
-            "ARC-AGI",
-            "SimpleBench",
-            "Mystery Game Puzzles",
-            "Chess Puzzles",
-            "DTBench",
-            "FrontierMath T1-3",
-            "FrontierMath T4",
-            "ProofBench",
+            "APEX-Agents",
+            "Remote Labor Index",
+            "OSWorld 2.0",
+            "OSWorld",
+            "EBR-bench",
+            "SpireClimb",
+            "METR Time Horizons",
+            "The Agent Company",
+            "GDPval",
+            "Terminal Bench",
         ],
     },
     Task {
@@ -110,21 +95,13 @@ pub const TASKS: &[Task] = &[
         need: Need::Vision,
         benches: &[],
     },
-    Task {
-        name: "value",
-        about: "the models close to your best on coding",
-        when: "routine coding that needs no top reasoning",
-        ranked: Some("coding per dollar"),
-        need: Need::Coder,
-        benches: &[],
-    },
 ];
 
 pub fn task(name: &str) -> Option<&'static Task> {
     TASKS.iter().find(|t| t.name == name)
 }
 
-/// Every benchmark a task uses, sorted; the others are not even parsed.
+/// Every benchmark a task uses, sorted.
 pub fn task_benches() -> Vec<&'static str> {
     let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.benches.iter().copied()).collect();
     v.sort();
@@ -136,132 +113,111 @@ pub fn task_names() -> impl Iterator<Item = &'static str> {
     TASKS.iter().map(|t| t.name)
 }
 
-/// Tasks ranked by the ECI percentile; they show the raw ECI, as the table's ECI column does.
+/// A benchmark in Epoch's model of scores (`edi_scores.csv`, `benchmark_metadata.csv`): its
+/// difficulty on the ECI scale, its slope there, and the random baseline and the ceiling a score
+/// is normalized between.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Bench {
+    pub edi: f64,
+    pub slope: f64,
+    pub baseline: f64,
+    pub ceiling: f64,
+}
+
+impl Bench {
+    /// A score, as Epoch scales it, as 0..1 between the random baseline and the ceiling.
+    pub fn norm(&self, score: f64) -> f64 {
+        ((score - self.baseline) / (self.ceiling - self.baseline)).clamp(0.0, 1.0)
+    }
+}
+
+/// Where the estimate is searched: the ECI scale runs from about 55 to 185 today.
+const RANGE: (f64, f64) = (60.0, 220.0);
+
+/// The capability c that Epoch's model of scores, y ≈ sigmoid(slope × (c − edi)), fits to the
+/// normalized scores `ys`: the root of Σ slope × (y − sigmoid(slope × (c − edi))), which falls
+/// as c grows, by bisection on `RANGE`. Its bound when there is no root in it, every score at
+/// the floor or the ceiling, so a score near 0 or 1 weighs little and never throws the estimate.
+/// None with no score.
+pub fn estimate(ys: &[(Bench, f64)]) -> Option<f64> {
+    if ys.is_empty() {
+        return None;
+    }
+    let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
+    let f = |c: f64| ys.iter().map(|(b, y)| b.slope * (y - sigmoid(b.slope * (c - b.edi)))).sum::<f64>();
+    let (mut lo, mut hi) = RANGE;
+    if f(lo) <= 0.0 {
+        return Some(lo);
+    }
+    if f(hi) >= 0.0 {
+        return Some(hi);
+    }
+    for _ in 0..50 {
+        let mid = (lo + hi) / 2.0;
+        if f(mid) > 0.0 { lo = mid } else { hi = mid }
+    }
+    Some((lo + hi) / 2.0)
+}
+
+/// What a task's score is from: Epoch's ECI, the estimate over that many of the model's
+/// benchmarks, or the overall score, as the task has none of its own.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Basis {
+    Eci,
+    Benches(usize),
+    Overall,
+}
+
+impl Basis {
+    /// As `--json` and `show` say it: "ECI", "3 benchmarks" or "overall".
+    pub fn said(self) -> String {
+        match self {
+            Basis::Eci => "ECI".into(),
+            Basis::Benches(1) => "1 benchmark".into(),
+            Basis::Benches(n) => format!("{n} benchmarks"),
+            Basis::Overall => "overall".into(),
+        }
+    }
+
+    /// Whether the score is `task`'s own: a measured ECI for overall and vision, else the task's
+    /// benchmarks. An estimated overall and a task's fallback to it are not, drawn dimmed and
+    /// sorted after an own score they tie.
+    pub fn own(self, task: &str) -> bool {
+        match self {
+            Basis::Eci => true,
+            Basis::Benches(_) => !ECI_TASKS.contains(&task),
+            Basis::Overall => false,
+        }
+    }
+}
+
+/// The tasks the overall score ranks.
 const ECI_TASKS: [&str; 2] = ["overall", "vision"];
 
-/// The value a task shows for a model ranked `s`, in its table column and frontier: the ECI or
-/// the task's benchmark score, 0..100; "value" alone stays a percentile.
-pub fn shown(m: &Model, t: &Task, s: f64) -> f64 {
-    // A favorite the task cannot score (`view::task_frontier`) shows no score.
-    if s.is_nan() {
-        return s;
-    }
-    if ECI_TASKS.contains(&t.name) { m.eci.unwrap_or(s) } else { m.shown.get(t.name).copied().unwrap_or(s) }
-}
+/// Task name -> its score on the ECI scale, and what it is from.
+pub type Fit = BTreeMap<String, (f64, Basis)>;
 
-/// Per task: key -> task -> percentile, and key -> task -> the value it shows (`shown`).
-pub type Fit = (HashMap<String, BTreeMap<String, f64>>, HashMap<String, BTreeMap<String, f64>>);
-
-/// Fraction of `all` below x (ties count half), as 0..100.
-fn pct_rank(x: f64, all: &[f64]) -> f64 {
-    let below = all.iter().filter(|v| **v < x).count() as f64;
-    let equal = all.iter().filter(|v| **v == x).count() as f64;
-    100.0 * (below + equal / 2.0) / all.len() as f64
-}
-
-/// What Epoch's models scored, each `(index, benchmark -> score)`: the index, and every
-/// benchmark a task uses. One model's scores are ranked among them (`scored`).
-#[derive(Default, Debug)]
-pub struct Pools {
-    index: Vec<f64>,
-    benches: HashMap<&'static str, Vec<f64>>,
-}
-
-pub fn pools<'a>(groups: impl Iterator<Item = (Option<f64>, &'a BTreeMap<String, f64>)>) -> Pools {
-    let groups: Vec<_> = groups.collect();
-    Pools {
-        index: groups.iter().filter_map(|g| g.0).collect(),
-        benches: task_benches()
-            .into_iter()
-            .map(|b| (b, groups.iter().filter_map(|g| g.1.get(b).copied()).collect()))
-            .collect(),
-    }
-}
-
-/// A model's fit, from its `index` and `benchmark -> score`: each task's percentile among the
-/// models scored on its benchmark, and that score as 0..100; overall and vision the index's.
-pub fn scored(
-    index: Option<f64>,
-    scores: &BTreeMap<String, f64>,
-    pools: &Pools,
-) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
-    let (mut fit, mut show) = (BTreeMap::new(), BTreeMap::new());
-    if let Some(i) = index {
-        for t in ECI_TASKS {
-            fit.insert(t.to_string(), pct_rank(i, &pools.index));
-        }
-    }
+/// Every task's score of a model, from its ECI and its `benchmark -> score` with the curves of
+/// `benches`: overall Epoch's ECI, else the estimate over every benchmark it has; coding and
+/// agentic the estimate over the task's benchmarks it has, else the overall; vision the overall.
+pub fn scored(eci: Option<f64>, scores: &BTreeMap<String, f64>, benches: &HashMap<String, Bench>) -> Fit {
+    let over = |names: &[&str]| {
+        let ys: Vec<(Bench, f64)> = scores
+            .iter()
+            .filter(|(b, _)| names.is_empty() || names.contains(&b.as_str()))
+            .filter_map(|(b, s)| benches.get(b).map(|bench| (*bench, bench.norm(*s))))
+            .collect();
+        Some((estimate(&ys)?, Basis::Benches(ys.len())))
+    };
+    let overall = eci.map(|e| (e, Basis::Eci)).or_else(|| over(&[]));
+    let mut fit = Fit::new();
     for t in TASKS {
-        if let Some(b) = t.own().0
-            && let (Some(&x), Some(pool)) = (scores.get(b), pools.benches.get(b))
-        {
-            fit.insert(t.name.to_string(), pct_rank(x, pool));
-            show.insert(t.name.to_string(), x * 100.0);
+        let own = if t.benches.is_empty() { overall } else { over(t.benches) };
+        if let Some(v) = own.or_else(|| overall.map(|(s, _)| (s, Basis::Overall))) {
+            fit.insert(t.name.to_string(), v);
         }
     }
-    (fit, show)
-}
-
-/// What a free model counts as costing in "value": below any price, so free models rank over
-/// every priced one, and among themselves by coding.
-const FREE: f64 = 1e-9;
-
-/// A release date, "2026-09-18" or "2026-09", in months since 1970.
-// ponytail: months of the mean length, so a day or two off; nothing here turns on a day.
-pub fn months(date: &str) -> Option<f64> {
-    let mut parts = date.split('-').map(|p| p.parse::<f64>().ok());
-    let (year, month, day) = (parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(15.0));
-    Some((year - 1970.0) * 12.0 + (month - 1.0) + (day - 1.0) / 30.44)
-}
-
-/// Each task's `Model::lag`: how far the model is behind the best on it, in months of
-/// progress, a month's share of what the best score rose over the last `WINDOW` months, or
-/// over the months it was scored in when fewer. `now` is in seconds since 1970. One scale for every task, which a share
-/// of the best score is not (an index has no zero) and a gap in points is not either (each
-/// benchmark moves at its own pace); a percentile among every model ever scored counts a
-/// model at half the best score as near the top. A task scored for under half of `WINDOW`,
-/// or whose best has not risen in it, has no lag, and its line leaves none out for it. A
-/// best of then that scored nothing still gives a pace: the floor hides part of the rise, so
-/// the lags come out too long, the strict side. "value" has none, being a rank.
-// ponytail: a straight line over that window; a benchmark whose scores rose in a few of those
-// months counts its models as closer than they are. The best score at each date if it bites.
-pub fn add_lag(models: &mut [Model], now: f64) {
-    let now = now / 86400.0 / 30.436_875;
-    // Read once, not once a task.
-    let released: Vec<Option<f64>> = models.iter().map(|m| months(&m.release)).collect();
-    for t in TASKS.iter().filter(|t| t.name != "value") {
-        let score = |m: &Model| if ECI_TASKS.contains(&t.name) { m.eci } else { m.shown.get(t.name).copied() };
-        let dated = || models.iter().zip(&released);
-        let first = dated().filter(|(m, _)| score(m).is_some()).filter_map(|(_, r)| *r).fold(now, f64::min);
-        let window = (now - first).min(WINDOW);
-        let best = |old: bool| {
-            let scores = dated().filter(|(_, r)| !old || r.is_some_and(|r| r <= now - window));
-            scores.filter_map(|(m, _)| score(m)).fold(f64::NEG_INFINITY, f64::max)
-        };
-        let (best, old) = (best(false), best(true));
-        let rate = (best - old) / window;
-        for m in models.iter_mut() {
-            match score(m).filter(|_| window >= WINDOW / 2.0 && rate > 0.0 && rate.is_finite()) {
-                Some(s) => m.lag.insert(t.name.to_string(), (best - s) / rate),
-                None => m.lag.remove(t.name),
-            };
-        }
-    }
-}
-
-/// "value": coding percentile per blended dollar, itself ranked as a percentile, for every
-/// model with both. The task's line only takes the models close to your best on coding (see `Need::Coder`).
-pub fn add_value(models: &mut [Model]) {
-    // Not one only your machine runs: the score is not that copy's, and free it would top the rank.
-    let value = |m: &Model| Some(m.fit.get("coding").filter(|_| !m.local())? / m.cost()?.max(FREE));
-    let raw: Vec<Option<f64>> = models.iter().map(value).collect();
-    let all: Vec<f64> = raw.iter().flatten().copied().collect();
-    for (m, v) in models.iter_mut().zip(raw) {
-        match v {
-            Some(v) => m.fit.insert("value".into(), pct_rank(v, &all)),
-            None => m.fit.remove("value"),
-        };
-    }
+    fit
 }
 
 /// Whether the model has what the task needs, tool calling or vision.
@@ -269,94 +225,155 @@ pub fn qualifies(m: &Model, t: &Task) -> bool {
     match t.need {
         Need::Tools => m.tool_call,
         Need::Vision => m.vision,
-        Need::None | Need::Coder => true,
+        Need::None => true,
     }
 }
 
-/// Task score if the model qualifies for the task.
-pub fn fit(m: &Model, t: &Task) -> Option<f64> {
+/// Task score, and what it is from, if the model qualifies for the task.
+pub fn fit(m: &Model, t: &Task) -> Option<(f64, Basis)> {
     m.fit.get(t.name).copied().filter(|_| qualifies(m, t))
+}
+
+/// Whether the model's score on `task` is the task's own (`Basis::own`): a score to sort before
+/// an estimate or a fallback it ties.
+pub fn own(m: &Model, task: &str) -> bool {
+    m.fit.get(task).is_some_and(|f| f.1.own(task))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::Offer;
 
     fn scores(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
 
-    #[test]
-    fn ranks_by_task() {
-        let a = scores(&[("APEX-Agents", 0.9), ("FrontierCode", 0.2), ("FrontierSWE", 0.9)]);
-        let b = scores(&[("APEX-Agents", 0.5), ("FrontierCode", 0.7)]);
-        let p = pools([(Some(145.0), &a), (None, &b)].into_iter());
-        let ((pa, shown_a), (pb, _)) = (scored(Some(145.0), &a, &p), scored(None, &b, &p));
-        assert!(pa["agentic"] > pb["agentic"]);
-        assert!(pb["coding"] > pa["coding"], "FrontierSWE is not the task's score");
-        assert_eq!(shown_a["coding"], 20.0, "shown as the score, 0..100");
-        assert!(!pa.contains_key("reasoning"), "no LMCA, no reasoning score");
+    /// Epoch's curves of 2026-10-30 for the benchmarks the models below were run on.
+    fn benches() -> HashMap<String, Bench> {
+        let b = |edi, slope, baseline, ceiling| Bench { edi, slope, baseline, ceiling };
+        [
+            ("GPQA diamond", b(134.72, 0.1321, 0.25, 0.97)),
+            ("FrontierMath T1-3", b(150.19, 0.1676, 0.0, 0.95)),
+            ("FrontierMath T4", b(158.34, 0.2483, 0.0, 1.0)),
+            ("OTIS Mock AIME 2024-2025", b(137.18, 0.2237, 0.001, 1.0)),
+            ("SimpleQA Verified", b(156.65, 0.0710, 0.0, 1.0)),
+            ("EBR-bench", b(163.95, 0.1788, 0.0, 1.0)),
+            ("Mystery Game Puzzles", b(163.06, 0.1663, 0.0922, 1.0)),
+            ("APEX-Agents", b(156.28, 0.0821, 0.0, 1.0)),
+            ("Furniture Assembly", b(165.03, 0.2843, 0.3, 1.0)),
+            ("WeirdML v3", b(167.72, 0.1540, 0.0, 0.9)),
+            ("Chess Puzzles", b(161.09, 0.1068, 0.0496, 1.0)),
+            ("ARC-AGI", b(145.08, 0.2256, 0.0, 1.0)),
+            ("Balrog", b(154.35, 0.0493, 0.0, 1.0)),
+            ("SimpleBench", b(151.65, 0.0915, 0.1667, 1.0)),
+            ("WeirdML", b(145.65, 0.0807, 0.0, 1.0)),
+            ("ARC-AGI-2", b(153.65, 0.2696, 0.0, 1.0)),
+            ("Surface Evolver Bench", b(150.24, 0.1320, 0.0, 1.0)),
+            ("ProofBench", b(156.12, 0.2942, 0.0, 1.0)),
+            ("FrontierCode", b(163.78, 0.0754, 0.0, 1.0)),
+            ("LMCA", b(151.58, 0.0758, 0.0, 0.85)),
+            ("DTBench", b(136.70, 0.0997, 0.4, 1.0)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
 
-        let mk = |k: &str, fit: &BTreeMap<String, f64>, tools: bool| Model {
-            key: k.into(),
-            fit: fit.clone(),
+    /// Epoch's own ECI, from the scores it computed it from, within a point.
+    #[test]
+    fn the_estimate_recovers_epochs_eci() {
+        let terra = scores(&[
+            ("GPQA diamond", 0.943),
+            ("FrontierMath T1-3", 0.909),
+            ("FrontierMath T4", 0.927),
+            ("OTIS Mock AIME 2024-2025", 1.0),
+            ("SimpleQA Verified", 0.573),
+            ("EBR-bench", 0.781),
+            ("Mystery Game Puzzles", 0.74),
+            ("APEX-Agents", 0.683),
+            ("Furniture Assembly", 0.792),
+            ("WeirdML v3", 0.404),
+        ]);
+        let fit = scored(None, &terra, &benches());
+        let (overall, basis) = fit["overall"];
+        assert!((overall - 168.05).abs() < 1.0, "GPT-6.1 Terra: {overall}");
+        assert_eq!(basis, Basis::Benches(10));
+        let (coding, basis) = fit["coding"];
+        assert!((coding - 166.0).abs() < 3.0, "from WeirdML v3 alone: {coding}");
+        assert_eq!(basis, Basis::Benches(1));
+        assert_eq!(fit["agentic"].1, Basis::Benches(2), "APEX-Agents and EBR-bench");
+        assert_eq!(fit["vision"], fit["overall"], "ranked by overall");
+        let terra56 = scores(&[
+            ("GPQA diamond", 0.933),
+            ("FrontierMath T1-3", 0.86),
+            ("FrontierMath T4", 0.707),
+            ("OTIS Mock AIME 2024-2025", 0.997),
+            ("SimpleQA Verified", 0.432),
+            ("Chess Puzzles", 0.47),
+            ("Mystery Game Puzzles", 0.35),
+            ("ARC-AGI", 0.965),
+            ("Balrog", 0.532),
+            ("SimpleBench", 0.489),
+            ("WeirdML", 0.783),
+            ("APEX-Agents", 0.582),
+            ("ARC-AGI-2", 0.839),
+            ("Surface Evolver Bench", 0.838),
+            ("ProofBench", 0.74),
+            ("FrontierCode", 0.413),
+            ("LMCA", 0.549),
+            ("DTBench", 0.933),
+            ("Furniture Assembly", 0.542),
+        ]);
+        let overall = scored(None, &terra56, &benches())["overall"].0;
+        assert!((overall - 160.25).abs() < 1.0, "GPT-5.6 Terra: {overall}");
+        // With an ECI, that is the overall, and the tasks go on from their own benchmarks.
+        let fit = scored(Some(160.0), &terra56, &benches());
+        assert_eq!(fit["overall"], (160.0, Basis::Eci));
+        assert_eq!(fit["coding"].1, Basis::Benches(3), "FrontierCode, WeirdML and Surface Evolver Bench");
+    }
+
+    #[test]
+    fn a_task_with_no_benchmark_takes_the_overall() {
+        let kimi = scores(&[("ProofBench", 0.91)]);
+        let fit = scored(None, &kimi, &benches());
+        let (overall, basis) = fit["overall"];
+        assert!((overall - 164.0).abs() < 1.0, "Kimi K3.1 Pro from ProofBench alone: {overall}");
+        assert_eq!(basis, Basis::Benches(1));
+        assert_eq!(fit["coding"], (overall, Basis::Overall));
+        assert_eq!(fit["agentic"], (overall, Basis::Overall));
+        assert!(scored(None, &scores(&[]), &benches()).is_empty(), "nothing to go by");
+        assert_eq!(scored(Some(150.0), &scores(&[]), &benches())["coding"], (150.0, Basis::Overall));
+        // A benchmark Epoch's model has no curve for counts for nothing.
+        assert!(scored(None, &scores(&[("SuperGLUE", 0.9)]), &benches()).is_empty());
+    }
+
+    #[test]
+    fn scores_at_the_floor_or_the_ceiling_stay_in_range() {
+        let b = Bench { edi: 150.0, slope: 0.2, baseline: 0.25, ceiling: 1.0 };
+        assert_eq!(estimate(&[(b, 0.0)]), Some(RANGE.0));
+        assert_eq!(estimate(&[(b, 1.0)]), Some(RANGE.1));
+        assert_eq!(estimate(&[]), None);
+        assert!((estimate(&[(b, 0.5)]).unwrap() - 150.0).abs() < 1e-6, "half way is the difficulty");
+        assert_eq!((b.norm(0.25), b.norm(1.0), b.norm(0.1), b.norm(0.625)), (0.0, 1.0, 0.0, 0.5));
+    }
+
+    #[test]
+    fn a_basis_is_own_by_task() {
+        assert!(Basis::Eci.own("overall") && Basis::Eci.own("vision"));
+        assert!(Basis::Benches(2).own("coding") && !Basis::Benches(9).own("overall"), "an estimated overall");
+        assert!(!Basis::Overall.own("coding"));
+        assert_eq!(Basis::Benches(1).said(), "1 benchmark");
+        assert_eq!(Basis::Benches(3).said(), "3 benchmarks");
+        assert_eq!((Basis::Eci.said(), Basis::Overall.said()), ("ECI".into(), "overall".into()));
+        let mk = |fit: &[(&str, (f64, Basis))], tools: bool| Model {
+            fit: fit.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             tool_call: tools,
             ..Default::default()
         };
-        let models = [mk("a", &pa, true), mk("b", &pb, false)];
-        // agentic needs tool calling; b lacks it
-        assert!(fit(&models[1], task("agentic").unwrap()).is_none());
-        assert!(pa.contains_key("overall") && !pb.contains_key("overall"), "no index, no overall");
-    }
-
-    #[test]
-    fn lag_is_in_months_of_the_best_score_s_progress() {
-        let model = |eci: Option<f64>, release: &str| Model { eci, release: release.into(), ..Default::default() };
-        let now = months("2026-10-01").unwrap() * 30.436_875 * 86400.0;
-        // The best was 100 a year ago and is 124: 2 points a month.
-        let mut ms = [
-            model(Some(100.0), "2025-06-01"),
-            model(Some(118.0), "2026-03"),
-            model(Some(124.0), "2026-09-20"),
-            model(None, "2026-09-20"),
-        ];
-        ms[1].shown.insert("coding".into(), 48.0);
-        add_lag(&mut ms, now);
-        let lag = |ms: &[Model], task: &str| ms.iter().map(|m| m.lag.get(task).copied()).collect::<Vec<_>>();
-        assert_eq!(lag(&ms, "overall"), [Some(12.0), Some(3.0), Some(0.0), None]);
-        assert_eq!(lag(&ms, "vision"), lag(&ms, "overall"), "ranked by the same index");
-        assert_eq!(lag(&ms, "coding"), [None; 4], "one score, a year ago none: no pace to go by");
-        assert_eq!(lag(&ms, "value"), [None; 4], "a rank, not a score");
-        // A year ago the best scored nothing: a pace still, of 4 points a month.
-        ms[0].shown.insert("coding".into(), 0.0);
-        add_lag(&mut ms, now);
-        assert_eq!(lag(&ms, "coding"), [Some(12.0), Some(0.0), None, None]);
-        // Scored for 8 months: the pace over those, 3 points a month.
-        ms[0].release = "2026-02-01".into();
-        add_lag(&mut ms, now);
-        assert_eq!(lag(&ms, "overall"), [Some(8.0), Some(2.0), Some(0.0), None]);
-        // Under half a year: no pace, and the lags of the last data go.
-        (ms[0].release, ms[1].release) = ("2026-05-01".into(), "2026-06".into());
-        add_lag(&mut ms, now);
-        assert_eq!(lag(&ms, "overall"), [None; 4]);
-    }
-
-    #[test]
-    fn value_needs_capability() {
-        let mk = |coding: f64, price: f64| Model {
-            fit: scores(&[("coding", coding)]),
-            offers: vec![Offer { input: price, output: price, ..Default::default() }],
-            ..Default::default()
-        };
-        let mut models = [mk(25.0, 0.01), mk(70.0, 1.0), mk(90.0, 10.0)];
-        add_value(&mut models);
-        assert!(models[0].fit.contains_key("value"), "the ratio is shown for every model");
-        assert!(models[1].fit["value"] > models[2].fit["value"]);
-
-        let mut models = [mk(70.0, 0.0), mk(60.0, 0.0), mk(90.0, 0.01)];
-        add_value(&mut models);
-        let v = |i: usize| models[i].fit["value"];
-        assert!(v(0) > v(1) && v(1) > v(2), "free beats any price, the better coder first");
+        let a = mk(&[("agentic", (150.0, Basis::Benches(1)))], true);
+        let b = mk(&[("agentic", (150.0, Basis::Overall))], false);
+        assert_eq!(fit(&a, task("agentic").unwrap()), Some((150.0, Basis::Benches(1))));
+        assert!(fit(&b, task("agentic").unwrap()).is_none(), "agentic needs tool calling");
+        assert!(own(&a, "agentic") && !own(&b, "agentic") && !own(&a, "coding"));
     }
 }

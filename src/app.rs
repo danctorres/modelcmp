@@ -56,16 +56,18 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
     }
 }
 
+/// The entry for the task's score, over all its benchmarks, first in a task column's dropdown.
+const ALL_BENCHES: &str = "all benchmarks";
+
 /// The benchmarks the dropdown of the task column `id` lists, after the entry for the task's
-/// score, the task's own benchmark, which may be Epoch's only one about the task: the dropdown
-/// then names that one.
+/// score (`ALL_BENCHES`), each shown alone when picked.
 fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
     if id == ARENA {
         let boards = crate::data::ARENA_BOARDS.iter().map(|b| b.0);
         return Some(("Agent", boards.chain(crate::data::ARENA_MORE.iter().map(|s| s.0)).collect()));
     }
-    let (own, more) = crate::fit::task(id)?.own();
-    Some((own?, more.to_vec()))
+    let benches = crate::fit::task(id)?.benches;
+    (!benches.is_empty()).then(|| (ALL_BENCHES, benches.to_vec()))
 }
 
 /// A benchmark's entry in a task column's dropdown: its name and the source that runs it.
@@ -129,8 +131,8 @@ fn month(v: f64) -> String {
 const ARENA: &str = "arena";
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the ECI and
-/// Arena's score, the two overall scores side by side, then the task scores and Value.
-pub const COLS: [Col; 12] = [
+/// Arena's score, the two overall scores side by side, then the task scores.
+pub const COLS: [Col; 10] = [
     Col {
         ranked: false,
         show: month,
@@ -171,21 +173,26 @@ pub const COLS: [Col; 12] = [
         read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()).map(|v| if v >= 10_000.0 { v / 1000.0 } else { v }),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    col("ECI", "eci", "Epoch AI's overall capability index", |m| m.eci),
+    col("ECI", "eci", "Epoch AI's overall index, grey = estimate", |m| task_score(m, "overall")),
     Col {
         show: signed,
         ..col("Arena", ARENA, "net improvement in real agent sessions, %, measured by arena.ai", |m| m.arena)
     },
-    col("Coding", "coding", "FrontierCode score (0-100)", |m| task_score(m, "coding")),
-    col("Agentic", "agentic", "APEX-Agents score (0-100)", |m| task_score(m, "agentic")),
-    col("Reason", "reasoning", "LMCA score (0-100)", |m| task_score(m, "reasoning")),
-    Col {
-        price: true,
-        ..col("Value", "value", "coding score per dollar of Price, as a percentile (0-100)", |m| {
-            m.fit.get("value").copied()
-        })
-    },
+    col("Coding", "coding", "ECI-scale score from its coding benchmarks, grey = overall's", |m| {
+        task_score(m, "coding")
+    }),
+    col("Agentic", "agentic", "ECI-scale score from its agentic benchmarks, grey = overall's", |m| {
+        task_score(m, "agentic")
+    }),
 ];
+
+/// The task the column `COLS[c]` scores, when it scores one: ECI is overall's.
+pub fn col_task(c: usize) -> Option<&'static str> {
+    match COLS.get(c)?.id {
+        "eci" => Some("overall"),
+        id => crate::fit::task(id).map(|t| t.name),
+    }
+}
 
 /// Whether `COLS[i]` hangs on the price: Price, $in, $cache and $out, and Value, which divides by it.
 pub fn on_price(i: usize) -> bool {
@@ -302,9 +309,9 @@ pub fn has_menu(col: usize) -> bool {
 /// Arena, whose dropdown lists its signals.
 const ARENA_COL: usize = ECI + 1;
 
-/// Coding, Agentic and Reason: the columns `col_benches` has benchmarks for. Asked of every
-/// header on every frame, so not looked up.
-const TASK_COLS: std::ops::RangeInclusive<usize> = ECI + 2..=ECI + 4;
+/// Coding and Agentic: the columns `col_benches` has benchmarks for. Asked of every header on
+/// every frame, so not looked up.
+const TASK_COLS: std::ops::RangeInclusive<usize> = ECI + 2..=ECI + 3;
 
 /// The benchmarks the dropdown of the task column at cursor index `col` lists.
 fn col_benches(col: usize) -> Option<(&'static str, Vec<&'static str>)> {
@@ -350,7 +357,7 @@ pub fn col_value(m: &Model, at: usize, store: &Store) -> Option<f64> {
 /// Whether `v`, a value of `COLS[at]`, is within a bound from `lo` to `hi`. A score counts in
 /// whole points, as its cell shows it, so a model shown at 64 meets a minimum of 64.
 pub fn meets(at: usize, v: f64, lo: f64, hi: f64) -> bool {
-    let score = COLS.get(at).is_some_and(|c| ["eci", "coding", "agentic", "reasoning", "value"].contains(&c.id));
+    let score = col_task(at).is_some();
     let v = if score { v.round_ties_even() } else { v };
     v >= lo && v <= hi
 }
@@ -377,9 +384,9 @@ pub fn base_col_about(col: usize) -> String {
 /// Why a task column's cell is empty, in its description.
 const UNTESTED: &str = "blank = not tested";
 
-/// `about` after Epoch AI, whose scores it tells of, and what an empty cell means.
+/// `about` and what an empty cell means.
 fn of_source(about: &str) -> String {
-    format!("Epoch AI, {about}, {UNTESTED}")
+    format!("{about}, {UNTESTED}")
 }
 
 /// The keys, in groups, each with what it does, the keys it names between backticks. A row
@@ -1688,16 +1695,23 @@ impl App {
         if TASK_COLS.contains(&col) && self.menu(col) { format!("{about}, d for other benchmarks") } else { about }
     }
 
-    /// Recompute everything that depends on `data::cached()`: Value and the column values.
+    /// Recompute everything that depends on `data::cached()`: the column values.
     pub fn reprice(&mut self) {
-        let mut data = std::mem::take(&mut self.data);
-        crate::fit::add_value(&mut data.models);
+        let data = std::mem::take(&mut self.data);
         self.set_data(data);
     }
 
     /// Value of the column at cursor index `col` for `data.models[i]`.
     fn val(&self, i: usize, col: usize) -> Option<f64> {
         *self.vals[i].get(col.checked_sub(TEXT)?)?
+    }
+
+    /// Whether the value of `COLS[c]` for `data.models[i]` is a score that is not its task's own
+    /// (`fit::own`), an estimated overall or a task's fallback to it: drawn dimmed, neither the
+    /// best nor the worst, and after an own score it ties in a sort. Never with a benchmark picked.
+    pub fn estimated(&self, i: usize, c: usize) -> bool {
+        let t = col_task(c).filter(|_| self.bench[c].is_none());
+        t.is_some_and(|t| self.data.models[i].fit.get(t).is_some_and(|f| !f.1.own(t)))
     }
 
     fn selected(&self) -> usize {
@@ -1795,9 +1809,7 @@ impl App {
             if self.among.is_some() || self.caps {
                 return None;
             }
-            // A task with one pick has `high`'s in its one box: `free` may have none.
             let tier = self.task_sel.checked_sub(1)?;
-            let tier = if self.one_pick(self.task_cur) { TIERS.len() - 1 } else { tier };
             return (*self.tier_picks(self.task_cur).get(tier)?).map(|e| e.0);
         }
         if matches!(self.view, View::Detail(_)) {
@@ -1806,24 +1818,10 @@ impl App {
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
     }
 
-    /// How many stops recommend's sideways cursor moves over: the task's name and its tiers.
+    /// How many stops recommend's sideways cursor moves over: the task's name and its tiers, or
+    /// `+ new task` alone, which has no tiers.
     fn across_len(&self) -> usize {
-        if self.one_pick(self.task_cur) {
-            2
-        } else if self.on_new_task() {
-            // `+ new task` has no tiers.
-            1
-        } else {
-            1 + TIERS.len()
-        }
-    }
-
-    /// Whether recommend's task `i` has one pick and not one per tier: "value", a rank with no
-    /// score for a tier to be near the best on (`fit::add_lag`), unless your favorites give its
-    /// tiers models of their own.
-    pub fn one_pick(&self, i: usize) -> bool {
-        // The name first: the picks are for "value" alone.
-        TASKS.get(i).is_some_and(|t| t.name == "value" && view::one_pick(t.name, &self.tier_picks(i)))
+        if self.on_new_task() { 1 } else { 1 + TIERS.len() }
     }
 
     /// What each tier of recommend's task `i` picks, as `--tier` does, with its score: your
@@ -2350,12 +2348,13 @@ impl App {
         }
         self.sort_rows(rows);
         let ms = &self.data.models;
-        // Among the models to use: a muted row is grey throughout, so it holds no extreme, nor does a list price.
+        // Among the models to use: a muted row is grey throughout, so it holds no extreme, nor
+        // does a list price or an estimated score.
         self.ext = std::array::from_fn(|c| {
             if !COLS[c].ranked {
                 return None;
             }
-            let own = |r: usize| !(self.listed[r] && on_price(c));
+            let own = |r: usize| !(self.listed[r] && on_price(c)) && !self.estimated(r, c);
             let mut it = self.rows.iter().filter(|&&r| !self.muted(&ms[r]) && own(r)).filter_map(|&r| self.vals[r][c]);
             let first = it.next()?;
             let (lo, hi) = it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
@@ -2374,9 +2373,11 @@ impl App {
         let keep = key_of(self.selected());
         let ms = &self.data.models;
         if numeric(self.sort_col).is_some() {
-            // Names breaking ties.
+            // An own score before an estimate it ties, then names breaking ties.
+            let estimated = |r: usize| self.estimated(r, self.sort_col - TEXT);
             rows.sort_by(|&a, &b| {
                 by_value(self.val(a, self.sort_col), self.val(b, self.sort_col), self.descending)
+                    .then_with(|| estimated(a).cmp(&estimated(b)))
                     .then_with(|| ms[a].name.cmp(&ms[b].name))
             });
         } else {
@@ -2873,10 +2874,8 @@ impl App {
         let at = self.task_at_hand().map(|t| t.name).or(own);
         let favs = self.store.favorite_for(key);
         let fav = favs.iter().find(|s| at.is_none_or(|t| slot_box(s).0 == t));
-        // On a tier in recommend, that tier's box, so f enter is for it alone. A task of one pick
-        // shows high's.
-        let on_tier = (self.view == View::Recommend && self.task_sel > 0)
-            .then(|| if self.one_pick(self.task_cur) { BOXES - 1 } else { self.task_sel - 1 });
+        // On a tier in recommend, that tier's box, so f enter is for it alone.
+        let on_tier = (self.view == View::Recommend && self.task_sel > 0).then(|| self.task_sel - 1);
         let tier = at.zip(on_tier).map(|(t, c)| box_slot(t, c));
         let on_box = tier.is_some();
         let slot = tier.unwrap_or_else(|| fav.map(String::as_str).or(at).unwrap_or(TASKS[0].name).to_string());
@@ -3385,10 +3384,8 @@ impl App {
         for (t, name) in names.into_iter().enumerate() {
             stops.extend(has(name).then_some((t, 0)));
             let picks = self.tier_picks(t);
-            // A task with one pick has `high`'s in its one box, as `current` reads it.
-            let one = t < TASKS.len() && view::one_pick(name, &picks);
-            let boxes: Vec<_> = if one { vec![(1, picks[TIERS.len() - 1])] } else { (1..).zip(picks).collect() };
-            stops.extend(boxes.into_iter().filter(|(_, p)| p.is_some_and(|(m, _)| has(&m.name))).map(|(b, _)| (t, b)));
+            let boxes = (1..).zip(picks);
+            stops.extend(boxes.filter(|(_, p)| p.is_some_and(|(m, _)| has(&m.name))).map(|(b, _)| (t, b)));
         }
         let Some(last) = stops.len().checked_sub(1) else {
             return self.refuse(format!("no task or model matches {}", self.overlay_query));
@@ -4113,9 +4110,8 @@ impl App {
     /// or `mid`, written on its header, from the one it has.
     fn ask_cap(&mut self) {
         let header = self.caps && self.among.is_none();
-        let one = self.one_pick(self.task_cur) && !header;
         let sel = if header { self.cap_col() + 1 } else { self.task_sel };
-        let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && !one && (header || !self.on_new_task()));
+        let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && (header || !self.on_new_task()));
         match tier.filter(|&c| view::capped(TIERS[c].0)) {
             Some(c) => self.edit_cap(c),
             None if header => self.refuse("only low and mid have a price cap, h l move to one"),
@@ -4130,18 +4126,10 @@ impl App {
         Some(within(&self.store, TIERS[c].0, m))
     }
 
-    /// The task and the tier under recommend's cursor, a task of one pick's the tier whose
-    /// favorite it shows, else high's.
+    /// The task and the tier under recommend's cursor.
     fn tier_at(&self) -> Option<(&str, usize)> {
         let c = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps)?;
         let task = self.cur_task().map(|t| t.name).or(self.custom_at())?;
-        let c = match self.current().map(|m| m.key.as_str()) {
-            Some(k) if self.one_pick(self.task_cur) => {
-                (0..BOXES).rev().find(|&c| self.store.favorite(&box_slot(task, c)) == Some(k)).unwrap_or(BOXES - 1)
-            }
-            _ if self.one_pick(self.task_cur) => BOXES - 1,
-            _ => c,
-        };
         Some((task, c))
     }
 
@@ -4168,8 +4156,11 @@ impl App {
             .chain(has)
             .map(|m| (m, t.and_then(|t| view::line_score(m, t, bench))))
             .collect();
+        // An own score before an estimate it ties (`fit::own`), unless a benchmark ranks the task.
+        let own = |m: &Model| bench.is_some() || t.is_some_and(|t| crate::fit::own(m, t.name));
         ms.sort_by(|a, b| {
             view::by_value(a.1, b.1, true)
+                .then_with(|| own(b.0).cmp(&own(a.0)))
                 .then_with(|| view::by_value(a.0.cost(), b.0.cost(), false))
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
@@ -4694,8 +4685,7 @@ impl App {
                 self.rebuild();
                 self.select(0);
                 // A favorite on the line only for being one is neither best nor cheapest,
-                // though "value" may score highest a model cut on coding, and one on the
-                // frontier may cost more than the best.
+                // though one on the frontier may cost more than the best.
                 let front = self.task_frontier(t).into_iter().filter(|(m, _)| !self.favorite_unrecommended(t, &m.key));
                 let front: Vec<_> = front.collect();
                 let best = front.iter().max_by(|a, b| a.1.total_cmp(&b.1));
@@ -5383,7 +5373,7 @@ mod tests {
         a.store.hide.extend(["via".to_string(), "notes".to_string()]);
         a.set_cols();
         press(&mut a, "$");
-        assert_eq!(a.col, col("value"));
+        assert_eq!(a.col, col("agentic"));
         // Ticked again, it is back.
         a.col = PRICE + 1;
         press(&mut a, "|k");
@@ -5408,10 +5398,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        // A point of the score is 0.4 months: `low` reaches 20 points under the best, `mid` 7.5.
         if let Some(c) = coding {
-            m.fit.insert("coding".into(), c);
-            m.lag.insert("coding".into(), (100.0 - c) / 2.5);
+            m.fit.insert("overall".into(), (c + 100.0, crate::fit::Basis::Eci));
+            m.fit.insert("coding".into(), (c, crate::fit::Basis::Benches(1)));
         }
         m
     }
@@ -5754,7 +5743,7 @@ mod tests {
     fn esc_on_a_panel_search_being_typed_leaves_no_match_count() {
         let mut a = app();
         // In the help and in recommend, the count of a search esc took back goes with it.
-        for keys in ["?/sort", "R/reason"] {
+        for keys in ["?/sort", "R/vis"] {
             press(&mut a, keys);
             assert!(a.status.starts_with("match 1 of "), "{keys}: {}", a.status);
             code(&mut a, KeyCode::Esc);
@@ -6109,14 +6098,14 @@ mod tests {
         let mut a = app();
         for (key, s) in [("gpt55", 0.4), ("mini", 0.7)] {
             let m = a.data.models.iter_mut().find(|m| m.key == key).unwrap();
-            m.scores.insert("WeirdML v3".into(), s);
+            m.scores.insert("FrontierCode".into(), s);
         }
         a.col = ECI + 2;
         press(&mut a, "d");
         assert_eq!(
-            menu(&a)[..2],
-            [("FrontierCode · Epoch AI", 2), ("WeirdML v3 · Epoch AI", 2)],
-            "each with the models it scored"
+            menu(&a)[..3],
+            [("all benchmarks · Epoch AI", 2), ("FrontierCode · Epoch AI", 2), ("FrontierSWE · Epoch AI", 0)],
+            "the task's score first, then each benchmark with the models it scored"
         );
         // The entry already shown changes nothing: a bound typed for the column stays.
         a.bounds.push((a.col, 1.0, f64::MAX));
@@ -6126,7 +6115,7 @@ mod tests {
         press(&mut a, "j ");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "s");
-        assert_eq!((a.col_name(a.col), keys(&a)), ("WeirdML v3", vec!["mini", "gpt55", "opus5"]), "unscored last");
+        assert_eq!((a.col_name(a.col), keys(&a)), ("FrontierCode", vec!["mini", "gpt55", "opus5"]), "unscored last");
         assert_eq!(a.val(a.rows[0], a.col), Some(70.0));
         press(&mut a, "c");
         assert_eq!((a.col_name(a.col), keys(&a)[0]), ("Coding", "gpt55"), "c is back to the task's score");
@@ -6134,22 +6123,22 @@ mod tests {
         // already keeps it, and counts what the table shows.
         a.bounds.push((a.col, 1e9, f64::MAX));
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("FrontierCode · Epoch AI", 0), ("WeirdML v3 · Epoch AI", 2)]);
+        assert_eq!(menu(&a)[..2], [("all benchmarks · Epoch AI", 0), ("FrontierCode · Epoch AI", 2)]);
         // Choosing one shows it again, and no other is picked.
         press(&mut a, "j ");
         assert_eq!(
             menu(&a)[..2],
-            [("FrontierCode · Epoch AI", 2), ("WeirdML v3 · Epoch AI", 2)],
+            [("all benchmarks · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
             "the open list counts again, the bound gone"
         );
         code(&mut a, KeyCode::Esc);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         // A task's line is ranked by the pick, so choosing the task keeps it.
-        assert_eq!((a.task.is_some(), a.col_name(ECI + 2)), (true, "WeirdML v3"));
+        assert_eq!((a.task.is_some(), a.col_name(ECI + 2)), (true, "FrontierCode"));
         a.col = ECI + 2;
         press(&mut a, "d");
-        assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "WeirdML v3"));
+        assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "FrontierCode"));
         assert!((0..NCOLS).all(|c| (TASK_COLS.contains(&c) || c == ARENA_COL) == col_benches(c).is_some()));
         // Leaving the task took its sort along.
         press(&mut a, "cs");
@@ -6721,13 +6710,13 @@ mod tests {
             Input::Choose { kind: Kind::Bench, list, .. } => list.sel,
             _ => panic!("{:?}", a.input),
         };
-        // Each column shows its task's score, its first entry: 0, 5 and 10.
+        // Each column shows its task's score, its first entry: 0 and 11, after coding's ten benchmarks.
         press(&mut a, "]");
-        assert_eq!(sel(&a), 5, "] to the next ticked one");
-        press(&mut a, "]]");
+        assert_eq!(sel(&a), 11, "] to the next ticked one");
+        press(&mut a, "]");
         assert_eq!(sel(&a), 0, "wrapping from the last to the first");
         press(&mut a, "[");
-        assert_eq!(sel(&a), 10, "[ the other way round");
+        assert_eq!(sel(&a), 11, "[ the other way round");
     }
 
     #[test]
@@ -6951,9 +6940,9 @@ mod tests {
         press(&mut a, "n");
         assert!(a.status.contains("/ searches first"), "{}", a.status);
         // A task's name, typed: the cursor leaves the `from` line for it.
-        let reasoning = TASKS.iter().position(|t| t.name == "reasoning").unwrap();
-        press(&mut a, "/reason");
-        assert_eq!((a.among, a.task_cur, a.task_sel), (None, reasoning, 0), "on the first match as it is typed");
+        let vision = TASKS.iter().position(|t| t.name == "vision").unwrap();
+        press(&mut a, "/vis");
+        assert_eq!((a.among, a.task_cur, a.task_sel), (None, vision, 0), "on the first match as it is typed");
         code(&mut a, KeyCode::Enter);
         // A model in a box: every stop `n` makes has it, and `N` goes back the way it came.
         let name = (0..a.task_count()).find_map(|t| a.tier_picks(t).iter().flatten().next().map(|p| p.0.name.clone()));
@@ -7061,19 +7050,48 @@ mod tests {
         assert_eq!(a.col, NCOLS - 1);
     }
 
+    /// A score that is not the task's own is grey, sorts after an own one it ties and is no
+    /// extreme: an estimated overall in ECI, a task's fallback to the overall. Not with a
+    /// benchmark picked, whose scores are all its own.
+    #[test]
+    fn an_estimate_is_grey_and_sorts_after_an_own_score() {
+        use crate::fit::Basis;
+        let mut a = app();
+        let (eci, coding) = (ECI - TEXT, ECI + 2 - TEXT);
+        let mut data = std::mem::take(&mut a.data);
+        let mini = data.models.iter_mut().find(|m| m.key == "mini").unwrap();
+        mini.fit.insert("overall".into(), (190.0, Basis::Benches(3)));
+        mini.fit.insert("coding".into(), (80.0, Basis::Overall));
+        let opus = data.models.iter_mut().find(|m| m.key == "opus5").unwrap();
+        opus.fit.insert("overall".into(), (150.0, Basis::Eci));
+        a.set_data(data);
+        let at = |a: &App, key: &str| a.data.models.iter().position(|m| m.key == key).unwrap();
+        let (mini, gpt) = (at(&a, "mini"), at(&a, "gpt55"));
+        assert!(
+            a.estimated(mini, eci) && a.estimated(mini, coding),
+            "an estimated overall, and the overall in coding's place"
+        );
+        assert!(!a.estimated(gpt, eci) && !a.estimated(gpt, coding), "Epoch's ECI, and coding's own benchmarks");
+        assert!(!a.estimated(mini, PRICE - TEXT), "a price is no score");
+        // Sorted by Coding, best first: gpt55 (80, its own) before mini (80, the overall).
+        a.col = ECI + 2;
+        press(&mut a, "s");
+        assert_eq!(keys(&a)[..2], ["gpt55", "mini"]);
+        // And in ECI, mini's 190 is no extreme: gpt55's 180 is the best, opus5's 150 the worst.
+        assert_eq!(a.ext[eci], Some((180.0, 150.0)), "{:?}", a.ext[eci]);
+        // A benchmark picked in the column: its scores are all its own.
+        a.bench[coding] = Some("FrontierCode");
+        assert!(!a.estimated(mini, coding));
+    }
+
     #[test]
     fn every_column_says_what_it_means() {
         assert!(base_col_about(0).contains("Via"));
         assert!(base_col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
-        assert_eq!(about("coding"), "Epoch AI, FrontierCode score (0-100), blank = not tested");
-        assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100), blank = not tested");
-        assert_eq!(
-            about("value"),
-            "coding score per dollar of Price, as a percentile (0-100)",
-            "no benchmarks of its own"
-        );
+        assert_eq!(about("coding"), "ECI-scale score from its coding benchmarks, grey = overall's, blank = not tested");
+        assert!(about("eci").ends_with("grey = estimate"), "no benchmarks of its own");
     }
 
     #[test]
@@ -7439,8 +7457,7 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         let llama = &mut data.models[2];
         (llama.offers[0].input, llama.offers[0].output) = (0.1, 0.1);
-        llama.fit.insert("coding".into(), 60.0);
-        llama.lag.insert("coding".into(), 16.0);
+        llama.fit.insert("coding".into(), (60.0, crate::fit::Basis::Benches(1)));
         a.store.toggle_marked("llama4");
         a.set_data(data);
         assert!(shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));
@@ -9006,32 +9023,6 @@ mod tests {
         press(&mut a, "U");
         a.set_data(Data::default());
         assert_eq!(a.input, Input::None, "a refresh that lost the release takes the question back");
-    }
-
-    #[test]
-    fn value_is_one_pick_in_recommend() {
-        let mut a = app();
-        press(&mut a, "R");
-        let value = TASKS.iter().position(|t| t.name == "value").unwrap();
-        (a.among, a.task_cur, a.task_sel) = (None, value, 0);
-        assert!(a.one_pick(value) && !a.one_pick(0), "a rank has no tiers to tell apart");
-        assert_eq!((press(&mut a, "l"), a.task_sel), (None, 1));
-        assert_eq!((press(&mut a, "l"), a.task_sel), (None, 0), "one box past the name");
-        assert_eq!((press(&mut a, "$"), a.task_sel), (None, 1));
-        // One model for every tier is still one pick, and f on it is for high's, whose pick it is.
-        for x in ["low", "mid", "high"] {
-            a.store.toggle_favorite(&format!("value:{x}"), "mini");
-        }
-        a.rebuild();
-        press(&mut a, "f");
-        assert!(a.one_pick(value), "the same model at each tier");
-        assert!(matches!(&a.input, Input::Choose { list: List { col, .. }, .. } if *col == BOXES - 1), "high's box");
-        code(&mut a, KeyCode::Esc);
-        ["mid", "high"].iter().for_each(|x| _ = a.store.clear_favorite(&format!("value:{x}")));
-        a.rebuild();
-        a.rebuild();
-        assert!(!a.one_pick(value), "a tier's favorite gives the tiers models of their own");
-        assert_eq!((press(&mut a, "$"), a.task_sel), (None, TIERS.len()));
     }
 
     #[test]

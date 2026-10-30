@@ -104,8 +104,9 @@ modelcmp get gemma-3-4b-it                 # download a model and run it on your
 
 ### How recommendations work
 
-Recommendations come from each task's Pareto frontier of price and score. A model with no
-benchmark score for a task is never recommended for it, but you can still make it your favorite.
+Recommendations come from each task's Pareto frontier of price and score. Scores are on Epoch
+AI's ECI scale, from the benchmarks the model has for the task. A model Epoch AI has not scored
+at all is never recommended, but you can still make it your favorite.
 
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
 the best up to $2 per 1M tokens, `mid` the best up to $5 and `high` the best at any price. A

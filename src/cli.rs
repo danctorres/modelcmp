@@ -1,16 +1,17 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
 use crate::app::{
-    COLS, Col, TEXT, col_value, harness_cmd, harness_id, launch_cmd, meets, on_price, runs_on, shown, stored_bench,
+    COLS, Col, TEXT, col_task, col_value, harness_cmd, harness_id, launch_cmd, meets, on_price, runs_on, shown,
+    stored_bench,
 };
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot, task_slots};
 use crate::view::{
     CUSTOM_ABOUT, CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front,
-    custom_line, custom_when, detail_lines, excluded, fits, left_out, left_out_by, local_best, one_pick, or_local,
-    over_cap, price, priced, reach, shown_via, task_line, tier_pick, tier_picks, truncate, used_benches, verdict, via,
-    visible, with_local, within,
+    custom_line, custom_when, detail_lines, excluded, fits, left_out, left_out_by, local_best, or_local, over_cap,
+    price, priced, reach, shown_via, task_line, tier_pick, tier_picks, truncate, verdict, via, visible, with_local,
+    within,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -98,11 +99,14 @@ struct ModelOut<'a> {
     /// openrouter.ai and huggingface.co that has one, and arena.ai's agent leaderboard when it ranks the model
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<BTreeMap<&'static str, String>>,
-    /// Epoch Capabilities Index
+    /// Epoch Capabilities Index, as Epoch publishes it
     eci: Option<f64>,
-    /// Task -> the score of its benchmark, 0..100; overall and vision are `eci`, value a 0..100
-    /// percentile
+    /// Task -> its score on the ECI scale, as the table shows it, or a benchmark's 0..100 score
+    /// when one is picked in the task's column
     tasks: BTreeMap<&'static str, f64>,
+    /// Task -> what its score is from: "ECI", "3 benchmarks" (its own), "overall" (none of its
+    /// own, so the overall score) or the benchmark picked in its column
+    basis: BTreeMap<&'static str, String>,
     /// Net improvement in real agent sessions, in percent, from arena.ai's Agent leaderboard
     #[serde(skip_serializing_if = "Option::is_none")]
     arena_agent: Option<f64>,
@@ -159,6 +163,13 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
             .filter_map(|t| {
                 let score = crate::view::line_score(m, t, crate::app::task_bench(s, t))?;
                 Some((t.name, (score * 10.0).round() / 10.0))
+            })
+            .collect(),
+        basis: TASKS
+            .iter()
+            .filter_map(|t| match crate::app::task_bench(s, t) {
+                Some(b) => m.picked(b).is_some().then(|| (t.name, b.to_string())),
+                None => Some((t.name, fit::fit(m, t)?.1.said())),
             })
             .collect(),
         arena_agent: m.arena,
@@ -404,7 +415,11 @@ fn matched<'a>(
         if let Some(i) = o.sort {
             // Best first, names breaking ties, by what the column shows, as the bounds go.
             let (v, desc) = (|m: &Model| col_value(m, i, store), !COLS[i].lower_better);
-            models.sort_by(|a, b| by_value(v(a), v(b), desc).then_with(|| a.name.cmp(&b.name)));
+            // An own score before an estimate it ties, as in the TUI.
+            let own = |m: &Model| stored_bench(store, i + TEXT).is_some() || col_task(i).is_none_or(|t| fit::own(m, t));
+            models.sort_by(|a, b| {
+                by_value(v(a), v(b), desc).then_with(|| own(b).cmp(&own(a))).then_with(|| a.name.cmp(&b.name))
+            });
         }
         models
     };
@@ -649,8 +664,6 @@ pub fn on_via(data: &mut Data, via: &[String]) {
     for m in &mut data.models {
         reach(m, via);
     }
-    // Value ranks the price you would pay.
-    fit::add_value(&mut data.models);
 }
 
 /// What a command of `pick` starts with: `quiet` runs the rest.
@@ -1243,7 +1256,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
         let front: Vec<_> = line.iter().map(|m| entry(m, store, f64::NAN, false)).collect();
         let tier_favs = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
         let (own, off) = custom_front(&line);
-        let tiers = tiers(tier_picks(&own, &off, store, t), t);
+        let tiers = tiers(tier_picks(&own, &off, store, t));
         serde_json::json!({"name": t, "custom": true, "about": CUSTOM_ABOUT, "when": custom_when(store, t), "benchmarks": [], "tier_favorites": tier_favs, "tiers": tiers, "frontier": front})
     });
     TASKS
@@ -1258,20 +1271,16 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             let (picks, _, local) = local_picks(data, store, t, &line, &off);
             // The key of the best model your machine runs.
             let local = local.map(|(m, _)| &m.key);
-            let tiers = tiers(picks, t.name);
-            serde_json::json!({"name": t.name, "about": t.about_ranked(), "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| used_benches(t), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
+            let tiers = tiers(picks);
+            serde_json::json!({"name": t.name, "about": t.about_ranked(), "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| t.benches.to_vec(), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
         })
         .chain(custom)
         .collect()
 }
 
-/// `recommend --json`'s `tiers`: the key each tier picks, as recommend's grid in the TUI shows,
-/// or the one `pick` for a task with one.
-fn tiers(picks: Picks, task: &str) -> serde_json::Value {
+/// `recommend --json`'s `tiers`: the key each tier picks, as recommend's grid in the TUI shows.
+fn tiers(picks: Picks) -> serde_json::Value {
     let key = |p: Option<(&Model, f64)>| p.map(|e| e.0.key.clone());
-    if one_pick(task, &picks) {
-        return serde_json::json!({"pick": key(picks[TIERS.len() - 1])});
-    }
     TIERS.iter().zip(picks).map(|(t, p)| (t.0.to_string(), key(p).into())).collect::<serde_json::Map<_, _>>().into()
 }
 
@@ -1283,11 +1292,10 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         return print_json(&recommend_json(data, store));
     }
     println!("{}\n", RECOMMEND_LEGEND.replace("{tiers}", &crate::view::tiers_said(store)));
-    // Each tier's pick, or the task's one `pick` under the last.
-    let show = |task: &str, picks: [Option<(&Model, f64)>; TIERS.len()], text: &dyn Fn(&Model, f64, &str) -> String| {
-        let one = one_pick(task, &picks);
-        for (t, p) in TIERS.iter().zip(picks).skip(if one { TIERS.len() - 1 } else { 0 }) {
-            let label = format!("{}:", if one { "all tiers" } else { t.0 });
+    // Each tier's pick.
+    let show = |picks: [Option<(&Model, f64)>; TIERS.len()], text: &dyn Fn(&Model, f64, &str) -> String| {
+        for (t, p) in TIERS.iter().zip(picks) {
+            let label = format!("{}:", t.0);
             println!("  {label:<17}{}", p.map_or("-".into(), |(m, s)| text(m, s, t.0)));
         }
     };
@@ -1299,7 +1307,6 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
         let (picks, took, local) = local_picks(data, store, t, &line, &off);
-        let one = one_pick(t.name, &picks);
         // `local_took`: the best model your machine runs took the tier.
         let said = |m: &Model, s: f64, fav: bool, local_took: bool| {
             let p = priced(m, s, true, fav);
@@ -1310,8 +1317,8 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
                 false => p,
             }
         };
-        show(t.name, picks, &|m, s, tier| {
-            let fav = crate::view::fav_pick(store, t.name, tier, m, one);
+        show(picks, &|m, s, tier| {
+            let fav = crate::view::fav_pick(store, t.name, tier, m);
             let mut text = said(m, s, fav, took[TIERS.iter().position(|x| x.0 == tier).unwrap_or(0)]);
             // A favorite in place of the tier's own pick, with what it would recommend, as the TUI.
             if fav {
@@ -1330,7 +1337,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         println!("  use for:         {}", custom_when(store, t));
         let line = custom_line(usable(data, store), store, t);
         let (own, off) = custom_front(&line);
-        show(t, tier_picks(&own, &off, store, t), &|m, _, _| format!("★ {} [{}] {}", m.name, m.key, price(m)));
+        show(tier_picks(&own, &off, store, t), &|m, _, _| format!("★ {} [{}] {}", m.name, m.key, price(m)));
         println!();
     }
     Ok(())
@@ -1355,7 +1362,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        m.fit.insert("coding".into(), coding);
+        m.fit.insert("coding".into(), (coding, crate::fit::Basis::Benches(1)));
         m
     }
 
@@ -1768,6 +1775,7 @@ mod tests {
         let short = serde_json::to_value(out(&m, &store, false, false)).unwrap();
         let fields = [
             "available",
+            "basis",
             "context",
             "developer",
             "eci",
