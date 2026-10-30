@@ -179,29 +179,14 @@ pub fn path() -> PathBuf {
 /// Write through a per-process temp file and rename, so neither a crash nor a concurrent
 /// writer (TUI and an agent script at once) leaves a half-written file behind.
 pub fn write_atomic(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    write_mode(p, bytes, 0o666)
-}
-
-/// `write_atomic`, readable by you alone: for a secret.
-pub fn write_private(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    write_mode(p, bytes, 0o600)
-}
-
-fn write_mode(p: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")))?;
     // Per call too: two refreshes in the TUI can write one cache at once.
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = p.with_extension(format!("{}.{n}.tmp", std::process::id()));
-    // `mode` applies only to a new file, so not to one a crash left behind.
+    // Not one a crash left behind.
     let _ = std::fs::remove_file(&tmp);
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
-    #[cfg(not(unix))]
-    let _ = mode;
-    let mut f = opts.open(&tmp)?;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
     std::io::Write::write_all(&mut f, bytes)?;
     // On disk before it takes the name: a power cut must not leave an empty file under it.
     f.sync_all()?;
@@ -616,17 +601,6 @@ mod tests {
             assert_eq!(Store::load_from(p.clone()).price_not, kept);
         }
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_private_file_is_yours_alone() {
-        use std::os::unix::fs::PermissionsExt;
-        let p = tmp("private").with_file_name("key");
-        write_private(&p, b"one").unwrap();
-        write_private(&p, b"two").unwrap();
-        assert_eq!(std::fs::read(&p).unwrap(), b"two");
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

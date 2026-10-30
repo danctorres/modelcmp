@@ -126,16 +126,11 @@ the subtask to it and has another model review the work.
 
 - [models.dev](https://models.dev): prices, context windows and what each model can do
   (tools, reasoning, vision).
-- [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks, and it needs no API key.
-- [Artificial Analysis](https://artificialanalysis.ai): benchmarks and speed, and it needs a
-  free API key.
+- [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks.
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions,
-  chat and web development (the Arena column), and it needs no API key.
+  chat and web development (the Arena column).
 
-The first time you start the TUI, it asks for an Artificial Analysis API key.
-With a key, recommendations use Artificial Analysis benchmarks, otherwise Epoch AI's.
-Artificial Analysis covers more models than Epoch AI and also measures speed.
-Data is cached for 24 hours.
+None needs an API key. Data is cached for 24 hours.
 
 ## More
 

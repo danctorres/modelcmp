@@ -1,7 +1,7 @@
 //! TUI state and key handling. No I/O here: side effects come back to the shell as `Effect`s,
 //! so every key is unit-testable.
 
-use crate::data::{Data, FELL_BACK, Failure, Model, Source};
+use crate::data::{Data, Model};
 use crate::fit::{TASKS, Task};
 use crate::store::{Bound, Store};
 use crate::view::{
@@ -16,11 +16,10 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// A numeric column. The text columns (model name, developer) come first and are not listed here.
 pub struct Col {
-    /// Read through `head`, which names the index column by the source.
     name: &'static str,
     /// The column's name on the command line: `--sort`, `--min`, `--max`.
     pub id: &'static str,
-    /// What the column means, for the top border and `?`; read through `about`.
+    /// What the column means, for the top border and `?`.
     about: &'static str,
     pub lower_better: bool,
     /// Whether one end of its values is the better one: a release date has no best or worst.
@@ -29,41 +28,17 @@ pub struct Col {
     pub show: fn(f64) -> String,
     /// A bound as typed, a maximum when the flag is set; none when it is not a value of the column.
     pub read: fn(&str, bool) -> Option<f64>,
-    /// The one source that has it, when not both: hidden with the other (`hidden`).
-    pub only: Option<Source>,
     /// It hangs on the price, so a list price shows in it after a `~` (`on_price`).
     pub price: bool,
 }
 
 impl Col {
-    /// Its name and meaning; an index column's are its source's, and the task columns' meanings
-    /// the benchmark source's, each the benchmark it is.
-    fn text(&self) -> (&'static str, &'static str) {
-        let about = match (self.id, crate::data::source()) {
-            ("eci", _) => return Source::Epoch.index(),
-            (OTHER, _) => return Source::Aa.index(),
-            ("coding", Source::Aa) => "mean of Terminal-Bench 4.0 and SciCode (0-100)",
-            ("agentic", Source::Aa) => "Terminal-Bench 4.0 score (0-100)",
-            ("reasoning", Source::Aa) => "Humanity's Last Exam score (0-100)",
-            ("coding", Source::Epoch) => "FrontierCode score (0-100)",
-            ("agentic", Source::Epoch) => "APEX-Agents score (0-100)",
-            ("reasoning", Source::Epoch) => "LMCA score (0-100)",
-            _ => self.about,
-        };
-        (self.name, about)
-    }
-
     pub fn head(&self) -> &'static str {
-        self.text().0
+        self.name
     }
 
     pub fn about(&self) -> &'static str {
-        self.text().1
-    }
-
-    /// The source its values are from: the one that alone has it, else the one in use.
-    pub fn from(&self) -> Source {
-        self.only.unwrap_or_else(crate::data::source)
+        self.about
     }
 }
 
@@ -77,29 +52,25 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
         get,
         show: |v| score(Some(v)),
         read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()),
-        only: None,
         price: false,
     }
 }
 
 /// The benchmarks the dropdown of the task column `id` lists, after the entry for the task's
-/// score, the task's own benchmark, which may be the source's only one about the task: the
-/// dropdown then names that one. The other source's about the task come last, with its data
-/// at hand too.
+/// score, the task's own benchmark, which may be Epoch's only one about the task: the dropdown
+/// then names that one.
 fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
     if id == ARENA {
         let boards = crate::data::ARENA_BOARDS.iter().map(|b| b.0);
         return Some(("Agent", boards.chain(crate::data::ARENA_MORE.iter().map(|s| s.0)).collect()));
     }
-    let task = crate::fit::task(id)?;
-    let (own, more) = task.sourced();
-    let all: Vec<_> = more.iter().copied().chain(task.lent()).collect();
-    Some((own?, all))
+    let (own, more) = crate::fit::task(id)?.own();
+    Some((own?, more.to_vec()))
 }
 
 /// A benchmark's entry in a task column's dropdown: its name and the source that runs it.
 pub fn bench_label(b: &str) -> String {
-    format!("{b} · {}", if arena_bench(b) { "Arena" } else { crate::fit::bench_source(b).label() })
+    format!("{b} · {}", if arena_bench(b) { "Arena" } else { "Epoch AI" })
 }
 
 /// Whether `b` is in the Arena column's dropdown: its score, one of its signals or another of its
@@ -154,19 +125,12 @@ fn month(v: f64) -> String {
     }
 }
 
-/// The id of the AAII column. On the command line it is the other source's index, as `eci` is
-/// the one of the source in use, whichever columns those are (`by_role`).
-const OTHER: &str = "other";
-
-/// The id of the Arena column, which neither benchmark source has its values from (`col_source`).
+/// The id of the Arena column, which Epoch has no values of.
 const ARENA: &str = "arena";
 
-/// The release, beside Dev, then prices from the offer you'd pay and context, the source's overall
-/// index, the other source's and Arena's score, the three overall scores side by side, the task
-/// scores and Value, then speed when Artificial Analysis measures it. What the source in use does
-/// not measure is the other one's, when its data is there too, and Artificial Analysis's show
-/// empty without it (`absent`).
-pub const COLS: [Col; 15] = [
+/// The release, beside Dev, then prices from the offer you'd pay and context, the ECI and
+/// Arena's score, the two overall scores side by side, then the task scores and Value.
+pub const COLS: [Col; 12] = [
     Col {
         ranked: false,
         show: month,
@@ -207,32 +171,19 @@ pub const COLS: [Col; 15] = [
         read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()).map(|v| if v >= 10_000.0 { v / 1000.0 } else { v }),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    // The two indexes, each in its place whichever source is in use, and named in `Col::text`.
-    Col { only: Some(Source::Epoch), ..col("", "eci", "", |m| m.index(Source::Epoch)) },
-    Col { only: Some(Source::Aa), ..col("", OTHER, "", |m| m.index(Source::Aa)) },
+    col("ECI", "eci", "Epoch AI's overall capability index", |m| m.eci),
     Col {
         show: signed,
         ..col("Arena", ARENA, "net improvement in real agent sessions, %, measured by arena.ai", |m| m.arena)
     },
-    col("Coding", "coding", "", |m| task_score(m, "coding")),
-    col("Agentic", "agentic", "", |m| task_score(m, "agentic")),
-    col("Reason", "reasoning", "", |m| task_score(m, "reasoning")),
+    col("Coding", "coding", "FrontierCode score (0-100)", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "APEX-Agents score (0-100)", |m| task_score(m, "agentic")),
+    col("Reason", "reasoning", "LMCA score (0-100)", |m| task_score(m, "reasoning")),
     Col {
         price: true,
         ..col("Value", "value", "coding score per dollar of Price, as a percentile (0-100)", |m| {
             m.fit.get("value").copied()
         })
-    },
-    Col {
-        only: Some(Source::Aa),
-        show: |v| format!("{v:.0}"),
-        ..col("Tok/s", "tps", "output tokens per second (median)", |m| m.tps)
-    },
-    Col {
-        only: Some(Source::Aa),
-        lower_better: true,
-        show: |v| format!("{v:.1}s"),
-        ..col("TTFT", "ttft", "seconds to the first answer token, after any thinking (median)", |m| m.ttft)
     },
 ];
 
@@ -258,29 +209,15 @@ pub fn shown(i: usize, v: f64, listed: bool, bench: Option<&str>) -> String {
 pub const TEXT: usize = 2;
 /// Column index of the blended price, the frontier's sort.
 pub const PRICE: usize = TEXT + 1;
-/// The sort the table starts with, and that `c` and leaving a task go back to: the source's
-/// index (ECI or AAII), best first. The cursor starts on that column too.
+/// The sort the table starts with, and that `c` and leaving a task go back to: ECI, best first.
+/// The cursor starts on that column too.
 fn default_sort() -> (usize, bool) {
-    (index_col(), true)
+    (ECI, true)
 }
-/// Column index of ECI, and of AAII beside it.
+/// Column index of ECI.
 pub const ECI: usize = TEXT + 6;
-const AAII: usize = ECI + 1;
-
-/// Column index of the index of the source in use.
-pub fn index_col() -> usize {
-    if crate::data::source() == Source::Aa { AAII } else { ECI }
-}
-
-/// `COLS[c]` as the command line names it: there `eci` is the index of the source in use and
-/// `other` the other one's.
-pub fn by_role(c: usize) -> usize {
-    if crate::data::source() == Source::Aa && [ECI, AAII].contains(&(c + TEXT)) { ECI + AAII - 2 * TEXT - c } else { c }
-}
-/// Column index of Tok/s, the first of what a run measured: speed.
-const MEASURED: usize = TEXT + 13;
-/// First column of each group: names and release, price and context, scores, measured, your own.
-pub const GROUPS: [usize; 5] = [0, PRICE, ECI, MEASURED, VIA];
+/// First column of each group: names and release, price and context, scores, your own.
+pub const GROUPS: [usize; 4] = [0, PRICE, ECI, VIA];
 /// Column index of where you have access.
 pub const VIA: usize = TEXT + COLS.len();
 /// Column index of your note, the last one.
@@ -308,46 +245,15 @@ fn set_off(mask: u32) {
     OFF.store(mask, Relaxed);
 }
 
-/// Whether the column at cursor index `col` has nothing to show: one of the other source's,
-/// with none of its data.
-pub fn unmeasured(col: usize) -> bool {
-    numeric(col).is_some_and(|c| c.from() != crate::data::source() && !crate::data::lent())
-}
-
-/// Whether the TUI leaves the column at cursor index `col` out as `unmeasured`: Epoch's, as
-/// Artificial Analysis's stay, empty, to say they take a key (`base_col_about`).
-fn absent(col: usize) -> bool {
-    unmeasured(col) && crate::data::source() == Source::Aa
-}
-
-/// Why the column at cursor index `col` shows empty, when it does as `unmeasured`: said after
-/// what it is (`base_col_about`), and after its name to a sort or a bound on it.
-fn empty_why(col: usize) -> Option<String> {
-    if !unmeasured(col) || absent(col) {
-        return None;
-    }
-    if crate::data::aa_key().is_some() {
-        return Some("has no data yet, r refreshes".into());
-    }
-    let whose = if col == AAII { "its".into() } else { format!("{}'s", Source::Aa.label()) };
-    Some(format!("needs {whose} API key, K adds it"))
-}
-
-/// The benchmark source the column at cursor index `col` has its values from, when it has them
-/// from one: every column from the indexes on, the task scores and Value of the source in use.
-fn base_col_source(col: usize) -> Option<Source> {
-    numeric(col).filter(|c| col >= ECI && c.id != ARENA).map(Col::from)
-}
-
-/// Whether the column at cursor index `col` is left out: `absent`, or turned off in `|`.
+/// Whether the column at cursor index `col` is left out: turned off in `|`.
 pub fn hidden(col: usize) -> bool {
-    absent(col) || off() >> col & 1 == 1
+    off() >> col & 1 == 1
 }
 
 /// Whether a bound or a pick on the column at cursor index `col` applies: not while it is
-/// hidden with `|` or has no values from the source in use, which keep it for when it is back.
+/// hidden with `|`, which keeps it for when it is back.
 pub fn bound_applies(col: usize, hide: &BTreeSet<String>) -> bool {
-    !hide.contains(col_id(col)) && !unmeasured(col)
+    !hide.contains(col_id(col))
 }
 
 /// The column at cursor index `col` as `Store::hide` names it. Model always shows.
@@ -393,12 +299,12 @@ pub fn has_menu(col: usize) -> bool {
     col == 1 || col == PRICE || col == VIA || col == ARENA_COL || TASK_COLS.contains(&col)
 }
 
-/// Arena, whose dropdown lists its signals, with either source.
-const ARENA_COL: usize = AAII + 1;
+/// Arena, whose dropdown lists its signals.
+const ARENA_COL: usize = ECI + 1;
 
-/// Coding, Agentic and Reason: the columns `col_benches` has benchmarks for, with either
-/// source. Asked of every header on every frame, so not looked up.
-const TASK_COLS: std::ops::RangeInclusive<usize> = AAII + 2..=AAII + 4;
+/// Coding, Agentic and Reason: the columns `col_benches` has benchmarks for. Asked of every
+/// header on every frame, so not looked up.
+const TASK_COLS: std::ops::RangeInclusive<usize> = ECI + 2..=ECI + 4;
 
 /// The benchmarks the dropdown of the task column at cursor index `col` lists.
 fn col_benches(col: usize) -> Option<(&'static str, Vec<&'static str>)> {
@@ -406,7 +312,7 @@ fn col_benches(col: usize) -> Option<(&'static str, Vec<&'static str>)> {
 }
 
 /// The benchmark `store` has picked for the column at cursor index `col`, when its dropdown
-/// lists it with the source in use.
+/// lists it.
 pub fn stored_bench(store: &Store, col: usize) -> Option<&'static str> {
     let b = store.bench.get(numeric(col)?.id)?;
     col_benches(col)?.1.into_iter().find(|x| x == b)
@@ -414,22 +320,12 @@ pub fn stored_bench(store: &Store, col: usize) -> Option<&'static str> {
 
 /// Whether `store` picked a benchmark for the column at cursor index `col` that its dropdown no
 /// longer lists, as one Epoch dropped: the bounds typed for it go with it (`load_bounds`), and are
-/// not put on the column's own value. Not one that is now the column's own benchmark, as after a
-/// switch of source: the column shows it.
+/// not put on the column's own value. Not one that is now the column's own benchmark: the
+/// column shows it.
 pub fn pick_gone(store: &Store, col: usize) -> bool {
     let own = col_benches(col).map(|b| b.0);
     numeric(col).and_then(|c| store.bench.get(c.id)).is_some_and(|b| Some(b.as_str()) != own)
         && stored_bench(store, col).is_none()
-}
-
-/// Whether `store`'s pick for the column at cursor index `col` is one of the other source's
-/// benchmarks, gone only until that source's data is back (`Data::lent`): the store keeps it
-/// and its bounds meanwhile (`keep_bounds`).
-fn pick_away(store: &Store, col: usize) -> bool {
-    let other = if crate::data::source() == Source::Aa { Source::Epoch } else { Source::Aa };
-    let theirs =
-        |id, b: &str| crate::fit::task(id).is_some_and(|t| t.of(other).0 == Some(b) || t.of(other).1.contains(&b));
-    numeric(col).is_some_and(|c| store.bench.get(c.id).is_some_and(|b| theirs(c.id, b))) && pick_gone(store, col)
 }
 
 /// A bound the store keeps, on the column at cursor index `col`, as `App::bounds` has it.
@@ -454,7 +350,7 @@ pub fn col_value(m: &Model, at: usize, store: &Store) -> Option<f64> {
 /// Whether `v`, a value of `COLS[at]`, is within a bound from `lo` to `hi`. A score counts in
 /// whole points, as its cell shows it, so a model shown at 64 meets a minimum of 64.
 pub fn meets(at: usize, v: f64, lo: f64, hi: f64) -> bool {
-    let score = COLS.get(at).is_some_and(|c| ["eci", OTHER, "coding", "agentic", "reasoning", "value"].contains(&c.id));
+    let score = COLS.get(at).is_some_and(|c| ["eci", "coding", "agentic", "reasoning", "value"].contains(&c.id));
     let v = if score { v.round_ties_even() } else { v };
     v >= lo && v <= hi
 }
@@ -473,10 +369,6 @@ pub fn base_col_about(col: usize) -> String {
         ),
         _ => {
             let about = numeric(col).map_or("", Col::about).to_string();
-            if let Some(why) = empty_why(col) {
-                return format!("{about}, {why}");
-            }
-            // A task's column is of the source in use, beside both sources' indexes.
             if TASK_COLS.contains(&col) { of_source(&about) } else { about }
         }
     }
@@ -485,9 +377,9 @@ pub fn base_col_about(col: usize) -> String {
 /// Why a task column's cell is empty, in its description.
 const UNTESTED: &str = "blank = not tested";
 
-/// `about` after the source in use, whose scores it tells of, and what an empty cell means.
+/// `about` after Epoch AI, whose scores it tells of, and what an empty cell means.
 fn of_source(about: &str) -> String {
-    format!("{}, {about}, {UNTESTED}", crate::data::source().label())
+    format!("Epoch AI, {about}, {UNTESTED}")
 }
 
 /// The keys, in groups, each with what it does, the keys it names between backticks. A row
@@ -502,8 +394,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "back: close the panel, then drop the highlight, filter, `S` `F` `E`, task"),
             ("q", "quit, asks first"),
             ("r", "refresh data now (auto at a day's first start, and after 24h)"),
-            ("!", "list warnings from the last refresh or a missing key, or click the ⚠"),
-            ("K", "add or replace the Artificial Analysis API key"),
+            ("!", "list warnings from the last refresh, or click the ⚠"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
         ],
     ),
@@ -718,15 +609,6 @@ pub enum Input {
         key: String,
         text: String,
         cur: usize,
-    },
-    /// Typing Artificial Analysis's API key: on the first start, where esc skips it for Epoch AI,
-    /// under `--source aa` with none saved, when it turned the saved one down (`wrong`), or on
-    /// `K` (`asked`), where esc and a click leave everything as it was.
-    Key {
-        text: String,
-        cur: usize,
-        wrong: bool,
-        asked: bool,
     },
     /// Typing a minimum (`>`) or maximum (`<`) for column `col`.
     Bound {
@@ -1002,17 +884,6 @@ impl Input {
     fn choose(title: &'static str, kind: Kind, items: Vec<(String, Effect)>, sel: usize) -> Self {
         Self::Choose { title, kind, items, list: List::at(sel) }
     }
-
-    /// The API key prompt with nothing typed yet.
-    pub fn key(wrong: bool, asked: bool) -> Self {
-        Self::Key { text: String::new(), cur: 0, wrong, asked }
-    }
-
-    /// The key prompt `K` opened, which esc and a click leave: not one that esc answers with
-    /// Epoch AI, nor one for a key turned down.
-    fn leavable(&self) -> bool {
-        !matches!(self, Self::Key { asked: false, .. } | Self::Key { wrong: true, .. })
-    }
 }
 
 /// Where a panel was when `/` started its search: its match, scroll and recommend's cursor.
@@ -1223,8 +1094,6 @@ pub enum Effect {
     /// The slot's favorite, or none for the model recommended there; the `d` list's items,
     /// applied by `App` itself.
     Pick(String, Option<String>),
-    /// The source was switched, by the key that came or did not work, and its data must be loaded.
-    Source(crate::data::Source),
 }
 
 /// A mouse action, already mapped to the table by the shell.
@@ -1283,8 +1152,6 @@ pub enum Mouse {
     Close,
     /// Click on a status bar hint: press its key.
     Key(KeyCode),
-    /// Click on the link in the API key prompt: open where a key is made, the prompt staying.
-    Link,
     /// Click on a stop in compare or recommend: move the cursor to it.
     Model(Stop),
     /// Double click on it: do what `enter` does, open the model's details or rank the table by
@@ -1614,14 +1481,6 @@ pub struct App {
     pub cache_on: f64,
     /// The `%` hint while no input is cached, naming `cache_on`.
     pub cache_hint: &'static str,
-    /// The TUI opened asking for Artificial Analysis's key, with no data: skipping it is Epoch AI.
-    /// Not so with `--source`, which picked one for the run.
-    pub first_start: bool,
-    /// The saved key that one typed on `K` replaced, back if the new one is turned down.
-    pub old_key: Option<String>,
-    /// A key was just saved: the switch to Artificial Analysis downloads, whatever is cached,
-    /// so that the key is checked.
-    unchecked: bool,
     /// What `q` asked to quit from, which any key but a second `q` goes back to: an open list.
     asked_from: Input,
     /// The terminal's background colour, when it told at start (`tui::terminal_bg`): with the
@@ -1702,9 +1561,6 @@ impl App {
             refresh_failed: false,
             cache_on: 0.0,
             cache_hint: "",
-            first_start: false,
-            old_key: None,
-            unchecked: false,
             asked_from: Input::None,
             term_bg: None,
             term_ansi: None,
@@ -1713,8 +1569,6 @@ impl App {
         app.cache_on = if start > 0.0 { start } else { crate::data::AGENT_CACHED };
         // ponytail: leaked once per App, which the TUI makes once; hints are &'static str.
         app.cache_hint = Box::leak(format!("% {:.0}% cached", app.cache_on * 100.0).into_boxed_str());
-        // The picks the store has are of the benchmarks the data lends too.
-        crate::data::set_lent(data.lent);
         app.load_bounds();
         app.set_cols();
         app.set_data(data);
@@ -1737,27 +1591,7 @@ impl App {
             }
         }
         self.data = data;
-        // The other source's columns come and go with its data.
-        crate::data::set_lent(self.data.lent);
         self.off_hidden();
-        // And so does a pick of one of its benchmarks, with the bounds typed for it.
-        for c in 0..COLS.len() {
-            let listed = |b| col_benches(c + TEXT).is_some_and(|(_, benches)| benches.contains(&b));
-            if self.bench[c].is_some_and(|b| !listed(b)) {
-                self.bench[c] = None;
-                self.bounds.retain(|b| b.0 != c + TEXT);
-            }
-        }
-        // A pick that waited in the store for the other source's data is back with it, its bounds too.
-        for (c, id) in COLS.iter().map(|c| c.id).enumerate() {
-            let col = c + TEXT;
-            let Some(pick) = stored_bench(&self.store, col).filter(|_| self.bench[c].is_none()) else { continue };
-            if !self.bounds.iter().any(|b| b.0 == col) {
-                self.bench[c] = Some(pick);
-                let back: Vec<_> = self.store.bounds.iter().filter(|b| b.col == id).map(|b| loaded(col, b)).collect();
-                self.bounds.extend(back);
-            }
-        }
         self.fill();
         // A refresh that could not ask for the newest release leaves nothing to upgrade to.
         if self.input == Input::Upgrade && self.data.update().is_none() {
@@ -1791,7 +1625,6 @@ impl App {
     /// entry is what it shows already.
     fn pick_bench(&mut self, col: usize, i: usize) {
         let Some((c, (_, benches))) = col.checked_sub(TEXT).zip(col_benches(col)) else { return };
-        // One waiting for the other source's data is replaced too.
         self.bounds_changed |= self.store.bench.remove(COLS[c].id).is_some();
         let pick = i.checked_sub(1).and_then(|i| benches.get(i).copied()).filter(|b| self.bench[c] != Some(b));
         if pick == self.bench[c] {
@@ -1805,7 +1638,6 @@ impl App {
     /// Every task column back to its task's score, and the bounds typed for a picked benchmark
     /// gone. Without `refill` the values wait for the `set_data` that follows.
     fn drop_benches(&mut self, refill: bool) {
-        // The ones waiting in the store for the other source's data too.
         self.bounds_changed |= !self.store.bench.is_empty();
         self.store.bench.clear();
         for c in 0..COLS.len() {
@@ -1826,14 +1658,6 @@ impl App {
     /// The benchmark picked in the column of task `t`, which ranks its line.
     pub fn task_bench(&self, t: &Task) -> Option<&'static str> {
         self.col_bench(TEXT + COLS.iter().position(|c| c.id == t.name)?)
-    }
-
-    /// The benchmark source the column at cursor index `col` shows the values of: a picked
-    /// benchmark's, else `base_col_source`.
-    pub fn col_source(&self, col: usize) -> Option<Source> {
-        // Arena's signals are of neither, as Arena is.
-        let base = base_col_source(col);
-        self.col_bench(col).filter(|_| base.is_some()).map(crate::fit::bench_source).or(base)
     }
 
     /// What the sort, the bounds and the top border call the column at cursor index `col`: a
@@ -1857,9 +1681,7 @@ impl App {
             Some(b) if arena_bench(b) => {
                 "net improvement on this signal alone in real agent sessions, %, measured by arena.ai".into()
             }
-            Some(b) => {
-                format!("{}, score on this benchmark alone, 0-100, {UNTESTED}", crate::fit::bench_source(b).label())
-            }
+            Some(_) => format!("Epoch AI, score on this benchmark alone, 0-100, {UNTESTED}"),
             None => base_col_about(col),
         };
         // The ▾ says there is a dropdown, not that a task's swaps the benchmark.
@@ -2427,19 +2249,8 @@ impl App {
     /// dropdowns' picks, before anything reads them there: `rebuild`. `take_bounds_changed` says
     /// when to save them.
     fn keep_bounds(&mut self) {
-        // A pick of the other source's, while its data is not here, stays with its bounds until
-        // one is typed on its column: a start or a refresh without it does not lose them.
-        let waits = |c: usize| {
-            self.bench[c].is_none() && pick_away(&self.store, c + TEXT) && !self.bounds.iter().any(|b| b.0 == c + TEXT)
-        };
-        let waiting: Vec<&str> = (0..COLS.len()).filter(|&c| waits(c)).map(|c| COLS[c].id).collect();
-        let bench: BTreeMap<String, String> = (0..COLS.len())
-            .filter_map(|c| {
-                let id = COLS[c].id;
-                let pick = self.bench[c].map(str::to_string);
-                Some((id.to_string(), pick.or_else(|| waiting.contains(&id).then(|| self.store.bench[id].clone()))?))
-            })
-            .collect();
+        let bench: BTreeMap<String, String> =
+            (0..COLS.len()).filter_map(|c| Some((COLS[c].id.to_string(), self.bench[c]?.to_string()))).collect();
         self.bounds_changed |= bench != self.store.bench;
         let bounds: Vec<Bound> = self
             .bounds
@@ -2448,7 +2259,6 @@ impl App {
                 let col = numeric(c)?.id.to_string();
                 Some(Bound { col, min: lo.is_finite().then_some(lo), max: hi.is_finite().then_some(hi) })
             })
-            .chain(self.store.bounds.iter().filter(|b| waiting.contains(&b.col.as_str())).cloned())
             .collect();
         self.store.bench = bench;
         self.bounds_changed |= bounds != self.store.bounds;
@@ -2627,7 +2437,7 @@ impl App {
 
     /// A background refresh finished.
     /// True when the key did not work and the source is now Epoch AI, for the shell to load.
-    pub fn refreshed(&mut self, res: Result<Data, Failure>, tools: Tools) -> bool {
+    pub fn refreshed(&mut self, res: Result<Data, String>, tools: Tools) {
         // A runner may be installed since, and the sizes that did not come are asked for again.
         self.tools = tools;
         self.downloads.retain(|_, d| *d != Download::NoAnswer);
@@ -2635,7 +2445,6 @@ impl App {
         self.refresh_failed = res.is_err();
         match res {
             Ok(d) => {
-                self.old_key = None;
                 // An error still standing, as the start's of an unreadable user.json, is not
                 // replaced by the news that the refresh went well. Why a key did nothing is.
                 // The news replaces no other message either: what a switch of source said
@@ -2645,29 +2454,8 @@ impl App {
                 }
                 self.set_data(d);
             }
-            // No key, or the saved one was turned down: ask for one, which esc answers with
-            // Epoch AI. Epoch AI at once for one from the environment, yours to change there as a
-            // saved one would not replace it, and while you are typing or choosing something
-            // else, which the prompt would throw away.
-            Err(e @ (Failure::BadKey | Failure::NoKey)) => {
-                let from_env = crate::data::aa_key_env().is_some();
-                // The prompt `K` opened meanwhile is the one to say so in.
-                if !from_env && let Input::Key { wrong, .. } = &mut self.input {
-                    *wrong |= e == Failure::BadKey;
-                    self.report(Err(e.to_string()));
-                } else if !from_env && self.input == Input::None {
-                    self.report(Err(e.to_string()));
-                    self.input = Input::key(e == Failure::BadKey, false);
-                } else {
-                    let fell = self.switch(Source::Epoch).is_some();
-                    let why = if from_env { format!("{e} in {}", crate::data::AA_KEY_ENV) } else { e.to_string() };
-                    self.report(Err(if fell { format!("{why}{FELL_BACK}") } else { why }));
-                    return fell;
-                }
-            }
             Err(e) => self.report(Err(format!("refresh failed: {e}"))),
         }
-        false
     }
 
     /// The outcome of an action in the status bar, an error in red.
@@ -2686,9 +2474,8 @@ impl App {
     /// The `|` chooser: every column right of Model that has something to show, ticked while shown,
     /// on the one under the cursor.
     fn ask_cols(&mut self) {
-        let cols = (1..NCOLS).filter(|&c| !absent(c));
         let items: Vec<_> =
-            cols.map(|c| (format!("{:<8} {}", base_col_name(c), base_col_about(c)), Effect::Col(c))).collect();
+            (1..NCOLS).map(|c| (format!("{:<8} {}", base_col_name(c), base_col_about(c)), Effect::Col(c))).collect();
         let sel = items.iter().position(|(_, e)| *e == Effect::Col(self.col)).unwrap_or(0);
         self.input = Input::choose("columns?", Kind::Cols, items, sel);
     }
@@ -2748,46 +2535,6 @@ impl App {
         if hidden(self.sort_col) {
             (self.sort_col, self.descending) = default_sort();
         }
-    }
-
-    /// Use benchmarks from `src` from now on; the shell loads its data (`switched`). The first
-    /// start loads it even when it is the default, as the TUI opened with none.
-    fn switch(&mut self, src: Source) -> Option<Effect> {
-        if src == crate::data::source() && !self.first_start {
-            return None;
-        }
-        self.first_start = false;
-        // A dropdown still open lists the other source's benchmarks.
-        if matches!(self.input, Input::Menu { .. }) {
-            self.input = Input::None;
-        }
-        // A pick is one of the other source's benchmarks.
-        self.drop_benches(false);
-        // And a bound on a task is on the other source's benchmark.
-        self.bounds.retain(|b| !TASK_COLS.contains(&b.0));
-        let was = index_col();
-        crate::data::set_source(src);
-        // The cursor and the sort follow the index to this source's column.
-        for c in [&mut self.col, &mut self.sort_col] {
-            if *c == was {
-                *c = index_col();
-            }
-        }
-        self.report(Ok(format!("benchmarks from {}", src.label())));
-        Some(Effect::Source(src))
-    }
-
-    /// After a switch of source: that source's cached data, or none. True when it must be
-    /// downloaded, which replaces any refresh under way for the other source. Until then the
-    /// table is empty rather than showing the other source's scores under this one's name.
-    pub fn switched(&mut self, cached: Option<Data>) -> bool {
-        let fetch = std::mem::take(&mut self.unchecked) || cached.as_ref().is_none_or(Data::stale);
-        let mut cached = cached.unwrap_or_default();
-        // A start may have learnt of a newer release than the cache's refresh did.
-        cached.keep_latest(&self.data.latest);
-        self.set_data(cached);
-        (self.refreshing, self.refresh_failed) = (fetch, false);
-        fetch
     }
 
     /// The frame's `⟳ refreshing` says it is under way, so the message is cleared.
@@ -3850,14 +3597,9 @@ impl App {
         ) || self.open_list().is_some_and(List::idle)
     }
 
-    /// What `!` lists: what the last refresh warned of, and a missing Artificial Analysis key.
+    /// What `!` lists: what the last refresh warned of.
     pub fn issues(&self) -> Option<String> {
-        let key = crate::data::keyless().then(|| {
-            let aa = crate::data::Source::Aa.label();
-            format!("no {aa} API key, so benchmarks are from Epoch AI, {} adds one", self.key_of('K'))
-        });
-        let all: Vec<String> = self.data.warning.clone().into_iter().chain(key).collect();
-        Some(all.join(crate::data::SEP)).filter(|w| !w.is_empty())
+        self.data.warning.clone()
     }
 
     /// The key the action with the default key `d` is on.
@@ -4096,10 +3838,6 @@ impl App {
         // esc leaves them. An entry or a note being written is only left, its panel staying open.
         let writing = self.editing() || matches!(self.input, Input::Note { .. } | Input::Task(_) | Input::Cap { .. });
         if m == Mouse::Close && !writing {
-            // The key prompt stays open: closing it would skip the key, for Epoch AI. Not `K`'s.
-            if !self.input.leavable() {
-                return None;
-            }
             if self.input != Input::None {
                 self.on_key(KeyCode::Esc.into());
             }
@@ -4108,18 +3846,13 @@ impl App {
             }
             return self.on_key(KeyCode::Esc.into());
         }
-        if m == Mouse::Link {
-            return Some(Effect::Open(crate::data::AA_KEY_URL.into()));
-        }
         // A prompt keeps the wheel still, and a click anywhere else leaves it as esc does: an
-        // entry or a note being written, a bound, the key, and what `q`, `U`, `D` and `X` ask. A search
+        // entry or a note being written, a bound, and what `q`, `U`, `D` and `X` ask. A search
         // is kept as enter keeps it, and the click is then on what it found.
         if self.editing() || (self.input != Input::None && self.open_list().is_none()) {
             let search = matches!(self.input, Input::Search { .. });
             match m {
                 Mouse::Scroll(_) | Mouse::Cols(_) => return None,
-                // The key prompt stays open: closing it would skip the key, for Epoch AI. Not `K`'s.
-                _ if !self.input.leavable() => return None,
                 _ if search => drop(self.input_key(KeyCode::Enter, KeyModifiers::NONE)),
                 _ => return self.input_key(KeyCode::Esc, KeyModifiers::NONE),
             }
@@ -4329,8 +4062,7 @@ impl App {
                     let board = crate::data::ARENA_BOARDS.iter().find(|b| self.col_bench(col) == Some(b.0));
                     ("arena.ai", board.map(|b| b.1.to_string()).or_else(|| m.arena_page()))
                 } else {
-                    let src = self.col_source(col).unwrap_or_else(crate::data::source);
-                    (src.site(), m.page(src))
+                    ("epoch.ai", m.epoch_page())
                 };
                 if page.is_none() {
                     self.refuse(format!("{} has no page on {site}", m.name));
@@ -4617,11 +4349,6 @@ impl App {
                 for _ in 0..n {
                     self.col = starts.iter().rev().copied().find(|&g| g < self.col).unwrap_or(starts[starts.len() - 1]);
                 }
-            }
-            // Nothing to sort by or to bound in a column that shows empty.
-            KeyCode::Char('s' | '>' | '<') if table && empty_why(self.col).is_some() => {
-                let why = empty_why(self.col).unwrap_or_default();
-                self.refuse(format!("{} {why}", base_col_name(self.col)));
             }
             KeyCode::Char('s') if table => {
                 if self.sort_col == self.col {
@@ -4914,11 +4641,6 @@ impl App {
                 return save.then_some(Effect::Save);
             }
             KeyCode::Char('r') => return self.refresh(),
-            // A saved key would not replace the environment's.
-            KeyCode::Char('K') if crate::data::aa_key_env().is_some() => {
-                self.refuse(format!("the key is from {}, change it there", crate::data::AA_KEY_ENV));
-            }
-            KeyCode::Char('K') => self.input = Input::key(false, true),
             KeyCode::Char('t') => {
                 let items = THEMES.iter().map(|t| (t.0.to_string(), Effect::Theme(t.0))).collect();
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
@@ -5091,68 +4813,6 @@ impl App {
                     self.next_hit(0);
                 }
             }
-            Input::Key { text, cur, wrong, asked } => match code {
-                KeyCode::Enter if !text.trim().is_empty() => {
-                    let (wrong, old) = (*wrong, crate::data::aa_key());
-                    let res = crate::data::save_aa_key(text);
-                    self.input = Input::None;
-                    // The key this one replaces, unless that one was turned down.
-                    if res.is_ok() && !wrong && self.old_key.is_none() {
-                        self.old_key.clone_from(&old);
-                    }
-                    return match res {
-                        // A refresh under way has the old key: start over, the shell drops it.
-                        Ok(()) if crate::data::source() == Source::Aa => {
-                            self.refreshing = false;
-                            self.refresh()
-                        }
-                        Ok(()) => {
-                            self.unchecked = true;
-                            self.switch(Source::Aa)
-                        }
-                        // The one before is still saved, and still the key.
-                        Err(e) if old.is_some() && !wrong => {
-                            self.report(Err(format!("could not save the key: {e}")));
-                            None
-                        }
-                        // No key that works, as with esc.
-                        Err(e) => {
-                            let effect = self.switch(Source::Epoch);
-                            self.report(Err(format!("could not save the key: {e}")));
-                            effect
-                        }
-                    };
-                }
-                KeyCode::Esc => {
-                    let (wrong, asked) = (*wrong, *asked);
-                    self.input = Input::None;
-                    // The key that `K` replaced is back when the new one was turned down.
-                    if wrong
-                        && let Some(old) = self.old_key.take()
-                        && crate::data::save_aa_key(&old).is_ok()
-                    {
-                        self.refreshing = false;
-                        let effect = self.refresh();
-                        self.report(Err(format!("{}, so the previous key is back", Failure::BadKey)));
-                        return effect;
-                    }
-                    // `K` asked: what was there stays.
-                    if asked && !wrong {
-                        return None;
-                    }
-                    // No key, or none that works: Epoch AI, which needs none. The saved one that
-                    // was turned down goes, or every start would ask again.
-                    let effect = self.switch(Source::Epoch);
-                    if wrong {
-                        self.report(Err(match crate::data::save_aa_key("") {
-                            Ok(()) => format!("{}, so it was removed{FELL_BACK}", Failure::BadKey),
-                            Err(e) => format!("could not remove the key: {e}{FELL_BACK}"),
-                        }));
-                    }
-                    return effect;
-                }
-                _ => drop(edit(text, cur, code, mods, |_| true)),
-            },
             Input::Note { key, text, cur } => match code {
                 KeyCode::Enter => {
                     let (key, text) = (std::mem::take(key), std::mem::take(text));
@@ -5594,8 +5254,7 @@ mod tests {
     fn a_pick_that_is_now_the_column_s_own_is_not_gone() {
         let coding = TEXT + COLS.iter().position(|c| c.id == "coding").unwrap();
         let mut store = Store::default();
-        crate::data::set_source(Source::Epoch);
-        // Picked from Epoch's list under Artificial Analysis, now Coding's own score.
+        // Picked from the dropdown before, now Coding's own score.
         store.bench.insert("coding".into(), "FrontierCode".into());
         assert!(!pick_gone(&store, coding), "its bounds stay, on the column's own value");
         store.bench.insert("coding".into(), "DeepSWE".into());
@@ -5698,48 +5357,12 @@ mod tests {
     use crate::fit;
     use crate::view::frontier;
 
-    /// ECI and AAII keep their columns whichever source is in use: the cursor and the sort move.
+    /// `|` ticks the columns the table shows, saved.
     #[test]
-    fn the_indexes_keep_their_columns() {
-        let mut a = app();
-        assert_eq!((a.col, a.sort_col, by_role(ECI - TEXT) + TEXT), (ECI, ECI, ECI));
-        a.switch(Source::Aa);
-        assert_eq!([ECI, AAII].map(base_col_name), ["ECI", "AAII"]);
-        assert_eq!((a.col, a.sort_col), (AAII, AAII), "they follow the index of the source");
-        assert!(hidden(ECI) && !hidden(AAII), "Epoch's index shows with its data alone");
-        assert_eq!([ECI, AAII].map(|c| by_role(c - TEXT) + TEXT), [AAII, ECI], "`eci` on the command line is AAII");
-    }
-
-    /// `|` ticks the columns the table shows, saved, and the other source's show with its data.
-    #[test]
-    fn columns_are_picked_and_the_other_sources_show_with_its_data() {
+    fn columns_are_picked() {
         let col = |id: &str| TEXT + COLS.iter().position(|c| c.id == id).unwrap();
-        let (tps, other, price) = (col("tps"), col(OTHER), col("price"));
+        let price = col("price");
         let mut a = app();
-        assert!(unmeasured(tps) && unmeasured(other), "Epoch alone has no speed, nor another index");
-        // They show all the same, empty, and say what fills them.
-        assert!(!hidden(tps) && !hidden(other));
-        assert!(base_col_about(other).ends_with("Index, needs its API key, K adds it"), "AAII says so");
-        assert!(base_col_about(tps).ends_with("needs Artificial Analysis's API key, K adds it"), "and Tok/s");
-        // Nothing to sort by or to bound there, which a key on it says.
-        a.col = tps;
-        let before = (a.sort_col, a.rows.len());
-        for key in ["s", ">", "<"] {
-            press(&mut a, key);
-            assert!(matches!(a.input, Input::None) && a.refused, "{key}");
-            assert_eq!(a.status, "Tok/s needs Artificial Analysis's API key, K adds it");
-        }
-        assert_eq!((a.sort_col, a.rows.len()), before);
-        // With a key the data is only not there yet.
-        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[1] = Some("k".into()));
-        assert!(base_col_about(tps).ends_with("(median), has no data yet, r refreshes"));
-        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[1] = None);
-        // With Artificial Analysis's data too, its columns show, the index under its name.
-        let mut data = std::mem::take(&mut a.data);
-        data.lent = true;
-        a.set_data(data);
-        assert!(!hidden(tps) && !hidden(other));
-        assert_eq!(base_col_name(other), "AAII");
         // The list opens on the cursor's column, and a tick leaves it out, the cursor off it.
         a.col = price;
         a.bounds = vec![(price, 0.0, 1.0)];
@@ -5760,7 +5383,7 @@ mod tests {
         a.store.hide.extend(["via".to_string(), "notes".to_string()]);
         a.set_cols();
         press(&mut a, "$");
-        assert_eq!(a.col, col("ttft"));
+        assert_eq!(a.col, col("value"));
         // Ticked again, it is back.
         a.col = PRICE + 1;
         press(&mut a, "|k");
@@ -6297,110 +5920,6 @@ mod tests {
         assert!(matches!(a.input, Input::Choose { kind: Kind::Bench, .. }), "B finds a benchmark");
         press(&mut a, "B");
         assert_eq!(a.input, Input::None, "and closes the list");
-        // The first start asks for the key alone, and a click beside it leaves it open.
-        a.first_start = true;
-        a.input = Input::key(false, false);
-        assert!(a.mouse(Mouse::Outside).is_none() && matches!(a.input, Input::Key { .. }), "a click beside it");
-        // Skipping it is Epoch AI, loaded as the TUI opened with no data.
-        assert!(matches!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch))));
-        assert_eq!((a.status.as_str(), crate::data::source()), ("benchmarks from Epoch AI", Source::Epoch));
-        assert!(a.input == Input::None && !a.first_start && !a.failed);
-        // A key typed there starts on Artificial Analysis.
-        let mut k = app();
-        k.first_start = true;
-        k.input = Input::key(false, false);
-        press(&mut k, "key");
-        assert!(matches!(code(&mut k, KeyCode::Enter), Some(Effect::Source(Source::Aa))));
-        assert_eq!((crate::data::source(), crate::data::aa_key().as_deref()), (Source::Aa, Some("key")));
-        crate::data::set_source(Source::Epoch);
-        // A source never downloaded shows nothing until it is, not the other one's scores.
-        assert!(a.switched(None) && a.data.models.is_empty() && a.refreshing);
-    }
-
-    #[test]
-    fn k_asks_for_the_key() {
-        // None yet: esc leaves Epoch AI, and a key typed there starts on Artificial Analysis.
-        let mut a = app();
-        press(&mut a, "K");
-        assert!(matches!(a.input, Input::Key { wrong: false, .. }));
-        assert_eq!(code(&mut a, KeyCode::Esc), None);
-        assert!(a.input == Input::None && crate::data::source() == Source::Epoch);
-        press(&mut a, "Kold");
-        assert!(matches!(code(&mut a, KeyCode::Enter), Some(Effect::Source(Source::Aa))));
-        // Esc keeps a key that works, and another one replaces it.
-        press(&mut a, "K");
-        assert_eq!(code(&mut a, KeyCode::Esc), None);
-        assert_eq!((crate::data::source(), crate::data::aa_key().as_deref()), (Source::Aa, Some("old")));
-        press(&mut a, "Knew");
-        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Refresh));
-        assert_eq!(crate::data::aa_key().as_deref(), Some("new"));
-        // A click leaves it as esc does, unlike the prompts that esc answers with Epoch AI.
-        press(&mut a, "K");
-        assert!(a.mouse(Mouse::Outside).is_none() && a.input == Input::None);
-        // Turned down, the new key gives way to the one it replaced.
-        a.refreshed(Ok(Data::default()), tools());
-        press(&mut a, "Ktypo");
-        code(&mut a, KeyCode::Enter);
-        assert!(!a.refreshed(Err(Failure::BadKey), tools()));
-        assert!(matches!(a.input, Input::Key { wrong: true, .. }));
-        assert_eq!(code(&mut a, KeyCode::Esc), Some(Effect::Refresh));
-        assert_eq!((crate::data::source(), crate::data::aa_key().as_deref()), (Source::Aa, Some("new")));
-        assert!(a.failed && a.status.contains("rejected"), "{}", a.status);
-        // A rejection of the saved key lands in the prompt open for another, where esc removes it.
-        press(&mut a, "K");
-        assert!(!a.refreshed(Err(Failure::BadKey), tools()));
-        assert!(matches!(a.input, Input::Key { wrong: true, asked: true, .. }));
-        assert_eq!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch)));
-        assert_eq!(crate::data::aa_key(), None);
-        // A key typed on Epoch AI is checked by a download, whatever is cached.
-        press(&mut a, "Kkey");
-        code(&mut a, KeyCode::Enter);
-        assert!(a.unchecked && a.switched(None) && !a.unchecked);
-        crate::data::save_aa_key("").unwrap();
-        // One from the environment is changed there.
-        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = Some("env".into()));
-        press(&mut a, "K");
-        assert!(a.input == Input::None && a.failed && a.status.contains(crate::data::AA_KEY_ENV));
-        crate::data::TEST_KEYS.with(|k| *k.borrow_mut() = [None, None]);
-        crate::data::set_source(Source::Epoch);
-    }
-
-    #[test]
-    fn a_rejected_key_is_asked_for_again() {
-        let mut a = app();
-        crate::data::set_source(Source::Aa);
-        assert!(!a.refreshed(Err(Failure::BadKey), tools()));
-        assert!(matches!(a.input, Input::Key { wrong: true, .. }));
-        // A click beside a panel under it leaves it open, as one beside the prompt does.
-        assert!(a.mouse(Mouse::Close).is_none() && matches!(a.input, Input::Key { wrong: true, .. }));
-        assert_eq!(crate::data::source(), Source::Aa);
-        // Left unanswered, it is Epoch AI, and the status says why.
-        crate::data::save_aa_key("old").unwrap();
-        assert_eq!(code(&mut a, KeyCode::Esc), Some(Effect::Source(Source::Epoch)));
-        assert!(a.failed && a.status.contains("rejected") && a.status.ends_with(FELL_BACK), "{}", a.status);
-        assert_eq!(crate::data::aa_key(), None, "the key turned down is not kept to ask again");
-        // A new key while the old one's refresh is under way starts another.
-        crate::data::set_source(Source::Aa);
-        a.refreshed(Err(Failure::BadKey), tools());
-        a.refreshing = true;
-        press(&mut a, "new");
-        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Refresh));
-        assert_eq!(crate::data::aa_key().as_deref(), Some("new"));
-        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = Some("env".into()));
-        let mut e = app();
-        assert!(e.refreshed(Err(Failure::BadKey), tools()), "Epoch AI at once");
-        assert!(e.input == Input::None && e.status.contains(crate::data::AA_KEY_ENV), "fixed where it is set");
-        assert!(e.status.ends_with(FELL_BACK) && crate::data::source() == Source::Epoch, "{}", e.status);
-        let mut b = app();
-        crate::data::set_source(Source::Aa);
-        assert!(!b.refreshed(Err("offline".into()), tools()));
-        assert_eq!((&b.input, crate::data::source()), (&Input::None, Source::Aa), "any other failure is only reported");
-        crate::data::TEST_KEYS.with(|k| k.borrow_mut()[0] = None);
-        let mut c = app();
-        c.input = Input::Note { key: "gpt55".into(), text: "half".into(), cur: 4 };
-        assert!(c.refreshed(Err(Failure::NoKey), tools()), "Epoch AI with no prompt");
-        assert!(matches!(c.input, Input::Note { .. }), "a note being typed is kept");
-        crate::data::set_source(Source::Epoch);
     }
 
     #[test]
@@ -6592,7 +6111,7 @@ mod tests {
             let m = a.data.models.iter_mut().find(|m| m.key == key).unwrap();
             m.scores.insert("WeirdML v3".into(), s);
         }
-        a.col = ECI + 3;
+        a.col = ECI + 2;
         press(&mut a, "d");
         assert_eq!(
             menu(&a)[..2],
@@ -6627,40 +6146,13 @@ mod tests {
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         // A task's line is ranked by the pick, so choosing the task keeps it.
-        assert_eq!((a.task.is_some(), a.col_name(ECI + 3)), (true, "WeirdML v3"));
-        a.col = ECI + 3;
+        assert_eq!((a.task.is_some(), a.col_name(ECI + 2)), (true, "WeirdML v3"));
+        a.col = ECI + 2;
         press(&mut a, "d");
         assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "WeirdML v3"));
         assert!((0..NCOLS).all(|c| (TASK_COLS.contains(&c) || c == ARENA_COL) == col_benches(c).is_some()));
         // Leaving the task took its sort along.
         press(&mut a, "cs");
-        // Another source has other benchmarks: the pick goes, and a bound typed for it.
-        press(&mut a, "dj ");
-        code(&mut a, KeyCode::Esc);
-        a.bounds.push((a.col, 60.0, f64::MAX));
-        // One on an index stays, as ECI keeps its column and its scale. A price stays a price.
-        a.bounds.extend([(ECI, 155.0, f64::MAX), (PRICE, 0.0, f64::MAX)]);
-        a.switch(Source::Aa);
-        assert_eq!((a.col_name(a.col), a.bounds.iter().map(|b| b.0).collect::<Vec<_>>()), ("Coding", vec![ECI, PRICE]));
-        a.bounds.clear();
-        assert!(
-            (0..NCOLS).all(|c| (TASK_COLS.contains(&c) || c == ARENA_COL) == col_benches(c).is_some()),
-            "with either source"
-        );
-        // Artificial Analysis lists the task's own benchmark, then its others about the task.
-        let m = a.data.models.iter_mut().find(|m| m.key == "mini").unwrap();
-        m.scores.insert("scicode".into(), 0.3);
-        press(&mut a, "d");
-        let named = |b: &str| format!("{b} · Artificial Analysis");
-        let want = [(crate::fit::AA_CODING, 2), ("terminalbench_v4_0", 0), ("scicode", 1)].map(|(b, n)| (named(b), n));
-        assert_eq!(menu(&a), want.iter().map(|(b, n)| (b.as_str(), *n)).collect::<Vec<_>>());
-        press(&mut a, "G ");
-        assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
-        // A task with no other benchmark still has its dropdown, which names the one.
-        code(&mut a, KeyCode::Esc);
-        a.col = ECI + 4;
-        press(&mut a, "d");
-        assert_eq!(menu(&a).iter().map(|e| e.0).collect::<Vec<_>>(), ["terminalbench_v4_0 · Artificial Analysis"]);
     }
 
     /// Arena's dropdown lists its other leaderboards, rated, then its signals, in percent as its
@@ -6688,55 +6180,10 @@ mod tests {
         assert!(a.col_about(a.col).starts_with("chat rating"), "{}", a.col_about(a.col));
         press(&mut a, "4j ");
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.col_name(a.col), a.val(mini, a.col), a.col_source(a.col)), ("Steerability", Some(-1.2), None));
+        assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Steerability", Some(-1.2)));
         assert_eq!(shown(a.col - TEXT, -1.2, true, a.col_bench(a.col)), "-1.2");
         press(&mut a, "d ");
         assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Arena", Some(8.7)), "the picked one again drops it");
-    }
-
-    /// With both sources' data a task's dropdown lists the other's benchmarks too, named as its.
-    #[test]
-    fn a_task_dropdown_lists_the_other_sources_benchmarks() {
-        let mut a = app();
-        let mut data = std::mem::take(&mut a.data);
-        data.models.iter_mut().find(|m| m.key == "mini").unwrap().other_scores.insert("scicode".into(), 0.3);
-        data.lent = true;
-        a.set_data(data);
-        a.col = ECI + 3;
-        press(&mut a, "d");
-        let names: Vec<&str> = menu(&a).iter().map(|e| e.0).collect();
-        assert_eq!(
-            names[..2],
-            ["FrontierCode · Epoch AI", "WeirdML v3 · Epoch AI"],
-            "its own first, each named with its source"
-        );
-        assert_eq!(menu(&a).last(), Some(&("scicode · Artificial Analysis", 1)));
-        press(&mut a, "G ");
-        code(&mut a, KeyCode::Esc);
-        press(&mut a, "s");
-        assert_eq!((a.col_name(a.col), a.val(a.rows[0], a.col)), ("scicode", Some(30.0)));
-        assert!(a.col_about(a.col).starts_with("Artificial Analysis, "), "{}", a.col_about(a.col));
-        assert_eq!(a.col_source(a.col), Some(Source::Aa), "a double click opens that source's page");
-        a.bounds = vec![(a.col, 20.0, f64::INFINITY)];
-        a.rebuild();
-        // Without the other source's data the pick goes, and the column is the task's score again.
-        let mut data = std::mem::take(&mut a.data);
-        data.lent = false;
-        a.set_data(data);
-        assert_eq!((a.col_bench(a.col), a.col_name(a.col), a.bounds.len()), (None, "Coding", 0));
-        // The store keeps both until it is back, as at a start without it.
-        let kept = |a: &App| (a.store.bench.get("coding").cloned(), a.store.bounds.len());
-        assert_eq!(kept(&a), (Some("scicode".into()), 1));
-        let mut b = App::new(a.data.clone(), a.store.clone());
-        assert_eq!((b.col_bench(a.col), kept(&b)), (None, (Some("scicode".into()), 1)));
-        let mut data = std::mem::take(&mut b.data);
-        data.lent = true;
-        b.set_data(data);
-        assert_eq!((b.col_bench(a.col), b.bounds.as_slice()), (Some("scicode"), &[(a.col, 20.0, f64::INFINITY)][..]));
-        // A pick of the first entry meanwhile takes it back.
-        a.pick_bench(a.col, 0);
-        a.rebuild();
-        assert_eq!(kept(&a), (None, 0));
     }
 
     #[test]
@@ -7041,7 +6488,7 @@ mod tests {
         assert!(a.size_wanted());
         a.sized([(key.as_str(), Download::NoAnswer)]);
         assert!(!a.size_wanted(), "not while the cursor stays");
-        a.refreshed(Err("offline".to_string().into()), (vec![], vec![]));
+        a.refreshed(Err("offline".to_string()), (vec![], vec![]));
         assert!(a.size_wanted() && a.sizes().len() == 1, "a refresh asks again, the sizes staying");
         assert_eq!(a.downloads["llama4"], Download::Gone, "and the lack of a copy");
         // The local rows on screen are asked with it, each once.
@@ -7238,27 +6685,27 @@ mod tests {
             _ => panic!("{:?}", a.input),
         };
         assert_eq!(on(&a), "Remote Labor Index · Epoch AI · Agentic");
-        let remote = Effect::Bench(ECI + 4, Some("Remote Labor Index"));
-        assert!(!a.ticked(&remote) && a.ticked(&Effect::Bench(ECI + 4, None)), "the task's score is ticked");
+        let remote = Effect::Bench(ECI + 3, Some("Remote Labor Index"));
+        assert!(!a.ticked(&remote) && a.ticked(&Effect::Bench(ECI + 3, None)), "the task's score is ticked");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.col, a.col_bench(ECI + 4)), (ECI + 4, Some("Remote Labor Index")));
+        assert_eq!((a.col, a.col_bench(ECI + 3)), (ECI + 3, Some("Remote Labor Index")));
         assert_eq!(a.input, Input::None);
         assert_eq!(a.status, "Agentic shows Remote Labor Index · Epoch AI");
         press(&mut a, "B");
         assert_eq!(on(&a), "Remote Labor Index · Epoch AI · Agentic", "on the one the column shows");
         assert!(a.ticked(&remote), "ticked, as in the dropdown");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.col_bench(ECI + 4), None, "picked again, the task's score is back");
+        assert_eq!(a.col_bench(ECI + 3), None, "picked again, the task's score is back");
         // A column hidden while the list is open is not picked in, nor is the cursor put on it.
         a.col = 0;
         press(&mut a, "B/remote");
         code(&mut a, KeyCode::Enter);
-        a.toggle_col(ECI + 4);
+        a.toggle_col(ECI + 3);
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.col, a.col_bench(ECI + 4)), (0, None), "{}", a.status);
+        assert_eq!((a.col, a.col_bench(ECI + 3)), (0, None), "{}", a.status);
         assert!(a.status.starts_with("Agentic no longer lists it"), "{}", a.status);
-        a.toggle_col(ECI + 4);
+        a.toggle_col(ECI + 3);
         a.task = crate::fit::task("coding");
         press(&mut a, "B");
         assert!(a.input == Input::None && a.status.starts_with("a task is in use"), "{}", a.status);
@@ -7619,14 +7066,6 @@ mod tests {
         assert!(base_col_about(0).contains("Via"));
         assert!(base_col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
-        let of = |id| base_col_source(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
-        assert_eq!(
-            (of("price"), of("ctx"), of("eci"), of("value"), of("tps")),
-            (None, None, Some(Source::Epoch), Some(Source::Epoch), Some(Source::Aa))
-        );
-        let sourced = |c: &Col| c.only.is_some() || c.price || c.id == ARENA || crate::fit::task(c.id).is_some();
-        assert!(COLS[ECI - TEXT..].iter().all(sourced));
-        assert_eq!(of(ARENA), None, "neither source's");
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
         assert_eq!(about("coding"), "Epoch AI, FrontierCode score (0-100), blank = not tested");
         assert_eq!(about("agentic"), "Epoch AI, APEX-Agents score (0-100), blank = not tested");
@@ -7634,12 +7073,6 @@ mod tests {
             about("value"),
             "coding score per dollar of Price, as a percentile (0-100)",
             "no benchmarks of its own"
-        );
-        crate::data::set_source(Source::Aa);
-        assert_eq!(
-            about("agentic"),
-            "Artificial Analysis, Terminal-Bench 4.0 score (0-100), blank = not tested",
-            "the one benchmark it is"
         );
     }
 
@@ -7693,23 +7126,22 @@ mod tests {
         assert_eq!(a.current().unwrap().key, "opus5");
         ctrl(&mut a, 'u');
         assert_eq!(a.current().unwrap().key, "gpt55");
-        let shown = (0..NCOLS).filter(|&c| !hidden(c)).count();
-        assert_eq!(shown, NCOLS, "Epoch has no speed columns, which show empty");
         a.col = 0;
-        press(&mut a, &format!("{shown}l"));
+        press(&mut a, &format!("{NCOLS}l"));
         assert_eq!(a.col, NCOLS - 1, "a counted column move stops at the last column");
         press(&mut a, "l");
         assert_eq!(a.col, 0, "and wraps from there");
-        crate::data::set_source(Source::Aa);
+        // Two columns left out with `|`: the moves go over the shown ones.
+        a.store.hide.extend(["ctx".to_string(), "arena".to_string()]);
+        a.set_cols();
         let shown: Vec<usize> = (0..NCOLS).filter(|&c| !hidden(c)).collect();
-        assert!(shown.len() < NCOLS, "Epoch's columns are left out without its data");
-        a.off_hidden();
+        assert_eq!(shown.len(), NCOLS - 2);
         a.col = 0;
         press(&mut a, &format!("{}l", shown.len() - 2));
         assert_eq!(a.col, shown[shown.len() - 2], "over the shown ones");
         press(&mut a, "9l");
         assert_eq!(a.col, shown[shown.len() - 1], "stopping at the last of them");
-        // From a column left out, as between a switch of source and `off_hidden`: the next shown.
+        // From a column left out, as before `off_hidden`: the next shown.
         let off = (0..NCOLS).find(|c| !shown.contains(c)).unwrap();
         let next = shown.iter().copied().find(|&c| c > off).unwrap();
         a.col = off;
@@ -7722,15 +7154,15 @@ mod tests {
         let mut a = app();
         a.col = 0;
         let mut cols = vec![];
-        for _ in 0..5 {
+        for _ in 0..4 {
             press(&mut a, "w");
             cols.push(a.col);
         }
         press(&mut a, "w");
-        assert_eq!((cols, a.col), (vec![PRICE, ECI, MEASURED, VIA, NOTES], 0), "w wraps from the last column");
+        assert_eq!((cols, a.col), (vec![PRICE, ECI, VIA, NOTES], 0), "w wraps from the last column");
         press(&mut a, "b");
         assert_eq!(a.col, VIA, "b wraps from the first");
-        a.col = ECI + 3;
+        a.col = ECI + 2;
         press(&mut a, "b");
         assert_eq!(a.col, ECI, "b to the start of the group first");
         press(&mut a, "b");
@@ -7753,7 +7185,7 @@ mod tests {
     fn bounds_filter_and_replace() {
         let mut a = app();
         a.col = ECI;
-        press(&mut a, "alll");
+        press(&mut a, "all");
         assert_eq!(numeric(a.col).unwrap().name, "Coding");
         press(&mut a, ">50");
         assert!(matches!(a.input, Input::Bound { min: true, .. }));
@@ -9319,9 +8751,6 @@ mod tests {
         a.refreshed(Ok(Data { warning: Some("pi did not list its models".into()), ..Default::default() }), tools());
         assert_eq!((a.failed, a.status.as_str()), (false, "data refreshed"), "its warning is the frame's ⚠");
         // A message set under an open list is no error, whatever stood before it.
-        a.first_start = true;
-        a.switch(crate::data::source());
-        assert!(!a.failed && a.status.starts_with("benchmarks from"));
         a.report(Ok("done".into()));
         assert!(!a.failed);
     }
@@ -9558,10 +8987,6 @@ mod tests {
         assert!(matches!(a.input, Input::Menu { .. }), "and is back");
         assert_eq!(press(&mut a, "qq"), Some(Effect::Quit));
         let mut a = app();
-        a.first_start = true;
-        a.input = Input::key(false, false);
-        assert!(press(&mut a, "q").is_none(), "a letter of the key on the first start");
-        assert!(matches!(&a.input, Input::Key { text, .. } if text == "q"));
         assert_eq!(ctrl(&mut a, 'c'), Some(Effect::Quit), "ctrl-c quits at once");
     }
 

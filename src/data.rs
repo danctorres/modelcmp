@@ -4,23 +4,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODELS_URL: &str = "https://models.dev/api.json";
-/// Epoch's scores; with Artificial Analysis's, only its names, to link a model there.
+/// Epoch's scores.
 const EPOCH_URL: &str = "https://epoch.ai/data/benchmark_data.zip";
 /// Epoch's model pages, as it has none for some models it scored and some for models it did not.
 /// The index of Epoch's sitemaps, which names those of its model pages (`epoch_pages`).
 const EPOCH_PAGES_URL: &str = "https://epoch.ai/sitemap-index.xml";
-/// Artificial Analysis's page names, to link a model there that its API did not name one for.
+/// Artificial Analysis's page names, to link a model there (`aa_pages`): its public sitemap, no key.
 const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 /// OpenRouter's models, for the Hugging Face repo it names for each (`hf_listed`).
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
-/// Artificial Analysis's scores, with an API key (`aa_key`).
-const AA_API_URL: &str = "https://artificialanalysis.ai/api/v2/data/llms/models";
 /// Arena's Agent leaderboard, the newest one, from the dataset it publishes on Hugging Face
 /// (CC-BY): no key needed (`Arena`).
 // ponytail: one page of 100 rows, twice what the leaderboard has, and a warning past that
@@ -101,8 +99,8 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// that release. 34: Artificial Analysis's scores too are of the release a row's offers are, an
 /// Arena name with its vendor first is of its model, a merged row takes its dated release's Arena
 /// rating, and volcengine's ids are ByteDance's. 35: an offer's output is at its reasoning price
-/// where that is higher.
-const FORMAT: u32 = 35;
+/// where that is higher. 36: no Artificial Analysis scores, nor `Model::tps` and `ttft`.
+const FORMAT: u32 = 36;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -132,235 +130,6 @@ pub fn set_cached(share: f64) {
     CACHED.store(bits, Relaxed);
 }
 
-/// Where the benchmark scores come from: Epoch AI needs nothing, Artificial Analysis an API key.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Source {
-    #[default]
-    Epoch,
-    Aa,
-}
-
-impl Source {
-    pub const ALL: [Source; 2] = [Source::Epoch, Source::Aa];
-
-    /// Its name in `--source`, the store and the cache: "epoch", "aa".
-    pub fn id(self) -> &'static str {
-        match self {
-            Source::Epoch => "epoch",
-            Source::Aa => "aa",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Source::Epoch => "Epoch AI",
-            Source::Aa => "Artificial Analysis",
-        }
-    }
-
-    /// The overall index's column name and what it is.
-    pub fn index(self) -> (&'static str, &'static str) {
-        match self {
-            Source::Epoch => ("ECI", "Epoch AI's overall capability index"),
-            Source::Aa => ("AAII", "Artificial Analysis Intelligence Index"),
-        }
-    }
-
-    /// Its website, as `Model::links` names it.
-    pub fn site(self) -> &'static str {
-        match self {
-            Source::Epoch => "epoch.ai",
-            Source::Aa => "artificialanalysis.ai",
-        }
-    }
-
-    /// The one to use without `--source`: Artificial Analysis once its key is there.
-    pub fn preferred() -> Source {
-        if aa_key().is_some() { Source::Aa } else { Source::Epoch }
-    }
-
-    /// By `id`.
-    pub fn parse(s: &str) -> Option<Source> {
-        Source::ALL.into_iter().find(|x| x.id() == s)
-    }
-
-    /// The one this is not, whose columns show beside its own (`Data::borrow`).
-    pub fn other(self) -> Source {
-        match self {
-            Source::Epoch => Source::Aa,
-            Source::Aa => Source::Epoch,
-        }
-    }
-
-    /// The benchmarks its tasks use; a cache made with others is stale.
-    fn benches(self) -> Vec<&'static str> {
-        match self {
-            Source::Epoch => crate::fit::task_benches(),
-            Source::Aa => crate::fit::aa_fields(),
-        }
-    }
-}
-
-/// The source in use: one process-wide setting, like `CACHED`.
-#[cfg(not(test))]
-static SOURCE: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-thread_local!(static SOURCE: AtomicU8 = const { AtomicU8::new(0) });
-
-pub fn source() -> Source {
-    #[cfg(test)]
-    let i = SOURCE.with(|s| s.load(Relaxed));
-    #[cfg(not(test))]
-    let i = SOURCE.load(Relaxed);
-    Source::ALL[i as usize]
-}
-
-pub fn set_source(s: Source) {
-    let i = Source::ALL.iter().position(|x| *x == s).unwrap_or(0) as u8;
-    #[cfg(test)]
-    SOURCE.with(|x| x.store(i, Relaxed));
-    #[cfg(not(test))]
-    SOURCE.store(i, Relaxed);
-}
-
-/// Whether the data shown has the other source's columns too (`Data::lent`): one process-wide
-/// setting, like `SOURCE`.
-#[cfg(not(test))]
-static LENT: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-thread_local!(static LENT: AtomicBool = const { AtomicBool::new(false) });
-
-pub fn lent() -> bool {
-    #[cfg(test)]
-    return LENT.with(|l| l.load(Relaxed));
-    #[cfg(not(test))]
-    LENT.load(Relaxed)
-}
-
-pub fn set_lent(on: bool) {
-    #[cfg(test)]
-    LENT.with(|l| l.store(on, Relaxed));
-    #[cfg(not(test))]
-    LENT.store(on, Relaxed);
-}
-
-/// Artificial Analysis's API key: `AA_KEY_ENV`, else the one saved with `save_aa_key`.
-pub const AA_KEY_ENV: &str = "ARTIFICIAL_ANALYSIS_API_KEY";
-/// Where its key is made, free with an account: what a click on the key prompt's link opens.
-pub const AA_KEY_URL: &str = "https://artificialanalysis.ai/login";
-
-/// Why a refresh failed: the two the TUI answers by asking for a key, and the rest.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Failure {
-    /// Artificial Analysis is the source and there is no API key.
-    NoKey,
-    /// Artificial Analysis turned the key down.
-    BadKey,
-    Other(String),
-}
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Failure::NoKey => {
-                write!(f, "Artificial Analysis needs an API key: set {AA_KEY_ENV}, or press K in the TUI to enter one")
-            }
-            Failure::BadKey => f.write_str("Artificial Analysis rejected the API key"),
-            Failure::Other(e) => f.write_str(e),
-        }
-    }
-}
-
-impl From<String> for Failure {
-    fn from(e: String) -> Self {
-        Failure::Other(e)
-    }
-}
-
-impl From<&str> for Failure {
-    fn from(e: &str) -> Self {
-        Failure::Other(e.into())
-    }
-}
-
-#[cfg(not(test))]
-fn aa_key_path() -> PathBuf {
-    crate::store::path().with_file_name("aa_key")
-}
-
-/// Blank counts as unset, in the environment as in the file.
-fn nonblank(k: &str) -> Option<String> {
-    Some(k.trim().to_string()).filter(|k| !k.is_empty())
-}
-
-// Tests set the environment's key and the saved one here, never reading or writing yours.
-#[cfg(test)]
-thread_local!(pub static TEST_KEYS: std::cell::RefCell<[Option<String>; 2]> = const { std::cell::RefCell::new([None, None]) });
-
-/// The saved key as last read, the frame asking for it at every draw (`keyless`): read again
-/// after `save_aa_key`.
-// ponytail: one saved by another modelcmp meanwhile is seen at the next start.
-#[cfg(not(test))]
-static SAVED_KEY: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
-
-#[cfg(not(test))]
-fn read_aa_key() -> Option<String> {
-    std::fs::read_to_string(aa_key_path()).ok()
-}
-
-pub fn aa_key() -> Option<String> {
-    #[cfg(test)]
-    let saved = TEST_KEYS.with(|k| k.borrow()[1].clone());
-    #[cfg(not(test))]
-    let saved = SAVED_KEY.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(read_aa_key).clone();
-    aa_key_env().or_else(|| saved.as_deref().and_then(nonblank))
-}
-
-/// Whether `--source` chose the source, which is then not for want of a key (`keyless`).
-#[cfg(not(test))]
-static CHOSEN: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-thread_local!(static CHOSEN: AtomicBool = const { AtomicBool::new(false) });
-
-pub fn set_chosen(on: bool) {
-    #[cfg(test)]
-    CHOSEN.with(|c| c.store(on, Relaxed));
-    #[cfg(not(test))]
-    CHOSEN.store(on, Relaxed);
-}
-
-/// Epoch AI for want of a key to choose Artificial Analysis by, not because `--source` chose it.
-pub fn keyless() -> bool {
-    #[cfg(test)]
-    let chosen = CHOSEN.with(|c| c.load(Relaxed));
-    #[cfg(not(test))]
-    let chosen = CHOSEN.load(Relaxed);
-    !chosen && source() == Source::Epoch && aa_key().is_none()
-}
-
-/// The key set in `AA_KEY_ENV`, which a saved one would not replace.
-pub fn aa_key_env() -> Option<String> {
-    #[cfg(test)]
-    let env = TEST_KEYS.with(|k| k.borrow()[0].clone());
-    #[cfg(not(test))]
-    let env = std::env::var(AA_KEY_ENV).ok();
-    env.as_deref().and_then(nonblank)
-}
-
-/// Saved apart from user.json, readable by you alone, so the key is never shared with your settings.
-pub fn save_aa_key(key: &str) -> std::io::Result<()> {
-    #[cfg(test)]
-    {
-        TEST_KEYS.with(|k| k.borrow_mut()[1] = Some(key.trim().to_string()));
-        Ok(())
-    }
-    #[cfg(not(test))]
-    {
-        let saved = crate::store::write_private(&aa_key_path(), key.trim().as_bytes());
-        *SAVED_KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        saved
-    }
-}
 /// How a harness tells which models it can use.
 enum Probe {
     /// A command that prints the `provider/model` ids it has access to, one per line.
@@ -472,7 +241,7 @@ pub fn gguf_repo(base: &str, key: &str) -> Result<Option<String>, String> {
     let url = format!(
         "https://huggingface.co/api/models?filter=gguf&filter=base_model:quantized:{base}&sort=downloads&direction=-1&limit=20"
     );
-    let list = fetch_within(&url, None, HF_WAIT).map_err(|e| e.to_string())?;
+    let list = fetch_within(&url, HF_WAIT)?;
     Ok(gguf_named(&list, base, key))
 }
 
@@ -570,7 +339,7 @@ pub fn gguf_size(repo: &str) -> Result<Option<u64>, String> {
         return Ok(Some(size + proj));
     }
     let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true");
-    let tree = fetch_within(&url, None, HF_WAIT).map_err(|e| e.to_string())?;
+    let tree = fetch_within(&url, HF_WAIT)?;
     let (file, proj) = chosen.map_or((None, 0), |(f, _, p)| (Some(f), p));
     Ok(gguf_bytes(&tree, file.as_deref()).map(|b| b + proj))
 }
@@ -934,8 +703,7 @@ pub struct Model {
     pub offers: Vec<Offer>,
     /// Epoch Capabilities Index: overall capability, roughly 100..170.
     pub eci: Option<f64>,
-    /// Benchmark name -> best score (0..1) across reasoning-effort settings, or of the one
-    /// the name states (`aa_named`).
+    /// Benchmark name -> best score (0..1) across reasoning-effort settings.
     pub scores: BTreeMap<String, f64>,
     /// Task name -> 0..100 percentile (see fit.rs), which ranks it.
     pub fit: BTreeMap<String, f64>,
@@ -953,13 +721,6 @@ pub struct Model {
     /// the benchmarks Epoch ran it on.
     #[serde(default)]
     pub epoch: Option<String>,
-    /// Output tokens per second and seconds to the first token of the answer, after any
-    /// thinking: medians on the developer's own API, else across providers. Artificial Analysis
-    /// measures them, Epoch does not.
-    #[serde(default)]
-    pub tps: Option<f64>,
-    #[serde(default)]
-    pub ttft: Option<f64>,
     /// Its score on Arena's Agent leaderboard, in percent: the net improvement arena.ai measures
     /// in real agent sessions, the best of its reasoning settings (`Arena`).
     #[serde(default)]
@@ -972,12 +733,6 @@ pub struct Model {
     /// "Nemotron 3 Ultra 550B A55B".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aka: Vec<String>,
-    /// The other source's overall index, with its data at hand too (`Data::borrow`).
-    #[serde(skip)]
-    pub other_index: Option<f64>,
-    /// The other source's `scores`, with its data at hand too (`Data::borrow`).
-    #[serde(skip)]
-    pub other_scores: BTreeMap<String, f64>,
     #[serde(skip)]
     pub available: bool,
     /// Every `Offer::via` of the model, once each.
@@ -986,21 +741,10 @@ pub struct Model {
 }
 
 impl Model {
-    /// The overall index `of` gives it: the one in use has it in `eci`, the other in `other_index`.
-    pub fn index(&self, of: Source) -> Option<f64> {
-        if of == source() { self.eci } else { self.other_index }
-    }
-
-    /// Its score (0..1) on the benchmark `b`, of whichever source runs it.
-    pub fn bench(&self, b: &str) -> Option<f64> {
-        let of = if crate::fit::bench_source(b) == source() { &self.scores } else { &self.other_scores };
-        of.get(b).copied()
-    }
-
-    /// What a column that picked `b` in its dropdown shows: `bench` in percent, or one of
-    /// `arena_more` as it is.
+    /// What a column that picked `b` in its dropdown shows: its score on the benchmark `b` in
+    /// percent, or one of `arena_more` as it is.
     pub fn picked(&self, b: &str) -> Option<f64> {
-        self.arena_more.get(b).copied().or_else(|| self.bench(b).map(|s| s * 100.0))
+        self.arena_more.get(b).copied().or_else(|| self.scores.get(b).map(|s| s * 100.0))
     }
 
     /// The offer you'd actually use: the cheapest available one, a free one first, else one of
@@ -1091,13 +835,14 @@ impl Model {
         self.via.iter().any(|h| runs_here(h))
     }
 
-    /// The model's page on a benchmark source, when it has one there (`epoch`, `aa`).
-    pub fn page(&self, s: Source) -> Option<String> {
-        let id = match s {
-            Source::Epoch => self.epoch.as_ref()?,
-            Source::Aa => self.aa.as_ref()?,
-        };
-        Some(format!("https://{}/models/{id}", s.site()))
+    /// The model's page on epoch.ai, when it has one there (`epoch`).
+    pub fn epoch_page(&self) -> Option<String> {
+        self.epoch.as_ref().map(|id| format!("https://epoch.ai/models/{id}"))
+    }
+
+    /// The model's page on artificialanalysis.ai, when it has one there (`aa`).
+    fn aa_page(&self) -> Option<String> {
+        self.aa.as_ref().map(|id| format!("https://artificialanalysis.ai/models/{id}"))
     }
 
     /// The model's Hugging Face repo: the one the copy on this machine was pulled from,
@@ -1126,16 +871,17 @@ impl Model {
         self.arena.map(|_| ARENA_PAGE).or(board).map(String::from)
     }
 
-    /// The model's pages, (site, url), of the sites that have one: models.dev, the benchmark
-    /// sources, OpenRouter, Hugging Face (`hf_repo`), then Arena's leaderboard (`arena_page`).
+    /// The model's pages, (site, url), of the sites that have one: models.dev, Epoch, Artificial
+    /// Analysis, OpenRouter, Hugging Face (`hf_repo`), then Arena's leaderboard (`arena_page`).
     /// None is a guess: a model no site has a page for has no link.
     pub fn links(&self) -> Vec<(&'static str, String)> {
         let md = self.md_page().map(|url| ("models.dev", url));
-        let sources = Source::ALL.into_iter().filter_map(|s| Some((s.site(), self.page(s)?)));
+        let epoch = self.epoch_page().map(|url| ("epoch.ai", url));
+        let aa = self.aa_page().map(|url| ("artificialanalysis.ai", url));
         let or = self.openrouter.as_ref().map(|id| ("openrouter.ai", format!("https://openrouter.ai/{id}")));
         let hf = self.hf_repo().map(|repo| ("huggingface.co", format!("https://huggingface.co/{repo}")));
         let arena = self.arena_page().map(|url| ("arena.ai", url));
-        md.into_iter().chain(sources).chain(or).chain(hf).chain(arena).collect()
+        md.into_iter().chain(epoch).chain(aa).chain(or).chain(hf).chain(arena).collect()
     }
 
     /// The first of `links`, which `o` then `enter` opens. Err says that no site has the model.
@@ -1188,37 +934,6 @@ pub struct Data {
     /// early data, too soon to say that there is access to no model.
     #[serde(skip)]
     pub listing: bool,
-    /// The rows have what the other source measures too (`borrow`), so its columns show.
-    #[serde(skip)]
-    pub lent: bool,
-}
-
-/// A row of the other source's data, as much of it as `Data::borrow` takes.
-#[derive(Deserialize)]
-struct Lent {
-    key: String,
-    eci: Option<f64>,
-    #[serde(default)]
-    tps: Option<f64>,
-    #[serde(default)]
-    ttft: Option<f64>,
-    #[serde(default)]
-    scores: BTreeMap<String, f64>,
-}
-
-impl From<&Model> for Lent {
-    fn from(m: &Model) -> Self {
-        Lent { key: m.key.clone(), eci: m.eci, tps: m.tps, ttft: m.ttft, scores: m.scores.clone() }
-    }
-}
-
-/// The other source's cache, read for `Lent` alone.
-#[derive(Deserialize)]
-struct LentData {
-    #[serde(default)]
-    format: u32,
-    fetched: u64,
-    models: Vec<Lent>,
 }
 
 impl Data {
@@ -1237,31 +952,6 @@ impl Data {
         (version(&self.latest) > version(env!("CARGO_PKG_VERSION"))).then_some(self.latest.as_str())
     }
 
-    /// Keeps `known` as the newest release where it is the newer: a cache's is as old as its
-    /// refresh.
-    pub fn keep_latest(&mut self, known: &str) {
-        if version(known) > version(&self.latest) {
-            self.latest = known.into();
-        }
-    }
-
-    /// Gives each row of `src`'s data what only the other source measures, and its index, from
-    /// that one's rows, which go by the same keys: one table shows both. With none, the row has
-    /// neither, whatever its cache kept.
-    fn borrow(&mut self, src: Source, other: Option<Vec<Lent>>) {
-        self.lent = other.is_some();
-        let mut by_key: HashMap<String, Lent> =
-            other.into_iter().flatten().map(|mut l| (std::mem::take(&mut l.key), l)).collect();
-        for m in &mut self.models {
-            let l = by_key.remove(m.key.as_str());
-            m.other_index = l.as_ref().and_then(|l| l.eci);
-            if src == Source::Epoch {
-                (m.tps, m.ttft) = l.as_ref().map_or((None, None), |l| (l.tps, l.ttft));
-            }
-            m.other_scores = l.map(|l| l.scores).unwrap_or_default();
-        }
-    }
-
     /// Whether it was fetched on another day than today, by the local clock. The TUI's first
     /// start of a day refreshes behind the table, where a command would wait for the download.
     pub fn of_another_day(&self) -> bool {
@@ -1270,13 +960,13 @@ impl Data {
 
     pub fn stale(&self) -> bool {
         // Dated ahead of the clock, it would never grow old.
-        // What Epoch missed is said at every load, with either source, so it is asked for again.
+        // What Epoch missed is said at every load, so it is asked for again.
         let unranked = (self.arena_missed || !self.missed.is_empty()) && self.age() > RETRY;
         self.age() > MAX_AGE
             || unranked
             || self.fetched > now()
             || self.format != FORMAT
-            || self.benches != source().benches()
+            || self.benches != crate::fit::task_benches()
     }
 
     /// What a load of the cache says: what its refresh said, as that one's, else what `missed`
@@ -1428,13 +1118,8 @@ fn local_day(secs: u64) -> (i32, i32) {
     (0, (secs / 86400) as i32)
 }
 
-/// One per source, so a switch back needs no download: data.json for Epoch, data-aa.json.
-fn cache_path(src: Source) -> PathBuf {
-    let name = match src {
-        Source::Epoch => "data.json".to_string(),
-        s => format!("data-{}.json", s.id()),
-    };
-    cache_file(&name)
+fn cache_path() -> PathBuf {
+    cache_file("data.json")
 }
 
 /// When the file at `p` was last written, which a refresh of another run changes.
@@ -1442,36 +1127,11 @@ fn written(p: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
-/// The cache of the source other than `src`, as much of it as `lending` takes.
-fn lent_cache(src: Source) -> Option<LentData> {
-    serde_json::from_slice(&std::fs::read(cache_path(src.other())).ok()?).ok()
-}
-
-/// What the rows of data fetched at `fetched` borrow from the other source (`Data::borrow`):
-/// its data this refresh downloaded, else its `cached` data, unless fetched more than a day
-/// apart, as its numbers would be older than the table says. A refresh that could not download
-/// it lends its cache too, which it leaves as it was, as the next start would.
-fn lending(downloaded: Option<&Data>, cached: impl FnOnce() -> Option<LentData>, fetched: u64) -> Option<Vec<Lent>> {
-    if let Some(o) = downloaded {
-        return Some(o.models.iter().map(Lent::from).collect());
-    }
-    let o = cached()?;
-    (o.format == FORMAT && o.fetched.abs_diff(fetched) <= MAX_AGE.as_secs()).then_some(o.models)
-}
-
 pub fn load_cache() -> Option<Data> {
     load_repos();
-    // The other source's, read beside this one's: each is milliseconds of parsing.
-    let (d, other) = std::thread::scope(|s| {
-        let other = s.spawn(|| lent_cache(source()));
-        let bytes = std::fs::read(cache_path(source())).ok();
-        // One written in another format reads wrong here (a missing price as free), so it is no fallback.
-        let d = bytes.and_then(|b| serde_json::from_slice::<Data>(&b).ok()).filter(|d| d.format == FORMAT);
-        (d, other.join().ok().flatten())
-    });
-    let mut d = d?;
-    let lent = lending(None, || other, d.fetched);
-    d.borrow(source(), lent);
+    let bytes = std::fs::read(cache_path()).ok()?;
+    // One written in another format reads wrong here (a missing price as free), so it is no fallback.
+    let mut d = serde_json::from_slice::<Data>(&bytes).ok().filter(|d| d.format == FORMAT)?;
     // Value is derived here from cached fields, so a change to the formula applies without a re-download.
     d.apply_available();
     Some(d)
@@ -1640,7 +1300,7 @@ impl Listed {
     }
 }
 
-/// The pages linked at the last refresh, Artificial Analysis's then Epoch's, from its cache: the
+/// The pages linked at the last refresh, Artificial Analysis's then Epoch's, from the cache: the
 /// sites have those, so they stand for a site's list when that did not come, as one bad
 /// download is not a day without its links. None from a cache in another format, whose Epoch
 /// names were not checked.
@@ -1920,8 +1580,8 @@ fn progress_text(total: usize, awaited: &[&str]) -> String {
 
 /// `refresh_held` under the cache's lock: the TUI's refresh and a command's (`load`) run one at
 /// a time, and a command that comes second reads what the first wrote.
-pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
-    let _held = crate::store::lock(&cache_path(source()));
+pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, String> {
+    let _held = crate::store::lock(&cache_path());
     refresh_held(steps, early)
 }
 
@@ -1930,14 +1590,8 @@ pub fn refresh(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, 
 /// still listing their models, which have the ones the cache had until the whole answer: they
 /// are not waited for to show the rest. Nor is Arena's leaderboard, whose column has the scores
 /// the cache had until it is in.
-fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, Failure> {
+fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data, String> {
     load_repos();
-    let src = source();
-    // Asked for under Epoch too when it is there: one refresh serves both sources.
-    let key = aa_key();
-    if src == Source::Aa && key.is_none() {
-        return Err(Failure::NoKey);
-    }
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, answers) = std::sync::mpsc::channel();
     // The installed ones: one not installed is left out.
@@ -1946,35 +1600,31 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
         let (asked, stop, steps) = (asked.clone(), Arc::clone(&stop), Arc::clone(steps));
         std::thread::spawn(move || harness_models(&asked, &stop, &steps, &tx))
     };
-    let res = download(src, key.as_deref(), steps);
+    let res = download(steps);
     // A refresh that cannot finish kills the harnesses rather than wait for them.
     stop.store(res.is_err(), Relaxed);
-    let (mut data, mut other, [aa, epoch, openrouter], release, late) = match res {
+    let (mut data, [aa, epoch, openrouter], release, late) = match res {
         Ok(d) => d,
         Err(e) => {
             let _ = harness.join();
             return Err(e);
         }
     };
-    // Before the early data, so the other source's columns do not go to come back.
-    let downloaded = other.as_ref().and_then(|(_, o)| o.as_ref().ok());
-    let lent = lending(downloaded, || lent_cache(src), data.fetched);
-    data.borrow(src, lent);
     // Only links hang on them, so without one the refresh still succeeds, and says so.
-    let text = |xml: Result<Vec<u8>, Failure>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
+    let text = |xml: Result<Vec<u8>, String>| String::from_utf8_lossy(&xml.unwrap_or_default()).into_owned();
     let (aa, epoch) = (text(aa), text(epoch));
-    let (mut aa, mut epoch) = (sitemap(&aa, Source::Aa), sitemap(&epoch, Source::Epoch));
+    let (mut aa, mut epoch) = (sitemap(&aa, "artificialanalysis.ai"), sitemap(&epoch, "epoch.ai"));
     // Read once, and only by a refresh that a list of pages or a harness's models did not reach,
     // or not yet.
-    let cache = std::cell::LazyCell::new(|| std::fs::read(cache_path(src)).unwrap_or_default());
+    let cache = std::cell::LazyCell::new(|| std::fs::read(cache_path()).unwrap_or_default());
     // Only a page a site lists is linked; without its list, only one linked at the last refresh.
     let before = if aa.is_empty() || epoch.is_empty() { cached_pages(&cache) } else { Default::default() };
     let was = std::cell::LazyCell::new(|| Listed::of(&cache));
     let mut unpaged = [None, None];
-    for (i, (pages, s)) in [(&mut aa, Source::Aa), (&mut epoch, Source::Epoch)].into_iter().enumerate() {
+    for (i, (pages, site)) in [(&mut aa, "artificialanalysis.ai"), (&mut epoch, "epoch.ai")].into_iter().enumerate() {
         if pages.is_empty() {
             let so = if before[i].is_empty() { "may be missing" } else { "are kept from the last refresh" };
-            unpaged[i] = Some(format!("{} did not list its pages: links to it {so}", s.site()));
+            unpaged[i] = Some(format!("{site} did not list its pages: links to it {so}"));
             pages.extend(before[i].iter().map(String::as_str));
         }
     }
@@ -2013,11 +1663,6 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
     step(steps, "huggingface.co");
     let (mut found, mut asks): (Asked, _) = (kept("hf.json"), HF_ASKS);
     hf_found(&mut data.models, &mut found, &mut asks, hf_spelled);
-    if let Some((_, Ok(o))) = &mut other {
-        // OpenRouter's repos first, as for `data`: `hf_found` guesses only the rest.
-        hf_listed(&mut o.models, &openrouter);
-        hf_found(&mut o.models, &mut found, &mut asks, hf_spelled);
-    }
     keep("hf.json", &found);
     answered(steps, "huggingface.co");
     // Only the Arena column hangs on it: without it, the scores of the last refresh are kept,
@@ -2067,13 +1712,6 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
     arena.score(&mut data.models);
     data.arena_date.clone_from(&arena.date);
     data.arena_dates = arena.dates();
-    if let Some((_, Ok(o))) = &mut other {
-        aa_pages(&mut o.models, &aa);
-        epoch_listed(&mut o.models, &epoch);
-        arena.score(&mut o.models);
-        (o.arena_date, o.arena_dates, o.arena_missed) =
-            (arena.date.clone(), data.arena_dates.clone(), data.arena_missed);
-    }
     // Until the last harness has answered. One that never does, its thread dead, is silent.
     listed.extend(answers.iter());
     let _ = harness.join();
@@ -2105,44 +1743,29 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
             .chain(logged_out)
             .chain(uncut)
             .collect();
-    // Each source's own, then the ones of the whole refresh.
-    let said = |own: [Option<String>; 2]| {
-        let all: Vec<_> = own.into_iter().flatten().chain(common.iter().cloned()).collect();
-        Some(all.join(SEP)).filter(|w| !w.is_empty())
-    };
-    data.warning = said([data.warning.take(), data.unscored()]);
+    // Epoch's own, then the ones of the whole refresh.
+    let all: Vec<_> = data.warning.take().into_iter().chain(data.unscored()).chain(common).collect();
+    data.warning = Some(all.join(SEP)).filter(|w| !w.is_empty());
     let json = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
-    // Its own source's file, though a switch may have happened meanwhile.
     // An unwritable cache costs the next start a download, not this one its data.
-    let uncached = crate::store::write_atomic(&cache_path(src), &json)
+    let uncached = crate::store::write_atomic(&cache_path(), &json)
         .err()
-        .map(|e| format!("could not cache the data in {}: {e}", cache_path(src).display()));
-    // The other source's cache, with the same listings, so that a switch to it needs no refresh.
-    let unswitched = other.and_then(|(s, o)| {
-        let written = o.and_then(|mut o| {
-            (o.latest, o.harness, o.kept) = (data.latest.clone(), data.harness.clone(), data.kept.clone());
-            o.warning = said([o.warning.take(), o.unscored()]);
-            let json = serde_json::to_vec(&o).map_err(|e| e.to_string())?;
-            Ok(crate::store::write_atomic(&cache_path(s), &json).map_err(|e| e.to_string())?)
-        });
-        written.err().map(|e: Failure| format!("{}'s data was not refreshed ({e})", s.label()))
-    });
+        .map(|e| format!("could not cache the data in {}: {e}", cache_path().display()));
     // What no cache holds, said only now.
-    let all: Vec<_> = data.warning.take().into_iter().chain(uncached).chain(unswitched).collect();
+    let all: Vec<_> = data.warning.take().into_iter().chain(uncached).collect();
     data.warning = Some(all.join(SEP)).filter(|w| !w.is_empty());
     data.apply_available();
     Ok(data)
 }
 
-/// What `download` gives: the merged data, the other source's when it was asked for, then
-/// Artificial Analysis's and Epoch's sitemaps, OpenRouter's models and modelcmp's newest release,
-/// which a refresh can do without, and Arena's downloads, still under way.
-type Downloaded =
-    (Data, Option<(Source, Result<Data, Failure>)>, [Result<Vec<u8>, Failure>; 3], Result<Vec<u8>, Failure>, Late);
+/// What `download` gives: the merged data, then Artificial Analysis's and Epoch's sitemaps,
+/// OpenRouter's models and modelcmp's newest release, which a refresh can do without, and
+/// Arena's downloads, still under way.
+type Downloaded = (Data, [Result<Vec<u8>, String>; 3], Result<Vec<u8>, String>, Late);
 
 /// Where Arena's downloads start in `download`'s: its agent leaderboard, then `ARENA_MORE`, then
 /// the pages of `ARENA_BOARDS`.
-const ARENA_AT: usize = 7;
+const ARENA_AT: usize = 6;
 
 /// How many of `download`'s are Arena's.
 const ARENA_URLS: usize = 1 + ARENA_MORE.len() + {
@@ -2156,15 +1779,15 @@ const ARENA_URLS: usize = 1 + ARENA_MORE.len() + {
 /// Arena's downloads, which `download` does not wait for: the ones it `got`, and the rest as
 /// they come, until `end`.
 struct Late {
-    got: [Result<Vec<u8>, Failure>; ARENA_URLS],
-    rx: std::sync::mpsc::Receiver<(usize, Result<Vec<u8>, Failure>)>,
+    got: [Result<Vec<u8>, String>; ARENA_URLS],
+    rx: std::sync::mpsc::Receiver<(usize, Result<Vec<u8>, String>)>,
     end: Instant,
     sites: Vec<&'static str>,
 }
 
 impl Late {
     /// All of them, waited for until `end`: one that did not come is a failure.
-    fn all(mut self, steps: &Steps) -> [Result<Vec<u8>, Failure>; ARENA_URLS] {
+    fn all(mut self, steps: &Steps) -> [Result<Vec<u8>, String>; ARENA_URLS] {
         let timed =
             std::iter::from_fn(|| self.rx.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok());
         // The ones that came before `end`, when it is past.
@@ -2182,12 +1805,12 @@ impl Late {
 const GRACE: Duration = Duration::from_secs(10);
 
 /// The sources, downloaded in parallel and merged. It returns at the first failure of a download
-/// it cannot do without, models.dev's and the source's scores, leaving the others to end on
-/// their own: none is waited for once the refresh cannot finish, and the links and the newest
-/// release no longer than `GRACE` once it can. Arena's are not waited for at all, but by `Late`.
-fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded, Failure> {
+/// it cannot do without, models.dev's and Epoch's scores, leaving the others to end on their
+/// own: none is waited for once the refresh cannot finish, and the links and the newest release
+/// no longer than `GRACE` once it can. Arena's are not waited for at all, but by `Late`.
+fn download(steps: &Steps) -> Result<Downloaded, String> {
     const URLS: [&str; ARENA_AT + ARENA_URLS] = {
-        let head = [MODELS_URL, EPOCH_URL, AA_API_URL, AA_URL, EPOCH_PAGES_URL, OPENROUTER_URL, RELEASE_URL, ARENA_URL];
+        let head = [MODELS_URL, EPOCH_URL, AA_URL, EPOCH_PAGES_URL, OPENROUTER_URL, RELEASE_URL, ARENA_URL];
         let (mut urls, mut n, mut i) = ([""; ARENA_AT + ARENA_URLS], 0, 0);
         while n < head.len() {
             urls[n] = head[n];
@@ -2207,15 +1830,10 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         assert!(n == urls.len());
         urls
     };
-    let needed = [0, if src == Source::Aa { 2 } else { 1 }];
+    let needed = [0, 1];
     let (tx, rx) = std::sync::mpsc::channel();
     let (mut sites, mut left) = (vec![], 0);
     for (i, url) in URLS.into_iter().enumerate() {
-        // Artificial Analysis's scores are asked for only with its key.
-        let key = if url == AA_API_URL { key.map(String::from) } else { None };
-        if url == AA_API_URL && key.is_none() {
-            continue;
-        }
         let (tx, steps) = (tx.clone(), Arc::clone(steps));
         let pages = url == EPOCH_PAGES_URL;
         // Counted under its site's name, as the warnings name it.
@@ -2225,18 +1843,15 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         sites.push((i, site));
         left += usize::from(i < ARENA_AT);
         std::thread::spawn(move || {
-            let res = if pages { epoch_pages(url) } else { fetch(url, key.as_deref()) };
+            let res = if pages { epoch_pages(url) } else { fetch(url) };
             answered(&steps, site);
             tx.send((i, res))
         });
     }
     drop(tx);
-    let mut got: [Result<Vec<u8>, Failure>; ARENA_AT + ARENA_URLS] =
-        URLS.map(|url| Err(format!("{url}: no reply").into()));
-    // Once the first three that were asked for are in, the rest get `GRACE` and no more. The
-    // other source's scores are among them, though not needed: they fill its cache, and Epoch's
-    // names decide which key a merged row keeps, which your favorites and notes hang on.
-    let (mut missing, mut end) = (2 + usize::from(key.is_some()), None::<Instant>);
+    let mut got: [Result<Vec<u8>, String>; ARENA_AT + ARENA_URLS] = URLS.map(|url| Err(format!("{url}: no reply")));
+    // Once the two that are needed are in, the rest get `GRACE` and no more.
+    let (mut missing, mut end) = (needed.len(), None::<Instant>);
     while left > 0 {
         let next = match end {
             None => rx.recv().ok(),
@@ -2244,9 +1859,7 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
         };
         let Some((i, res)) = next else { break };
         if needed.contains(&i) {
-            res.as_ref().map_err(Failure::clone)?;
-        }
-        if i < 3 {
+            res.as_ref().map_err(String::clone)?;
             missing -= 1;
             if missing == 0 {
                 end = Some(Instant::now() + GRACE);
@@ -2258,69 +1871,31 @@ fn download(src: Source, key: Option<&str>, steps: &Steps) -> Result<Downloaded,
     // A download not waited for is awaited no more, before the merge and not after it.
     let (sites, late): (Vec<_>, Vec<_>) = sites.into_iter().partition(|(i, _)| *i < ARENA_AT);
     sites.into_iter().for_each(|(_, site)| answered(steps, site));
-    let [models, epoch, api, aa, epoch_pages, openrouter, release, arena @ ..] = got;
+    let [models, epoch, aa, epoch_pages, openrouter, release, arena @ ..] = got;
     let sites = late.into_iter().map(|(_, site)| site).collect();
     let late = Late { got: arena, rx, end: end.unwrap_or_else(Instant::now), sites };
-    let models = models?;
-    let ep = epoch.and_then(|z| Ok(parse_epoch(&z)?));
-    let by_epoch = || -> Result<Data, Failure> {
-        let ep = ep.as_ref().map_err(Failure::clone)?;
-        let mut data = merge(&models, ep, None)?;
-        epoch_named(&mut data.models, ep);
-        data.missed.clone_from(&ep.missed);
-        Ok(data)
-    };
-    let by_aa = || -> Result<Data, Failure> {
-        // Without Epoch's the refresh still succeeds, with fewer epoch.ai links and Artificial
-        // Analysis's names deciding the keys.
-        let mut data = merge(&models, &parse_aa(api.as_ref().map_err(Failure::clone)?)?, ep.as_ref().ok())?;
-        match &ep {
-            // Its other scores are Epoch's, lent (`Data::borrow`): what Epoch missed is missed here too.
-            Ok(ep) => {
-                epoch_named(&mut data.models, ep);
-                data.missed.clone_from(&ep.missed);
-            }
-            // Said, as a favorite or a note on a key that changed is not found until the next refresh.
-            Err(e) => {
-                data.warning = Some(format!(
-                    "could not get epoch.ai's model names ({e}), so some models may have a different key until the next refresh"
-                ))
-            }
-        }
-        Ok(data)
-    };
-    // Side by side, as each merges the whole of models.dev's list.
-    // ponytail: each parses it and builds the same rows. Build them once, joined to each source,
-    // if a refresh's merge shows.
-    let (of_epoch, of_aa) = std::thread::scope(|s| {
-        let of_aa = key.map(|_| s.spawn(by_aa));
-        (by_epoch(), of_aa.and_then(|t| t.join().ok()))
-    });
-    let (data, other) = match src {
-        Source::Epoch => (of_epoch?, of_aa.map(|d| (Source::Aa, d))),
-        Source::Aa => (of_aa.unwrap_or_else(by_aa)?, Some((Source::Epoch, of_epoch))),
-    };
-    Ok((data, other, [aa, epoch_pages, openrouter], release, late))
+    let ep = parse_epoch(&epoch?)?;
+    let mut data = merge(&models?, &ep)?;
+    epoch_named(&mut data.models, &ep);
+    data.missed.clone_from(&ep.missed);
+    Ok((data, [aa, epoch_pages, openrouter], release, late))
 }
-
-/// Said after why Artificial Analysis's key did nothing: what is shown instead.
-pub const FELL_BACK: &str = " · benchmarks from Epoch AI";
 
 /// What a warning from the cached data's refresh starts with (`Data::said`).
 pub const LAST_REFRESH: &str = "last refresh: ";
 /// Between the warnings of a refresh, which `!` and `modelcmp` split on to list them.
 pub const SEP: &str = " · ";
 
-/// Source id -> when a command's refresh last failed to download, and why: offline, every
+/// When a command's refresh last failed to download, and why, under `FAILED_KEY`: offline, every
 /// command would otherwise wait on a refresh of its own to fail.
 const FAILED: &str = "failed.json";
+const FAILED_KEY: &str = "epoch";
 
 /// Cached data, refreshing if missing or stale. Falls back to stale cache when offline.
-/// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
-pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> {
+pub fn load(force: bool) -> Result<(Data, Option<String>), String> {
     // Tried again once `RETRY` has passed, or when you ask for it.
     let failed = || {
-        let (at, e) = kept::<(u64, String)>(FAILED).remove(source().id())?;
+        let (at, e) = kept::<(u64, String)>(FAILED).remove(FAILED_KEY)?;
         let ago = now().saturating_sub(at);
         (ago < RETRY.as_secs()).then(|| {
             let (ago, next) = (Duration::from_secs(ago), RETRY - Duration::from_secs(ago));
@@ -2333,7 +1908,7 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
         Ok((d, Some(w)))
     };
     // Before the read, so that a refresh another run makes after it is read below.
-    let read = written(&cache_path(source()));
+    let read = written(&cache_path());
     match load_cache() {
         Some(d) if !force && !d.stale() => {
             let w = d.said();
@@ -2342,8 +1917,8 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
         cached => {
             // One refresh at a time: agents that find the cache stale together wait for the
             // first and read what it wrote. Unwritten, it is the same cache, not read twice.
-            let _held = crate::store::lock(&cache_path(source()));
-            let wrote = written(&cache_path(source())) != read;
+            let _held = crate::store::lock(&cache_path());
+            let wrote = written(&cache_path()) != read;
             if !force
                 && wrote
                 && let Some(d) = load_cache().filter(|d| !d.stale())
@@ -2362,25 +1937,14 @@ pub fn load(force: bool, auto: bool) -> Result<(Data, Option<String>), Failure> 
                     let w = d.warning.take();
                     Ok((d, w))
                 }
-                Err(e @ Failure::BadKey) if auto => {
-                    eprintln!("warning: {e}, so benchmarks are from Epoch AI");
-                    set_source(Source::Epoch);
-                    load(force, false)
-                }
                 Err(e) => match cached {
                     Some(d) => {
-                        // Not a key turned down, which a new one mends at once.
-                        if let Failure::Other(e) = &e {
-                            let mut failed = kept::<(u64, String)>(FAILED);
-                            failed.insert(source().id().into(), (now(), e.clone()));
-                            keep(FAILED, &failed);
-                        }
-                        kept_from(d, &e.to_string())
+                        let mut failed = kept::<(u64, String)>(FAILED);
+                        failed.insert(FAILED_KEY.into(), (now(), e.clone()));
+                        keep(FAILED, &failed);
+                        kept_from(d, &e)
                     }
-                    None => Err(match e {
-                        Failure::Other(e) => Failure::Other(format!("could not download model data: {e}")),
-                        key => key,
-                    }),
+                    None => Err(format!("could not download model data: {e}")),
                 },
             }
         }
@@ -2405,20 +1969,17 @@ fn release_tag(body: &[u8]) -> Option<String> {
 
 /// modelcmp's newest release, asked for alone: `None` when GitHub does not say.
 pub fn newest_release() -> Option<String> {
-    release_tag(&fetch_within(RELEASE_URL, None, Duration::from_secs(10)).ok()?)
+    release_tag(&fetch_within(RELEASE_URL, Duration::from_secs(10)).ok()?)
 }
 
-/// `url`'s body; `key` goes in Artificial Analysis's `x-api-key` header.
-fn fetch(url: &str, key: Option<&str>) -> Result<Vec<u8>, Failure> {
-    fetch_within(url, key, Duration::from_secs(60))
+/// `url`'s body.
+fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    fetch_within(url, Duration::from_secs(60))
 }
 
 /// `fetch`, given up on after `limit`.
-fn fetch_within(url: &str, key: Option<&str>, limit: Duration) -> Result<Vec<u8>, Failure> {
-    request(url, key.map(|k| ("x-api-key", k)), limit).map_err(|e| match e {
-        ureq::Error::StatusCode(401 | 403) if key.is_some() => Failure::BadKey,
-        e => format!("{url}: {e}").into(),
-    })
+fn fetch_within(url: &str, limit: Duration) -> Result<Vec<u8>, String> {
+    request(url, None, limit).map_err(|e| format!("{url}: {e}"))
 }
 
 /// How many times a download is asked for: a site that fails once often answers the next time.
@@ -2459,11 +2020,11 @@ fn model_sitemaps(index: &str) -> impl Iterator<Item = &str> {
 
 /// Epoch's sitemaps of model pages, one after the other. All of them or none: a part of the
 /// list would drop the links to the pages it lacks without a word.
-fn epoch_pages(index: &str) -> Result<Vec<u8>, Failure> {
-    let index = fetch(index, None)?;
+fn epoch_pages(index: &str) -> Result<Vec<u8>, String> {
+    let index = fetch(index)?;
     let mut all = Vec::new();
     for url in model_sitemaps(&String::from_utf8_lossy(&index)) {
-        all.extend(fetch(url, None)?);
+        all.extend(fetch(url)?);
     }
     Ok(all)
 }
@@ -2877,8 +2438,8 @@ fn undated(name: &str) -> Option<&str> {
 }
 
 /// The model pages a site's sitemap lists, by name: `claude-opus-5-5`. None when it is not one.
-fn sitemap(xml: &str, site: Source) -> HashSet<&str> {
-    xml.split(&format!("<loc>https://{}/models/", site.site()))
+fn sitemap<'a>(xml: &'a str, site: &str) -> HashSet<&'a str> {
+    xml.split(&format!("<loc>https://{site}/models/"))
         .skip(1)
         .filter_map(|s| s.split_once('<').map(|(p, _)| p))
         .filter(|p| !p.is_empty() && !p.contains('/'))
@@ -3026,62 +2587,6 @@ fn reasons(words: &[String]) -> Option<bool> {
 fn setting(words: &[String]) -> Setting {
     let effort = words.iter().find(|w| EFFORTS.contains(&w.as_str()) || *w == "max").cloned();
     (reasons(words).or(effort.as_ref().map(|_| true)), effort)
-}
-
-/// The setting of one of the API's entries: what its name says in brackets, "Claude Opus 4.6
-/// (Non-reasoning, High Effort)", then what its slug and its name end in.
-fn aa_setting(slug: &str, name: &str) -> Setting {
-    let mut said = words(name.split_once('(').map_or("", |(_, brackets)| brackets));
-    for w in [words(slug), words(&clean_name(name))] {
-        said.extend_from_slice(&w[setting_at(&w)..]);
-    }
-    setting(&said)
-}
-
-/// The entries among `all`, one model's, that are the setting `name` ends in, as one
-/// (`aa_fold`): "Grok 4.20 Non-Reasoning" is not scored as Grok 4.20 reasoning. `None` when the
-/// name ends in no setting. One the API did not measure has no scores, and the page of the
-/// entries that reason as it does, whatever their effort: "Thinking Low" is not on the
-/// non-reasoning page. An entry that does not say counts when none says it, as a model with
-/// one setting is listed bare.
-fn aa_named(name: &str, all: &[AaEntry]) -> Option<AaEntry> {
-    let w = words(name);
-    let asked = setting(&w[setting_at(&w)..]);
-    if asked == (None, None) {
-        return None;
-    }
-    // 1 when the entry says what is asked, 0 when it does not say, none when it says otherwise.
-    fn part<T: PartialEq>(asked: &Option<T>, said: &Option<T>) -> Option<usize> {
-        match (asked, said) {
-            (Some(a), Some(s)) => (a == s).then_some(1),
-            _ => Some(0),
-        }
-    }
-    let says = |e: &AaEntry| Some(part(&asked.0, &e.setting.0)? + part(&asked.1, &e.setting.1)?);
-    let most = all.iter().filter_map(says).max();
-    let measured = aa_fold(all.iter().filter(|e| most.is_some() && says(e) == most));
-    let page = || aa_fold(all.iter().filter(|e| e.setting.0 == asked.0)).map(|e| e.slug).unwrap_or_default();
-    Some(measured.unwrap_or_else(|| AaEntry { slug: page(), ..Default::default() }))
-}
-
-/// The entries among `all` that came out with the model, the one with the shortest slug: "Kimi
-/// K2 Thinking", four months after Kimi K2, is not Kimi K2 set to think.
-fn same_release(all: &[AaEntry]) -> impl Iterator<Item = &AaEntry> {
-    let model = all.iter().min_by_key(|e| (e.slug.len(), &e.slug));
-    all.iter().filter(move |e| model.is_some_and(|m| m.release == e.release))
-}
-
-/// The settings of one model as one: the setting with the best index, the first on a tie, all
-/// of it, scores and speed, as the best of each is a model no setting is. Among those scored
-/// on the most benchmarks: "Gemini 3.7 Flash (Medium)" has the higher index and no
-/// Terminal-Bench 4.0, which the index now counts. Its page is that of the setting-less slug,
-/// else the shortest.
-fn aa_fold<'a>(entries: impl IntoIterator<Item = &'a AaEntry>) -> Option<AaEntry> {
-    let entries: Vec<&AaEntry> = entries.into_iter().collect();
-    let rank = |e: &AaEntry| (e.scores.len(), e.index.unwrap_or(f64::NEG_INFINITY));
-    let best = entries.iter().copied().reduce(|best, e| if rank(e) > rank(best) { e } else { best })?;
-    let page = entries.iter().map(|e| &e.slug).min_by_key(|s| (s.len(), *s))?;
-    Some(AaEntry { slug: page.clone(), ..best.clone() })
 }
 
 /// Lowercase alphanumerics only: "Claude Opus 4.5" == "claude-opus-4-5" == "claude_opus_4.5".
@@ -3354,11 +2859,7 @@ fn joined<'a>(
     let names = |m: &Model| std::iter::once(m.name.clone()).chain(gone(m).map(|r| r.1.clone()));
     let main: Vec<Option<String>> = models.iter().map(sold_as).collect();
     let fits = |id: &Option<String>, g: &String| !id.as_ref().is_some_and(|id| other_release(id, ep.versions.get(g)));
-    let named = |m: &Model, id: &Option<String>| {
-        // Artificial Analysis orders a name's words its own way: "Claude 4.5 Sonnet".
-        let aa = names(m).filter(|_| ep.source == Source::Aa).map(|n| aa_words(&n, true).join("-"));
-        keys(m).chain(aa).filter_map(|k| ep.group(&k)).find(|g| fits(id, g))
-    };
+    let named = |m: &Model, id: &Option<String>| keys(m).filter_map(|k| ep.group(&k)).find(|g| fits(id, g));
     let named: Vec<Option<&String>> = models.iter().zip(&main).map(|(m, id)| named(m, id)).collect();
     let owned: HashSet<&String> = named.iter().flatten().copied().collect();
     let rows: HashSet<&str> = models.iter().map(|m| m.key.as_str()).collect();
@@ -3580,64 +3081,39 @@ impl MdCost {
 type Group = (String, Option<f64>, BTreeMap<String, f64>);
 type CsvRow = HashMap<String, String>;
 
-/// A benchmark source's models, as `merge` joins them to models.dev's.
+/// Epoch's models, as `merge` joins them to models.dev's.
 #[derive(Default, Debug)]
 struct Scores {
-    source: Source,
-    /// Keyed by norm(name) for Epoch, `aa_words` for Artificial Analysis. Ordered so that merge
-    /// results are deterministic.
+    /// Keyed by norm(name). Ordered so that merge results are deterministic.
     groups: BTreeMap<String, Group>,
     /// "Gemini 2.5 Pro (Jun 2025)" is reachable as "gemini25pro"; newest dated version wins.
     alias: HashMap<String, String>,
     /// Epoch's model ids, for a model it names otherwise: `grok-4.3` is "Grok 4.3 Beta". Apart
     /// from `alias`, as an id only finds the scores: it does not choose which row keeps its key.
     ids: HashMap<String, String>,
-    /// group -> the model ids Epoch benchmarked, or Artificial Analysis's slugs without their
-    /// setting, which say what release its scores are of (`other_release`).
+    /// group -> the model ids Epoch benchmarked, which say what release its scores are of
+    /// (`other_release`).
     versions: HashMap<String, BTreeSet<String>>,
     /// group -> organization.
     org: HashMap<String, String>,
-    /// Developer (`dev_key`) -> its country, Epoch's only.
+    /// Developer (`dev_key`) -> its country.
     country: HashMap<String, String>,
     /// group -> task -> percentile, and the value it shows.
     fit: crate::fit::Fit,
-    /// The task benchmarks no row scored, Epoch's only (`Data::missed`).
+    /// The task benchmarks no row scored (`Data::missed`).
     missed: Vec<String>,
-    /// group -> its page on artificialanalysis.ai.
-    page: HashMap<String, String>,
-    /// group -> (tokens/s, time to first answer token) of that page's setting.
-    speed: HashMap<String, (Option<f64>, Option<f64>)>,
-    /// group -> each of its reasoning settings, which Artificial Analysis lists apart.
-    settings: HashMap<String, Vec<AaEntry>>,
-    /// What a setting's scores are ranked among: the groups'.
-    pools: crate::fit::Pools,
 }
 
 impl Scores {
     /// Rank each group's scores among them all (`fit::scored`).
     fn rank(&mut self) {
-        self.pools = crate::fit::pools(self.groups.values().map(|(_, i, s)| (*i, s)));
+        let pools = crate::fit::pools(self.groups.values().map(|(_, i, s)| (*i, s)));
         for (key, (_, i, s)) in &self.groups {
-            let (fit, shown) = crate::fit::scored(self.source, *i, s, &self.pools);
+            let (fit, shown) = crate::fit::scored(*i, s, &pools);
             self.fit.0.insert(key.clone(), fit);
             self.fit.1.insert(key.clone(), shown);
         }
     }
-}
-
-/// One entry of Artificial Analysis's API: a model at one reasoning setting.
-#[derive(Clone, Default, Debug)]
-struct AaEntry {
-    /// Its page on artificialanalysis.ai.
-    slug: String,
-    /// When it came out: a "Thinking" entry of another date is a later model, not a setting.
-    release: String,
-    setting: Setting,
-    index: Option<f64>,
-    /// Field -> score, 0..1.
-    scores: BTreeMap<String, f64>,
-    /// (tokens/s, time to first answer token).
-    speed: (Option<f64>, Option<f64>),
 }
 
 /// Whether `provider` is the developer itself, not a reseller of its models.
@@ -3981,80 +3457,9 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     Ok(ep)
 }
 
-// ---------- Artificial Analysis ----------
-
-/// The API's models, the reasoning settings of one model folded into one group, its best
-/// (`aa_words`, `aa_fold`), as Epoch's are, and kept apart in `settings` for the
-/// rows that name one. Scores are 0..1, as Epoch's; the index stays 0..100.
-fn parse_aa(bytes: &[u8]) -> Result<Scores, String> {
-    let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("artificial analysis: {e}"))?;
-    let list = v["data"].as_array().or(v.as_array()).ok_or("artificial analysis: no model list")?;
-    let fields = crate::fit::aa_fields();
-    let mut sc = Scores { source: Source::Aa, ..Default::default() };
-    let mut names: BTreeMap<String, _> = BTreeMap::new();
-    for m in list {
-        let (Some(slug), Some(name)) = (m["slug"].as_str(), m["name"].as_str()) else { continue };
-        let num = |f: &str| m["evaluations"][f].as_f64().filter(|x| x.is_finite());
-        let key = aa_words(slug, true).join("-");
-        if key.is_empty() {
-            continue;
-        }
-        sc.groups.entry(key.clone()).or_insert_with(|| (clean_name(name), None, BTreeMap::new()));
-        // Its name reaches it too, where the slug says more or less: `step-5` is "Step 5
-        // Preview" and `claude-35-sonnet` "Claude 3.5 Sonnet". Of several, the newest release.
-        // A setting with a slug of its own ("…-reasoning-0925") is the longer one.
-        let named =
-            (m["release_date"].as_str().unwrap_or_default(), std::cmp::Reverse((slug.len(), slug)), key.clone());
-        let e = names.entry(aa_words(&clean_name(name), true).join("-")).or_insert_with(|| named.clone());
-        *e = named.max(e.clone());
-        // Benchmarks are 0..1, though one above 1 is a percentage.
-        let score = |f: &&str| Some((f.to_string(), num(f).map(|x| if x > 1.0 { x / 100.0 } else { x })?));
-        let mut scores: BTreeMap<String, f64> = fields.iter().filter_map(score).collect();
-        if let (Some(tb), Some(sci)) = (scores.get("terminalbench_v4_0"), scores.get("scicode")) {
-            scores.insert(crate::fit::AA_CODING.into(), (tb + sci) / 2.0);
-        }
-        let top = |f: &str| m[f].as_f64().filter(|x| x.is_finite() && *x > 0.0);
-        // The release it is of, "…-preview-09-2025" not the row sold as "…-preview-06-17". Not
-        // its setting, which a row naming one picks (`aa_named`).
-        let w = words(slug);
-        sc.versions.entry(key.clone()).or_default().insert(w[..setting_at(&w)].join("-"));
-        sc.settings.entry(key.clone()).or_default().push(AaEntry {
-            slug: slug.to_string(),
-            release: m["release_date"].as_str().unwrap_or_default().to_string(),
-            setting: aa_setting(slug, name),
-            index: num(crate::fit::AA_INDEX),
-            scores,
-            // To the answer, not to the first token: that one is of the thinking, for the
-            // models that stream it.
-            speed: (top("median_output_tokens_per_second"), top("median_time_to_first_answer_token")),
-        });
-        if let Some(o) = m["model_creator"]["name"].as_str() {
-            sc.org.entry(key).or_insert_with(|| o.to_string());
-        }
-    }
-    for (key, g) in &mut sc.groups {
-        let Some(all) = sc.settings.get(key).and_then(|all| aa_fold(same_release(all))) else { continue };
-        (g.1, g.2) = (all.index, all.scores);
-        sc.page.insert(key.clone(), all.slug);
-        if all.speed != (None, None) {
-            sc.speed.insert(key.clone(), all.speed);
-        }
-    }
-    sc.groups.retain(|_, (_, i, s)| i.is_some() || !s.is_empty());
-    sc.alias =
-        names.into_iter().map(|(name, (.., key))| (name, key)).filter(|(_, k)| sc.groups.contains_key(k)).collect();
-    if sc.groups.is_empty() {
-        return Err("artificial analysis: no benchmark data found".into());
-    }
-    sc.rank();
-    Ok(sc)
-}
-
 // ---------- merge ----------
 
-/// `epoch`: Epoch's models when the scores are another source's, as its names decide which of
-/// two rows keeps its key (`merge_same_ids`) whatever the source: user.json is keyed by them.
-fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data, String> {
+fn merge(models_json: &[u8], ep: &Scores) -> Result<Data, String> {
     // Ordered, so that two refreshes of the same data merge the same way.
     let providers: BTreeMap<String, MdProvider> =
         serde_json::from_slice(models_json).map_err(|e| format!("models.dev: {e}"))?;
@@ -4168,9 +3573,8 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
         });
     }
 
-    let names = epoch.unwrap_or(ep);
     let row_names: HashMap<String, String> = by_key.iter().map(|(k, m)| (k.clone(), m.name.clone())).collect();
-    let known = |k: &str| openrouter.contains_key(k) || names.groups.contains_key(k) || names.alias.contains_key(k);
+    let known = |k: &str| openrouter.contains_key(k) || ep.groups.contains_key(k) || ep.alias.contains_key(k);
     let mut moved = merge_same_ids(&mut by_key, known);
     // A row's page counts the votes of the rows it absorbed.
     for (from, to) in &moved {
@@ -4213,7 +3617,6 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
     for m in &mut models {
         m.aka = absorbed.get(&m.key).into_iter().flatten().map(|r| r.0.clone()).collect();
     }
-    let plain = plain(&models);
     let groups = joined(&models, &absorbed, ep);
     // One row takes a group's name, the others that reach it keep their own: the row most
     // providers sell, then the first by key, whatever order this refresh has them in.
@@ -4283,54 +3686,28 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             or_slug.get(&slug(base)).filter(|s| *s == base)
         };
         m.openrouter = or_id.map(|id| standard(id).unwrap_or(id).clone());
-        let gk = group.map(|(k, _)| k.as_str());
-        // A reasoning model of its own is not the model it is named after, unless Artificial
-        // Analysis lists it as that model's reasoning setting.
-        let reasons = |k: &&str| ep.settings.get(*k).is_some_and(|all| all.iter().any(|e| e.setting.0 == Some(true)));
-        let gk = gk.filter(|k| ep.source != Source::Aa || !own_reasoner(&m.name, &plain) || reasons(k));
-        if let Some(k) = gk
+        if let Some((k, _)) = group
             && let Some((gname, eci, scores)) = ep.groups.get(k)
         {
-            let (mut eci, mut scores) = (*eci, scores.clone());
-            let mut fit = (ep.fit.0.get(k).cloned().unwrap_or_default(), ep.fit.1.get(k).cloned().unwrap_or_default());
-            if ep.source == Source::Aa {
-                m.aa = ep.page.get(k).cloned();
-                (m.tps, m.ttft) = ep.speed.get(k).copied().unwrap_or_default();
-                // A row naming a reasoning setting is that setting, not the best of them
-                // all; one the API did not measure has the model's page and no scores.
-                // Nor is a row that cannot reason its reasoning settings.
-                let plain = |all: &Vec<AaEntry>| {
-                    let off = same_release(all).filter(|e| e.setting.0 != Some(true));
-                    aa_fold(off).filter(|_| !m.reasoning)
-                };
-                if let Some(own) = ep.settings.get(k).and_then(|all| aa_named(&m.name, all).or_else(|| plain(all))) {
-                    fit = crate::fit::scored(Source::Aa, own.index, &own.scores, &ep.pools);
-                    (m.tps, m.ttft) = own.speed;
-                    (eci, scores) = (own.index, own.scores);
-                    if !own.slug.is_empty() {
-                        m.aa = Some(own.slug);
-                    }
-                }
-            }
-            // Scored on no task, a page is all the source adds; its name for the model may be a bare id.
+            // Scored on no task, a page is all Epoch adds; its name for the model may be a bare id.
             if eci.is_none() && scores.is_empty() {
                 continue;
             }
-            // Epoch's names are the cleaner; Artificial Analysis's put the version first.
-            if ep.source == Source::Epoch && group.is_some_and(|g| g.1 && named[g.0].1 == m.key) {
+            // Epoch's names are the cleaner.
+            if group.is_some_and(|g| g.1 && named[g.0].1 == m.key) {
                 m.name = gname.clone();
             }
             if let Some(o) = ep.org.get(k) {
                 m.developer = short_org(o);
             }
-            (m.eci, m.scores) = (eci, scores);
-            (m.fit, m.shown) = fit;
+            (m.eci, m.scores) = (*eci, scores.clone());
+            m.fit = ep.fit.0.get(k).cloned().unwrap_or_default();
+            m.shown = ep.fit.1.get(k).cloned().unwrap_or_default();
         }
     }
     unify_developers(&mut models);
-    let country = epoch.map_or(&ep.country, |e| &e.country);
     for m in &mut models {
-        m.country = country.get(&dev_key(&m.developer)).cloned().unwrap_or_default();
+        m.country = ep.country.get(&dev_key(&m.developer)).cloned().unwrap_or_default();
     }
     models.sort_by(|a, b| {
         b.eci
@@ -4339,7 +3716,7 @@ fn merge(models_json: &[u8], ep: &Scores, epoch: Option<&Scores>) -> Result<Data
             .then(b.release.cmp(&a.release))
             .then_with(|| a.key.cmp(&b.key))
     });
-    let benches = ep.source.benches().into_iter().map(String::from).collect();
+    let benches = crate::fit::task_benches().into_iter().map(String::from).collect();
     Ok(Data { format: FORMAT, fetched: now(), benches, models, ..Default::default() })
 }
 
@@ -4378,7 +3755,6 @@ mod tests {
         assert_eq!(progress(&steps), "1/1", "and are awaited no more");
     }
 
-    /// A row has what the other source measures and its index, by its key, or neither.
     #[test]
     fn a_download_that_fails_once_is_asked_for_again() {
         use std::io::{Read, Write};
@@ -4503,7 +3879,7 @@ mod tests {
         let aged = |mins: u64, arena_missed| Data {
             format: FORMAT,
             fetched: now() - mins * 60,
-            benches: source().benches().into_iter().map(String::from).collect(),
+            benches: crate::fit::task_benches().into_iter().map(String::from).collect(),
             arena_missed,
             ..Default::default()
         };
@@ -4534,22 +3910,6 @@ mod tests {
         crate::store::write_atomic(&p, b"{}").unwrap();
         assert_ne!(written(&p), read, "written again, though with the same bytes");
         std::fs::remove_file(p).unwrap();
-    }
-
-    /// A refresh waits for the one under way, the TUI's as a command's: two at once would each
-    /// download everything and ask every harness, and a command would not read what the first wrote.
-    #[test]
-    fn a_refresh_waits_for_the_one_under_way() {
-        let held = crate::store::lock(&cache_path(Source::Aa)).unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            // Artificial Analysis without a key: it ends as soon as it has the lock, with no download.
-            set_source(Source::Aa);
-            let _ = tx.send(refresh(&Steps::default(), None::<fn(Data)>).err());
-        });
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "it waits while the lock is held");
-        drop(held);
-        assert_eq!(rx.recv().unwrap(), Some(Failure::NoKey));
     }
 
     #[test]
@@ -4603,39 +3963,6 @@ mod tests {
                                  {"row": {"model_name": "Command R+", "rating": 1203.8}}]}"#;
         Arena::parse(rows).unwrap().score(&mut ms);
         assert_eq!(ms[0].arena, Some(1229.0), "the release it is, not the one its name is");
-    }
-
-    #[test]
-    fn a_row_borrows_the_other_sources_columns() {
-        let row = |key: &str| Model { key: key.into(), tps: Some(1.0), ..Default::default() };
-        let mut d = Data { models: vec![row("a"), row("b")], ..Default::default() };
-        let mut a = Model { key: "a".into(), eci: Some(60.0), tps: Some(90.0), ..Default::default() };
-        a.scores.insert("scicode".into(), 0.3);
-        let aa = [Lent::from(&a)];
-        d.borrow(Source::Epoch, Some(aa.into()));
-        assert_eq!((d.models[0].bench("scicode"), d.models[1].bench("scicode")), (Some(0.3), None));
-        let got = |d: &Data, i: usize| (d.models[i].other_index, d.models[i].tps);
-        assert_eq!(got(&d, 0), (Some(60.0), Some(90.0)));
-        assert_eq!(got(&d, 1), (None, None), "a row it does not have: not what the cache kept");
-        assert!(d.lent);
-        d.borrow(Source::Epoch, None);
-        assert_eq!((got(&d, 0), d.lent), ((None, None), false));
-        assert_eq!(d.models[0].bench("scicode"), None);
-    }
-
-    #[test]
-    fn a_refresh_that_could_not_download_the_other_source_lends_its_cache() {
-        // Artificial Analysis down under Epoch: its cache, which the refresh leaves as it was,
-        // keeps its columns, as at the next start, while it is of the same day.
-        let a = Model { key: "a".into(), eci: Some(60.0), tps: Some(90.0), ..Default::default() };
-        let cached = |fetched| Some(LentData { format: FORMAT, fetched, models: vec![Lent::from(&a)] });
-        let keys = |l: Option<Vec<Lent>>| l.map(|l| l.into_iter().map(|l| l.key).collect::<Vec<_>>());
-        let day = MAX_AGE.as_secs();
-        assert_eq!(keys(lending(None, || cached(10 * day), 10 * day + 3600)), Some(vec!["a".to_string()]));
-        assert_eq!(keys(lending(None, || cached(10 * day), 12 * day)), None, "older than the table says");
-        let downloaded = Data { models: vec![Model { key: "b".into(), ..Default::default() }], ..Default::default() };
-        let got = lending(Some(&downloaded), || cached(10 * day), 10 * day);
-        assert_eq!(keys(got), Some(vec!["b".to_string()]), "the download, not the cache");
     }
 
     #[test]
@@ -4876,14 +4203,14 @@ mod tests {
                         "aimlapi": {"models": {"mistralai/mistral-medium-3-5": {"name": "Medium 3.5"}}}}"#;
         let mut ep = Scores::default();
         ep.groups.insert("mistralmedium35".into(), ("Mistral Medium 3.5".into(), Some(141.0), BTreeMap::new()));
-        let d = merge(json, &ep, None).unwrap();
+        let d = merge(json, &ep).unwrap();
         let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.name.as_str(), m.eci, m.offers.len())).collect();
         assert_eq!(rows, [("mistralmedium35", "Mistral Medium 3.5", Some(141.0), 3)]);
         // Nor one vendor's word apart from another's: NVIDIA's name and the plain one are one row.
         let json = br#"{"a": {"models": {"nvidia/nemotron-9-nano-30b": {"name": "NVIDIA Nemotron 9 Nano 30B"}}},
                         "b": {"models": {"nvidia/nemotron-9-nano-30b": {"name": "NVIDIA Nemotron 9 Nano 30B"}}},
                         "c": {"models": {"nemotron-9-nano-30b": {"name": "Nemotron 9 Nano 30B"}}}}"#;
-        let d = merge(json, &ep, None).unwrap();
+        let d = merge(json, &ep).unwrap();
         assert_eq!(d.models.iter().map(|m| m.offers.len()).collect::<Vec<_>>(), [3]);
     }
 
@@ -4994,32 +4321,32 @@ mod tests {
                         "b": {"models": {"gemma-9-it": {"name": "Gemma 9 IT"}}}}"#;
         let mut ep = Scores::default();
         ep.groups.insert("gemma9it".into(), ("Gemma 9 IT".into(), Some(140.0), BTreeMap::new()));
-        let d = merge(json, &ep, None).unwrap();
+        let d = merge(json, &ep).unwrap();
         let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.eci)).collect();
         assert_eq!(rows, [("gemma9", Some(140.0))]);
-        assert!(merge(b"{}", &ep, None).is_err(), "no models is a reply in another shape, not data");
+        assert!(merge(b"{}", &ep).is_err(), "no models is a reply in another shape, not data");
         // The same words in another order, under ids of its own: still one row, and scored.
         let json = br#"{"openrouter": {"models": {"x/opus-9": {"name": "Claude Opus 9"}}},
                         "b": {"models": {"opus9-a": {"name": "Claude 9 Opus"}, "opus9-b": {"name": "Claude 9 Opus"}}}}"#;
         ep.groups.insert("claudeopus9".into(), ("Claude Opus 9".into(), Some(150.0), BTreeMap::new()));
-        let d = merge(json, &ep, None).unwrap();
+        let d = merge(json, &ep).unwrap();
         let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.eci, m.offers.len())).collect();
         assert_eq!(rows, [("claudeopus9", Some(150.0), 3)]);
         // And with the vendor before them, as DigitalOcean writes "Anthropic Claude 5.5 Haiku".
         let json = br#"{"openrouter": {"models": {"x/opus-9": {"name": "Claude Opus 9"}}},
                         "b": {"models": {"opus9-a": {"name": "Anthropic Claude 9 Opus"}}}}"#;
-        let d = merge(json, &ep, None).unwrap();
+        let d = merge(json, &ep).unwrap();
         let rows: Vec<_> = d.models.iter().map(|m| (m.key.as_str(), m.offers.len())).collect();
         assert_eq!(rows, [("claudeopus9", 2)]);
         // Numbers apart are not numbers side by side, and a name without one merges with none.
         let json = br#"{"b": {"models": {"a": {"name": "Grok 4.1 Fast"}, "b": {"name": "Grok 4 Fast 1"},
                         "c": {"name": "Sonar Pro"}, "d": {"name": "Pro Sonar"}}}}"#;
-        assert_eq!(merge(json, &ep, None).unwrap().models.len(), 4);
+        assert_eq!(merge(json, &ep).unwrap().models.len(), 4);
         // An id reaches a group no row has by name, and only then.
         ep.groups.insert("grok9beta".into(), ("Grok 9 Beta".into(), Some(160.0), BTreeMap::new()));
         ep.ids.insert("grok9".into(), "grok9beta".into());
         let eci = |json: &[u8]| {
-            let d = merge(json, &ep, None).unwrap();
+            let d = merge(json, &ep).unwrap();
             d.models.iter().map(|m| (m.key.clone(), m.eci)).collect::<Vec<_>>()
         };
         assert_eq!(eci(br#"{"b": {"models": {"a": {"name": "Grok 9"}}}}"#), [("grok9".into(), Some(160.0))]);
@@ -5061,7 +4388,7 @@ mod tests {
             "mistral-medium-latest": {"name": "Mistral Medium"}, "mistral-medium-2312": {"name": "mistral-medium-2312"},
             "x/llama-9-70b-fp8": {"name": "Llama 9 70B"}, "llama-9-70b-instruct": {"name": "Llama-9-70B-Instruct"},
             "r1-0528": {"name": "R1 0528"}, "qwen-9-plus": {"name": "Qwen 9 Plus Uncensored"}}}}"#;
-        let d = merge(json, &ep, None).unwrap();
+        let d = merge(json, &ep).unwrap();
         let rows: Vec<_> = d.models.iter().map(|m| (m.name.as_str(), m.eci)).collect();
         let named = [
             ("R1 (May 2025)", Some(141.0)),
@@ -5080,7 +4407,7 @@ mod tests {
         let json = br#"{"p": {"models": {"kimi-9-0905": {"name": "Kimi 9 0905"},
                                          "kimi-9-instruct-0905": {"name": "Kimi-9-Instruct-0905"}}},
                         "q": {"models": {"kimi-9-0905": {"name": "Kimi 9 0905"}}}}"#;
-        let d = merge(json, &ep, None).unwrap();
+        let d = merge(json, &ep).unwrap();
         let mut rows: Vec<_> = d.models.iter().map(|m| (m.name.as_str(), m.eci)).collect();
         rows.sort_by_key(|r| r.0);
         assert_eq!(rows, [("Kimi 9 (Sep 2025)", Some(150.0)), ("Kimi-9-Instruct-0905", Some(150.0))]);
@@ -5093,40 +4420,6 @@ mod tests {
         let absorbed =
             HashMap::from([("mistralmedium".to_string(), vec![("mistralmedium9".into(), "Mistral Medium 9".into())])]);
         assert_eq!(joined(&[row], &absorbed, &ep), [Some((&"mistralmedium9".to_string(), true))]);
-
-        // Artificial Analysis names it as a row it absorbed: "Nemotron 3.5 Lightning" in "… 30B A3B".
-        let mut aa = Scores { source: Source::Aa, ..Default::default() };
-        let g = aa_words("Nemotron 3.5 Lightning", true).join("-");
-        aa.groups.insert(g.clone(), ("Nemotron 3.5 Lightning".into(), Some(13.0), BTreeMap::new()));
-        let row =
-            Model { key: "lightning".into(), name: "Nemotron 3.5 Lightning 30B A3B".into(), ..Default::default() };
-        let absorbed =
-            HashMap::from([("lightning".to_string(), vec![("short".into(), "Nemotron 3.5 Lightning".into())])]);
-        assert_eq!(joined(std::slice::from_ref(&row), &absorbed, &aa), [Some((&g, true))]);
-        assert_eq!(joined(&[row], &HashMap::new(), &aa), [None], "its own name alone is not the group's");
-    }
-
-    #[test]
-    fn an_artificial_analysis_release_is_not_the_one_a_row_sells_dated_otherwise() {
-        let api = br#"{"data":[
-            {"slug":"gemini-2-5-flash-lite-preview-09-2025","name":"Gemini 2.5 Flash-Lite Preview (Sep '25)",
-             "evaluations":{"artificial_analysis_intelligence_index":10.4}},
-            {"slug":"command-r-plus-04-2024","name":"Command-R+ (Apr '24)",
-             "evaluations":{"artificial_analysis_intelligence_index":5.3}},
-            {"slug":"grok-4-fast-reasoning","name":"Grok 4 Fast (Reasoning)",
-             "evaluations":{"artificial_analysis_intelligence_index":35}},
-            {"slug":"grok-4-fast","name":"Grok 4 Fast (Non-reasoning)",
-             "evaluations":{"artificial_analysis_intelligence_index":23}}]}"#;
-        let json = br#"{"p": {"models": {
-            "gemini-2.5-flash-lite-preview-06-17": {"name": "Gemini 2.5 Flash Lite Preview"},
-            "command-r-plus-08-2024": {"name": "Command R+"},
-            "grok-4-fast-non-reasoning": {"name": "Grok 4 Fast Non-Reasoning"}}}}"#;
-        let d = merge(json, &parse_aa(api).unwrap(), None).unwrap();
-        let shown = |n: &str| d.models.iter().find(|m| m.name == n).map(|m| (m.eci, m.aa.clone()));
-        assert_eq!(shown("Gemini 2.5 Flash Lite Preview"), Some((None, None)), "the June preview, not September's");
-        assert_eq!(shown("Command R+"), Some((None, None)));
-        let setting = Some((Some(23.0), Some("grok-4-fast".into())));
-        assert_eq!(shown("Grok 4 Fast Non-Reasoning"), setting, "a setting is no release");
     }
 
     #[test]
@@ -5136,7 +4429,7 @@ mod tests {
             "old/gpt-4.1": {"name": "GPT-4.1", "status": "deprecated", "cost": {"input": 1, "output": 1}},
             "shisa/shisa-v2-gpt-4.1": {"name": "Shisa v2 GPT-4.1", "cost": {"input": 0.5, "output": 0.5}}
         }}}"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let offers = |k: &str| d.models.iter().find(|m| m.key == k).map(|m| m.offers.len());
         assert_eq!((offers("gpt41"), offers("shisav2gpt41")), (Some(1), Some(1)));
     }
@@ -5150,7 +4443,7 @@ mod tests {
             "kilo": {"models": {"r/beam-free": {"name": "Beam 1.0"}}},
             "vercel": {"models": {"r/beam-free": {"name": "Beam 1.0"}}}
         }"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         assert_eq!(d.models.len(), 1, "W&B's \"Beam 1.0\" goes by the 501B's page, so is that model");
     }
 
@@ -5161,7 +4454,7 @@ mod tests {
             "b": {"models": {"x-1": {"name": "X 1", "release_date": "2026-04-16"}, "y-1": {"release_date": "2026-01"}}},
             "stealth": {"models": {"x-1": {"name": "X 1", "release_date": "2025-08-26"}, "z-1": {}}}
         }"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let date = |k: &str| d.models.iter().find(|m| m.key == k).unwrap().release.as_str();
         assert_eq!(date("x1"), "2026-04-16", "not the earliest, one reseller's own");
         assert_eq!((date("y1"), date("z1")), ("2026-01", ""), "the earliest on a tie, none when no offer has one");
@@ -5171,7 +4464,7 @@ mod tests {
             "a": {"models": {"gpt-9": {"release_date": "2025-08-26"}, "w-1": {"release_date": "2026-02"}}},
             "b": {"models": {"w-1": {"release_date": "2026-02-10"}}}
         }"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let date = |k: &str| d.models.iter().find(|m| m.key == k).unwrap().release.as_str();
         assert_eq!(date("gpt9"), "2026-04-16", "its developer's own, whatever the resellers say");
         assert_eq!(date("w1"), "2026-02-10", "a month counts for a day in it");
@@ -5186,7 +4479,7 @@ mod tests {
             "c": {"models": {"gpt-9": {"limit": {"context": 1000000}}}},
             "openai": {"models": {"gpt-9": {"limit": {"context": 400000}}}}
         }"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let of = |k: &str| d.models.iter().find(|m| m.key == k).map(|m| (m.context, m.max_output)).unwrap();
         assert_eq!(of("x1"), (400_000, 128_000), "not the most one reseller claims");
         assert_eq!(of("y1"), (200_000, 0), "the smaller on a tie, none when no offer has one");
@@ -5407,7 +4700,7 @@ mod tests {
                 "x/xrouter-7b": {"name": "XRouter 7B"}
             }}
         }"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let row = |k: &str| d.models.iter().find(|m| m.key == k).unwrap();
         assert_eq!(row("glm53").md.as_deref(), Some("zhipuai/glm-5.3"), "the page, not provider/id nor an alias");
         let routers = ["autorouter", "autosmall", "brickv1", "auto"].map(|k| d.models.iter().any(|m| m.key == k));
@@ -5453,9 +4746,13 @@ mod tests {
         let other =
             "<url><loc>https://artificialanalysis.ai/models/comparisons/a-vs-b</loc></url><loc>https://x/y</loc>";
         let xml = xml + other;
-        let pages = sitemap(&xml, Source::Aa);
+        let pages = sitemap(&xml, "artificialanalysis.ai");
         assert_eq!(pages.len(), 17, "the model pages alone");
-        assert!(sitemap("<html>not found</html>", Source::Aa).is_empty());
+        assert!(sitemap("<html>not found</html>", "artificialanalysis.ai").is_empty());
+        let w = |s| aa_words(s, true);
+        assert_eq!(w("gpt-5-mini-high"), w("gpt-5-mini"), "a setting is folded");
+        assert_eq!(w("grok-4-non-reasoning"), w("grok-4"));
+        assert_ne!(w("magistral-medium"), w("magistral"), "a tier is not a setting");
         let index = "<sitemap><loc>https://epoch.ai/sitemap-data-0.xml</loc></sitemap>\
                      <sitemap><loc>https://epoch.ai/sitemap-models-0.xml</loc></sitemap>\
                      <sitemap><loc>https://epoch.ai/sitemap-models-1.xml</loc></sitemap>\
@@ -5623,7 +4920,7 @@ mod tests {
             "ofox": {"models": {"volcengine/doubao-seed-character": {"name": "Seed Character"}}},
             "volcengine": {"models": {"doubao-seed-character-260628": {"name": "Seed Character"}}}
         }"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let devs: Vec<_> = d.models.iter().map(|m| (m.name.as_str(), m.developer.as_str())).collect();
         assert_eq!(devs, [("Seed Character", "ByteDance")], "its developer, not the cloud it is sold on");
     }
@@ -5960,143 +5257,6 @@ mod tests {
     }
 
     #[test]
-    fn aa_folds_reasoning_settings_into_one_model() {
-        let json = br#"{"status":200,"data":[
-            {"slug":"claude-4-5-sonnet","name":"Claude 4.5 Sonnet (Non-reasoning)","model_creator":{"name":"Anthropic"},
-             "median_output_tokens_per_second":80.5,"median_time_to_first_answer_token":1.2,
-             "evaluations":{"artificial_analysis_intelligence_index":50,"terminalbench_v4_0":0.5,"scicode":0.3,"hle":0.2}},
-            {"slug":"claude-4-5-sonnet-thinking","name":"Claude 4.5 Sonnet (Reasoning)","model_creator":{"name":"Anthropic"},
-             "median_output_tokens_per_second":40.0,"median_time_to_first_token_seconds":0.5,
-             "median_time_to_first_answer_token":9.0,
-             "evaluations":{"artificial_analysis_intelligence_index":60,"terminalbench_v4_0":0.7,"scicode":0.5,"hle":0.3}},
-            {"slug":"unscored","name":"Unscored","evaluations":{}}
-        ]}"#;
-        let sc = parse_aa(json).unwrap();
-        let key = aa_words("Claude Sonnet 4.5", true).join("-");
-        let (name, index, scores) = &sc.groups[&key];
-        assert_eq!((name.as_str(), *index), ("Claude 4.5 Sonnet", Some(60.0)), "the best setting's index");
-        assert_eq!((scores[crate::fit::AA_CODING], scores["terminalbench_v4_0"]), (0.6, 0.7), "all of that setting's");
-        let e = |index, scored: usize| AaEntry {
-            index: Some(index),
-            scores: (0..scored).map(|i| (i.to_string(), 0.5)).collect(),
-            ..Default::default()
-        };
-        let most = aa_fold([&e(40.0, 1), &e(39.0, 3)]).unwrap();
-        assert_eq!(
-            (most.index, most.scores.len()),
-            (Some(39.0), 3),
-            "the setting scored on the most, not another's index"
-        );
-        assert_eq!(scores["hle"], 0.3);
-        assert_eq!((sc.page[&key].as_str(), sc.org[&key].as_str()), ("claude-4-5-sonnet", "Anthropic"));
-        assert_eq!(
-            sc.speed[&key],
-            (Some(40.0), Some(9.0)),
-            "the speed of the setting whose index it shows, to its answer"
-        );
-        assert_eq!(sc.groups.len(), 1, "a model with no scores is left out");
-        assert!(parse_aa(br#"{"data":[]}"#).is_err());
-        let w = |s| aa_words(s, true);
-        assert_eq!(w("gpt-5-mini-high"), w("gpt-5-mini"), "a setting is folded");
-        assert_eq!(w("grok-4-non-reasoning"), w("grok-4"));
-        assert_ne!(w("magistral-medium"), w("magistral"), "a tier is not a setting");
-    }
-
-    #[test]
-    fn a_row_naming_a_setting_has_that_settings_scores() {
-        let api = br#"{"data":[
-            {"slug":"grok-4-20","name":"Grok 4.20 (Reasoning)","median_output_tokens_per_second":40.0,
-             "evaluations":{"artificial_analysis_intelligence_index":26,"hle":0.3}},
-            {"slug":"grok-4-20-non-reasoning","name":"Grok 4.20 (Non-reasoning)","median_output_tokens_per_second":90.0,
-             "evaluations":{"artificial_analysis_intelligence_index":14,"hle":0.1}},
-            {"slug":"claude-opus-4-6-adaptive","name":"Claude Opus 4.6 (Adaptive Reasoning, Max Effort)",
-             "evaluations":{"artificial_analysis_intelligence_index":32}},
-            {"slug":"claude-opus-4-6","name":"Claude Opus 4.6 (Non-reasoning, High Effort)",
-             "evaluations":{"artificial_analysis_intelligence_index":26}},
-            {"slug":"gpt-5-3-codex","name":"GPT-5.3 Codex (Xhigh)","evaluations":{"artificial_analysis_intelligence_index":33}},
-            {"slug":"minimax-m3","name":"MiniMax-M3","evaluations":{"artificial_analysis_intelligence_index":29}},
-            {"slug":"phi-4","name":"Phi-4","evaluations":{"artificial_analysis_intelligence_index":6}},
-            {"slug":"kimi-k2","name":"Kimi K2","release_date":"2025-07-11",
-             "evaluations":{"artificial_analysis_intelligence_index":12}},
-            {"slug":"kimi-k2-thinking","name":"Kimi K2 Thinking","release_date":"2025-11-06",
-             "evaluations":{"artificial_analysis_intelligence_index":22}},
-            {"slug":"qwen-9-instruct","name":"Qwen 9 Instruct","evaluations":{"artificial_analysis_intelligence_index":8}},
-            {"slug":"qwen-9-instruct-reasoning","name":"Qwen 9 Instruct (Reasoning)",
-             "evaluations":{"artificial_analysis_intelligence_index":13}},
-            {"slug":"step-5","name":"Step 5 Preview","evaluations":{"artificial_analysis_intelligence_index":43}},
-            {"slug":"v3-2-reasoning-0925","name":"V3.2 Exp (Reasoning)","evaluations":{"artificial_analysis_intelligence_index":16}},
-            {"slug":"v3-2-0925","name":"V3.2 Exp (Non-reasoning)","evaluations":{"artificial_analysis_intelligence_index":13}},
-            {"slug":"y7-reasoning-0925","name":"Y7 Exp (Reasoning)","evaluations":{"artificial_analysis_intelligence_index":16}},
-            {"slug":"y7-v-0925","name":"Y7 Exp (Non-reasoning)","evaluations":{"artificial_analysis_intelligence_index":13}},
-            {"slug":"mistral-medium","name":"Mistral Medium","evaluations":{"artificial_analysis_intelligence_index":5}}
-        ]}"#;
-        let names = [
-            "Grok 4.20",
-            "Grok 4.20 Reasoning",
-            "Grok 4.20 Non-Reasoning",
-            "Claude Opus 4.6",
-            "Claude 4.6 Opus Thinking",
-            "Claude 4.6 Opus Thinking Low",
-            "GPT-5.3 Codex XHigh",
-            "GPT-5.3 Codex Low",
-            "MiniMax M3 Thinking",
-            "Kimi K2",
-            "Kimi K2 Thinking",
-            "Step 5 Preview",
-            "V3.2 Exp",
-            "Y7 Exp",
-            "Phi-4",
-            "Phi-4-reasoning",
-            "Qwen 9 Instruct",
-        ];
-        // The last three cannot reason.
-        let models: String = names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| format!(r#""{n}": {{"name": "{n}", "reasoning": {}}},"#, i < names.len() - 3))
-            .collect();
-        let json = format!(
-            r#"{{"p": {{"models": {{{models} "mistral-medium-latest": {{"name": "Mistral Medium", "reasoning": true}}}}}}}}"#
-        );
-        let d = merge(json.as_bytes(), &parse_aa(api).unwrap(), None).unwrap();
-        let row = |n: &str| d.models.iter().find(|m| m.name == n).unwrap();
-        let index = |n: &str| row(n).eci;
-        assert_eq!(index("Grok 4.20"), Some(26.0), "a row naming no setting has the best of them");
-        assert_eq!((index("Grok 4.20 Reasoning"), index("Grok 4.20 Non-Reasoning")), (Some(26.0), Some(14.0)));
-        let off = row("Grok 4.20 Non-Reasoning");
-        assert_eq!((off.scores["hle"], off.shown["reasoning"], off.tps), (0.1, 10.0, Some(90.0)), "all of it its own");
-        assert_eq!(off.aa.as_deref(), Some("grok-4-20-non-reasoning"), "and its own page");
-        assert!(off.fit["overall"] < row("Grok 4.20").fit["overall"], "ranked on its own index");
-        assert_eq!((index("Claude Opus 4.6"), index("Claude 4.6 Opus Thinking")), (Some(32.0), Some(32.0)));
-        let low = row("Claude 4.6 Opus Thinking Low");
-        let page = Some("claude-opus-4-6-adaptive");
-        assert_eq!((low.eci, low.aa.as_deref()), (None, page), "an effort not measured: no score, the reasoning page");
-        assert!(low.fit.is_empty() && low.scores.is_empty());
-        assert_eq!(index("GPT-5.3 Codex XHigh"), Some(33.0), "the setting is in the entry's name alone");
-        assert_eq!(index("GPT-5.3 Codex Low"), None);
-        assert_eq!(index("MiniMax M3 Thinking"), Some(29.0), "an entry saying no setting is the model's only one");
-        let own = row("Phi-4-reasoning");
-        assert_eq!((index("Phi-4"), own.eci, own.aa.as_deref()), (Some(6.0), None, None), "not one that cannot reason");
-        assert_eq!(
-            (index("Kimi K2"), index("Kimi K2 Thinking")),
-            (Some(12.0), Some(22.0)),
-            "a later release is no setting"
-        );
-        assert_eq!(index("Qwen 9 Instruct"), Some(8.0), "a row that cannot reason is not its reasoning setting");
-        assert_eq!(index("Step 5 Preview"), Some(43.0), "found by the entry's name, where its slug says less");
-        assert_eq!(index("V3.2 Exp"), Some(13.0), "of two entries so named, the shorter slug: no setting");
-        assert_eq!(index("Y7 Exp"), Some(13.0), "the shorter, not the first by its letters");
-        assert_eq!(index("Mistral Medium"), None, "sold as -latest: whichever release that is by now");
-    }
-
-    #[test]
-    fn the_source_is_artificial_analysis_once_its_key_is_there() {
-        assert_eq!(Source::preferred(), Source::Epoch);
-        save_aa_key("k").unwrap();
-        assert_eq!(Source::preferred(), Source::Aa);
-    }
-
-    #[test]
     fn epoch_schema_change_is_an_error() {
         let mut buf = Cursor::new(Vec::new());
         {
@@ -6125,7 +5285,7 @@ mod tests {
                 {"input": 2, "tier": {"type": "context", "size": 32000}}]}},
             "m-6": {"name": "M 6", "cost": {"input": 1, "output": 2, "cache_read": 0.1, "tiers": [
                 {"output": 4, "tier": {"type": "context", "size": 32000}}]}}}}}"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let price = |k: &str| {
             let o = &d.models.iter().find(|m| m.key == k).unwrap().offers[0];
             (o.input, o.output, o.cache_read)
@@ -6149,7 +5309,7 @@ mod tests {
                 {"input": 0.8, "output": 2.4, "reasoning": 8, "tier": {"type": "context", "size": 32000}}]}},
             "s-1": {"name": "S 1", "cost": {"input": 2, "output": 8, "reasoning": 3}},
             "o-1": {"name": "O 1", "cost": {"input": 4, "output": 20, "reasoning": 0}}}}}"#;
-        let d = merge(json, &Scores::default(), None).unwrap();
+        let d = merge(json, &Scores::default()).unwrap();
         let output = |k: &str| d.models.iter().find(|m| m.key == k).unwrap().offers[0].output;
         assert_eq!(output("q1"), 4.0);
         assert_eq!(output("q2"), 8.0, "a tier's own, as the session reaches it");
@@ -6224,12 +5384,6 @@ mod tests {
     fn release_tag_is_the_version_without_its_v() {
         assert_eq!(release_tag(br#"{"tag_name": "v0.2.0"}"#).as_deref(), Some("0.2.0"));
         assert_eq!(release_tag(br#"{"message": "API rate limit exceeded"}"#), None);
-        // What a start learnt outlives a switch to a cache that is older.
-        let mut d = Data { latest: "0.9.0".into(), ..Default::default() };
-        d.keep_latest("0.10.0");
-        d.keep_latest("");
-        d.keep_latest("0.2.0");
-        assert_eq!(d.latest, "0.10.0");
     }
 
     #[test]

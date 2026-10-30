@@ -1,8 +1,7 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
 use crate::app::{
-    COLS, Col, TEXT, col_value, harness_cmd, harness_id, hidden, launch_cmd, meets, on_price, runs_on, shown,
-    stored_bench, unmeasured,
+    COLS, Col, TEXT, col_value, harness_cmd, harness_id, launch_cmd, meets, on_price, runs_on, shown, stored_bench,
 };
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
@@ -99,16 +98,11 @@ struct ModelOut<'a> {
     /// openrouter.ai and huggingface.co that has one, and arena.ai's agent leaderboard when it ranks the model
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<BTreeMap<&'static str, String>>,
-    /// The overall index of `source`: Epoch Capabilities Index, or Artificial Analysis Intelligence Index
+    /// Epoch Capabilities Index
     eci: Option<f64>,
-    /// Where `eci`, `tasks` and `benchmarks` come from: "epoch" or "aa"
-    source: &'static str,
-    /// Task -> the score of its benchmark with the source, 0..100; overall and vision are
-    /// `eci`, value a 0..100 percentile
+    /// Task -> the score of its benchmark, 0..100; overall and vision are `eci`, value a 0..100
+    /// percentile
     tasks: BTreeMap<&'static str, f64>,
-    /// The other source's overall index, when its data is cached too: AAII with "epoch", ECI with "aa"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    other_index: Option<f64>,
     /// Net improvement in real agent sessions, in percent, from arena.ai's Agent leaderboard
     #[serde(skip_serializing_if = "Option::is_none")]
     arena_agent: Option<f64>,
@@ -118,12 +112,6 @@ struct ModelOut<'a> {
     /// Rating from people's votes on web development, from arena.ai's WebDev leaderboard
     #[serde(skip_serializing_if = "Option::is_none")]
     arena_webdev: Option<f64>,
-    /// Output tokens per second, median, from Artificial Analysis
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tokens_per_second: Option<f64>,
-    /// Seconds to the first answer token, after any thinking, median, from Artificial Analysis
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ttft_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,7 +153,6 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
         url: links.first().map(|(_, url)| url.clone()),
         pages: full.then(|| links.into_iter().collect()),
         eci: m.eci,
-        source: crate::data::source().id(),
         // As the table shows it, with the benchmark picked in the task's column.
         tasks: TASKS
             .iter()
@@ -174,12 +161,9 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
                 Some((t.name, (score * 10.0).round() / 10.0))
             })
             .collect(),
-        other_index: m.other_index,
         arena_agent: m.arena,
         arena_chat: m.arena_more.get(crate::data::ARENA_BOARDS[0].0).copied(),
         arena_webdev: m.arena_more.get(crate::data::ARENA_BOARDS[1].0).copied(),
-        tokens_per_second: m.tps,
-        ttft_seconds: m.ttft,
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
     }
@@ -194,11 +178,10 @@ fn print_json<T: Serialize>(v: &T) -> Result {
     Ok(())
 }
 
-/// The TUI's columns, so both show the same thing: Model, Dev, every numeric column the
-/// source measures, Via. A column shows the benchmark picked in its dropdown, as the bounds go by it.
+/// The TUI's columns, so both show the same thing: Model, Dev, every numeric column, Via. A
+/// column shows the benchmark picked in its dropdown, as the bounds go by it.
 fn table(models: &[&Model], store: &Store, any: bool) {
-    let cols: Vec<(usize, &Col)> =
-        COLS.iter().enumerate().filter(|(i, _)| !hidden(i + TEXT) && !unmeasured(i + TEXT)).collect();
+    let cols: Vec<(usize, &Col)> = COLS.iter().enumerate().collect();
     let cell = |m: &Model, &(i, _): &(usize, &Col)| {
         let bench = stored_bench(store, i + TEXT);
         col_value(m, i, store).map_or("-".into(), |v| shown(i, v, on_price(i) && m.listed(), bench))
@@ -764,7 +747,6 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
     }
     println!();
     let table = compare_rows(&models, data.any_available(), &|_| None, store);
-    // Artificial Analysis names its benchmarks at length.
     let lw = table.iter().map(|r| r.label.chars().count() + 1).max().unwrap_or(0).max(22);
     let mut section = "";
     for row in table {
@@ -784,7 +766,7 @@ pub fn compare(data: &Data, store: &Store, qs: &[String], json: bool) -> Result 
 
 /// The page `open --on` asks for: the first, as `o` then `enter` in the TUI, when it names no
 /// site, else that of the site `on` starts the name of, in any case; "aa" is Artificial
-/// Analysis, as in `--source`, and "hf" Hugging Face. Err says which sites have the model.
+/// Analysis and "hf" Hugging Face. Err says which sites have the model.
 fn page(m: &Model, on: Option<&str>) -> std::result::Result<String, String> {
     let Some(on) = on else { return m.url() };
     let links = m.links();
@@ -1461,9 +1443,6 @@ mod tests {
         assert_eq!((line(&store), why(&store)), (vec!["gpt55".to_string()], Some("Coding≥80".into())));
         assert_eq!(listed(&store, &bound("coding", 50.0, f64::INFINITY)).len(), 2, "--min coding replaces it");
         assert_eq!(listed(&store, &bound("coding", f64::NEG_INFINITY, 100.0)), ["gpt55"], "--max coding does not");
-        // One on a column with no values from the source in use excludes none, kept for when it has.
-        store.bounds = vec![crate::store::Bound { col: "tps".into(), min: Some(1.0), max: None }];
-        assert_eq!((line(&store).len(), crate::view::bounds_said(&store).count()), (2, 0));
         (store.bounds, store.price_pick) = (vec![], Some(0));
         assert_eq!(crate::view::picks_said(&store), ["Price=free"]);
     }
@@ -1804,7 +1783,6 @@ mod tests {
             "reasoning",
             "release",
             "selected",
-            "source",
             "tasks",
             "tool_call",
             "url",

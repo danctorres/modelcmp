@@ -44,15 +44,13 @@ use std::time::{Duration, Instant};
 /// its outcome.
 enum Refreshed {
     Early(Data),
-    Done(Result<Data, data::Failure>, crate::app::Tools),
+    Done(Result<Data, String>, crate::app::Tools),
 }
 
 /// A refresh under way: where its result comes, and its steps for the frame's count.
 type Refresh = (Receiver<Refreshed>, data::Steps);
 
-/// `ask`: the first start, with no `--source` and no key for Artificial Analysis: open on its
-/// key prompt, with no data until a key is typed or skipped.
-pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
+pub fn run(mut store: Store, force: bool) -> Result<(), String> {
     // Run by an agent or a script there is no terminal to draw on: say so before any download or
     // harness is started, not after.
     if !std::io::stdout().is_terminal() {
@@ -61,8 +59,7 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // The first start of a version, so the first ever or the first after an upgrade, plays the
     // intro. Noted now, while the store is fresh from the file.
     let new = store.seen != env!("CARGO_PKG_VERSION");
-    // Not before the first start's question is answered, or quitting there would skip it for good.
-    if new && !ask {
+    if new {
         let _lock = crate::store::lock(&crate::store::path());
         store.reload_if_changed();
         store.seen = env!("CARGO_PKG_VERSION").into();
@@ -75,23 +72,16 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
     // Start from the cache however old, or with no cache from an empty table, and download behind
     // the intro and the table (`--refresh` too), so nothing waits for it and a failure shows in
     // the frame.
-    let mut app = App::new((!ask).then(data::load_cache).flatten().unwrap_or_default(), store);
+    let mut app = App::new(data::load_cache().unwrap_or_default(), store);
     app.dir = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
     (app.term_bg, app.term_ansi) = (term_bg, term_ansi);
-    let (mut rx, mut pre) = (None, None);
-    if ask {
-        app.first_start = true;
-        app.input = Input::key(false, false);
-        // The key is not answered yet: the default's download starts under the intro, for a skipped
-        // key to take up, unless the CLI has left a cache that will do.
-        pre = (force || data::load_cache().is_none_or(|d| d.stale() || d.of_another_day())).then(spawn_refresh);
-    } else if (force || app.data.stale() || app.data.of_another_day()) && app.refresh().is_some() {
+    let mut rx = None;
+    if (force || app.data.stale() || app.data.of_another_day()) && app.refresh().is_some() {
         rx = Some(spawn_refresh());
     }
     // After the refresh starts, which clears the status: it is your marks and notes that are at
-    // stake. The first start keeps it until its key prompt closes, which has the status bar.
-    // What the last refresh said is the frame's `⚠` and `!`'s.
-    if !ask && let Some(w) = app.store.warning.take() {
+    // stake. What the last refresh said is the frame's `⚠` and `!`'s.
+    if let Some(w) = app.store.warning.take() {
         app.report(Err(w));
     }
     // ratatui's setup (raw mode, the alternate screen, its panic hook), and a terminal of our own
@@ -111,8 +101,8 @@ pub fn run(mut store: Store, force: bool, ask: bool) -> Result<(), String> {
         hook(info);
     }));
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
-    let res = if ask || new { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
-        .and_then(|()| event_loop(&mut app, &mut terminal, rx, pre));
+    let res = if new { intro(&app, &mut terminal).map_err(|e| e.to_string()) } else { Ok(()) }
+        .and_then(|()| event_loop(&mut app, &mut terminal, rx));
     restore();
     let Some((cmds, unsaved)) = res? else { return Ok(()) };
     // On the terminal's own screen, where the upgrade's output shows.
@@ -332,11 +322,6 @@ const SMALL: [&str; 4] = [
 const LOGOS: [&[&str]; 2] = [&LOGO, &SMALL];
 /// A wordmark's corner, the rows under it that the tagline and the version take, and its rows.
 type At = (u16, u16, u16, &'static [&'static str]);
-/// A link a click opens: blue and underlined, as on a web page.
-fn link() -> Style {
-    fg(Color::Blue).add_modifier(Modifier::UNDERLINED)
-}
-
 /// Under the wordmark, after a blank row.
 const TAGLINE: &str = "the right AI model for each agent, automatically";
 
@@ -355,94 +340,6 @@ fn logo_at(logo: &'static [&'static str], a: Rect, below: u16) -> Option<At> {
         _ => 3,
     };
     Some((a.x + (a.width - w) / 2, a.y + (a.height - rows - under - below) / 2, under, logo))
-}
-
-/// The question of the key's box, under the wordmark on the first start and over the panel on `K`.
-const KEY_TITLE: &str = "Artificial Analysis API key?";
-/// What the key is typed after there, on line `KEY_ROW` of the box.
-const KEY_ASK: &str = " key: ";
-const KEY_ROW: usize = 4;
-/// How many lines `key_lines` has.
-const KEY_LINES: usize = 6;
-
-/// The lines of the key's box: what the key gives and where it is had, a link (`hit`), the
-/// key being typed, and the keys, as under every list (`key_line`). The third line and what esc
-/// does are the prompt's: skipping it on the first start, leaving it on `K`, and for a key turned
-/// down, what becomes of that.
-fn key_lines(app: &App) -> Vec<Line<'static>> {
-    let (typed, wrong, asked) = match &app.input {
-        Input::Key { text, wrong, asked, .. } => (text.chars().count(), *wrong, *asked),
-        _ => (0, false, false),
-    };
-    let site = Span::styled(data::Source::Aa.site(), link());
-    let what = Line::from(vec![Span::raw(" enter your free "), site, Span::raw(" API key ")]);
-    // Hidden from anyone looking at the screen.
-    // Dots, not `*`: a font with ligatures joins three of those and lifts the middle one.
-    // ponytail: a key longer than the box shows no more dots; scroll it if keys grow that long.
-    let dots = "•".repeat(typed.min(what.width() - KEY_ASK.len() - 1));
-    let (third, esc) = match (wrong, asked) {
-        (true, _) => (
-            Line::styled(format!(" rejected, try another or set {} ", data::AA_KEY_ENV), fg(BAD)),
-            if app.old_key.is_some() { "esc keeps the old key" } else { "esc removes the key" },
-        ),
-        (false, true) => (Line::from(format!(" or set it in {} ", data::AA_KEY_ENV)), "esc cancels"),
-        // K is no key of this box: said in the sentence, not with the hints under it.
-        (false, false) => (
-            Line::from(vec![
-                Span::raw(" or skip it for Epoch AI and add it later with "),
-                Span::styled("K", fg(KEY).add_modifier(BOLD)),
-                Span::raw(" "),
-            ]),
-            "esc skips",
-        ),
-    };
-    vec![
-        what,
-        Line::from(" for newer benchmarks, covering the most models "),
-        third,
-        Line::default(),
-        Line::from(format!("{KEY_ASK}{dots}")),
-        key_line(&format!(" enter saves · {esc} · ctrl+c quits"), &BTreeMap::new()),
-    ]
-}
-
-/// Where the key's box is centred: under the wordmark on the first start (`splash`), else over
-/// the panel. None with no key being asked for.
-fn key_box(app: &App, area: Rect) -> Option<Rect> {
-    if !matches!(app.input, Input::Key { .. }) {
-        return None;
-    }
-    Some(splash(app, area).map_or(Rect { y: area.y + 2, height: area.height.saturating_sub(3), ..area }, |s| s.1))
-}
-
-/// On the first start's screen, on the rows over the status bar: keys to try once the table is
-/// up, each with what it does, as the status bar's hints.
-fn try_lines(bound: &BTreeMap<char, char>) -> [Line<'static>; 3] {
-    [
-        Line::from("on the next screen, try").style(fg(MUTED)),
-        key_line("o open a model's page · x run it in a harness", bound),
-        key_line("f favorite a model · R get recommendations · ? all keys", bound),
-    ]
-}
-
-/// The first start asks for Artificial Analysis's API key under the wordmark, where the intro
-/// leaves it: where the wordmark is (`logo_at`), and the rows under it that the question's box is
-/// centred in. None once the key is typed or skipped, and on a screen too small for both, which
-/// asks over the table. With four more rows to spare they are kept under the box, for
-/// `try_lines` at the bottom.
-fn splash(app: &App, area: Rect) -> Option<(At, Rect)> {
-    if !app.first_start || !matches!(app.input, Input::Key { .. }) {
-        return None;
-    }
-    // Above the status bar.
-    let body = Rect { height: area.height.checked_sub(1)?, ..area };
-    // A blank row, then the box: its border and its lines.
-    let ask = KEY_LINES as u16 + 3;
-    // Not at the cost of the tagline and the version.
-    let at = LOGOS
-        .into_iter()
-        .find_map(|l| logo_at(l, body, ask + 4).filter(|at| at.2 == 3).or_else(|| logo_at(l, body, ask)))?;
-    Some((at, Rect { y: at.1 + at.3.len() as u16 + at.2 + 1, height: ask - 1, ..body }))
 }
 
 /// The wordmark with its corner at `(x, y)`, each cell in the style its column and row give, and
@@ -473,8 +370,7 @@ fn wordmark(buf: &mut Buffer, a: Rect, (x, y, under, logo): At, typed: usize, st
 /// diagonal, each cell running red to blue before it settles on the accent, the tagline typing in
 /// under it as the rainbow passes and the version showing under that once it is whole. Any key
 /// skips it, and is not passed on. A window too small for the wordmark has the small one, and one
-/// too small for that skips it too. On the first start it stops above the question that follows
-/// (`splash`), and stays.
+/// too small for that skips it too.
 fn intro(app: &App, terminal: &mut Term) -> std::io::Result<()> {
     // The hue wheel up to the accent, so the last step into magenta is a small one.
     const RAINBOW: [Color; 5] = [Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue];
@@ -490,12 +386,10 @@ fn intro(app: &App, terminal: &mut Term) -> std::io::Result<()> {
     let mut t = 1;
     loop {
         // `end`: the last frame, 0 with no room for a wordmark.
-        let (mut end, mut landed, mut asks) = (0, false, false);
+        let (mut end, mut landed) = (0, false);
         terminal.draw(|f| {
             let a = f.area();
-            let at = splash(app, a).map(|s| s.0);
-            asks = at.is_some();
-            let Some((x, y, under, logo)) = at.or_else(|| LOGOS.into_iter().find_map(|l| logo_at(l, a, 0))) else {
+            let Some((x, y, under, logo)) = LOGOS.into_iter().find_map(|l| logo_at(l, a, 0)) else {
                 return;
             };
             let (w, rows) = (logo[0].chars().count(), logo.len());
@@ -529,8 +423,8 @@ fn intro(app: &App, terminal: &mut Term) -> std::io::Result<()> {
         // A key skips it; a pointer move or a resize does not, nor does it cut the frame short.
         // Past the deadline the wait is zero, so what is still queued is read and a key behind
         // a burst of pointer moves is not left for the table. The whole wordmark is held before
-        // the table takes its place; the first start's question shows under it at once.
-        let until = Instant::now() + Duration::from_millis(if t >= end && !asks { 1100 } else { 25 });
+        // the table takes its place.
+        let until = Instant::now() + Duration::from_millis(if t >= end { 1100 } else { 25 });
         loop {
             if !event::poll(until.saturating_duration_since(Instant::now()))? {
                 break;
@@ -560,16 +454,10 @@ fn spawn_refresh() -> Refresh {
 }
 
 /// Returns at a quit, or with the commands of an upgrade to run once the screen is restored.
-/// `pre`: the first start's download for the default source, held until a source is picked.
 /// What a quit for an upgrade leaves to do: its commands, and a save that failed, said first.
 type Upgrading = (Vec<Vec<String>>, Option<String>);
 
-fn event_loop(
-    app: &mut App,
-    terminal: &mut Term,
-    mut rx: Option<Refresh>,
-    mut pre: Option<Refresh>,
-) -> Result<Option<Upgrading>, String> {
+fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Result<Option<Upgrading>, String> {
     let mut dirty = true;
     // The sizes of downloads Hugging Face is asked for (`Effect::Size`), and how many are awaited.
     let (size_tx, size_rx) = mpsc::channel::<(String, Download)>();
@@ -599,7 +487,7 @@ fn event_loop(
     };
     // The newest release, asked for by a start that refreshes nothing: a refresh asks for it too,
     // but only once a day.
-    let mut newest = (rx.is_none() && pre.is_none()).then(|| {
+    let mut newest = rx.is_none().then(|| {
         let (tx, newest) = mpsc::channel();
         std::thread::spawn(move || data::newest_release().map(|v| tx.send(v)));
         newest
@@ -623,10 +511,7 @@ fn event_loop(
             Some(Refreshed::Early(d)) => app.set_data(d),
             Some(Refreshed::Done(res, tools)) => {
                 rx = None;
-                // The key did not work: Epoch AI's, from its cache or a download.
-                if app.refreshed(res, tools) && app.switched(data::load_cache()) {
-                    rx = Some(spawn_refresh());
-                }
+                app.refreshed(res, tools);
             }
             None => {}
         }
@@ -789,23 +674,6 @@ fn event_loop(
                         sizing += 1;
                         ask_size(key, base);
                     }
-                    Some(Effect::Source(src)) => {
-                        // The first start's question is answered: not asked again. Saved now, for
-                        // its error to come before the start's warning, which closing it says.
-                        if app.store.seen.is_empty() {
-                            app.store.seen = env!("CARGO_PKG_VERSION").into();
-                            if let Err(e) = app.store.save() {
-                                app.report(Err(format!("could not save: {e}")));
-                            }
-                        }
-                        // A refresh under way is for the other source: drop it, or it lands here.
-                        // The first start's is for the default: skipped to, it is the one to wait for.
-                        // One that ended before that is taken up all the same, for its warning.
-                        let pre = pre.take().filter(|_| src == data::Source::default());
-                        let fetch = app.switched(data::load_cache());
-                        rx = pre.or_else(|| fetch.then(spawn_refresh));
-                        app.refreshing = rx.is_some();
-                    }
                     // The app applies its own chooser items before they get here.
                     Some(
                         Effect::Save
@@ -820,15 +688,12 @@ fn event_loop(
                     )
                     | None => {}
                 }
-                if matches!(app.input, Input::None) {
-                    // The first start's download is for its question: closed without a pick of
-                    // the default, a later pick would put its old result over newer data.
-                    pre = None;
-                    // The start's warning, kept while the question was open, is said once it
-                    // closes, however it does, after an error the closing gave.
-                    if let Some(w) = app.store.warning.take() {
-                        app.report(Err(if app.failed { format!("{} · {w}", app.status) } else { w }));
-                    }
+                // The start's warning, kept while a question was open, is said once it closes,
+                // however it does, after an error the closing gave.
+                if matches!(app.input, Input::None)
+                    && let Some(w) = app.store.warning.take()
+                {
+                    app.report(Err(if app.failed { format!("{} · {w}", app.status) } else { w }));
                 }
             }
             dirty = true;
@@ -965,19 +830,6 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         Mouse::Cols(d) => Mouse::Across(d * across(app)),
         a => a,
     });
-    // The key's box has one thing to click, its link, on its first line. A click elsewhere in it
-    // does nothing, as in a list's box, and one outside it leaves `K`'s.
-    if let Some(within) = key_box(app, area) {
-        let lines = key_lines(app);
-        let rect = overlay_rect(within, KEY_TITLE, &lines);
-        let x = rect.x + 2 + lines[0].spans[0].width() as u16;
-        let link = m.row == rect.y + 1 && (x..x + lines[0].spans[1].width() as u16).contains(&m.column);
-        return match link && !mark && !extend {
-            true => Some(Mouse::Link),
-            false if rect.contains(pos) => None,
-            false => Some(Mouse::Outside),
-        };
-    }
     let head = head(app);
     // A tab on the first two lines, or the edge left of it, over recommend too.
     let on_tabs = m.row <= area.y + 1 && !mark && !pick && !extend;
@@ -1310,13 +1162,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if stale(app) {
                 view.push("r refresh");
             }
-            // A missing key is in `!` too, but `K` says it.
             if app.data.warning.is_some() {
                 view.push("! issues");
-            }
-            // Epoch AI is what no key, or one turned down, leaves.
-            if data::source() == data::Source::Epoch {
-                view.push("K api key");
             }
             let mut back = vec![];
             // Where esc goes back from, as in the overlays.
@@ -1901,11 +1748,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     // The tabs have the first two lines, the frame the rest down to the status bar.
     let body = Rect { y: area.y + 2, height: area.height - 3, ..area };
     let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
-    // The first start asks its question under the wordmark, settled as the intro leaves it.
-    let splash = splash(app, area);
-    if let Some((at, _)) = splash {
-        wordmark(f.buffer_mut(), area, at, TAGLINE.len(), |_, _| fg(ACCENT).add_modifier(BOLD));
-    } else {
+    {
         // The refresh state is always in view: under way, failed, or how old the data is.
         let age = format!("{} ", data_age(&app.data));
         let version = match app.data.update() {
@@ -1913,7 +1756,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 .style(fg(Color::Yellow)),
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         };
-        let source = format!(" models.dev + {} · ", data::source().label());
+        let source = " models.dev + Epoch AI · ";
         // Where the count and what it waits for would run over the version, the count goes alone.
         let room = usize::from(body.width).saturating_sub(2 + version.width() + source.chars().count());
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
@@ -1926,10 +1769,6 @@ fn draw(app: &mut App, f: &mut Frame) {
             // Until a refresh without any: `!` lists them.
             (_, _, old) if app.data.warning.is_some() => {
                 (format!("⚠ refresh had issues · {age}"), if old { BAD } else { Color::Yellow })
-            }
-            // Epoch AI with no key to choose the other source by: `!` says `K` takes one.
-            (_, _, old) if data::keyless() => {
-                (format!("⚠ no {} key · {age}", data::Source::Aa.label()), if old { BAD } else { Color::Yellow })
             }
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
@@ -2030,24 +1869,6 @@ fn draw(app: &mut App, f: &mut Frame) {
         let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
         let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
         overlay(buf, body, &title, lines, &mut 0, (0, 0, 0..0));
-    }
-    // The key's question, under the wordmark on the first start, else over the panel.
-    // The key is typed in it, on its own line.
-    // ponytail: a screen under the box's 8 rows or 52 columns cuts it, the key's line or the cursor
-    // with it; scroll it as the status bar did if such screens matter.
-    if let (Some(within), Input::Key { text, cur, .. }) = (key_box(app, area), &app.input) {
-        let lines = key_lines(app);
-        let rect = overlay_rect(within, KEY_TITLE, &lines);
-        let x = rect.x + 2 + lines[KEY_ROW].width().min(KEY_ASK.len() + text[..*cur].chars().count()) as u16;
-        overlay(buf, within, KEY_TITLE, lines, &mut 0, (0, 0, 0..0));
-        cursor = Some((x, rect.y + 1 + KEY_ROW as u16));
-        // At the bottom of the first start's screen, with a blank row at least under the box.
-        if splash.is_some() && within.bottom() + 3 < bar.y {
-            for (hint, y) in try_lines(&app.store.keys).iter().zip(bar.y - 3..) {
-                let w = hint.width() as u16;
-                buf.set_line(within.x + within.width.saturating_sub(w) / 2, y, hint, w);
-            }
-        }
     }
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
@@ -2922,7 +2743,6 @@ fn mode(app: &App) -> (&'static str, Color) {
     match (&app.input, &app.view) {
         (Input::Search { .. }, _) => ("SEARCH", Color::Blue),
         (Input::Note { .. }, _) => ("NOTE", Color::Blue),
-        (Input::Key { .. }, _) => ("KEY", Color::Blue),
         (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
         (Input::Cap { .. }, _) => ("TIER", Color::Yellow),
         (Input::Task(_), _) => ("TASK", Color::Yellow),
@@ -2958,8 +2778,7 @@ fn mode(app: &App) -> (&'static str, Color) {
     }
 }
 
-/// Returns the cursor column while a search, note or bound is being typed. The key is typed in
-/// its box (`key_box`), not here.
+/// Returns the cursor column while a search, note or bound is being typed.
 fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let width = area.width as usize;
     let (mode, color) = mode(app);
@@ -2973,7 +2792,6 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             | Input::Unexclude
             | Input::Reset
             | Input::DeleteTask(_)
-            | Input::Key { .. }
             | Input::Choose { list: List { typing: false, .. }, .. }
     ) && app.open_list().is_none_or(|l| l.query.is_empty())
     {
@@ -3006,7 +2824,6 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         | Input::Unexclude
         | Input::Reset
         | Input::DeleteTask(_)
-        | Input::Key { .. }
         | Input::Bind { .. }
         // Written on its header or its row (`recommend`).
         | Input::Cap { .. }
@@ -3798,8 +3615,6 @@ const TIER_LEGEND: &str = "the best model for each task at each price, or ★ yo
 /// What recommend leaves out, and how to pick it anyway.
 const UNRATED: &str =
     "models without a benchmark score aren't recommended, but you can still pick one with d on a tier.";
-/// After `UNRATED` on Epoch AI with no key for the other source.
-const MORE_RATED: &str = "K adds Artificial Analysis, which scores more models.";
 
 /// A row per task, the built-in ones and then your own, with a box per tier for the model it
 /// picks, as `--tier` does, wrapped to `width`; under the grid, what the cursor's task is, when
@@ -3848,10 +3663,8 @@ fn recommend(
             .into_iter()
             .map(|l| l.style(fg(MUTED))),
     );
-    let keyless = data::keyless();
     // The keys they name as they are bound now.
-    let mut warn: Vec<Line> = words(&UNRATED.replace(" d ", &format!(" {} ", app.key_of('d'))));
-    warn.extend(if keyless { words(&MORE_RATED.replace("K ", &format!("{} ", app.key_of('K')))) } else { vec![] });
+    let warn: Vec<Line> = words(&UNRATED.replace(" d ", &format!(" {} ", app.key_of('d'))));
     let warning = vec![Span::styled("warning: ", fg(Color::Yellow))];
     v.extend(wrapped(warning, warn, &space, text).into_iter().map(|l| l.style(fg(MUTED))));
     v.push(Line::default());
@@ -4814,66 +4627,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_first_start_asks_under_the_wordmark() {
-        let screen = |a: &mut App, w: u16, h: u16| {
-            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-            term.draw(|f| draw(a, f)).unwrap();
-            let buf = term.backend().buffer();
-            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
-        };
-        let row = |lines: &[String], pat: &str| lines.iter().position(|l| l.contains(pat)).map(|y| y as u16);
-        let mut a = app();
-        a.first_start = true;
-        a.input = Input::key(false, false);
-        a.store.warning = Some("user.json is not valid".into());
-        let lines = screen(&mut a, 120, 30);
-        assert!(lines[29].contains("user.json is not valid"), "the start's warning shows under it");
-        assert_eq!(row(&lines, "Model"), None, "no table behind the question");
-        let (tagline, ask) = (row(&lines, TAGLINE).unwrap(), row(&lines, KEY_TITLE).unwrap());
-        assert!(tagline < ask, "the question is under the wordmark");
-        assert_eq!(row(&lines, "ctrl+c quits"), Some(ask + KEY_LINES as u16), "every line of it");
-        let tries = row(&lines, "on the next screen, try");
-        assert_eq!(tries, Some(26), "keys to try, at the bottom");
-        assert_eq!(row(&lines, "o open a model's page · x run it in a harness"), tries.map(|y| y + 1));
-        assert_eq!(row(&lines, "f favorite a model · R get recommendations · ? all keys"), tries.map(|y| y + 2));
-        assert!(
-            try_lines(&BTreeMap::new()).iter().all(|l| l.width() <= LOGO[0].chars().count()),
-            "as wide as the wordmark at most"
-        );
-        let narrow = screen(&mut a, 60, 30);
-        let small = row(&narrow, SMALL[1]);
-        assert!(small.is_some() && small < row(&narrow, KEY_TITLE), "the small wordmark in a narrow window");
-        assert_eq!(row(&narrow, "Model"), None, "and no table there either");
-        let short = screen(&mut a, 120, 24);
-        assert!(row(&short, TAGLINE).is_some() && row(&short, "next screen").is_none(), "the question alone");
-        // The key is typed in the box, hidden, and not in the status bar.
-        a.input = Input::Key { text: "abc".into(), cur: 3, wrong: false, asked: false };
-        let lines = screen(&mut a, 120, 30);
-        assert_eq!(row(&lines, "key: •••"), Some(ask + 1 + KEY_ROW as u16));
-        assert!(!lines[29].contains("API key"), "{}", lines[29]);
-        // A click on the box's link opens where a key is made, and one beside it does nothing.
-        let at = lines[usize::from(ask) + 1].find("artificialanalysis.ai").unwrap();
-        let column = lines[usize::from(ask) + 1][..at].chars().count() as u16;
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row: ask + 1,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), click), Some(Mouse::Link));
-        assert_eq!(hit(&a, Rect::new(0, 0, 120, 30), MouseEvent { column: column - 1, ..click }), None);
-        assert_eq!(a.mouse(Mouse::Link), Some(Effect::Open(data::AA_KEY_URL.into())));
-        assert!(matches!(a.input, Input::Key { .. }), "the prompt stays for the key");
-        // Too small for both: over the table, as a rejected key is asked for later.
-        let lines = screen(&mut a, 120, 9);
-        assert!(row(&lines, "Model").is_some() && row(&lines, TAGLINE).is_none());
-        assert!(row(&screen(&mut a, 120, 14), SMALL[1]).is_some(), "the small wordmark where the big one is too tall");
-        // The key could not be saved: the table, where the status bar says so.
-        a.input = Input::None;
-        assert_eq!(row(&screen(&mut a, 120, 30), TAGLINE), None);
-    }
-
     fn model(name: &str, dev: &str, eci: Option<f64>, price: f64) -> Model {
         Model {
             key: name.into(),
@@ -4912,7 +4665,7 @@ mod tests {
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
         assert!(
-            lines[3].contains("d dropdown  % no cache  r refresh  K api key  │  enter details  x launch  H harness"),
+            lines[3].contains("d dropdown  % no cache  r refresh  │  enter details  x launch  H harness"),
             "{}",
             lines[3]
         );
@@ -4920,7 +4673,7 @@ mod tests {
         data::set_cached(0.0);
         let (_, lines) = render(&mut a, 200, 4);
         assert!(
-            lines[3].contains("s sort  d dropdown  % 90% cached  K api key  │"),
+            lines[3].contains("s sort  d dropdown  % 90% cached  │"),
             "off the default, the way back: {}",
             lines[3]
         );
@@ -5502,11 +5255,11 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 229, 6);
-        let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI AAII Arena ▾ Coding ▾ Agentic ▾ \
-                      Reason ▾ Value │ Tok/s TTFT │ Via ▾ Notes";
+        let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Arena ▾ Coding ▾ Agentic ▾ \
+                      Reason ▾ Value │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
-        assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);
+        assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 3, "{}", lines[1]);
         let sep = cell(&lines[0], "│");
         assert_eq!((cell(&lines[1], "┼"), cell(&lines[3], "│")), (sep, sep), "the group lines run straight down");
         assert_eq!(buf[(sep, 3)].fg, MUTED, "and are muted");
@@ -5521,15 +5274,11 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  | columns  / filter  s sort  K api key  │  enter details  x launch  H harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
+                "← → column  │  | columns  / filter  s sort  │  enter details  x launch  H harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
             ),
             "{}",
             lines[5]
         );
-        // The key's hint goes once Artificial Analysis is the source.
-        data::set_source(data::Source::Aa);
-        assert!(!hints(&a, 200).contains(&"K api key"));
-        data::set_source(data::Source::Epoch);
         assert_eq!(buf[(cell(&lines[5], "│"), 5)].fg, MUTED, "groups are split by a muted rule");
         assert!((0..200).all(|x| buf[(x, 2)].bg == CURSOR), "row 0 is under the cursor");
         assert_eq!(buf[(cell(&lines[2], "anthropic"), 2)].fg, dev_color("anthropic"), "and keeps its colours");
@@ -5554,7 +5303,7 @@ mod tests {
             "the blended price takes its level's colour"
         );
         // A task shows its own scores, so its columns offer no dropdown while one is picked. Arena's does.
-        a.col = ECI + 3;
+        a.col = ECI + 2;
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 7 && lines[5].contains("d dropdown"), "{lines:?}");
         assert!(a.col_about(a.col).ends_with("blank = not tested, d for other benchmarks"), "what its dropdown is for");
@@ -5835,40 +5584,6 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_the_key_prompts_link_opens_where_a_key_is_made() {
-        let mut a = app();
-        a.input = Input::key(false, true);
-        let (w, h) = (120, 20);
-        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-        term.draw(|f| draw(&mut a, f)).unwrap();
-        let buf = term.backend().buffer();
-        let lines: Vec<String> = (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        // `K` asks in a box in the middle, as the first start does, not in the status bar.
-        let y = lines.iter().position(|l| l.contains("artificialanalysis.ai")).unwrap();
-        assert!(y > 2 && y < 15, "in the middle: {y}");
-        assert!(lines.iter().any(|l| l.contains("esc cancels")), "{lines:#?}");
-        assert!(!lines[19].contains("artificialanalysis.ai"), "{}", lines[19]);
-        let column = lines[y][..lines[y].find("artificialanalysis.ai").unwrap()].chars().count() as u16;
-        let click = |x| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: x,
-            row: y as u16,
-            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
-        };
-        let area = Rect::new(0, 0, w, h);
-        assert_eq!(hit(&a, area, click(column)), Some(Mouse::Link));
-        assert_eq!(hit(&a, area, click(column - 1)), None, "elsewhere in the box, nothing");
-        assert_eq!(hit(&a, area, MouseEvent { row: y as u16 + 4, ..click(column) }), None, "the key's line too");
-        assert_eq!(hit(&a, area, click(1)), Some(Mouse::Outside), "outside it, as esc");
-        // A rejected key still says where else it can be set.
-        a.input = Input::key(true, true);
-        assert!(key_lines(&a)[2].to_string().contains(data::AA_KEY_ENV));
-        a.input = Input::key(false, true);
-        assert_eq!(a.mouse(Mouse::Link), Some(Effect::Open(data::AA_KEY_URL.into())));
-        assert!(matches!(a.input, Input::Key { .. }), "the prompt stays for the key");
-    }
-
-    #[test]
     fn clicks_land_on_rows_headers_and_dropdown_entries() {
         use ratatui::crossterm::event::KeyModifiers;
         let mut a = app();
@@ -5929,7 +5644,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
         assert_eq!(hit(&a, area, click(col("Price"), 1)), Some(Mouse::Header(PRICE)));
         assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(PRICE)), "the ▾ after Price");
-        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(11)));
+        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(10)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 2)), None, "the status bar");
         let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.rfind("│ oc")? + "│ ".len()))).unwrap();
@@ -5937,7 +5652,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(x + 1, y)), Some(Mouse::Harness(k - 2, 0)), "a harness in Via");
         assert_eq!(hit(&a, area, click(x + 2, y)), Some(Mouse::Row(k - 2)), "past its name: the row");
         assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
-        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 11)), "a benchmark score");
+        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 10)), "a benchmark score");
         assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Cell(1, PRICE)), "a price");
         assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Cell(1, NOTES)), "the note to write");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
@@ -6035,27 +5750,20 @@ mod tests {
         let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
         let star = |m: &str| buf[at(lines.iter().position(|l| l.contains(m)).unwrap(), "★")].fg;
         assert_eq!(star("opus"), STAR, "no task picked: a gold ★ that says favorite for some task");
-        // Every header is one colour whichever source its values are from, as the source's
-        // name on the bottom border.
-        data::set_lent(true);
+        // Every header is one colour, as the source's name on the bottom border.
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 10)).unwrap();
-        for src in data::Source::ALL {
-            data::set_source(src);
-            term.draw(|f| draw(&mut a, f)).unwrap();
-            let (wide, rows) = (term.backend().buffer(), text(term.backend().buffer()));
-            // The first cell of `pat`: a header's, or on the bottom border, where models.dev is.
-            let cell = |pat: &str| {
-                let on = if pat == src.label() { "models.dev" } else { "Released" };
-                let y = rows.iter().position(|l| l.contains(on)).unwrap();
-                wide[(rows[y][..rows[y].find(pat).unwrap()].chars().count() as u16, y as u16)].fg
-            };
-            for pat in ["Price", "ECI", "AAII", "Coding", "Value"] {
-                assert_eq!(cell(pat), ACCENT, "{pat}");
-            }
-            assert_eq!(cell(src.label()), MUTED, "the source is the border's grey, as models.dev beside it");
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let (wide, rows) = (term.backend().buffer(), text(term.backend().buffer()));
+        // The first cell of `pat`: a header's, or on the bottom border, where models.dev is.
+        let cell = |pat: &str| {
+            let on = if pat == "Epoch AI" { "models.dev" } else { "Released" };
+            let y = rows.iter().position(|l| l.contains(on)).unwrap();
+            wide[(rows[y][..rows[y].find(pat).unwrap()].chars().count() as u16, y as u16)].fg
+        };
+        for pat in ["Price", "ECI", "Coding", "Value"] {
+            assert_eq!(cell(pat), ACCENT, "{pat}");
         }
-        data::set_source(data::Source::Epoch);
-        data::set_lent(false);
+        assert_eq!(cell("Epoch AI"), MUTED, "the source is the border's grey, as models.dev beside it");
         assert_eq!(buf[at(4, "★")].fg, task_color("agentic"), "and in the status bar");
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         let name_x = at(opus, "opus").0;
@@ -6259,12 +5967,12 @@ mod tests {
         let (_, lines) = render(&mut a, 51, 4);
         assert_eq!(
             words(&lines[0])[2..],
-            ["‹│", "Tok/s", "TTFT", "│", "Via", "▾"],
+            ["‹│", "Reason", "▾", "Value", "│", "Via"],
             "scrolls back only as far as needed"
         );
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 51, 4);
-        assert_eq!(words(&lines[0])[2..], ["‹│", "Tok/s", "TTFT", "│", "Via", "▾"], "{}", lines[0]);
+        assert_eq!(words(&lines[0])[2..], ["‹│", "Reason", "▾", "Value", "│", "Via"], "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 48, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");
@@ -6614,12 +6322,6 @@ mod tests {
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
         };
         let bang = |a: &mut App| a.key(ratatui::crossterm::event::KeyEvent::from(KeyCode::Char('!')));
-        // With no key, Epoch AI is the source and `!` says how to change that.
-        bang(&mut a);
-        assert_eq!(a.view, View::Issues);
-        assert!(screen(&mut a).iter().any(|l| l.contains("• no Artificial Analysis API key")));
-        bang(&mut a);
-        data::save_aa_key("k").unwrap();
         bang(&mut a);
         assert!(a.view == View::Table && a.status == "no issues to list");
         a.data.warning = Some("copilot did not list its models · openrouter.ai did not list its models".into());
@@ -6960,19 +6662,6 @@ mod tests {
         a.view = View::Table;
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(bottom.contains("models.dev + Epoch AI · ⚠ no Artificial Analysis key · data "), "{bottom}");
-        let x = bottom[..bottom.find("⚠").unwrap()].chars().count() as u16;
-        assert_eq!(term.backend().buffer()[(x, 8)].fg, Color::Yellow, "the missing key stands out");
-        // Chosen with `--source`, it is not for want of a key.
-        data::set_chosen(true);
-        term.draw(|f| draw(&mut a, f)).unwrap();
-        let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(bottom.contains("models.dev + Epoch AI · data "), "{bottom}");
-        data::set_chosen(false);
-        // With a key, Epoch AI is `--source`'s choice.
-        data::save_aa_key("k").unwrap();
-        term.draw(|f| draw(&mut a, f)).unwrap();
-        let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
         assert!(bottom.contains("models.dev + Epoch AI · data "), "{bottom}");
         assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
@@ -7309,13 +6998,9 @@ mod tests {
         let gap = text.iter().position(String::is_empty).unwrap();
         let warn = text.iter().position(|l| l.starts_with("warning: ")).unwrap();
         assert!(warn > 2 && text[1..warn].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..warn]);
-        // Then what it leaves out, and the other source while there is no key for it.
+        // Then what it leaves out.
         let said = text[warn..gap].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
-        assert_eq!(said, format!("warning: {UNRATED} {MORE_RATED}"));
-        data::save_aa_key("k").unwrap();
-        let keyed = recommend(&a, 60, &mut vec![]).0.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" ");
-        assert!(keyed.contains("pick one with d on a") && !keyed.contains("API key"), "{keyed}");
-        data::save_aa_key("").unwrap();
+        assert_eq!(said, format!("warning: {UNRATED}"));
         let head = gap + 1;
         assert_eq!(
             text[head].split_whitespace().collect::<Vec<_>>(),
@@ -7517,9 +7202,6 @@ mod tests {
         a.store.toggle_favorite("debugging:low", "flash");
         let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();
         assert_eq!(models(&text[own]), ["flash · $0.10", "opus · $5.0", "opus · $5.0"]);
-        // The key the warning names asks for it over the panel.
-        a.key(KeyCode::Char('K').into());
-        assert!(a.input != Input::None && a.view == View::Recommend, "{:?}", a.input);
     }
 
     #[test]

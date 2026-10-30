@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use cli::Exit;
 use store::Store;
 
-/// Pick the right AI model for each agent: prices from models.dev and benchmarks from Epoch AI or Artificial Analysis,
+/// Pick the right AI model for each agent: prices from models.dev and benchmarks from Epoch AI,
 /// for the models you can already use. Those are the models opencode, pi and omp list, Anthropic's
 /// for claude, OpenAI's for codex, Google's for gemini, the ones your Copilot plan includes, and the
 /// ones ollama and llama-cli have on your machine. The Via column shows which
@@ -19,7 +19,7 @@ use store::Store;
 #[derive(Parser)]
 #[command(
     version,
-    after_help = "Data: models.dev (prices), Epoch AI (benchmarks, CC-BY) or Artificial Analysis (benchmarks, https://artificialanalysis.ai/), Arena (agent, chat and WebDev leaderboards, CC-BY). Cached for 24h."
+    after_help = "Data: models.dev (prices), Epoch AI (benchmarks, CC-BY), Arena (agent, chat and WebDev leaderboards, CC-BY). Cached for 24h."
 )]
 struct Args {
     /// Re-download data now instead of using the cache
@@ -28,9 +28,6 @@ struct Args {
     /// The percent of input tokens read from the prompt cache, for the Price column: 90 suits an agent session, 0 a one-off prompt (`%` in the TUI)
     #[arg(long, global = true, value_name = "PERCENT", default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
     cache: u8,
-    /// Where benchmarks come from: epoch (Epoch AI) or aa (Artificial Analysis, which needs ARTIFICIAL_ANALYSIS_API_KEY or a key saved in the TUI). Defaults to aa when a working key is set, else epoch
-    #[arg(long, global = true, value_parser = PossibleValuesParser::new(data::Source::ALL.map(|s| s.id())))]
-    source: Option<String>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -260,16 +257,8 @@ fn main() {
     data::set_cached(f64::from(args.cache) / 100.0);
     let store = Store::load();
     data::set_models_dir(&store.models_dir);
-    let source = args.source.as_deref().and_then(data::Source::parse);
-    data::set_source(source.unwrap_or_else(data::Source::preferred));
-    data::set_chosen(source.is_some());
     let result = match args.cmd {
-        None => {
-            // Asked the first time the TUI opens, and not with a key there: Artificial Analysis
-            // is then the source.
-            let ask = source.is_none() && store.seen.is_empty() && data::aa_key().is_none();
-            tui::run(store, args.refresh, ask).map_err(Exit::from)
-        }
+        None => tui::run(store, args.refresh).map_err(Exit::from),
         Some(cmd) => {
             // Die quietly when a pipe closes early, as in `modelcmp list | head`, instead of
             // panicking in println. Not in the TUI: it writes to clipboard tools that may exit.
@@ -292,7 +281,7 @@ fn main() {
                         .to_string(),
                 ))
             } else {
-                run(cmd, args.refresh, source.is_none())
+                run(cmd, args.refresh)
             }
         }
     };
@@ -310,19 +299,7 @@ fn warn(w: &str) {
     }
 }
 
-/// Epoch has no speed: a bound on it would drop every model, a sort do nothing.
-fn shown(mut cols: impl Iterator<Item = usize>) -> Result<(), Exit> {
-    match cols.find(|&c| app::hidden(c + app::TEXT) || app::unmeasured(c + app::TEXT)) {
-        Some(c) => {
-            let (id, src) = (app::COLS[app::by_role(c)].id, app::COLS[c].from());
-            Err(Exit::from(format!("{id} needs --source {}: only {} has it", src.id(), src.label())))
-        }
-        None => Ok(()),
-    }
-}
-
-/// `auto`: no `--source` was given, so a key that does not work leaves Epoch AI.
-fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
+fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     // These name no model: they neither wait for a download nor fail without one.
     let bare = match &cmd {
         // `--rm` takes every name as a model's.
@@ -339,22 +316,9 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
     let mut data = if bare {
         data::Data::default()
     } else {
-        let (data, warn_of) = data::load(force, auto).map_err(|e| e.to_string())?;
-        // The other source's columns sort and bound too, with its data there.
-        data::set_lent(data.lent);
+        let (data, warn_of) = data::load(force)?;
         if let Some(w) = warn_of {
             warn(&w);
-        }
-        // Epoch AI by default for want of a key, which the TUI's frame says too. Not when asked
-        // for, and only where benchmarks are what is shown: not for the id or command a script
-        // takes from `$(...)`.
-        let shown = matches!(cmd, Cmd::List { id: false, cmd: false, .. } | Cmd::Recommend { .. });
-        if shown && data::keyless() {
-            eprintln!(
-                "warning: no {} API key, so benchmarks are from Epoch AI (set {}, or press K in the TUI)",
-                data::Source::Aa.label(),
-                data::AA_KEY_ENV
-            );
         }
         if !data.any_available() {
             eprintln!("note: {}", view::NO_ACCESS);
@@ -380,13 +344,12 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
     let mut store = Store::load();
     match cmd {
         Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id, cmd, no_fav } => {
-            let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s)).map(app::by_role);
+            let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
             let bounds: Vec<_> = min
                 .into_iter()
-                .map(|(c, v)| (app::by_role(c), v, f64::INFINITY))
-                .chain(max.into_iter().map(|(c, v)| (app::by_role(c), f64::NEG_INFINITY, v)))
+                .map(|(c, v)| (c, v, f64::INFINITY))
+                .chain(max.into_iter().map(|(c, v)| (c, f64::NEG_INFINITY, v)))
                 .collect();
-            shown(sort.into_iter().chain(bounds.iter().map(|b| b.0)))?;
             // A name that is no built-in task is one of your own.
             let task = t.as_deref().and_then(fit::task);
             let custom = t.filter(|_| task.is_none());
@@ -412,8 +375,7 @@ fn run(cmd: Cmd, force: bool, auto: bool) -> Result<(), Exit> {
             cli::list(&data, &store, &opts)
         }
         Cmd::Pick { via, min, not, task, tier } => {
-            let bounds: Vec<_> = min.into_iter().map(|(c, v)| (app::by_role(c), v, f64::INFINITY)).collect();
-            shown(bounds.iter().map(|b| b.0))?;
+            let bounds: Vec<_> = min.into_iter().map(|(c, v)| (c, v, f64::INFINITY)).collect();
             // The task asked for, built in or yours, goes by its name.
             let opts = cli::ListOpts { via, bounds, custom: task, tier, ..Default::default() };
             cli::on_via(&mut data, &opts.via);

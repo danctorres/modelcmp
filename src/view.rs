@@ -1157,7 +1157,6 @@ pub fn detail_rows(
     size: Option<u64>,
 ) -> Vec<(Option<&'static str>, String)> {
     let yes = |b: bool| if b { "yes" } else { "no" };
-    let source = crate::data::source();
     let mut v = vec![
         format!("{}{}", m.name, if excluded(m, store, any) { " (excluded)" } else { "" }),
         format!("  developer:  {}", or_dash(&m.developer)),
@@ -1181,15 +1180,6 @@ pub fn detail_rows(
     ];
     // What it takes on your machine, next to what it holds.
     v.extend(size.map(|b| format!("  size:       {} (GGUF copy on Hugging Face)", crate::data::gb(b))));
-    // Under context: what the model costs in time, next to what it holds.
-    if m.tps.is_some() || m.ttft.is_some() {
-        let n = |v: Option<f64>, f: fn(f64) -> String| v.map_or("-".into(), f);
-        v.push(format!(
-            "  speed:      {} tokens/s, answer starts in {} (median)",
-            n(m.tps, |v| format!("{v:.0}")),
-            n(m.ttft, |v| format!("{v:.1}s"))
-        ));
-    }
     v.extend(m.arena.map(|a| format!("  arena:      {}% net improvement in agent sessions (arena.ai)", signed(a))));
     for (b, ..) in crate::data::ARENA_BOARDS {
         v.extend(
@@ -1215,21 +1205,11 @@ pub fn detail_rows(
             Some(store.favorite_for(&m.key).join(", ")).filter(|s| !s.is_empty()).unwrap_or("-".into())
         ),
         String::new(),
-        // Both indexes in the table's order, the other source's with its data there too.
-        format!(
-            "  {}",
-            crate::data::Source::ALL
-                .iter()
-                .filter(|s| **s == source || m.other_index.is_some())
-                .map(|s| format!("{} {}", s.index().0, score(m.index(*s))))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        ),
+        format!("  ECI {}", score(m.eci)),
         "  task fit (scores 0-100, value a percentile):".into(),
     ]);
     // The benchmarks listed under a task, so the rest come after: one a task's score here does
-    // not come from, as the fields a column's dropdown adds with Artificial Analysis, or the
-    // benchmarks of a task the model has no score for.
+    // not come from, as the benchmarks of a task the model has no score for.
     let mut used: Vec<&str> = vec![];
     let mut fits = vec![];
     for t in TASKS {
@@ -1239,14 +1219,11 @@ pub fn detail_rows(
             used.extend(used_benches(t));
         }
     }
-    let mine = m.scores.iter().filter(|(b, _)| !used.contains(&b.as_str())).collect();
-    // Then every one of the other source's, with its data at hand too, as a task column can show them.
-    for (src, other) in [(source, mine), (source.other(), m.other_scores.iter().collect::<Vec<_>>())] {
-        if !other.is_empty() {
-            v.push(String::new());
-            v.push(format!("  other benchmarks ({}, best reasoning setting):", src.label()));
-            v.extend(other.into_iter().map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
-        }
+    let other: Vec<_> = m.scores.iter().filter(|(b, _)| !used.contains(&b.as_str())).collect();
+    if !other.is_empty() {
+        v.push(String::new());
+        v.push("  other benchmarks (Epoch AI, best reasoning setting):".into());
+        v.extend(other.into_iter().map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
     }
     v.push(String::new());
     // A page per line, as the details panel cuts a line at its width. Down here, as `o` opens them.
@@ -1285,9 +1262,9 @@ pub fn detail_rows(
     rows
 }
 
-/// The benchmark a task's score is, with the source in use.
+/// The benchmark a task's score is.
 pub fn used_benches(t: &fit::Task) -> Vec<&'static str> {
-    t.sourced().0.into_iter().collect()
+    t.own().0.into_iter().collect()
 }
 
 #[derive(Default)]
@@ -1313,8 +1290,8 @@ pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
 /// Rows for side-by-side comparison, named and ordered as the table's columns, with the
 /// model's first; Via as the table shows it (`shown_via`), and a task as its line ranks it with
 /// `store`'s picks (`line_score`). A model with no value in a row has a `-` there, so no column
-/// of the table seems to be missing. Only Arena, a task and the speeds are left out, when no
-/// model has a value for them.
+/// of the table seems to be missing. Only Arena and a task are left out, when no model has a
+/// value for them.
 pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
         let mut it = vals.iter().flatten();
@@ -1369,17 +1346,9 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
         ),
         Row {
             section: "scores",
-            ..row(crate::data::source().index().0, models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true)
+            ..row(&head("eci"), models.iter().map(|m| m.eci).collect(), |v| format!("{v:.1}"), true)
         },
     ];
-    // The other source's index beside this one's, with its data there too: ECI then AAII, as
-    // the table's columns.
-    if models.iter().any(|m| m.other_index.is_some()) {
-        let source = crate::data::source();
-        let other = models.iter().map(|m| m.other_index).collect();
-        let at = rows.len() - usize::from(source == crate::data::Source::Aa);
-        rows.insert(at, Row { section: "scores", ..row(source.other().index().0, other, |v| format!("{v:.1}"), true) });
-    }
     if models.iter().any(|m| m.arena.is_some()) {
         let arena = models.iter().map(|m| m.arena).collect();
         rows.push(Row { section: "scores", ..row(&head("arena"), arena, signed, true) });
@@ -1392,14 +1361,6 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
             let label = head(t.name) + if bench.is_some() { "*" } else { "" };
             rows.push(Row { section: "scores", ..row(&label, vals, |v| format!("{v:.0}"), true) });
         }
-    }
-    if models.iter().any(|m| m.tps.is_some() || m.ttft.is_some()) {
-        let speed = |id, f: fn(&Model) -> Option<f64>, fmt: fn(f64) -> String, higher| Row {
-            section: "speed",
-            ..row(&head(id), models.iter().map(|m| f(m)).collect(), fmt, higher)
-        };
-        rows.push(speed("tps", |m| m.tps, |v| format!("{v:.0}"), true));
-        rows.push(speed("ttft", |m| m.ttft, |v| format!("{v:.1}s"), false));
     }
     rows.push(Row {
         label: "Via".into(),
@@ -1566,11 +1527,9 @@ mod tests {
     fn details_show_the_price_then_pages_before_the_providers_by_name() {
         let offer = |name: &str| Offer { provider_name: name.into(), input: 1.0, output: 2.0, ..Default::default() };
         let offers = vec![offer("Zed"), offer("abc")];
-        let m =
-            Model { md: Some("a/b".into()), epoch: Some("b".into()), tps: Some(50.0), offers, ..Default::default() };
+        let m = Model { md: Some("a/b".into()), epoch: Some("b".into()), offers, ..Default::default() };
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
-        assert_eq!(at("  speed:"), at("  context:") + 1, "speed under context");
         let pages = at("  pages:");
         assert_eq!(lines[pages], "  pages:      https://models.dev/models/a/b/");
         assert_eq!(lines[pages + 1], "              https://epoch.ai/models/b");
@@ -1595,18 +1554,6 @@ mod tests {
         assert_eq!(at("    FrontierSWE"), at("  other benchmarks") + 1, "not the task's score");
         assert_eq!(at("    scicode"), at("  other benchmarks") + 2);
         assert!(!lines.iter().any(|l| l.starts_with("    FrontierCode")), "the task's score, the same number again");
-    }
-
-    /// With both sources' data a task column can show the other's benchmarks, so the details list them too.
-    #[test]
-    fn details_list_the_other_sources_benchmarks_too() {
-        let scores = [("FrontierSWE".to_string(), 0.4)].into();
-        let other_scores = [("scicode".to_string(), 0.669)].into();
-        let m = Model { scores, other_scores, ..Default::default() };
-        let lines = detail_lines(&m, &Store::default(), false);
-        let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
-        assert_eq!(at("    FrontierSWE"), at("  other benchmarks (Epoch AI") + 1);
-        assert_eq!(lines[at("  other benchmarks (Artificial Analysis") + 1], format!("    {:<36} 66.9%", "scicode"));
     }
 
     #[test]

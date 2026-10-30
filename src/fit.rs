@@ -1,8 +1,7 @@
 //! Task fit: which model is good for what.
 //!
-//! A task's score is one benchmark's, a widely run one of the source about the task, or a
-//! mean of two of them (`AA_CODING`). It is ranked as a percentile (0..100) among the models
-//! scored on it, and shown as that score, in percent.
+//! A task's score is one benchmark's, a widely run one of Epoch's about the task. It is ranked
+//! as a percentile (0..100) among the models scored on it, and shown as that score, in percent.
 
 use crate::data::Model;
 use std::collections::{BTreeMap, HashMap};
@@ -30,12 +29,6 @@ pub struct Task {
     /// Epoch's benchmarks about the task, still run on new models: the first is the task's
     /// score, shown as is, and the column's dropdown lists the others.
     pub benches: &'static [&'static str],
-    /// The same for Artificial Analysis: one of its API's `evaluations` fields, shown as is,
-    /// or `AA_CODING`.
-    pub aa: Option<&'static str>,
-    /// Its other fields about the task, still run on new models: the column's dropdown lists
-    /// them after `aa`.
-    pub aa_more: &'static [&'static str],
     pub need: Need,
 }
 
@@ -48,42 +41,14 @@ impl Task {
         }
     }
 
-    /// With `src`: the benchmark the task's score is, and the others about the task.
-    pub fn of(&self, src: crate::data::Source) -> (Option<&'static str>, &'static [&'static str]) {
-        match (src, self.benches.split_first()) {
-            (crate::data::Source::Aa, _) => (self.aa, self.aa_more),
-            (_, Some((own, more))) => (Some(*own), more),
-            (_, None) => (None, &[]),
-        }
-    }
-
-    /// `of` the source in use.
-    pub fn sourced(&self) -> (Option<&'static str>, &'static [&'static str]) {
-        self.of(crate::data::source())
-    }
-
-    /// The other source's benchmarks about the task, with its data at hand too (`Data::borrow`):
-    /// the column's dropdown lists them after `sourced`'s.
-    pub fn lent(&self) -> Vec<&'static str> {
-        match crate::data::source() {
-            _ if !crate::data::lent() => vec![],
-            crate::data::Source::Aa => self.benches.to_vec(),
-            _ => self.aa.into_iter().chain(self.aa_more.iter().copied()).collect(),
+    /// The benchmark the task's score is, and the others about the task.
+    pub fn own(&self) -> (Option<&'static str>, &'static [&'static str]) {
+        match self.benches.split_first() {
+            Some((own, more)) => (Some(*own), more),
+            None => (None, &[]),
         }
     }
 }
-
-/// The source that runs the benchmark `b` of a task.
-pub fn bench_source(b: &str) -> crate::data::Source {
-    let aa = TASKS.iter().any(|t| t.aa == Some(b) || t.aa_more.contains(&b));
-    if aa { crate::data::Source::Aa } else { crate::data::Source::Epoch }
-}
-
-/// Artificial Analysis's overall index, its ECI.
-pub const AA_INDEX: &str = "artificial_analysis_intelligence_index";
-/// The mean of Terminal-Bench 4.0 and SciCode, the coding part of that index: no field of the
-/// API, whose Coding Index is no longer given to new models (2026-09).
-pub const AA_CODING: &str = "terminalbench_scicode_mean";
 
 /// A task is a capability software engineering needs, judged by `when`; its benchmarks need
 /// not be about code. Factual recall and math that most models max out stay out, and those Epoch
@@ -95,12 +60,10 @@ pub const AA_CODING: &str = "terminalbench_scicode_mean";
 pub const TASKS: &[Task] = &[
     Task {
         name: "overall",
-        about: "general capability, from ECI or AAII",
+        about: "general capability, from ECI",
         when: "a tiebreaker, or work that fits no other task",
         ranked: None,
         need: Need::None,
-        aa: None,
-        aa_more: &[],
         benches: &[],
     },
     Task {
@@ -109,8 +72,6 @@ pub const TASKS: &[Task] = &[
         when: "fixing a bug, adding a feature to an existing repo, refactors",
         ranked: None,
         need: Need::None,
-        aa: Some(AA_CODING),
-        aa_more: &["terminalbench_v4_0", "scicode"],
         benches: &["FrontierCode", "WeirdML v3", "FrontierSWE", "MirrorCode", "Surface Evolver Bench"],
     },
     Task {
@@ -119,8 +80,6 @@ pub const TASKS: &[Task] = &[
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         ranked: None,
         need: Need::Tools,
-        aa: Some("terminalbench_v4_0"),
-        aa_more: &[],
         benches: &["APEX-Agents", "Remote Labor Index", "OSWorld 2.0", "EBR-bench", "SpireClimb"],
     },
     Task {
@@ -129,8 +88,6 @@ pub const TASKS: &[Task] = &[
         when: "subtle bugs, algorithm and architecture design, contradictory specs, tricky invariants",
         ranked: None,
         need: Need::None,
-        aa: Some("hle"),
-        aa_more: &["lcr"],
         benches: &[
             "LMCA",
             "GPQA diamond",
@@ -151,8 +108,6 @@ pub const TASKS: &[Task] = &[
         when: "screenshots, UI mockups, diagrams as input",
         ranked: Some("overall"),
         need: Need::Vision,
-        aa: None,
-        aa_more: &[],
         benches: &[],
     },
     Task {
@@ -161,8 +116,6 @@ pub const TASKS: &[Task] = &[
         when: "routine coding that needs no top reasoning",
         ranked: Some("coding per dollar"),
         need: Need::Coder,
-        aa: None,
-        aa_more: &[],
         benches: &[],
     },
 ];
@@ -179,14 +132,6 @@ pub fn task_benches() -> Vec<&'static str> {
     v
 }
 
-/// Every Artificial Analysis field a task uses, sorted.
-pub fn aa_fields() -> Vec<&'static str> {
-    let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.aa.into_iter().chain(t.aa_more.iter().copied())).collect();
-    v.sort();
-    v.dedup();
-    v
-}
-
 pub fn task_names() -> impl Iterator<Item = &'static str> {
     TASKS.iter().map(|t| t.name)
 }
@@ -194,8 +139,8 @@ pub fn task_names() -> impl Iterator<Item = &'static str> {
 /// Tasks ranked by the ECI percentile; they show the raw ECI, as the table's ECI column does.
 const ECI_TASKS: [&str; 2] = ["overall", "vision"];
 
-/// The value a task shows for a model ranked `s`, in its table column and frontier: the
-/// source's overall index or the task's benchmark score, 0..100; "value" alone stays a percentile.
+/// The value a task shows for a model ranked `s`, in its table column and frontier: the ECI or
+/// the task's benchmark score, 0..100; "value" alone stays a percentile.
 pub fn shown(m: &Model, t: &Task, s: f64) -> f64 {
     // A favorite the task cannot score (`view::task_frontier`) shows no score.
     if s.is_nan() {
@@ -214,7 +159,7 @@ fn pct_rank(x: f64, all: &[f64]) -> f64 {
     100.0 * (below + equal / 2.0) / all.len() as f64
 }
 
-/// What a source's models scored, each `(index, benchmark -> score)`: the index, and every
+/// What Epoch's models scored, each `(index, benchmark -> score)`: the index, and every
 /// benchmark a task uses. One model's scores are ranked among them (`scored`).
 #[derive(Default, Debug)]
 pub struct Pools {
@@ -228,17 +173,14 @@ pub fn pools<'a>(groups: impl Iterator<Item = (Option<f64>, &'a BTreeMap<String,
         index: groups.iter().filter_map(|g| g.0).collect(),
         benches: task_benches()
             .into_iter()
-            .chain(aa_fields())
             .map(|b| (b, groups.iter().filter_map(|g| g.1.get(b).copied()).collect()))
             .collect(),
     }
 }
 
-/// A model's fit with `src`, from its `index` and `benchmark -> score`: each task's percentile
-/// among the models scored on its benchmark, and that score as 0..100; overall and vision the
-/// index's.
+/// A model's fit, from its `index` and `benchmark -> score`: each task's percentile among the
+/// models scored on its benchmark, and that score as 0..100; overall and vision the index's.
 pub fn scored(
-    src: crate::data::Source,
     index: Option<f64>,
     scores: &BTreeMap<String, f64>,
     pools: &Pools,
@@ -250,7 +192,7 @@ pub fn scored(
         }
     }
     for t in TASKS {
-        if let Some(b) = t.of(src).0
+        if let Some(b) = t.own().0
             && let (Some(&x), Some(pool)) = (scores.get(b), pools.benches.get(b))
         {
             fit.insert(t.name.to_string(), pct_rank(x, pool));
@@ -272,9 +214,9 @@ pub fn months(date: &str) -> Option<f64> {
     Some((year - 1970.0) * 12.0 + (month - 1.0) + (day - 1.0) / 30.44)
 }
 
-/// Each task's `Model::lag`: how far the model is behind the source's best on it, in months of
+/// Each task's `Model::lag`: how far the model is behind the best on it, in months of
 /// progress, a month's share of what the best score rose over the last `WINDOW` months, or
-/// over the months it was scored in when fewer. `now` is in seconds since 1970. One scale for every source and task, which a share
+/// over the months it was scored in when fewer. `now` is in seconds since 1970. One scale for every task, which a share
 /// of the best score is not (an index has no zero) and a gap in points is not either (each
 /// benchmark moves at its own pace); a percentile among every model ever scored counts a
 /// model at half the best score as near the top. A task scored for under half of `WINDOW`,
@@ -347,11 +289,10 @@ mod tests {
 
     #[test]
     fn ranks_by_task() {
-        use crate::data::Source::{Aa, Epoch};
         let a = scores(&[("APEX-Agents", 0.9), ("FrontierCode", 0.2), ("FrontierSWE", 0.9)]);
         let b = scores(&[("APEX-Agents", 0.5), ("FrontierCode", 0.7)]);
         let p = pools([(Some(145.0), &a), (None, &b)].into_iter());
-        let ((pa, shown_a), (pb, _)) = (scored(Epoch, Some(145.0), &a, &p), scored(Epoch, None, &b, &p));
+        let ((pa, shown_a), (pb, _)) = (scored(Some(145.0), &a, &p), scored(None, &b, &p));
         assert!(pa["agentic"] > pb["agentic"]);
         assert!(pb["coding"] > pa["coding"], "FrontierSWE is not the task's score");
         assert_eq!(shown_a["coding"], 20.0, "shown as the score, 0..100");
@@ -366,19 +307,7 @@ mod tests {
         let models = [mk("a", &pa, true), mk("b", &pb, false)];
         // agentic needs tool calling; b lacks it
         assert!(fit(&models[1], task("agentic").unwrap()).is_none());
-
-        let a = scores(&[(AA_CODING, 0.6), ("hle", 0.4)]);
-        let b = scores(&[(AA_CODING, 0.4), ("hle", 0.3)]);
-        let p = pools([(Some(60.0), &a), (None, &b)].into_iter());
-        let ((pa, shown_a), (pb, shown_b)) = (scored(Aa, Some(60.0), &a, &p), scored(Aa, None, &b, &p));
-        assert!(pa["coding"] > pb["coding"]);
-        assert!(pa["reasoning"] > pb["reasoning"]);
-        assert_eq!((shown_a["coding"], shown_b["reasoning"]), (60.0, 30.0));
         assert!(pa.contains_key("overall") && !pb.contains_key("overall"), "no index, no overall");
-        assert!(!pa.contains_key("agentic"), "no agentic field, no agentic score");
-        // A setting of a model is ranked among the models, though it is none of them.
-        let low = scored(Aa, Some(10.0), &scores(&[("hle", 0.1)]), &p).0;
-        assert_eq!((low["overall"], low["reasoning"]), (0.0, 0.0), "below every model");
     }
 
     #[test]

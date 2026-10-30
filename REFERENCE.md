@@ -19,36 +19,13 @@ means. Green and red mark the best and worst value in a column, here and in comp
 | $out | $ per 1M output tokens |
 | Ctx | context window, in tokens |
 | ECI | Epoch Capabilities Index. From Epoch AI |
-| AAII | Artificial Analysis Intelligence Index. From Artificial Analysis |
 | Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard, and its chat and WebDev ratings in the dropdown |
 | Coding, Agentic, Reason | the [task scores](#task-columns) |
 | Value | coding score per dollar of Price, as a percentile (0-100) |
-| Tok/s | output tokens per second. From Artificial Analysis |
-| TTFT | seconds to the first answer token, after any thinking. From Artificial Analysis |
 | Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare. The one the model runs on (`H`) is dark on its colour, here, in the details and compare |
 | Notes | your note on it |
 
-One table shows the columns of both sources. The columns of the source not in use show when
-both sources are cached, which takes an Artificial Analysis key, and were fetched within a day of
-each other. In the TUI, AAII, Tok/s and TTFT show even without that data, empty, and their
-descriptions say they need a key, or a refresh with one. A sort or a bound on an empty column is
-refused. ECI and AAII keep their places, and the table starts sorted by the index of the source in
-use. The task scores, Value and the recommendations always come from that source. In the TUI,
-`|` picks the columns to show.
-
-The source in use is Artificial Analysis when its key is there and works, else Epoch AI.
-
-- The TUI's first start asks for the key, under the wordmark: `enter` saves it, `esc` skips it.
-  A click on `artificialanalysis.ai` there opens the page where a free key is made. The bottom
-  of that screen names keys to try on the next one: `o`, `x`, `R` and `?`.
-- The key is `ARTIFICIAL_ANALYSIS_API_KEY`, else the one saved in `aa_key` next to `user.json`,
-  readable by you alone. `K` in the TUI asks for one later, to add it or replace the saved
-  one. `modelcmp --source aa` asks for one when none is saved.
-- When Artificial Analysis rejects a saved key, modelcmp asks for it again, and `esc` there
-  removes the saved key and stays on Epoch AI. A rejected key from the environment falls back
-  to Epoch AI at once, with a message saying so. The command line does the same, unless
-  `--source aa` asked for Artificial Analysis. Then it is an error when no cached data is left
-  to show.
+The table starts sorted by ECI. In the TUI, `|` picks the columns to show.
 
 ### Price
 
@@ -61,35 +38,18 @@ The source in use is Artificial Analysis when its key is there and works, else E
 
 ### Task columns
 
-A task column is a benchmark score, 0-100, blank for a model not tested on it.
-
-With Epoch AI, the default, it is one widely run benchmark about the task:
+A task column is a benchmark score, 0-100, blank for a model not tested on it: one widely run
+benchmark of Epoch AI's about the task.
 
 - Coding: FrontierCode
 - Agentic: APEX-Agents
 - Reason: LMCA
 
-With Artificial Analysis (its key, or `--source aa`):
+A row has no scores when its offers are another release than the one scored, as a `-latest`
+id is.
 
-- Coding: the mean of Terminal-Bench 4.0 and SciCode
-- Agentic: Terminal-Bench 4.0
-- Reason: HLE
-
-Its scores and speed follow these rules:
-
-- Tok/s and TTFT are medians on the developer's own API, or across providers when it has none.
-- A model's scores and speed are those of one reasoning setting, the best index among those
-  scored on the most benchmarks.
-- A row that names a setting ("Grok 4.20 Non-Reasoning") has that setting's, or `-` when
-  Artificial Analysis did not measure it.
-- A row that cannot reason has its non-reasoning setting's.
-
-With either source a row has no scores when its offers are another release than the one
-scored, as a `-latest` id is.
-
-`modelcmp recommend --json` names each task's benchmark in `benchmarks`: one of the above, or
-with Artificial Analysis the field the score is, as `hle`. A benchmark picked in the task's column
-in the TUI takes its place.
+`modelcmp recommend --json` names each task's benchmark in `benchmarks`: one of the above. A
+benchmark picked in the task's column in the TUI takes its place.
 
 [Scores](#scores) says how each of these numbers is obtained.
 
@@ -99,14 +59,14 @@ Where the numbers in the score columns come from.
 
 What a refresh downloads:
 
-- Both sources, Artificial Analysis only with its key.
-- Each source's sitemap, with or without a key, to link the models that have a page there (`o`).
+- Epoch AI's benchmark data.
+- Epoch AI's and Artificial Analysis's sitemaps, to link the models that have a page there (`o`).
 - OpenRouter's list of models, for the Hugging Face repo it names for each.
 - For an open model OpenRouter names no repo for, the Hugging Face repo under an id a provider
   gives it. Hugging Face is asked once the early data is in, for up to 400 ids a refresh, and an
   id with no repo is asked about again a month later.
 
-Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data/benchmark_data.zip>, no key):
+Epoch AI (<https://epoch.ai/data/benchmark_data.zip>):
 
 - ECI is Epoch's Capabilities Index as Epoch publishes it. modelcmp does not compute it.
 - A benchmark score is the best one Epoch lists for any version of the model.
@@ -115,16 +75,7 @@ Epoch AI (the default without an Artificial Analysis key, <https://epoch.ai/data
 - A task's other benchmarks are in its column's dropdown (`d`), only those Epoch still runs on
   new models. `B` finds a benchmark of any task without knowing which task it is for.
 
-Artificial Analysis (`--source aa`, its API with your key):
-
-- AAII is its Intelligence Index as it publishes it.
-- Agentic and Reason are one benchmark's score as published, 0-100. Coding is the mean of
-  two, computed by modelcmp. Tok/s and TTFT are its measurements.
-- A model's numbers are those of one of its reasoning settings, chosen as
-  [Task columns](#task-columns) says.
-- It scores more models than Epoch AI does, most of all on Agentic.
-
-Arena (its Agent, Text and WebDev leaderboards, no key needed):
+Arena (its Agent, Text and WebDev leaderboards):
 
 - Arena is the score arena.ai publishes, its net improvement in real agent sessions, in
   percent. It can be negative, and higher is better. modelcmp does not compute it.
@@ -135,18 +86,18 @@ Arena (its Agent, Text and WebDev leaderboards, no key needed):
   percent: task outcome, tool hallucination, steerability, bash reliability and praise.
   One that a refresh could not get is empty until the next, and a rating is empty once its
   leaderboard is more than two months old.
-- It shows with either source, and counts toward no task score and no recommendation.
+- It counts toward no task score and no recommendation.
 - A refresh that cannot reach it keeps the last refresh's scores. With none to keep, the
   column is empty, and the first start or command an hour later tries again. The column is
   also empty once Arena's newest leaderboard is more than two months old.
 - The TUI shows the table before Arena has answered, with the last refresh's scores until then.
 
-With either source:
+Of every model:
 
 - Value is computed by modelcmp: the model's coding percentile divided by its price, ranked
   0-100 among the models that have both. Free models rank above every priced one.
-- A row has the scores of the model the source lists under its name, else under the id most
-  of the row's offers are sold as, and none when those offers are another release.
+- A row has the scores of the model Epoch lists under its name, else under the id most of the
+  row's offers are sold as, and none when those offers are another release.
 
 ## Commands
 
@@ -209,7 +160,6 @@ weigh a note when choosing.
 |---|---|
 | `--refresh` | re-downloads the data first |
 | `--cache PERCENT` | the percent of input tokens read from the prompt cache, for Price. 90 by default |
-| `--source epoch\|aa` | the benchmarks for this run. The default is `aa` when its key is there and works, else `epoch` |
 | `--all` | on `list`, includes the models you have no access to. On `show`, adds the price at providers you have no harness for |
 | `--json` | on `list`, `show`, `compare` and `recommend`, as [JSON](#json) says |
 
@@ -244,11 +194,7 @@ stored as `tool-dispatch`).
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
 | `eci`, `coding`, `agentic`, `reasoning`, `value` | the scores, in whole points as the table shows them |
-| `tps`, `ttft` | from Artificial Analysis |
 | `arena` | from Arena's Agent leaderboard, in percent |
-| `other` | the other source's index |
-
-A column of the source not in use needs both sources cached, as in the [table](#columns).
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
 excluded models marked `✗` and your selected ones `✓`. `--task`, `pick` and `recommend` leave
@@ -262,8 +208,8 @@ bound typed with `>` or `<`. `exclude --rm` on such a model says which filter hi
 `--via`, `--min` and `--max` each replace their own: `--dev` the Dev pick, `--max price` the
 Price level and `--min coding` a `>` on Coding. `--via ollama` or `--via llama-cli` on a task
 keeps a model's local copy off the ranking, which picking them in the TUI's Via dropdown does not.
-A bound or the Price level on a column hidden with `|`, or on one with no values from the source
-in use, hides nothing and is kept for when the column is back.
+A bound or the Price level on a column hidden with `|` hides nothing and is kept for when the
+column is back.
 
 `recommend` gives the same picks as the TUI's `R` on the `mine` tab with no search, as the TUI
 keeps neither its tab nor its search. The commands ignore a pick of `↓ downloadable` in Via, as
@@ -301,8 +247,8 @@ hide different models.
   given, so a model opencode has free runs there and not on pi, which charges for it.
 - `value` lists the models within 8 months of progress of your best on coding. A month of
   progress is a twelfth of what the best coding score rose in the last year, among the models
-  listed here that the source scored. A benchmark scored for 6 to 12 months is measured over
-  those months.
+  listed here that Epoch scored. A benchmark scored for 6 to 12 months is measured over those
+  months.
 
 ### Favorites
 
@@ -505,8 +451,6 @@ The TUI's bottom border always shows the refresh state, one of these:
   the last one or two still awaited.
 - `refresh failed` in red, with the age of the data still shown.
 - `⚠ refresh had issues` in yellow, until a refresh has none.
-- `⚠ no Artificial Analysis key`, when there are no other issues and Epoch AI is used for lack of
-  a key.
 - The data age alone, red once it is past 24h. The status bar then says it too, as `data 25h old`
   in red, with the hint `r refresh`.
 
@@ -514,9 +458,8 @@ The TUI's bottom border always shows the refresh state, one of these:
 any. The status bar itself says only what a key or a refresh you started did.
 
 When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no
-file for it, a warning names the benchmark, in `!` and at every command. It does so with Artificial
-Analysis as the source too, since the Epoch AI benchmarks in the dropdowns still come from Epoch
-AI. With either source, the first start or command an hour later downloads the data again.
+file for it, a warning names the benchmark, in `!` and at every command. The first start or
+command an hour later downloads the data again.
 
 ## JSON
 
@@ -545,13 +488,10 @@ Each model carries these fields:
 | `tool_call`, `reasoning`, `vision`, `open_weights` | what it can do, true or false |
 | `release`, `knowledge` | its release date and knowledge cutoff, empty when unknown |
 | `url` | its page, the first of `pages` below, null when no site has one |
-| `eci` | the overall index of `source` |
-| `source` | `epoch` or `aa` |
-| `tasks` | each task's table column: the 0-100 score of its benchmark with `source`, overall and vision the `eci`, value a 0-100 percentile |
-| `other_index` | the other source's index, AAII with `epoch` and ECI with `aa`, when both are cached |
+| `eci` | the Epoch Capabilities Index |
+| `tasks` | each task's table column: the 0-100 score of its benchmark, overall and vision the `eci`, value a 0-100 percentile |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `arena_chat`, `arena_webdev` | Arena's chat and WebDev ratings, when Arena rates the model |
-| `tokens_per_second`, `ttft_seconds` | from Artificial Analysis, when the model has them |
 
 `price` has:
 
