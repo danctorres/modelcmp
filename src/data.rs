@@ -19,13 +19,9 @@ const EPOCH_PAGES_URL: &str = "https://epoch.ai/sitemap-index.xml";
 const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 /// OpenRouter's models, for the Hugging Face repo it names for each (`hf_listed`).
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
-/// OpenRouter's benchmark leaderboard, its GPQA diamond results on the models it serves, run
-/// over the last 90 days (CC BY 4.0): a GPQA diamond score for a model Epoch has none for, and
-/// the speed of the runs (`openrouter_gpqa`).
+/// OpenRouter's benchmark leaderboard, its GPQA diamond runs on the models it serves over the
+/// last 90 days (CC BY 4.0): the speed of the runs (`openrouter_speeds`).
 const OPENROUTER_GPQA_URL: &str = "https://openrouter.ai/api/v1/datasets/exports/benchmark-leaderboard/latest.csv";
-/// The name OpenRouter's GPQA diamond score goes under in `Model::scores`, scored on Epoch's
-/// curve for GPQA diamond.
-pub const GPQA_OPENROUTER: &str = "GPQA diamond · OpenRouter";
 /// Arena's Agent leaderboard, the newest one, from the dataset it publishes on Hugging Face
 /// (CC-BY): no key needed (`Arena`).
 // ponytail: one page of 100 rows, twice what the leaderboard has, and a warning past that
@@ -45,8 +41,10 @@ macro_rules! arena_url {
     };
 }
 const ARENA_URL: &str = arena_url!("agent");
+/// Arena's agent score (`Model::arena`) as the agentic task and the Agentic column's dropdown name it.
+pub const ARENA_AGENT: &str = "Agent";
 /// The signals Arena's agent score is made of, each a leaderboard of its own with the same rows:
-/// its name in the Arena column's dropdown, and where it is (`Model::arena_more`).
+/// its name in the Agentic column's dropdown, and where it is (`Model::arena_more`).
 pub const ARENA_MORE: [(&str, &str); 5] = [
     ("Task outcome", arena_url!("agent_task_outcome_explicit")),
     ("Tool hallucination", arena_url!("agent_tool_hallucination")),
@@ -54,7 +52,7 @@ pub const ARENA_MORE: [(&str, &str); 5] = [
     ("Bash reliability", arena_url!("agent_bash_reliability")),
     ("Praise", arena_url!("agent_praise_complaint")),
 ];
-/// Arena's leaderboards of chat and of web development, in the Arena column's dropdown too, rated
+/// Arena's leaderboards of chat and of web development, in the ECI and Coding columns' dropdowns, rated
 /// as Arena rates them, around 1500 and not in percent: the name there, the leaderboard on arena.ai,
 /// which a click on a rating opens, and the pages the overall rows are on, as they come first
 /// (`Arena::parse`).
@@ -108,9 +106,11 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// rating, and volcengine's ids are ByteDance's. 35: an offer's output is at its reasoning price
 /// where that is higher. 36: no Artificial Analysis scores, nor `Model::tps` and `ttft`. 37: the
 /// task scores are on the ECI scale, with what they are from (`fit::Basis`), `Model::scores` has
-/// every benchmark of Epoch's index, and no `Model::shown`. 38: `GPQA_OPENROUTER` in `Model::scores`.
-/// 39: `Model::tps`.
-const FORMAT: u32 = 39;
+/// every benchmark of Epoch's index, and no `Model::shown`. 38: OpenRouter's GPQA diamond in
+/// `Model::scores`. 39: `Model::tps`. 40: not 38, `UNFITTED` benchmarks in `Model::scores`, coding
+/// is CursorBench's score, no task falls back to overall, and an estimate needs a score away from
+/// a benchmark's floor and ceiling. 41: no agentic estimate in `Model::fit`, as agentic is Arena's.
+const FORMAT: u32 = 41;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -752,8 +752,11 @@ pub struct Model {
 
 impl Model {
     /// What a column that picked `b` in its dropdown shows: its score on the benchmark `b` in
-    /// percent, or one of `arena_more` as it is.
+    /// percent, or Arena's agent score or one of `arena_more` as it is.
     pub fn picked(&self, b: &str) -> Option<f64> {
+        if b == ARENA_AGENT {
+            return self.arena;
+        }
         self.arena_more.get(b).copied().or_else(|| self.scores.get(b).map(|s| s * 100.0))
     }
 
@@ -932,7 +935,7 @@ pub struct Data {
     /// The day Arena published each of `ARENA_BOARDS` that `Model::arena_more` has, by name.
     #[serde(default)]
     pub arena_dates: BTreeMap<String, String>,
-    /// huggingface.co did not send the leaderboard and no kept scores stood in: the Arena column
+    /// huggingface.co did not send the leaderboard and no kept scores stood in: the Agentic column
     /// is empty, and the cache is stale after `RETRY`.
     #[serde(default)]
     pub arena_missed: bool,
@@ -1675,7 +1678,7 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
     hf_found(&mut data.models, &mut found, &mut asks, hf_spelled);
     keep("hf.json", &found);
     answered(steps, "huggingface.co");
-    // Only the Arena column hangs on it: without it, the scores of the last refresh are kept,
+    // Only Agentic hangs on it: without it, the scores of the last refresh are kept,
     // and none show once Arena has published no leaderboard for `ARENA_MAX_AGE`.
     let [arena, more @ ..] = late.all(steps);
     let ranked = Arena::parse(&arena.unwrap_or_default());
@@ -1687,10 +1690,10 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
         (Some(e), true) => Some(format!("{e}, so its scores are kept from the last refresh")),
         (Some(e), false) => {
             data.arena_missed = true;
-            Some(format!("{e}, so the Arena column is empty"))
+            Some(format!("{e}, so the Agentic column is empty"))
         }
         (None, false) => Some(format!(
-            "Arena's agent leaderboard is from {}, too old to show, so the Arena column is empty",
+            "Arena's agent leaderboard is from {}, too old to show, so the Agentic column is empty",
             arena.date
         )),
         (None, true) => arena
@@ -1893,32 +1896,25 @@ fn download(steps: &Steps) -> Result<Downloaded, String> {
     let [models, epoch, aa, epoch_pages, openrouter, gpqa, release, arena @ ..] = got;
     let sites = late.into_iter().map(|(_, site)| site).collect();
     let late = Late { got: arena, rx, end: end.unwrap_or_else(Instant::now), sites };
-    let mut ep = parse_epoch(&epoch?)?;
+    let ep = parse_epoch(&epoch?)?;
     let mut data = merge(&models?, &ep)?;
     epoch_named(&mut data.models, &ep);
     data.missed.clone_from(&ep.missed);
-    // Only the overall estimate of a model Epoch has not run on GPQA diamond hangs on it: without
-    // it the refresh still succeeds, and says so.
-    match gpqa.map(|csv| openrouter_gpqa(&csv)) {
-        Ok(gpqa) => gpqa_scores(&mut data.models, &gpqa, &mut ep.benches),
+    // Only Tok/s hangs on OpenRouter's runs: without them the refresh still succeeds, and says so.
+    match gpqa.map(|csv| openrouter_speeds(&csv)) {
+        Ok(speeds) => {
+            for m in &mut data.models {
+                m.tps = m.openrouter.as_ref().and_then(|id| speeds.get(id)).copied();
+            }
+        }
         Err(e) => {
-            data.warning = Some(format!(
-                "could not get OpenRouter's GPQA diamond results ({e}), so some models have no estimate and none a speed"
-            ));
+            data.warning = Some(format!("could not get OpenRouter's GPQA diamond runs ({e}), so no model has a speed"))
         }
     }
     for m in &mut data.models {
         m.fit = crate::fit::scored(m.eci, &m.scores, &ep.benches);
     }
     Ok((data, [aa, epoch_pages, openrouter], release, late))
-}
-
-/// A model's GPQA diamond runs on OpenRouter, as one: its accuracy, and its output tokens per
-/// second, end to end, when the rows say how long the runs took.
-#[derive(Debug, PartialEq)]
-struct Gpqa {
-    accuracy: f64,
-    tps: Option<f64>,
 }
 
 /// The median of `xs`, none of an empty list.
@@ -1931,12 +1927,11 @@ fn median(xs: &mut [f64]) -> Option<f64> {
     }
 }
 
-/// OpenRouter's GPQA diamond runs by model slug, from its benchmark leaderboard `csv`: the
-/// median over the providers that ran it, as a broken one scores near 0, and the auto-routing
-/// row alone when no provider has one, of the accuracy and of the output tokens a second, the
-/// tokens a task took over its duration. Its tau-bench rows are left out: that one levels off
-/// around 0.75 by ECI 143 and barely tracks ability above it.
-fn openrouter_gpqa(csv: &[u8]) -> HashMap<String, Gpqa> {
+/// The output tokens a second of OpenRouter's GPQA diamond runs by model slug, from its benchmark
+/// leaderboard `csv`: the tokens a task took over its duration, end to end, the median over the
+/// providers that ran it, or the auto-routing row's when no provider has one. Not its accuracy:
+/// GPQA is too easy for today's best models to tell them apart. Nor its tau-bench rows.
+fn openrouter_speeds(csv: &[u8]) -> HashMap<String, f64> {
     let mut rdr = csv::Reader::from_reader(csv);
     let headers = rdr.headers().cloned().unwrap_or_default();
     let at = |name: &str| headers.iter().position(|c| c == name);
@@ -1946,46 +1941,26 @@ fn openrouter_gpqa(csv: &[u8]) -> HashMap<String, Gpqa> {
         return HashMap::new();
     };
     let (tokens, ms) = (at("avg_output_tokens_per_task"), at("avg_duration_per_task_ms"));
-    // slug -> the providers' rows, and the auto-routing row: (accuracy, tokens a second)
-    type Rows = (Vec<(f64, Option<f64>)>, Option<(f64, Option<f64>)>);
-    let mut by_slug: HashMap<String, Rows> = HashMap::new();
+    // slug -> the providers' speeds, and the auto-routing row's
+    let mut by_slug: HashMap<String, (Vec<f64>, Option<f64>)> = HashMap::new();
     for r in rdr.records().flatten() {
         let get = |i: usize| r.get(i).unwrap_or_default();
         let num = |i: Option<usize>| get(i?).parse::<f64>().ok().filter(|v| v.is_finite());
-        let Some(acc) = num(Some(accuracy)) else { continue };
-        if get(bench) != "gpqa_diamond" || get(slug).is_empty() {
+        // A row with no accuracy is no run.
+        if get(bench) != "gpqa_diamond" || get(slug).is_empty() || num(Some(accuracy)).is_none() {
             continue;
         }
         let tps = num(tokens).zip(num(ms).filter(|ms| *ms > 0.0)).map(|(tokens, ms)| tokens / (ms / 1000.0));
         let e = by_slug.entry(get(slug).to_string()).or_default();
-        if get(provider) == "auto-routing" { e.1 = Some((acc, tps)) } else { e.0.push((acc, tps)) }
+        if get(provider) == "auto-routing" { e.1 = tps } else { e.0.extend(tps) }
     }
     by_slug
         .into_iter()
-        .filter_map(|(slug, (providers, auto))| {
-            let rows = if providers.is_empty() { vec![auto?] } else { providers };
-            let accuracy = median(&mut rows.iter().map(|r| r.0).collect::<Vec<_>>())?;
-            let tps = median(&mut rows.iter().filter_map(|r| r.1).collect::<Vec<_>>());
-            Some((slug, Gpqa { accuracy, tps }))
+        .filter_map(|(slug, (mut providers, auto))| {
+            let tps = if providers.is_empty() { auto } else { median(&mut providers) };
+            Some((slug, tps?))
         })
         .collect()
-}
-
-/// Gives each model with an OpenRouter id its `gpqa` runs there: the speed, and with no GPQA
-/// diamond score from Epoch the accuracy, under `GPQA_OPENROUTER`, scored on Epoch's curve
-/// for GPQA diamond, which `benches` gets under that name too. No score without that curve.
-fn gpqa_scores(models: &mut [Model], gpqa: &HashMap<String, Gpqa>, benches: &mut HashMap<String, crate::fit::Bench>) {
-    let curve = benches.get("GPQA diamond").copied();
-    if let Some(curve) = curve {
-        benches.insert(GPQA_OPENROUTER.into(), curve);
-    }
-    for m in models.iter_mut() {
-        let Some(run) = m.openrouter.as_ref().and_then(|id| gpqa.get(id)) else { continue };
-        m.tps = run.tps;
-        if curve.is_some() && !m.scores.contains_key("GPQA diamond") {
-            m.scores.insert(GPQA_OPENROUTER.into(), run.accuracy);
-        }
-    }
 }
 
 /// What a warning from the cached data's refresh starts with (`Data::said`).
@@ -3423,6 +3398,11 @@ fn epoch_named(models: &mut [Model], ep: &Scores) {
 const SHORT_NAMES: [(&str, &str); 2] =
     [("FrontierMath-Tiers-1-3-v2-Private", "FrontierMath T1-3"), ("FrontierMath-Tier-4-v2-Private", "FrontierMath T4")];
 
+/// Benchmarks outside Epoch's index, whose rows its zip has though its metadata names no file:
+/// (name, file, score column). With no curve they are in no estimate, but in coding's dropdown.
+const UNFITTED: [(&str, &str, &str); 2] =
+    [("CursorBench", "cursorbench_external.csv", "Score"), ("DeepSWE", "deepswe_external.csv", "Pass@1")];
+
 fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("epoch zip: {e}"))?;
     let meta = csv_rows(&mut zip, "model_metadata.csv").ok_or("epoch zip: missing model_metadata.csv")?;
@@ -3467,8 +3447,11 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
     let mut unscored: HashMap<String, BTreeSet<String>> = HashMap::new();
     let benches = csv_rows(&mut zip, "benchmark_metadata.csv").ok_or("epoch zip: missing benchmark_metadata.csv")?;
     for b in &benches {
-        let (file, score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
-        if file.is_empty() || score_col.is_empty() || col(b, "in_eci")? != "True" {
+        let (mut file, mut score_col, bench) = (col(b, "source_file")?, col(b, "score_column")?, col(b, "benchmark")?);
+        let unfitted = UNFITTED.iter().find(|u| u.0 == bench);
+        if let Some(&(_, f, c)) = unfitted {
+            (file, score_col) = (f, c);
+        } else if file.is_empty() || score_col.is_empty() || col(b, "in_eci")? != "True" {
             continue;
         }
         // "nan" and "inf" parse as numbers, and are none.
@@ -3496,11 +3479,13 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             let Some(s) = s.trim_end_matches('%').parse::<f64>().ok().filter(|s| s.is_finite()) else { continue };
             let g = group_of(v);
             // The ids its scores are of, else those of any result.
-            let scored = if curve.is_some() { &mut ep.versions } else { &mut unscored };
+            let scores = curve.is_some() || unfitted.is_some();
+            let scored = if scores { &mut ep.versions } else { &mut unscored };
             scored.entry(norm(&g)).or_default().insert(v.clone());
-            // Any benchmark result may give the model a page on Epoch; only one with a curve scores it.
+            // Any benchmark result may give the model a page on Epoch, only one with a curve or
+            // `UNFITTED` scores it.
             let e = ep.groups.entry(norm(&g)).or_insert_with(|| (g, None, BTreeMap::new()));
-            if curve.is_none() {
+            if !scores {
                 continue;
             }
             let best = e.2.entry(bench.to_string()).or_insert(0.0);
@@ -5333,54 +5318,21 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_gpqa_is_the_median_over_providers() {
+    fn openrouter_speed_is_the_median_over_providers() {
         let csv = b"benchmark,model_slug,provider_name,accuracy,avg_duration_per_task_ms,avg_output_tokens_per_task\n\
                     gpqa_diamond,a/one,P,0.9,10000,900\ngpqa_diamond,a/one,Q,0.5,,\ngpqa_diamond,a/one,R,0.02,2000,600\n\
                     gpqa_diamond,a/one,auto-routing,0.88,1000,10\n\
                     gpqa_diamond,a/two,P,0.8,2000,100\ngpqa_diamond,a/two,Q,0.6,0,100\n\
                     gpqa_diamond,a/auto,auto-routing,0.7,1000,50\n\
                     tau_bench_verified_airline,a/tau,P,0.75,1,1\ngpqa_diamond,,P,0.75,1,1\ngpqa_diamond,a/bad,P,nan,1,1\n";
-        let g = openrouter_gpqa(csv);
-        let one = &g["a/one"];
-        assert_eq!(one.accuracy, 0.5, "the median, not a broken provider's 0.02 nor the auto-routing run");
-        assert_eq!(one.tps, Some(195.0), "the median speed of the runs that say how long they took");
-        assert_eq!(
-            g["a/two"],
-            Gpqa { accuracy: 0.7, tps: Some(50.0) },
-            "the mean of the two middle ones, no speed from no time"
-        );
-        assert_eq!(
-            g["a/auto"],
-            Gpqa { accuracy: 0.7, tps: Some(50.0) },
-            "the auto-routing run when no provider has one"
-        );
+        let g = openrouter_speeds(csv);
+        assert_eq!(g["a/one"], 195.0, "the median of the runs that say how long they took, not the auto-routing one");
+        assert_eq!(g["a/two"], 50.0, "no speed from no time");
+        assert_eq!(g["a/auto"], 50.0, "the auto-routing run when no provider has one");
         assert_eq!(g.len(), 3, "not tau-bench, a row with no slug, nor one with no accuracy");
-        assert!(openrouter_gpqa(b"no,such,columns\n1,2,3\n").is_empty());
-        let acc = openrouter_gpqa(b"benchmark,model_slug,provider_name,accuracy\ngpqa_diamond,a/one,P,0.9\n");
-        assert_eq!(acc["a/one"], Gpqa { accuracy: 0.9, tps: None }, "the accuracy alone, without the run columns");
-        let curve = crate::fit::Bench { edi: 134.7, slope: 0.13, baseline: 0.25, ceiling: 0.97 };
-        let mut benches = HashMap::from([("GPQA diamond".to_string(), curve)]);
-        let model = |id: &str, gpqa: Option<f64>| Model {
-            openrouter: Some(id.into()),
-            scores: gpqa.map(|s| ("GPQA diamond".to_string(), s)).into_iter().collect(),
-            ..Default::default()
-        };
-        let mut ms = [model("a/one", None), model("a/two", Some(0.95)), model("a/none", None)];
-        gpqa_scores(&mut ms, &g, &mut benches);
-        assert_eq!(ms[0].scores.get(GPQA_OPENROUTER), Some(&0.5), "OpenRouter's, under its name");
-        assert_eq!((ms[1].scores.get(GPQA_OPENROUTER), ms[1].scores["GPQA diamond"]), (None, 0.95), "Epoch's stands");
-        assert_eq!((ms[0].tps, ms[1].tps, ms[2].tps), (Some(195.0), Some(50.0), None), "the speed either way");
-        assert!(ms[2].scores.is_empty(), "no result there");
-        assert_eq!(benches[GPQA_OPENROUTER], curve, "scored on Epoch's curve");
-        let fit = crate::fit::scored(None, &ms[0].scores, &benches);
-        assert_eq!(fit["overall"].1, crate::fit::Basis::Benches(1), "and so it feeds the overall estimate");
-        let mut none = HashMap::new();
-        let mut ms = [model("a/one", None)];
-        gpqa_scores(&mut ms, &g, &mut none);
-        assert!(
-            none.is_empty() && ms[0].scores.is_empty() && ms[0].tps == Some(195.0),
-            "without the curve, the speed alone"
-        );
+        assert!(openrouter_speeds(b"no,such,columns\n1,2,3\n").is_empty());
+        let none = openrouter_speeds(b"benchmark,model_slug,provider_name,accuracy\ngpqa_diamond,a/one,P,0.9\n");
+        assert!(none.is_empty(), "no speed without the run columns");
     }
 
     #[test]

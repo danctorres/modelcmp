@@ -19,7 +19,6 @@ means. Green and red mark the best and worst value in a column, here and in comp
 | $out | $ per 1M output tokens |
 | Ctx | context window, in tokens |
 | ECI | Epoch Capabilities Index. From Epoch AI, or grey when estimated from the model's benchmarks |
-| Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard, and its chat and WebDev ratings in the dropdown |
 | Coding, Agentic | the [task scores](#task-columns) |
 | Tok/s | output tokens per second in OpenRouter's GPQA diamond runs, end to end with the thinking. From OpenRouter |
 | Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare. The one the model runs on (`H`) is dark on its colour, here, in the details and compare |
@@ -38,19 +37,29 @@ The table starts sorted by ECI. In the TUI, `|` picks the columns to show.
 
 ### Task columns
 
-A task column is a score on Epoch AI's ECI scale (about 100 to 175), blank for a model Epoch
-AI has not scored. It is the capability Epoch's own model of benchmark scores fits to the task's
-benchmarks the model has, the ones in the column's dropdown:
+Coding is the model's FrontierCode score, in percent: Cognition's coding tasks written by
+project maintainers, solved well enough to merge. Every model is scored on the same tasks, each
+in its developer's own agent, so one model's score is not from other benchmarks than another's.
 
-- Coding: FrontierCode, FrontierSWE, MirrorCode, SWE-Bench verified, Aider polyglot, Terminal
-  Bench, GSO-Bench, WeirdML v3, WeirdML and Surface Evolver Bench
-- Agentic: APEX-Agents, Remote Labor Index, OSWorld 2.0, OSWorld, EBR-bench, SpireClimb, METR
-  Time Horizons, The Agent Company, GDPval and Terminal Bench
+Agentic is Arena's agent score: the net improvement arena.ai measures in real agent sessions,
+in percent, the same measure for every model (see [Scores](#scores)). It needs tool calling.
 
-A model with none of a task's benchmarks takes the overall score, in grey. The overall score, in
-ECI, is Epoch's own ECI, or in grey the same fit over every benchmark the model has. Vision is
-ranked by overall. At the same score, a value of the task's own benchmarks or a measured ECI sorts
-before a grey one. `modelcmp show` says what each task's score is from, as `--json`'s `basis`.
+A model with none of a task's benchmarks has no score for it, and is not recommended for it.
+
+Each column's dropdown (`d`) lists other benchmarks, each shown alone when picked:
+
+- ECI: FrontierMath T4, SimpleQA Verified, Chess Puzzles, Mystery Game Puzzles, LMCA and
+  Furniture Assembly, general benchmarks that still tell the best models apart, and Arena's
+  chat rating
+- Coding: CursorBench, DeepSWE, FrontierSWE, MirrorCode, SWE-Bench verified, Aider polyglot,
+  Terminal Bench, GSO-Bench, WeirdML v3, WeirdML, Surface Evolver Bench and Arena's WebDev rating
+- Agentic: the signals Arena's agent score is made of, then APEX-Agents, Remote Labor Index,
+  OSWorld 2.0, OSWorld, EBR-bench, SpireClimb, METR Time Horizons, The Agent Company, GDPval and
+  Terminal Bench
+
+The overall score, in ECI, is Epoch's own ECI, or in grey the same fit over every benchmark the
+model has. Vision is ranked by overall. At the same score, a measured ECI sorts before a grey one.
+`modelcmp show` says what each task's score is from, as `--json`'s `basis`.
 
 A row has no scores when its offers are another release than the one scored, as a `-latest`
 id is.
@@ -71,7 +80,8 @@ What a refresh downloads:
 - Epoch AI's and Artificial Analysis's sitemaps, to link the models that have a page there (`o`).
 - OpenRouter's list of models, for the Hugging Face repo it names for each.
 - OpenRouter's benchmark leaderboard (<https://openrouter.ai/api/v1/datasets/exports/README.md>,
-  CC BY 4.0), for its GPQA diamond results. A refresh that cannot get it says so and goes on.
+  CC BY 4.0), for the speed of its GPQA diamond runs. A refresh that cannot get it says so and
+  goes on.
 - For an open model OpenRouter names no repo for, the Hugging Face repo under an id a provider
   gives it. Hugging Face is asked once the early data is in, for up to 400 ids a refresh, and an
   id with no repo is asked about again a month later.
@@ -80,41 +90,39 @@ Epoch AI (<https://epoch.ai/data/benchmark_data.zip>):
 
 - ECI is Epoch's Capabilities Index as Epoch publishes it. modelcmp does not compute it.
 - A benchmark score is the best one Epoch lists for any version of the model, of every
-  benchmark in Epoch's index.
-- A task score is computed by modelcmp with Epoch's own model of benchmark scores: each
-  benchmark has a difficulty and a slope on the ECI scale (`edi_scores.csv`), a score is
-  normalized between the benchmark's random baseline and its ceiling, and the task's score is
-  the capability that fits the model's scores on the task's benchmarks. Over every benchmark it
-  recovers Epoch's ECI within a point for most models, so a model Epoch has not given an ECI yet
-  gets an estimate.
+  benchmark in Epoch's index, and of CursorBench and DeepSWE, which Epoch lists outside it.
+- The overall of a model Epoch has not given an ECI yet is computed by modelcmp with Epoch's own
+  model of benchmark scores: each benchmark has a difficulty and a slope on the ECI scale
+  (`edi_scores.csv`), a score is normalized between the benchmark's random baseline and its
+  ceiling, and the estimate is the capability that fits the model's scores. Over every benchmark
+  it recovers Epoch's ECI within a point for most models.
+- An estimate needs at least one score between 10% and 90% of the way from the random baseline
+  to the ceiling. Near either end a point moves the estimate far: one such score alone can be
+  off by tens of ECI points. With one in that range, the model's other scores count too.
 - A task's benchmarks are in its column's dropdown (`d`). `B` finds a benchmark of any task
   without knowing which task it is for.
 
 OpenRouter (its benchmark leaderboard, updated daily):
 
-- A model Epoch AI has no GPQA diamond score for, and OpenRouter has run it on, gets
-  OpenRouter's accuracy as its GPQA diamond score, named `GPQA diamond · OpenRouter` in `show`.
-  It is the median over the providers that ran the model in the last 90 days, as a broken
-  provider scores near 0, or OpenRouter's auto-routing run when no provider has one. It is
-  scored on Epoch's curve for GPQA diamond, so it feeds the overall estimate of a model with no
-  ECI. Its tau-bench results are not used.
-- Tok/s is the output tokens a GPQA run produced over the time it took, the median over the same
-  providers: an end-to-end rate, the thinking and the time to the first token included, which a
-  provider's streaming rate is not. A model OpenRouter ran, whether or not Epoch has its GPQA
-  diamond score, has it.
+- Tok/s is the output tokens a GPQA diamond run produced over the time it took, the median over
+  the providers that ran the model in the last 90 days, or OpenRouter's auto-routing run when no
+  provider has one: an end-to-end rate, the thinking and the time to the first token included,
+  which a provider's streaming rate is not.
+- Its accuracy is not used: GPQA diamond is too easy for today's best models to tell them apart.
+  Nor are its tau-bench results.
 
 Arena (its Agent, Text and WebDev leaderboards):
 
-- Arena is the score arena.ai publishes, its net improvement in real agent sessions, in
+- Agentic is the score arena.ai publishes, its net improvement in real agent sessions, in
   percent. It can be negative, and higher is better. modelcmp does not compute it.
 - Arena lists a model once per reasoning setting, and the column has the best of them.
-- The column's dropdown (`d`) has Arena's Chat and WebDev ratings, from people's votes in
-  its Text and WebDev leaderboards, around 1500 and higher is better. A click on one opens its
-  leaderboard. Then the signals the agent score is made of, each as Arena publishes it, in
-  percent: task outcome, tool hallucination, steerability, bash reliability and praise.
-  One that a refresh could not get is empty until the next, and a rating is empty once its
-  leaderboard is more than two months old.
-- It counts toward no task score and no recommendation.
+- Agentic's dropdown (`d`) has the signals the agent score is made of, each as Arena publishes
+  it, in percent: task outcome, tool hallucination, steerability, bash reliability and praise.
+  ECI's has Arena's Chat rating and Coding's its WebDev rating, from people's votes in its Text
+  and WebDev leaderboards, around 1500 and higher is better. A click on one opens its
+  leaderboard. One that a refresh could not get is empty until the next, and a rating is empty
+  once its leaderboard is more than two months old.
+- It is the agentic task's score, so it ranks agentic in recommend, `pick` and `--task`.
 - A refresh that cannot reach it keeps the last refresh's scores. With none to keep, the
   column is empty, and the first start or command an hour later tries again. The column is
   also empty once Arena's newest leaderboard is more than two months old.
@@ -217,9 +225,8 @@ stored as `tool-dispatch`).
 | `price`, `in`, `cache`, `out` | $ per 1M tokens |
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
-| `eci`, `coding`, `agentic` | the scores, in whole points as the table shows them |
+| `eci`, `coding`, `agentic` | the scores, in whole points as the table shows them, `agentic` Arena's agent score in percent |
 | `tps` | tokens per second, from OpenRouter's GPQA runs |
-| `arena` | from Arena's Agent leaderboard, in percent |
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
 excluded models marked `✗` and your selected ones `✓`. `--task`, `pick` and `recommend` leave
@@ -510,8 +517,8 @@ Each model carries these fields:
 | `release`, `knowledge` | its release date and knowledge cutoff, empty when unknown |
 | `url` | its page, the first of `pages` below, null when no site has one |
 | `eci` | the Epoch Capabilities Index, as Epoch publishes it |
-| `tasks` | each task's table column: its score on the ECI scale, or a benchmark's 0-100 score when one is picked in the TUI |
-| `basis` | what each task's score is from: `ECI`, `3 benchmarks` (its own) or `overall` |
+| `tasks` | each task's table column: coding's FrontierCode score, 0-100, agentic's Arena agent score in percent, the others on the ECI scale, or a benchmark's 0-100 score when one is picked in the TUI |
+| `basis` | what each task's score is from: `ECI`, `3 benchmarks`, `FrontierCode` or `Arena` |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `arena_chat`, `arena_webdev` | Arena's chat and WebDev ratings, when Arena rates the model |
 | `tokens_per_second` | from OpenRouter's GPQA diamond runs, when it ran the model |

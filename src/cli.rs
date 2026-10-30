@@ -173,7 +173,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
             .iter()
             .filter_map(|t| match crate::app::task_bench(s, t) {
                 Some(b) => m.picked(b).is_some().then(|| (t.name, b.to_string())),
-                None => Some((t.name, fit::fit(m, t)?.1.said())),
+                None => Some((t.name, fit::fit(m, t)?.1.said(t))),
             })
             .collect(),
         arena_agent: m.arena,
@@ -1935,6 +1935,8 @@ mod tests {
         for (m, s) in data.models.iter_mut().zip([0.5, 0.7]) {
             m.scores.insert("FrontierSWE".into(), s);
         }
+        data.models[0].scores.insert("LMCA".into(), 0.6);
+        data.models[1].scores.insert("LMCA".into(), 0.8);
         let mut store = Store::default();
         let coding = |s: &Store| recommend_json(&data, s).into_iter().find(|t| t["name"] == "coding").unwrap();
         store.bench.insert("coding".into(), "FrontierSWE".into());
@@ -1943,6 +1945,12 @@ mod tests {
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "mini"});
         assert_eq!(t["tiers"], tiers, "mini beats gpt55 on FrontierSWE for less");
         assert_eq!(t["frontier"][0]["score"], 70.0, "scored on FrontierSWE");
+        // ECI's pick ranks overall, its task.
+        store.bench.insert("eci".into(), "LMCA".into());
+        let overall = recommend_json(&data, &store).into_iter().find(|t| t["name"] == "overall").unwrap();
+        assert_eq!(overall["benchmarks"], serde_json::json!(["LMCA"]));
+        assert_eq!(overall["tiers"]["high"], "mini", "mini's 80 beats gpt55's 60");
+        store.bench.remove("eci");
         // A bound typed on the column is on the benchmark too.
         store.bounds = vec![crate::store::Bound { col: "coding".into(), min: Some(65.0), max: None }];
         store.bench.insert("coding".into(), "FrontierSWE".into());

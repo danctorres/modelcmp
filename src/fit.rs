@@ -2,8 +2,9 @@
 //!
 //! A task's score is on Epoch's ECI scale (about 100 to 175): the capability that Epoch's own
 //! model of benchmark scores fits to the task's benchmarks the model has (`estimate`). Overall
-//! is Epoch's ECI when it has one, else that estimate over every benchmark, and a task with none
-//! of its benchmarks takes the overall score, marked as such (`Basis`).
+//! is Epoch's ECI when it has one, else that estimate over every benchmark. Coding and agentic
+//! are one measure's score instead, the same for every model (`Task::bench`): FrontierCode's and
+//! Arena's agent score. A model with none of a task's benchmarks has no score for it.
 
 use crate::data::Model;
 use serde::{Deserialize, Serialize};
@@ -22,8 +23,12 @@ pub struct Task {
     pub when: &'static str,
     /// What ranks it when that is not a score of its own, said in recommend as `ranked by`.
     pub ranked: Option<&'static str>,
-    /// Epoch's benchmarks about the task, as `benchmark_metadata.csv` names them: the score is
-    /// the estimate over the ones the model has, and the column's dropdown lists them all.
+    /// The one measure that scores the task, for every model the same, as `Model::picked` has it,
+    /// where an estimate over `benches` would mix the ones each model has.
+    pub bench: Option<&'static str>,
+    /// Epoch's benchmarks about the task, as `benchmark_metadata.csv` names them: without `bench`
+    /// the score is the estimate over the ones the model has. The column's dropdown lists them
+    /// after the task's score.
     pub benches: &'static [&'static str],
     pub need: Need,
 }
@@ -47,6 +52,7 @@ pub const TASKS: &[Task] = &[
         when: "a tiebreaker, or work that fits no other task",
         ranked: None,
         need: Need::None,
+        bench: None,
         benches: &[],
     },
     Task {
@@ -55,8 +61,10 @@ pub const TASKS: &[Task] = &[
         when: "fixing a bug, adding a feature to an existing repo, refactors",
         ranked: None,
         need: Need::None,
+        bench: Some("FrontierCode"),
         benches: &[
-            "FrontierCode",
+            "CursorBench",
+            "DeepSWE",
             "FrontierSWE",
             "MirrorCode",
             "SWE-Bench verified",
@@ -74,6 +82,7 @@ pub const TASKS: &[Task] = &[
         when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
         ranked: None,
         need: Need::Tools,
+        bench: Some(crate::data::ARENA_AGENT),
         benches: &[
             "APEX-Agents",
             "Remote Labor Index",
@@ -93,6 +102,7 @@ pub const TASKS: &[Task] = &[
         when: "screenshots, UI mockups, diagrams as input",
         ranked: Some("overall"),
         need: Need::Vision,
+        bench: None,
         benches: &[],
     },
 ];
@@ -101,9 +111,16 @@ pub fn task(name: &str) -> Option<&'static Task> {
     TASKS.iter().find(|t| t.name == name)
 }
 
-/// Every benchmark a task uses, sorted.
+/// The benchmarks the ECI column's dropdown lists, as overall's score is from every benchmark the
+/// model has: the general ones that score the most new models and still tell the best apart.
+pub const OVERALL_BENCHES: &[&str] =
+    &["FrontierMath T4", "SimpleQA Verified", "Chess Puzzles", "Mystery Game Puzzles", "LMCA", "Furniture Assembly"];
+
+/// Every benchmark of Epoch's a task or the ECI column's dropdown uses, sorted: not Arena's.
 pub fn task_benches() -> Vec<&'static str> {
-    let mut v: Vec<&str> = TASKS.iter().flat_map(|t| t.benches.iter().copied()).collect();
+    let own = TASKS.iter().flat_map(|t| t.bench.iter().chain(t.benches).copied());
+    let mut v: Vec<&str> = own.chain(OVERALL_BENCHES.iter().copied()).collect();
+    v.retain(|b| *b != crate::data::ARENA_AGENT);
     v.sort();
     v.dedup();
     v
@@ -160,33 +177,33 @@ pub fn estimate(ys: &[(Bench, f64)]) -> Option<f64> {
 }
 
 /// What a task's score is from: Epoch's ECI, the estimate over that many of the model's
-/// benchmarks, or the overall score, as the task has none of its own.
+/// benchmarks, or the task's one benchmark (`Task::bench`).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Basis {
     Eci,
     Benches(usize),
-    Overall,
+    Bench,
 }
 
 impl Basis {
-    /// As `--json` and `show` say it: "ECI", "3 benchmarks" or "overall".
-    pub fn said(self) -> String {
-        match self {
-            Basis::Eci => "ECI".into(),
-            Basis::Benches(1) => "1 benchmark".into(),
-            Basis::Benches(n) => format!("{n} benchmarks"),
-            Basis::Overall => "overall".into(),
+    /// As `--json` and `show` say it for task `t`: "ECI", "3 benchmarks", its benchmark's name or
+    /// "Arena".
+    pub fn said(self, t: &Task) -> String {
+        match (self, t.bench) {
+            (Basis::Eci, _) => "ECI".into(),
+            (Basis::Benches(1), _) => "1 benchmark".into(),
+            (Basis::Benches(n), _) => format!("{n} benchmarks"),
+            (Basis::Bench, Some(crate::data::ARENA_AGENT)) => "Arena".into(),
+            (Basis::Bench, b) => b.unwrap_or_default().into(),
         }
     }
 
     /// Whether the score is `task`'s own: a measured ECI for overall and vision, else the task's
-    /// benchmarks. An estimated overall and a task's fallback to it are not, drawn dimmed and
-    /// sorted after an own score they tie.
+    /// benchmarks. An estimated overall is not, drawn dimmed and sorted after an own score it ties.
     pub fn own(self, task: &str) -> bool {
         match self {
-            Basis::Eci => true,
+            Basis::Eci | Basis::Bench => true,
             Basis::Benches(_) => !ECI_TASKS.contains(&task),
-            Basis::Overall => false,
         }
     }
 }
@@ -194,12 +211,19 @@ impl Basis {
 /// The tasks the overall score ranks.
 const ECI_TASKS: [&str; 2] = ["overall", "vision"];
 
-/// Task name -> its score on the ECI scale, and what it is from.
+/// Task name -> its score, on the ECI scale or as `Task::bench` has it, and what it is from.
 pub type Fit = BTreeMap<String, (f64, Basis)>;
 
+/// The normalized scores that pin a capability down. Near a benchmark's floor or ceiling a point
+/// moves it far, so an estimate from such scores alone can be off by tens of ECI points: one needs
+/// a score in here, and then takes the others too, which Epoch's ECI is fit to as well.
+const INFORMATIVE: std::ops::RangeInclusive<f64> = 0.1..=0.9;
+
 /// Every task's score of a model, from its ECI and its `benchmark -> score` with the curves of
-/// `benches`: overall Epoch's ECI, else the estimate over every benchmark it has; coding and
-/// agentic the estimate over the task's benchmarks it has, else the overall; vision the overall.
+/// `benches`: overall Epoch's ECI, else the estimate over every benchmark it has; a task with
+/// `Task::bench` that benchmark's score, in percent, when it is Epoch's; the others the estimate
+/// over the task's benchmarks it has; vision the overall. No estimate without a score in
+/// `INFORMATIVE`.
 pub fn scored(eci: Option<f64>, scores: &BTreeMap<String, f64>, benches: &HashMap<String, Bench>) -> Fit {
     let over = |names: &[&str]| {
         let ys: Vec<(Bench, f64)> = scores
@@ -207,13 +231,18 @@ pub fn scored(eci: Option<f64>, scores: &BTreeMap<String, f64>, benches: &HashMa
             .filter(|(b, _)| names.is_empty() || names.contains(&b.as_str()))
             .filter_map(|(b, s)| benches.get(b).map(|bench| (*bench, bench.norm(*s))))
             .collect();
+        ys.iter().any(|(_, y)| INFORMATIVE.contains(y)).then_some(())?;
         Some((estimate(&ys)?, Basis::Benches(ys.len())))
     };
     let overall = eci.map(|e| (e, Basis::Eci)).or_else(|| over(&[]));
     let mut fit = Fit::new();
     for t in TASKS {
-        let own = if t.benches.is_empty() { overall } else { over(t.benches) };
-        if let Some(v) = own.or_else(|| overall.map(|(s, _)| (s, Basis::Overall))) {
+        let own = match t.bench {
+            Some(b) => scores.get(b).map(|s| (s * 100.0, Basis::Bench)),
+            None if t.benches.is_empty() => overall,
+            None => over(t.benches),
+        };
+        if let Some(v) = own {
             fit.insert(t.name.to_string(), v);
         }
     }
@@ -231,13 +260,20 @@ pub fn qualifies(m: &Model, t: &Task) -> bool {
 
 /// Task score, and what it is from, if the model qualifies for the task.
 pub fn fit(m: &Model, t: &Task) -> Option<(f64, Basis)> {
-    m.fit.get(t.name).copied().filter(|_| qualifies(m, t))
+    score(m, t.name).filter(|_| qualifies(m, t))
 }
 
-/// Whether the model's score on `task` is the task's own (`Basis::own`): a score to sort before
-/// an estimate or a fallback it ties.
-pub fn own(m: &Model, task: &str) -> bool {
-    m.fit.get(task).is_some_and(|f| f.1.own(task))
+/// The score of task `name` and what it is from: `scored`'s, else its `Task::bench` as it is
+/// now, as Arena's agent score comes after the refresh.
+fn score(m: &Model, name: &str) -> Option<(f64, Basis)> {
+    let now = || Some((m.picked(task(name)?.bench?)?, Basis::Bench));
+    m.fit.get(name).copied().or_else(now)
+}
+
+/// Whether the model's score on task `name` is the task's own (`Basis::own`): a score to sort before
+/// an estimate it ties.
+pub fn own(m: &Model, name: &str) -> bool {
+    score(m, name).is_some_and(|f| f.1.own(name))
 }
 
 #[cfg(test)]
@@ -298,10 +334,8 @@ mod tests {
         let (overall, basis) = fit["overall"];
         assert!((overall - 168.05).abs() < 1.0, "GPT-6.1 Terra: {overall}");
         assert_eq!(basis, Basis::Benches(10));
-        let (coding, basis) = fit["coding"];
-        assert!((coding - 166.0).abs() < 3.0, "from WeirdML v3 alone: {coding}");
-        assert_eq!(basis, Basis::Benches(1));
-        assert_eq!(fit["agentic"].1, Basis::Benches(2), "APEX-Agents and EBR-bench");
+        assert!(!fit.contains_key("coding"), "coding is FrontierCode's, not WeirdML v3's");
+        assert!(!fit.contains_key("agentic"), "agentic is Arena's, not APEX-Agents' and EBR-bench's");
         assert_eq!(fit["vision"], fit["overall"], "ranked by overall");
         let terra56 = scores(&[
             ("GPQA diamond", 0.933),
@@ -329,22 +363,36 @@ mod tests {
         // With an ECI, that is the overall, and the tasks go on from their own benchmarks.
         let fit = scored(Some(160.0), &terra56, &benches());
         assert_eq!(fit["overall"], (160.0, Basis::Eci));
-        assert_eq!(fit["coding"].1, Basis::Benches(3), "FrontierCode, WeirdML and Surface Evolver Bench");
+        assert_eq!(fit["coding"], (41.3, Basis::Bench), "FrontierCode's, in percent");
     }
 
     #[test]
-    fn a_task_with_no_benchmark_takes_the_overall() {
-        let kimi = scores(&[("ProofBench", 0.91)]);
-        let fit = scored(None, &kimi, &benches());
+    fn a_task_with_none_of_its_benchmarks_has_no_score() {
+        let fit = scored(None, &scores(&[("ProofBench", 0.85)]), &benches());
         let (overall, basis) = fit["overall"];
-        assert!((overall - 164.0).abs() < 1.0, "Kimi K3.1 Pro from ProofBench alone: {overall}");
+        assert!((overall - 162.0).abs() < 1.0, "from ProofBench alone: {overall}");
         assert_eq!(basis, Basis::Benches(1));
-        assert_eq!(fit["coding"], (overall, Basis::Overall));
-        assert_eq!(fit["agentic"], (overall, Basis::Overall));
+        assert!(!fit.contains_key("coding") && !fit.contains_key("agentic"), "not the overall's");
         assert!(scored(None, &scores(&[]), &benches()).is_empty(), "nothing to go by");
-        assert_eq!(scored(Some(150.0), &scores(&[]), &benches())["coding"], (150.0, Basis::Overall));
+        let eci = scored(Some(150.0), &scores(&[]), &benches());
+        assert_eq!(eci.keys().collect::<Vec<_>>(), ["overall", "vision"]);
         // A benchmark Epoch's model has no curve for counts for nothing.
         assert!(scored(None, &scores(&[("SuperGLUE", 0.9)]), &benches()).is_empty());
+        // Coding is FrontierCode's score alone, in percent. CursorBench, with no curve, is in no estimate.
+        assert!(scored(None, &scores(&[("CursorBench", 0.5)]), &benches()).is_empty());
+        let fit = scored(None, &scores(&[("FrontierCode", 0.5)]), &benches());
+        assert_eq!(fit["coding"], (50.0, Basis::Bench));
+    }
+
+    /// A score near a benchmark's ceiling or floor says little: alone it is no estimate, beside
+    /// one that says more it counts.
+    #[test]
+    fn an_estimate_needs_a_score_away_from_floor_and_ceiling() {
+        for alone in [0.95, 0.05] {
+            assert!(scored(None, &scores(&[("ProofBench", alone)]), &benches()).is_empty(), "{alone}");
+        }
+        let two = scored(None, &scores(&[("ProofBench", 0.95), ("FrontierCode", 0.5)]), &benches());
+        assert_eq!(two["overall"].1, Basis::Benches(2));
     }
 
     #[test]
@@ -359,21 +407,21 @@ mod tests {
 
     #[test]
     fn a_basis_is_own_by_task() {
-        assert!(Basis::Eci.own("overall") && Basis::Eci.own("vision"));
-        assert!(Basis::Benches(2).own("coding") && !Basis::Benches(9).own("overall"), "an estimated overall");
-        assert!(!Basis::Overall.own("coding"));
-        assert_eq!(Basis::Benches(1).said(), "1 benchmark");
-        assert_eq!(Basis::Benches(3).said(), "3 benchmarks");
-        assert_eq!((Basis::Eci.said(), Basis::Overall.said()), ("ECI".into(), "overall".into()));
+        assert!(Basis::Eci.own("overall") && Basis::Eci.own("vision") && Basis::Bench.own("coding"));
+        assert!(Basis::Benches(2).own("agentic") && !Basis::Benches(9).own("overall"), "an estimated overall");
+        let coding = task("coding").unwrap();
+        assert_eq!(Basis::Benches(1).said(coding), "1 benchmark");
+        assert_eq!(Basis::Benches(3).said(coding), "3 benchmarks");
+        assert_eq!((Basis::Eci.said(coding), Basis::Bench.said(coding)), ("ECI".into(), "FrontierCode".into()));
         let mk = |fit: &[(&str, (f64, Basis))], tools: bool| Model {
             fit: fit.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             tool_call: tools,
             ..Default::default()
         };
         let a = mk(&[("agentic", (150.0, Basis::Benches(1)))], true);
-        let b = mk(&[("agentic", (150.0, Basis::Overall))], false);
+        let b = mk(&[("agentic", (150.0, Basis::Benches(1))), ("overall", (150.0, Basis::Benches(2)))], false);
         assert_eq!(fit(&a, task("agentic").unwrap()), Some((150.0, Basis::Benches(1))));
         assert!(fit(&b, task("agentic").unwrap()).is_none(), "agentic needs tool calling");
-        assert!(own(&a, "agentic") && !own(&b, "agentic") && !own(&a, "coding"));
+        assert!(own(&a, "agentic") && !own(&b, "overall") && !own(&a, "coding"));
     }
 }

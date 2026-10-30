@@ -1184,18 +1184,18 @@ pub fn detail_rows(
         ),
         String::new(),
         format!("  ECI {}", score(m.eci)),
-        "  task fit (on the ECI scale, and what the score is from):".into(),
+        "  task fit (and what the score is from):".into(),
     ]);
     let mut fits = vec![];
     for t in TASKS {
         if let Some((s, basis)) = fit::fit(m, t) {
             fits.push((v.len(), t.name));
-            v.push(format!("    {:<13}{s:>4.0}  {} · from {}", t.name, t.about_ranked(), basis.said()));
+            v.push(format!("    {:<13}{s:>4.0}  {} · from {}", t.name, t.about_ranked(), basis.said(t)));
         }
     }
     if !m.scores.is_empty() {
         v.push(String::new());
-        v.push("  benchmarks (Epoch AI, best reasoning setting, OpenRouter's where it says so):".into());
+        v.push("  benchmarks (Epoch AI, best reasoning setting):".into());
         v.extend(m.scores.iter().map(|(b, s)| format!("    {:<36}{:>5.1}%", b, s * 100.0)));
     }
     v.push(String::new());
@@ -1333,10 +1333,6 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
             )
         },
     ];
-    if models.iter().any(|m| m.arena.is_some()) {
-        let arena = models.iter().map(|m| m.arena).collect();
-        rows.push(Row { section: "scores", ..row(&head("arena"), arena, signed, true) });
-    }
     for t in TASKS.iter().filter(|t| t.name != "overall" && !as_overall(models, t.name)) {
         // A benchmark picked in the task's column, marked `*` as the table's header is.
         let bench = crate::app::task_bench(store, t);
@@ -1527,13 +1523,13 @@ mod tests {
         let scores = [("FrontierCode", 0.5), ("FrontierSWE", 0.4)].map(|(b, s)| (b.to_string(), s)).into();
         let mut m = Model { scores, tool_call: true, ..Default::default() };
         m.fit.insert("overall".into(), (160.4, crate::fit::Basis::Benches(2)));
-        m.fit.insert("coding".into(), (162.0, crate::fit::Basis::Benches(2)));
-        m.fit.insert("agentic".into(), (160.4, crate::fit::Basis::Overall));
+        m.fit.insert("coding".into(), (50.0, crate::fit::Basis::Bench));
+        m.fit.insert("agentic".into(), (160.4, crate::fit::Basis::Benches(1)));
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
         assert_eq!(lines[at("    overall")], "    overall       160  general capability · from 2 benchmarks");
-        assert_eq!(lines[at("    coding")], "    coding        162  writing and fixing code · from 2 benchmarks");
-        assert!(lines[at("    agentic")].ends_with("· from overall"), "{}", lines[at("    agentic")]);
+        assert_eq!(lines[at("    coding")], "    coding         50  writing and fixing code · from FrontierCode");
+        assert!(lines[at("    agentic")].ends_with("· from 1 benchmark"), "{}", lines[at("    agentic")]);
         assert!(!lines.iter().any(|l| l.starts_with("    vision")), "no image input");
         assert_eq!(at("    FrontierCode"), at("  benchmarks") + 1, "every benchmark, under the task fit");
         assert_eq!(lines[at("    FrontierSWE")], format!("    {:<36} 40.0%", "FrontierSWE"));

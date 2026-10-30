@@ -56,18 +56,22 @@ const fn col(name: &'static str, id: &'static str, about: &'static str, get: fn(
     }
 }
 
-/// The entry for the task's score, over all its benchmarks, first in a task column's dropdown.
-const ALL_BENCHES: &str = "all benchmarks";
-
 /// The benchmarks the dropdown of the task column `id` lists, after the entry for the task's
-/// score (`ALL_BENCHES`), each shown alone when picked.
+/// score (ECI's own or the task's measure, `Task::bench`), each shown alone when picked. Arena's
+/// go where they belong: its chat rating in ECI's, its WebDev rating in Coding's, and the signals
+/// its agent score is made of first in Agentic's.
 fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
-    if id == ARENA {
-        let boards = crate::data::ARENA_BOARDS.iter().map(|b| b.0);
-        return Some(("Agent", boards.chain(crate::data::ARENA_MORE.iter().map(|s| s.0)).collect()));
+    let [chat, webdev] = crate::data::ARENA_BOARDS.map(|b| b.0);
+    if id == "eci" {
+        return Some(("ECI", [crate::fit::OVERALL_BENCHES, &[chat]].concat()));
     }
-    let benches = crate::fit::task(id)?.benches;
-    (!benches.is_empty()).then(|| (ALL_BENCHES, benches.to_vec()))
+    let t = crate::fit::task(id)?;
+    let benches = match id {
+        "coding" => [t.benches, &[webdev]].concat(),
+        "agentic" => crate::data::ARENA_MORE.iter().map(|s| s.0).chain(t.benches.iter().copied()).collect(),
+        _ => t.benches.to_vec(),
+    };
+    Some((t.bench?, benches))
 }
 
 /// A benchmark's entry in a task column's dropdown: its name and the source that runs it.
@@ -75,10 +79,9 @@ pub fn bench_label(b: &str) -> String {
     format!("{b} · {}", if arena_bench(b) { "Arena" } else { "Epoch AI" })
 }
 
-/// Whether `b` is in the Arena column's dropdown: its score, one of its signals or another of its
-/// leaderboards.
+/// Whether `b` is Arena's: its agent score, one of its signals or another of its leaderboards.
 fn arena_bench(b: &str) -> bool {
-    b == "Agent" || crate::data::ARENA_MORE.iter().any(|s| s.0 == b) || arena_board(b)
+    b == crate::data::ARENA_AGENT || crate::data::ARENA_MORE.iter().any(|s| s.0 == b) || arena_board(b)
 }
 
 /// Whether `b` is one of `ARENA_BOARDS`, rated and not in percent.
@@ -127,12 +130,9 @@ fn month(v: f64) -> String {
     }
 }
 
-/// The id of the Arena column, which Epoch has no values of.
-const ARENA: &str = "arena";
-
 /// The release, beside Dev, then prices from the offer you'd pay and context, the ECI and
 /// Arena's score, the two overall scores side by side, then the task scores, then the speed.
-pub const COLS: [Col; 11] = [
+pub const COLS: [Col; 10] = [
     Col {
         ranked: false,
         show: month,
@@ -174,16 +174,15 @@ pub const COLS: [Col; 11] = [
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
     col("ECI", "eci", "Epoch AI's overall index, grey = estimate", |m| task_score(m, "overall")),
-    Col {
-        show: signed,
-        ..col("Arena", ARENA, "net improvement in real agent sessions, %, measured by arena.ai", |m| m.arena)
-    },
-    col("Coding", "coding", "ECI-scale score from its coding benchmarks, grey = overall's", |m| {
+    col("Coding", "coding", "FrontierCode score, % of maintainers' coding tasks solved well enough to merge", |m| {
         task_score(m, "coding")
     }),
-    col("Agentic", "agentic", "ECI-scale score from its agentic benchmarks, grey = overall's", |m| {
-        task_score(m, "agentic")
-    }),
+    Col {
+        show: signed,
+        ..col("Agentic", "agentic", "Arena's agent score, net improvement in real agent sessions, %", |m| {
+            task_score(m, "agentic")
+        })
+    },
     Col {
         show: |v| format!("{v:.0}"),
         ..col("Tok/s", "tps", "output tokens per second in OpenRouter's GPQA runs, thinking included (median)", |m| {
@@ -206,9 +205,9 @@ pub fn on_price(i: usize) -> bool {
 }
 
 /// How `COLS[i]` shows a value with `bench` picked in its dropdown: a rating of `ARENA_BOARDS`
-/// whole, not in percent as the rest of Arena's.
+/// whole, not in percent as the rest of Arena's, and Epoch's benchmarks unsigned in Agentic too.
 pub fn show(i: usize, bench: Option<&str>) -> fn(f64) -> String {
-    if bench.is_some_and(arena_board) { |v| score(Some(v)) } else { COLS[i].show }
+    if bench.is_some_and(|b| arena_board(b) || !arena_bench(b)) { |v| score(Some(v)) } else { COLS[i].show }
 }
 
 /// A value of `COLS[i]` as its cell shows it, with `bench` picked: after a `~` when it comes from
@@ -230,7 +229,7 @@ fn default_sort() -> (usize, bool) {
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 6;
 /// Column index of Tok/s, what a run measured: speed.
-const MEASURED: usize = TEXT + 10;
+const MEASURED: usize = TEXT + 9;
 /// First column of each group: names and release, price and context, scores, measured, your own.
 pub const GROUPS: [usize; 5] = [0, PRICE, ECI, MEASURED, VIA];
 /// Column index of where you have access.
@@ -311,15 +310,15 @@ pub fn base_col_name(col: usize) -> &'static str {
 
 /// Whether the header of the column at cursor index `col` opens a dropdown with `d`.
 pub fn has_menu(col: usize) -> bool {
-    col == 1 || col == PRICE || col == VIA || col == ARENA_COL || TASK_COLS.contains(&col)
+    col == 1 || col == PRICE || col == VIA || TASK_COLS.contains(&col)
 }
 
-/// Arena, whose dropdown lists its signals.
-const ARENA_COL: usize = ECI + 1;
+/// Column index of Agentic, Arena's agent score.
+const AGENTIC: usize = ECI + 2;
 
-/// Coding and Agentic: the columns `col_benches` has benchmarks for. Asked of every header on
-/// every frame, so not looked up.
-const TASK_COLS: std::ops::RangeInclusive<usize> = ECI + 2..=ECI + 3;
+/// ECI, Coding and Agentic: the columns `col_benches` has benchmarks for. Asked of every header
+/// on every frame, so not looked up.
+const TASK_COLS: [usize; 3] = [ECI, ECI + 1, AGENTIC];
 
 /// The benchmarks the dropdown of the task column at cursor index `col` lists.
 fn col_benches(col: usize) -> Option<(&'static str, Vec<&'static str>)> {
@@ -350,7 +349,12 @@ fn loaded(col: usize, b: &Bound) -> (usize, f64, f64) {
 
 /// The benchmark `store` has picked in task `t`'s column, which ranks its line.
 pub fn task_bench(store: &Store, t: &Task) -> Option<&'static str> {
-    stored_bench(store, TEXT + COLS.iter().position(|c| c.id == t.name)?)
+    stored_bench(store, TEXT + task_col(t)?)
+}
+
+/// The index in `COLS` of task `t`'s column: ECI for overall.
+fn task_col(t: &Task) -> Option<usize> {
+    (0..COLS.len()).position(|c| col_task(c) == Some(t.name))
 }
 
 /// What `COLS[at]` shows for `m` with `store`'s picks: a benchmark picked in its dropdown, else
@@ -384,7 +388,8 @@ pub fn base_col_about(col: usize) -> String {
         ),
         _ => {
             let about = numeric(col).map_or("", Col::about).to_string();
-            if TASK_COLS.contains(&col) { of_source(&about) } else { about }
+            // ECI's blank is a model with no score at all, which needs no saying.
+            if TASK_COLS.contains(&col) && col != ECI { of_source(&about) } else { about }
         }
     }
 }
@@ -1672,7 +1677,7 @@ impl App {
 
     /// The benchmark picked in the column of task `t`, which ranks its line.
     pub fn task_bench(&self, t: &Task) -> Option<&'static str> {
-        self.col_bench(TEXT + COLS.iter().position(|c| c.id == t.name)?)
+        self.col_bench(TEXT + task_col(t)?)
     }
 
     /// What the sort, the bounds and the top border call the column at cursor index `col`: a
@@ -1715,7 +1720,7 @@ impl App {
     }
 
     /// Whether the value of `COLS[c]` for `data.models[i]` is a score that is not its task's own
-    /// (`fit::own`), an estimated overall or a task's fallback to it: drawn dimmed, neither the
+    /// (`fit::own`), an estimated overall: drawn dimmed, neither the
     /// best nor the worst, and after an own score it ties in a sort. Never with a benchmark picked.
     pub fn estimated(&self, i: usize, c: usize) -> bool {
         let t = col_task(c).filter(|_| self.bench[c].is_none());
@@ -2499,7 +2504,7 @@ impl App {
         }
         // Each column's dropdown entries, with how many models each scored, as `d` lists them.
         let mut entries = vec![];
-        for c in TASK_COLS.filter(|&c| !hidden(c)) {
+        for c in TASK_COLS.into_iter().filter(|&c| !hidden(c)) {
             let Some((_, more)) = col_benches(c) else { continue };
             let names = std::iter::once(None).chain(more.into_iter().map(Some));
             for ((label, n), b) in self.menu_items(c).0.into_iter().zip(names) {
@@ -4063,7 +4068,7 @@ impl App {
                 // for the speed.
                 let (site, page) = if col < ECI {
                     ("models.dev", m.price_page())
-                } else if numeric(col).is_some_and(|c| c.id == ARENA) {
+                } else if self.col_bench(col).map_or(col == AGENTIC, arena_bench) {
                     // A rating opens its own leaderboard, the rest the agent one.
                     let board = crate::data::ARENA_BOARDS.iter().find(|b| self.col_bench(col) == Some(b.0));
                     ("arena.ai", board.map(|b| b.1.to_string()).or_else(|| m.arena_page()))
@@ -5258,7 +5263,7 @@ mod tests {
         // Picked from the dropdown before, now Coding's own score.
         store.bench.insert("coding".into(), "FrontierCode".into());
         assert!(!pick_gone(&store, coding), "its bounds stay, on the column's own value");
-        store.bench.insert("coding".into(), "DeepSWE".into());
+        store.bench.insert("coding".into(), "nope".into());
         assert!(pick_gone(&store, coding), "one no list has any more is gone");
     }
 
@@ -6109,13 +6114,13 @@ mod tests {
         let mut a = app();
         for (key, s) in [("gpt55", 0.4), ("mini", 0.7)] {
             let m = a.data.models.iter_mut().find(|m| m.key == key).unwrap();
-            m.scores.insert("FrontierCode".into(), s);
+            m.scores.insert("CursorBench".into(), s);
         }
-        a.col = ECI + 2;
+        a.col = ECI + 1;
         press(&mut a, "d");
         assert_eq!(
             menu(&a)[..3],
-            [("all benchmarks · Epoch AI", 2), ("FrontierCode · Epoch AI", 2), ("FrontierSWE · Epoch AI", 0)],
+            [("FrontierCode · Epoch AI", 2), ("CursorBench · Epoch AI", 2), ("DeepSWE · Epoch AI", 0)],
             "the task's score first, then each benchmark with the models it scored"
         );
         // The entry already shown changes nothing: a bound typed for the column stays.
@@ -6126,7 +6131,7 @@ mod tests {
         press(&mut a, "j ");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "s");
-        assert_eq!((a.col_name(a.col), keys(&a)), ("FrontierCode", vec!["mini", "gpt55", "opus5"]), "unscored last");
+        assert_eq!((a.col_name(a.col), keys(&a)), ("CursorBench", vec!["mini", "gpt55", "opus5"]), "unscored last");
         assert_eq!(a.val(a.rows[0], a.col), Some(70.0));
         press(&mut a, "c");
         assert_eq!((a.col_name(a.col), keys(&a)[0]), ("Coding", "gpt55"), "c is back to the task's score");
@@ -6134,56 +6139,56 @@ mod tests {
         // already keeps it, and counts what the table shows.
         a.bounds.push((a.col, 1e9, f64::MAX));
         press(&mut a, "d");
-        assert_eq!(menu(&a)[..2], [("all benchmarks · Epoch AI", 0), ("FrontierCode · Epoch AI", 2)]);
+        let entries =
+            |shown| [("FrontierCode · Epoch AI", shown), ("CursorBench · Epoch AI", 2), ("DeepSWE · Epoch AI", 0)];
+        assert_eq!(menu(&a)[..3], entries(0));
         // Choosing one shows it again, and no other is picked.
         press(&mut a, "j ");
-        assert_eq!(
-            menu(&a)[..2],
-            [("all benchmarks · Epoch AI", 2), ("FrontierCode · Epoch AI", 2)],
-            "the open list counts again, the bound gone"
-        );
+        assert_eq!(menu(&a)[..3], entries(2), "the open list counts again, the bound gone");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         // A task's line is ranked by the pick, so choosing the task keeps it.
-        assert_eq!((a.task.is_some(), a.col_name(ECI + 2)), (true, "FrontierCode"));
-        a.col = ECI + 2;
+        assert_eq!((a.task.is_some(), a.col_name(ECI + 1)), (true, "CursorBench"));
+        a.col = ECI + 1;
         press(&mut a, "d");
-        assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "FrontierCode"));
-        assert!((0..NCOLS).all(|c| (TASK_COLS.contains(&c) || c == ARENA_COL) == col_benches(c).is_some()));
+        assert_eq!((&a.input, a.col_name(a.col)), (&Input::None, "CursorBench"));
+        assert!((0..NCOLS).all(|c| TASK_COLS.contains(&c) == col_benches(c).is_some()));
         // Leaving the task took its sort along.
         press(&mut a, "cs");
     }
 
-    /// Arena's dropdown lists its other leaderboards, rated, then its signals, in percent as its
-    /// score, with a task picked too.
+    /// Arena's agent score is Agentic's, whose dropdown lists the signals it is made of first, in
+    /// percent as the score. Its chat rating is in ECI's dropdown, rated, not in percent.
     #[test]
-    fn the_arena_column_shows_the_signal_picked_in_its_dropdown() {
+    fn arena_s_signals_and_ratings_are_in_the_task_columns_dropdowns() {
         let mut a = app();
         let mut data = std::mem::take(&mut a.data);
         let m = data.models.iter_mut().find(|m| m.key == "mini").unwrap();
-        (m.arena, m.arena_more) = (Some(8.7), [("Steerability".into(), -1.2), ("Chat".into(), 1532.0)].into());
+        (m.arena, m.tool_call) = (Some(8.7), true);
+        m.arena_more = [("Steerability".into(), -1.2), ("Chat".into(), 1532.0)].into();
         a.set_data(data);
-        a.task = crate::fit::task("coding");
-        a.col = ARENA_COL;
+        a.col = AGENTIC;
         press(&mut a, "d");
-        assert_eq!(
-            menu(&a)[..4],
-            [("Agent · Arena", 1), ("Chat · Arena", 1), ("WebDev · Arena", 0), ("Task outcome · Arena", 0)]
-        );
-        assert_eq!(menu(&a)[5], ("Steerability · Arena", 1));
-        press(&mut a, "j ");
+        let signals = [("Task outcome · Arena", 0), ("Tool hallucination · Arena", 0), ("Steerability · Arena", 1)];
+        assert_eq!(menu(&a)[..4], [[("Agent · Arena", 1)].as_slice(), &signals].concat());
+        assert_eq!(menu(&a)[6], ("APEX-Agents · Epoch AI", 0), "Epoch's agentic benchmarks after them");
         let mini = a.data.models.iter().position(|m| m.key == "mini").unwrap();
-        assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Chat", Some(1532.0)));
-        assert_eq!(shown(a.col - TEXT, 1532.0, false, a.col_bench(a.col)), "1532", "a rating, not a percent");
-        assert_eq!(view::bound_said("Chat", a.col, 1500.0, f64::INFINITY, a.col_bench(a.col)), "Chat≥1500");
-        assert!(a.col_about(a.col).starts_with("chat rating"), "{}", a.col_about(a.col));
-        press(&mut a, "4j ");
+        press(&mut a, "3j ");
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Steerability", Some(-1.2)));
         assert_eq!(shown(a.col - TEXT, -1.2, true, a.col_bench(a.col)), "-1.2");
         press(&mut a, "d ");
-        assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Arena", Some(8.7)), "the picked one again drops it");
+        assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Agentic", Some(8.7)), "the picked one again drops it");
+        code(&mut a, KeyCode::Esc);
+        a.col = ECI;
+        press(&mut a, "d");
+        let chat = menu(&a).iter().position(|e| e.0 == "Chat · Arena").unwrap();
+        press(&mut a, &format!("{chat}j "));
+        assert_eq!((a.col_name(a.col), a.val(mini, a.col)), ("Chat", Some(1532.0)));
+        assert_eq!(shown(a.col - TEXT, 1532.0, false, a.col_bench(a.col)), "1532", "a rating, not a percent");
+        assert_eq!(view::bound_said("Chat", a.col, 1500.0, f64::INFINITY, a.col_bench(a.col)), "Chat≥1500");
+        assert!(a.col_about(a.col).starts_with("chat rating"), "{}", a.col_about(a.col));
     }
 
     #[test]
@@ -6206,7 +6211,7 @@ mod tests {
     #[test]
     fn dropdowns_pick_a_developer_and_a_price_level() {
         let mut a = app();
-        a.col = ECI;
+        a.col = PRICE + 1;
         press(&mut a, "d");
         assert_eq!((&a.input, a.status.as_str()), (&Input::None, "d opens a dropdown on the columns marked ▾"));
         a.col = 0;
@@ -6685,27 +6690,27 @@ mod tests {
             _ => panic!("{:?}", a.input),
         };
         assert_eq!(on(&a), "Remote Labor Index · Epoch AI · Agentic");
-        let remote = Effect::Bench(ECI + 3, Some("Remote Labor Index"));
-        assert!(!a.ticked(&remote) && a.ticked(&Effect::Bench(ECI + 3, None)), "the task's score is ticked");
+        let remote = Effect::Bench(ECI + 2, Some("Remote Labor Index"));
+        assert!(!a.ticked(&remote) && a.ticked(&Effect::Bench(ECI + 2, None)), "the task's score is ticked");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.col, a.col_bench(ECI + 3)), (ECI + 3, Some("Remote Labor Index")));
+        assert_eq!((a.col, a.col_bench(ECI + 2)), (ECI + 2, Some("Remote Labor Index")));
         assert_eq!(a.input, Input::None);
         assert_eq!(a.status, "Agentic shows Remote Labor Index · Epoch AI");
         press(&mut a, "B");
         assert_eq!(on(&a), "Remote Labor Index · Epoch AI · Agentic", "on the one the column shows");
         assert!(a.ticked(&remote), "ticked, as in the dropdown");
         code(&mut a, KeyCode::Enter);
-        assert_eq!(a.col_bench(ECI + 3), None, "picked again, the task's score is back");
+        assert_eq!(a.col_bench(ECI + 2), None, "picked again, the task's score is back");
         // A column hidden while the list is open is not picked in, nor is the cursor put on it.
         a.col = 0;
         press(&mut a, "B/remote");
         code(&mut a, KeyCode::Enter);
-        a.toggle_col(ECI + 3);
+        a.toggle_col(ECI + 2);
         code(&mut a, KeyCode::Enter);
-        assert_eq!((a.col, a.col_bench(ECI + 3)), (0, None), "{}", a.status);
+        assert_eq!((a.col, a.col_bench(ECI + 2)), (0, None), "{}", a.status);
         assert!(a.status.starts_with("Agentic no longer lists it"), "{}", a.status);
-        a.toggle_col(ECI + 3);
+        a.toggle_col(ECI + 2);
         a.task = crate::fit::task("coding");
         press(&mut a, "B");
         assert!(a.input == Input::None && a.status.starts_with("a task is in use"), "{}", a.status);
@@ -6721,13 +6726,14 @@ mod tests {
             Input::Choose { kind: Kind::Bench, list, .. } => list.sel,
             _ => panic!("{:?}", a.input),
         };
-        // Each column shows its task's score, its first entry: 0 and 11, after coding's ten benchmarks.
+        // Each column shows its task's score, its first entry: 0, 8 after ECI's six benchmarks and
+        // Arena's chat rating, and 21 after coding's eleven and Arena's WebDev rating.
         press(&mut a, "]");
-        assert_eq!(sel(&a), 11, "] to the next ticked one");
-        press(&mut a, "]");
+        assert_eq!(sel(&a), 8, "] to the next ticked one");
+        press(&mut a, "]]");
         assert_eq!(sel(&a), 0, "wrapping from the last to the first");
         press(&mut a, "[");
-        assert_eq!(sel(&a), 11, "[ the other way round");
+        assert_eq!(sel(&a), 21, "[ the other way round");
     }
 
     #[test]
@@ -7062,37 +7068,32 @@ mod tests {
     }
 
     /// A score that is not the task's own is grey, sorts after an own one it ties and is no
-    /// extreme: an estimated overall in ECI, a task's fallback to the overall. Not with a
+    /// extreme: an estimated overall in ECI. Not with a
     /// benchmark picked, whose scores are all its own.
     #[test]
     fn an_estimate_is_grey_and_sorts_after_an_own_score() {
         use crate::fit::Basis;
         let mut a = app();
-        let (eci, coding) = (ECI - TEXT, ECI + 2 - TEXT);
+        let (eci, coding) = (ECI - TEXT, ECI + 1 - TEXT);
         let mut data = std::mem::take(&mut a.data);
         let mini = data.models.iter_mut().find(|m| m.key == "mini").unwrap();
-        mini.fit.insert("overall".into(), (190.0, Basis::Benches(3)));
-        mini.fit.insert("coding".into(), (80.0, Basis::Overall));
+        mini.fit.insert("overall".into(), (180.0, Basis::Benches(3)));
+        mini.fit.insert("coding".into(), (80.0, Basis::Bench));
         let opus = data.models.iter_mut().find(|m| m.key == "opus5").unwrap();
         opus.fit.insert("overall".into(), (150.0, Basis::Eci));
         a.set_data(data);
         let at = |a: &App, key: &str| a.data.models.iter().position(|m| m.key == key).unwrap();
         let (mini, gpt) = (at(&a, "mini"), at(&a, "gpt55"));
-        assert!(
-            a.estimated(mini, eci) && a.estimated(mini, coding),
-            "an estimated overall, and the overall in coding's place"
-        );
-        assert!(!a.estimated(gpt, eci) && !a.estimated(gpt, coding), "Epoch's ECI, and coding's own benchmarks");
+        assert!(a.estimated(mini, eci) && !a.estimated(mini, coding), "an estimated overall, CursorBench's own");
+        assert!(!a.estimated(gpt, eci) && !a.estimated(gpt, coding), "Epoch's ECI, and coding's own");
         assert!(!a.estimated(mini, PRICE - TEXT), "a price is no score");
-        // Sorted by Coding, best first: gpt55 (80, its own) before mini (80, the overall).
-        a.col = ECI + 2;
-        press(&mut a, "s");
+        // Sorted by ECI, best first: gpt55 (180, Epoch's) before mini (180, an estimate).
         assert_eq!(keys(&a)[..2], ["gpt55", "mini"]);
-        // And in ECI, mini's 190 is no extreme: gpt55's 180 is the best, opus5's 150 the worst.
+        // And mini's 180 is no extreme: gpt55's is the best, opus5's 150 the worst.
         assert_eq!(a.ext[eci], Some((180.0, 150.0)), "{:?}", a.ext[eci]);
         // A benchmark picked in the column: its scores are all its own.
-        a.bench[coding] = Some("FrontierCode");
-        assert!(!a.estimated(mini, coding));
+        a.bench[eci] = Some("LMCA");
+        assert!(!a.estimated(mini, eci));
     }
 
     #[test]
@@ -7101,8 +7102,11 @@ mod tests {
         assert!(base_col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
-        assert_eq!(about("coding"), "ECI-scale score from its coding benchmarks, grey = overall's, blank = not tested");
-        assert!(about("eci").ends_with("grey = estimate"), "no benchmarks of its own");
+        assert_eq!(
+            about("coding"),
+            "FrontierCode score, % of maintainers' coding tasks solved well enough to merge, blank = not tested"
+        );
+        assert!(about("eci").ends_with("grey = estimate"), "a blank there is no score at all");
     }
 
     #[test]
@@ -7161,7 +7165,7 @@ mod tests {
         press(&mut a, "l");
         assert_eq!(a.col, 0, "and wraps from there");
         // Two columns left out with `|`: the moves go over the shown ones.
-        a.store.hide.extend(["ctx".to_string(), "arena".to_string()]);
+        a.store.hide.extend(["ctx".to_string(), "tps".to_string()]);
         a.set_cols();
         let shown: Vec<usize> = (0..NCOLS).filter(|&c| !hidden(c)).collect();
         assert_eq!(shown.len(), NCOLS - 2);
@@ -7191,7 +7195,7 @@ mod tests {
         assert_eq!((cols, a.col), (vec![PRICE, ECI, MEASURED, VIA, NOTES], 0), "w wraps from the last column");
         press(&mut a, "b");
         assert_eq!(a.col, VIA, "b wraps from the first");
-        a.col = ECI + 2;
+        a.col = ECI + 1;
         press(&mut a, "b");
         assert_eq!(a.col, ECI, "b to the start of the group first");
         press(&mut a, "b");
@@ -7214,7 +7218,7 @@ mod tests {
     fn bounds_filter_and_replace() {
         let mut a = app();
         a.col = ECI;
-        press(&mut a, "all");
+        press(&mut a, "al");
         assert_eq!(numeric(a.col).unwrap().name, "Coding");
         press(&mut a, ">50");
         assert!(matches!(a.input, Input::Bound { min: true, .. }));
@@ -8842,8 +8846,8 @@ mod tests {
         assert_eq!((a.selected(), &a.view), (0, &View::Table), "its row highlighted");
         let provider = open("https://models.dev/providers/p/");
         assert_eq!(a.mouse(Mouse::Cell(0, PRICE)), provider, "a price: the page of the provider you'd pay");
-        let arena = TEXT + COLS.iter().position(|c| c.id == ARENA).unwrap();
-        a.data.models[0].arena = Some(8.7);
+        let arena = TEXT + COLS.iter().position(|c| c.id == "agentic").unwrap();
+        (a.data.models[0].arena, a.data.models[0].tool_call) = (Some(8.7), true);
         a.fill();
         assert_eq!(
             a.mouse(Mouse::Cell(0, arena)),

@@ -104,9 +104,10 @@ modelcmp get gemma-3-4b-it                 # download a model and run it on your
 
 ### How recommendations work
 
-Recommendations come from each task's Pareto frontier of price and score. Scores are on Epoch
-AI's ECI scale, from the benchmarks the model has for the task. A model Epoch AI has not scored
-at all is never recommended, but you can still make it your favorite.
+Recommendations come from each task's Pareto frontier of price and score. Coding is the model's
+FrontierCode score and Agentic its Arena agent score, each the same measure for every model.
+Overall is on Epoch AI's ECI scale, from the benchmarks the model has. A model with no score for a task is never
+recommended for it, but you can still make it your favorite.
 
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
 the best up to $2 per 1M tokens, `mid` the best up to $5 and `high` the best at any price. A
@@ -128,10 +129,10 @@ the subtask to it and has another model review the work.
 - [models.dev](https://models.dev): prices, context windows and what each model can do
   (tools, reasoning, vision).
 - [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks.
-- [OpenRouter](https://openrouter.ai/benchmarks/gpqa-diamond) (CC BY 4.0): GPQA diamond
-  results, for the models Epoch AI has not run it on, and the speed of those runs.
+- [OpenRouter](https://openrouter.ai/benchmarks/gpqa-diamond) (CC BY 4.0): the speed of its GPQA
+  diamond runs (Tok/s).
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions,
-  chat and web development (the Arena column).
+  chat and web development (the Agentic column).
 
 None needs an API key. Data is cached for 24 hours.
 

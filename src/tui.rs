@@ -1752,7 +1752,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 .style(fg(Color::Yellow)),
             None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
         };
-        let source = " models.dev + Epoch AI · ";
+        let source = " models.dev + Epoch AI + Arena · ";
         // Where the count and what it waits for would run over the version, the count goes alone.
         let room = usize::from(body.width).saturating_sub(2 + version.width() + source.chars().count());
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
@@ -5222,7 +5222,8 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 229, 6);
-        let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Arena ▾ Coding ▾ Agentic ▾ │ Tok/s │ Via ▾ Notes";
+        let header =
+            "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI ▾ Coding ▾ Agentic ▾ │ Tok/s │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);
@@ -5240,7 +5241,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  | columns  / filter  s sort  │  enter details  x launch  H harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
+                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -5268,14 +5269,14 @@ mod tests {
             LEVEL[1],
             "the blended price takes its level's colour"
         );
-        // A task shows its own scores, so its columns offer no dropdown while one is picked. Arena's does.
-        a.col = ECI + 2;
+        // A task shows its own scores, so its columns offer no dropdown while one is picked.
+        a.col = ECI + 1;
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 6 && lines[5].contains("d dropdown"), "{lines:?}");
         assert!(a.col_about(a.col).ends_with("blank = not tested, d for other benchmarks"), "what its dropdown is for");
         a.task = fit::task("agentic");
         let (_, lines) = render(&mut a, 206, 6);
-        assert!(lines[0].matches('▾').count() == 4 && !lines[5].contains("d dropdown"), "{lines:?}");
+        assert!(lines[0].matches('▾').count() == 3 && !lines[5].contains("d dropdown"), "{lines:?}");
         assert!(a.col_about(a.col).ends_with("blank = not tested"), "no dropdown, no hint");
         // An entry left out or picked turns its header's ▾ yellow, and that one alone.
         let yellow = |a: &mut App| {
@@ -5605,7 +5606,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(col("Dev") + 4, 1)), Some(Mouse::Menu(1)), "the ▾ after Dev");
         assert_eq!(hit(&a, area, click(col("Price"), 1)), Some(Mouse::Header(PRICE)));
         assert_eq!(hit(&a, area, click(col("Price") + 6, 1)), Some(Mouse::Menu(PRICE)), "the ▾ after Price");
-        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(10)));
+        assert_eq!(hit(&a, area, click(col("Coding"), 1)), Some(Mouse::Header(9)));
         assert_eq!(hit(&a, area, click(0, 0)), None, "the frame");
         assert_eq!(hit(&a, area, click(3, h - 2)), None, "the status bar");
         let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.rfind("│ oc")? + "│ ".len()))).unwrap();
@@ -5613,7 +5614,7 @@ mod tests {
         assert_eq!(hit(&a, area, click(x + 1, y)), Some(Mouse::Harness(k - 2, 0)), "a harness in Via");
         assert_eq!(hit(&a, area, click(x + 2, y)), Some(Mouse::Row(k - 2)), "past its name: the row");
         assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
-        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 10)), "a benchmark score");
+        assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 9)), "a benchmark score");
         assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Cell(1, PRICE)), "a price");
         assert_eq!(hit(&a, area, click(col("Notes"), 4)), Some(Mouse::Cell(1, NOTES)), "the note to write");
         let wheel = |kind| MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
@@ -5864,7 +5865,7 @@ mod tests {
         let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(
             words(&lines[0]),
-            ["#", "Model", "‹│", "$out", "Ctx", "│", "▼ECI"],
+            ["#", "Model", "‹│", "Ctx", "│", "▼ECI", "▾"],
             "the cursor starts on the index, and Dev scrolls off"
         );
         assert!(layout(46, &a).more, "columns cut off on the right");
@@ -6316,7 +6317,7 @@ mod tests {
         // ✗'s tab, on, opens the border left of the sort at 70 columns and is over the sort at 60.
         for (w, left) in [
             (60, "╭─────────── ECI: Epoch AI's overall index, gre…─"),
-            (70, "╭ ECI: Epoch AI's overall index, grey = estimate ╯"),
+            (70, "╭ ECI: Epoch AI's overall index, grey = estimate…╯"),
         ] {
             let lines = rows(&mut a, w);
             assert!(lines[2].starts_with(left) && lines[2].ends_with(" ▼ by ECI ╮"), "{}", lines[2]);
@@ -6326,7 +6327,7 @@ mod tests {
         a.key(KeyCode::Char('S').into());
         let top = &rows(&mut a, 100)[2];
         assert!(
-            top.contains("╯              ╰─── ECI: Epoch AI's overall index, grey = estimate ────"),
+            top.contains("╯              ╰ ECI: Epoch AI's overall index, grey = estimate, d for…"),
             "right of it: {top}"
         );
         // A panel's tab stands on the frame, closed, and a cut one is a hint there too.
@@ -6603,8 +6604,9 @@ mod tests {
         );
         let top = row(&term, 2);
         assert!(top.ends_with("─ ▼ by ECI ╮"), "{top}");
-        assert!(top.starts_with("╭╯        ╰──────────"), "{top}");
-        let (l, r) = top.split_once(" ECI: Epoch AI's overall index, grey = estimate ").unwrap();
+        assert!(top.starts_with("╭╯        ╰───"), "{top}");
+        let (l, r) =
+            top.split_once(" ECI: Epoch AI's overall index, grey = estimate, d for other benchmarks ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         // Recommend's tab is the one on over its panel.
         a.view = View::Recommend;
@@ -6617,7 +6619,7 @@ mod tests {
         a.view = View::Table;
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(bottom.contains("models.dev + Epoch AI · data "), "{bottom}");
+        assert!(bottom.contains("models.dev + Epoch AI + Arena · data "), "{bottom}");
         assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
         // The right border marks columns off to the right, the left one rows below, then above.
