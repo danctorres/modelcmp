@@ -168,7 +168,7 @@ modelcmp fav debugging gemini-3.7-flash --tier low   # its model for one tier
 modelcmp fav debugging --rename triage         # another name, its models stay
 
 # recommendations
-modelcmp recommend                             # best model per price for each task, what it measures and when to use it
+modelcmp recommend                             # best model per price for each task, and when to use it
 modelcmp recommend --cache 0                   # priced as one-off prompts
 modelcmp pick                                  # for an agent: every task and tier, with the command to run
 modelcmp pick --via opencode                   # the same among opencode's models, by the id opencode takes
@@ -559,7 +559,6 @@ A task of your own follows the built-in ones with the same fields and `"custom":
 
 | Field | What it is |
 |---|---|
-| `about` | `your own task` |
 | `when` | what the user wrote, and that it wins over a built-in task that fits too |
 | `tier_favorites` | the models the user gave its tiers |
 | `frontier` | those models, cheapest first, with a null `score` |

@@ -18,7 +18,6 @@ pub enum Need {
 
 pub struct Task {
     pub name: &'static str,
-    pub about: &'static str,
     /// When a model high on this task is the right pick.
     pub when: &'static str,
     /// What ranks it when that is not a score of its own, said in recommend as `ranked by`.
@@ -33,22 +32,11 @@ pub struct Task {
     pub need: Need,
 }
 
-impl Task {
-    /// What it is about, and what ranks it where that is not a score of its own.
-    pub fn about_ranked(&self) -> String {
-        match self.ranked {
-            Some(r) => format!("{}, ranked by {r}", self.about),
-            None => self.about.to_string(),
-        }
-    }
-}
-
 /// A task is a capability software engineering needs, judged by `when`. Listed with the general
 /// pick first, then the ones a tier picks for, coding, agentic and vision.
 pub const TASKS: &[Task] = &[
     Task {
         name: "overall",
-        about: "general capability",
         when: "a tiebreaker, or work that fits no other task",
         ranked: None,
         need: Need::None,
@@ -57,8 +45,7 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "coding",
-        about: "writing and fixing code",
-        when: "fixing a bug, adding a feature to an existing repo, refactors",
+        when: "a well-specified bug or feature that must come out mergeable, the result matters more than the run",
         ranked: None,
         need: Need::None,
         bench: Some("FrontierCode"),
@@ -78,8 +65,7 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "agentic",
-        about: "multi-step tool use, long autonomous tasks",
-        when: "unattended multi-step runs, migrations, fix-until-tests-pass loops",
+        when: "long unattended runs, migrations, loops until tests pass, where not going astray matters more than the best fix",
         ranked: None,
         need: Need::Tools,
         bench: Some(crate::data::ARENA_AGENT),
@@ -98,7 +84,6 @@ pub const TASKS: &[Task] = &[
     },
     Task {
         name: "vision",
-        about: "image input",
         when: "screenshots, UI mockups, diagrams as input",
         ranked: Some("overall"),
         need: Need::Vision,

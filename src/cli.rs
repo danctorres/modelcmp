@@ -8,10 +8,9 @@ use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot, task_slots};
 use crate::view::{
-    CUSTOM_ABOUT, CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front,
-    custom_line, custom_when, detail_lines, excluded, fits, left_out, left_out_by, local_best, or_local, over_cap,
-    price, priced, reach, shown_via, task_line, tier_pick, tier_picks, truncate, verdict, via, visible, with_local,
-    within,
+    CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front, custom_line,
+    custom_when, detail_lines, excluded, fits, left_out, left_out_by, local_best, or_local, over_cap, price, priced,
+    reach, shown_via, task_line, tier_pick, tier_picks, truncate, verdict, via, visible, with_local, within,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1266,7 +1265,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
         let tier_favs = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
         let (own, off) = custom_front(&line);
         let tiers = tiers(tier_picks(&own, &off, store, t));
-        serde_json::json!({"name": t, "custom": true, "about": CUSTOM_ABOUT, "when": custom_when(store, t), "benchmarks": [], "tier_favorites": tier_favs, "tiers": tiers, "frontier": front})
+        serde_json::json!({"name": t, "custom": true, "when": custom_when(store, t), "benchmarks": [], "tier_favorites": tier_favs, "tiers": tiers, "frontier": front})
     });
     TASKS
         .iter()
@@ -1281,7 +1280,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             // The key of the best model your machine runs.
             let local = local.map(|(m, _)| &m.key);
             let tiers = tiers(picks);
-            serde_json::json!({"name": t.name, "about": t.about_ranked(), "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| t.benches.to_vec(), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
+            serde_json::json!({"name": t.name, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| t.benches.to_vec(), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -1293,8 +1292,8 @@ fn tiers(picks: Picks) -> serde_json::Value {
     TIERS.iter().zip(picks).map(|(t, p)| (t.0.to_string(), key(p).into())).collect::<serde_json::Map<_, _>>().into()
 }
 
-/// The best model at each price for each task, as recommend's grid in the TUI shows it, what the
-/// task measures and when to use it.
+/// The best model at each price for each task, as recommend's grid in the TUI shows it, and when
+/// to use each task.
 pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     say_filters(store, "");
     if json {
@@ -1313,7 +1312,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
         // column, or what a task with none goes by.
         let bench = crate::app::task_bench(store, t);
         let by = bench.or(t.ranked).map(|b| format!(", ranked by {b}")).unwrap_or_default();
-        println!("{}  {}{by}  (modelcmp list --task {})", t.name, t.about, t.name);
+        println!("{}{by}  (modelcmp list --task {})", t.name, t.name);
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
         let (picks, took, local) = local_picks(data, store, t, &line, &off);
@@ -1344,7 +1343,7 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     }
     for t in store.tasks_with_models() {
         // What you wrote about it is when to use it.
-        println!("{t}  {CUSTOM_ABOUT}  (modelcmp list --task {t})");
+        println!("{t}  (modelcmp list --task {t})");
         println!("  use for:         {}", custom_when(store, t));
         let line = custom_line(usable(data, store), store, t);
         let (own, off) = custom_front(&line);
@@ -1993,7 +1992,7 @@ mod tests {
         let coding = |v: &[Value]| v.iter().find(|t| t["name"] == "coding").unwrap().clone();
         let names = |t: &Value| t["frontier"].as_array().unwrap().iter().map(|e| e["key"].clone()).collect::<Vec<_>>();
         let t = coding(&recommend_json(&data, &store));
-        assert_eq!(keys(&t), ["about", "benchmarks", "frontier", "local", "name", "tier_favorites", "tiers", "when"]);
+        assert_eq!(keys(&t), ["benchmarks", "frontier", "local", "name", "tier_favorites", "tiers", "when"]);
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "gpt55"});
         assert_eq!(t["tiers"], tiers, "as recommend's grid in the TUI");
         assert_eq!(keys(&t["frontier"][0]), ["context", "key", "name", "price", "recommended", "score", "via"]);
@@ -2032,7 +2031,7 @@ mod tests {
         store.toggle_favorite("debugging:high", "gpt55");
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();
-        let fields = ["about", "benchmarks", "custom", "frontier", "name", "tier_favorites", "tiers", "when"];
+        let fields = ["benchmarks", "custom", "frontier", "name", "tier_favorites", "tiers", "when"];
         assert_eq!((keys(own), all.len()), (fields.to_vec(), TASKS.len() + 1));
         assert_eq!(
             (&own["name"], &own["tier_favorites"], names(own)),
@@ -2040,7 +2039,7 @@ mod tests {
         );
         assert_eq!(own["frontier"][0]["score"], Value::Null, "no benchmark scores it");
         // When to use it is yours to write; agents pick it over a built-in task that fits too.
-        assert_eq!((&own["about"], &own["when"]), (&CUSTOM_ABOUT.into(), &CUSTOM_WHEN.into()));
+        assert_eq!(own["when"], CUSTOM_WHEN);
         store.set_about("debugging", "finding and fixing a bug");
         assert_eq!(
             recommend_json(&data, &store).last().unwrap()["when"],

@@ -779,9 +779,6 @@ pub const RECOMMEND_LEGEND: &str = "The best model for each task at each price: 
      Under a favorite, recommended: names the model the tier would pick without it. \
      A model that runs free on your machine takes a tier when it scores higher.";
 
-/// What a task of your own says of itself, where a built-in one says what it measures.
-pub const CUSTOM_ABOUT: &str = "your own task";
-
 /// When a task of your own is the one to pick, where a built-in one has its `when`.
 pub const CUSTOM_WHEN: &str = "work that fits it, even when a built-in task fits too";
 
@@ -1213,7 +1210,8 @@ pub fn detail_rows(
         if let Some((s, basis)) = fit::fit(m, t) {
             fits.push((v.len(), t.name));
             let s = line_shown(t, None, s);
-            v.push(format!("    {:<13}{s:>5}  {} · from {}", t.name, t.about_ranked(), basis.said(t)));
+            let ranked = t.ranked.map_or(String::new(), |r| format!(", ranked by {r}"));
+            v.push(format!("    {:<13}{s:>5}  from {}{ranked}", t.name, basis.said(t)));
         }
     }
     if !m.scores.is_empty() {
@@ -1551,11 +1549,11 @@ mod tests {
         m.arena = Some(-0.3);
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
-        assert_eq!(lines[at("    overall")], "    overall        160  general capability · from 2 benchmarks");
-        assert_eq!(lines[at("    coding")], "    coding          50  writing and fixing code · from FrontierCode");
+        assert_eq!(lines[at("    overall")], "    overall        160  from 2 benchmarks");
+        assert_eq!(lines[at("    coding")], "    coding          50  from FrontierCode");
         assert_eq!(
             lines[at("    agentic")],
-            "    agentic       -0.3  multi-step tool use, long autonomous tasks · from Arena",
+            "    agentic       -0.3  from Arena",
             "Arena's score as the table shows it, to a tenth"
         );
         assert!(!lines.iter().any(|l| l.starts_with("    vision")), "no image input");
@@ -1563,7 +1561,12 @@ mod tests {
         assert_eq!(lines[at("    FrontierSWE")], format!("    {:<36} 40.0%", "FrontierSWE"));
         m.fit.insert("overall".into(), (165.0, crate::fit::Basis::Eci));
         let lines = detail_lines(&m, &Store::default(), false);
-        assert!(lines[at("    overall")].ends_with("· from ECI"), "{}", lines[at("    overall")]);
+        assert!(lines[at("    overall")].ends_with("  from ECI"), "{}", lines[at("    overall")]);
+        m.vision = true;
+        m.fit.insert("vision".into(), (165.0, crate::fit::Basis::Eci));
+        let lines = detail_lines(&m, &Store::default(), false);
+        let vision = lines.iter().find(|l| l.starts_with("    vision")).unwrap();
+        assert_eq!(vision, "    vision         165  from ECI, ranked by overall");
     }
 
     #[test]

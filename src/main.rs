@@ -233,7 +233,7 @@ enum Cmd {
         #[arg(long, value_name = "TEXT", requires = "task", conflicts_with_all = ["rm", "rename"])]
         about: Option<String>,
     },
-    /// The best model at each price for each task, with what the task measures and when to use it (`R` in the TUI)
+    /// The best model at each price for each task, and when to use each task (`R` in the TUI)
     Recommend {
         /// Machine-readable output
         #[arg(long)]

@@ -3143,11 +3143,10 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
                 };
             }
         }
-        // What the task is about, yours in your words, cut to what the row has left of `room`.
+        // What a task of your own is about, in your words, cut to what the row has left of `room`.
         let left = room.saturating_sub(w + 2 + BOXES * BOX_W).min(48);
-        let about = app.store.about(task).map(String::from).or_else(|| fit::task(task).map(fit::Task::about_ranked));
-        if let Some(about) = about.filter(|_| left > 1) {
-            spans.push(Span::styled(truncate(&about, left), fg(MUTED)));
+        if let Some(about) = app.store.about(task).filter(|_| left > 1) {
+            spans.push(Span::styled(truncate(about, left), fg(MUTED)));
         }
         lines.push(Line::from(spans));
     }
