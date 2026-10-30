@@ -811,6 +811,10 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         return None;
     }
     let pos = ratatui::layout::Position::new(m.column, m.row);
+    // A click on the note being written keeps it, where one anywhere else leaves it as esc does.
+    if matches!(app.input, Input::Note { .. }) && app.note_shown.is_some_and(|r| r.contains(pos)) {
+        return None;
+    }
     let plain = m.kind == MouseEventKind::Down(MouseButton::Left) && !pick && !extend;
     // Under the tabs' two lines and the frame's top border.
     let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
@@ -886,8 +890,10 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // A click outside the open panel closes it, as one outside a list does, unless it is on a
     // hint or a tab.
     let close = (!extend && app.panel.is_some_and(|r| !r.contains(pos))).then_some(Mouse::Close);
-    // A hint in the status bar presses its key.
+    // A hint in the status bar presses its key. Where a prompt is typed, the bar is the prompt's,
+    // which a click elsewhere on it leaves be.
     if m.row == area.bottom() - 1 {
+        let close = close.filter(|_| prompt(app).is_none());
         return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten().or(close);
     }
     if on_tabs {
@@ -1299,6 +1305,18 @@ fn hint_layout(app: &App, parts: &[Line], width: u16) -> (Vec<&'static str>, u16
 
 /// A click on the status bar at column `x` presses the key of the hint under it, as in tuiman.
 fn hint_at(app: &App, width: u16, x: u16) -> Option<KeyCode> {
+    // A prompt's keys after its text, which start after the pill and a space, as `status` has them.
+    if let Some((label, ..)) = prompt(app) {
+        let (hint, mut start) = prompt_keys(app, mode(app).0.chars().count() as u16 + 3, &label, width)?;
+        for part in hint.split("  ") {
+            let w = Span::raw(part).width() as u16;
+            if (start..start + w).contains(&x) {
+                return hint_key(part);
+            }
+            start += w + 2;
+        }
+        return None;
+    }
     if app.input != Input::None && !written_in_place(app) {
         return None;
     }
@@ -1745,7 +1763,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     if area.height < 4 || area.width < 4 {
         return;
     }
-    // The text cursor of a note written in its cell in the table.
+    // The cell of a note written in it in the table, and its text cursor.
     let note_at;
     // The tabs have the first two lines, the frame the rest down to the status bar.
     let body = Rect { y: area.y + 2, height: area.height - 3, ..area };
@@ -1820,6 +1838,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         put(buf, body.x + x as u16, body.y, about, end.saturating_sub(x), fg(MUTED));
         let (right, above, below, typing) = table(buf, inner, app);
         note_at = typing;
+        // Where the note being written is drawn, which the details' panel draws next.
+        app.note_shown = typing.map(|n| n.0);
         if right && inner.height > 0 {
             // Columns cut off on the right: `l` scrolls to them.
             put(buf, body.right() - 1, inner.y, "›", 1, MORE);
@@ -1842,11 +1862,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         });
     }
     let text = panel(app, buf, area, body);
-    app.note_shown = note_at.is_some() || matches!((&app.input, text), (Input::Note { .. }, Some(Some(_))));
     // Where the text cursor goes: in the status bar's prompt, on a note written in its place, on
     // a cap in recommend or on an entry written in a list. After the panel's lines, as finding
     // its search's match says so there.
-    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y)).or(note_at);
+    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y)).or(note_at.map(|n| n.1));
     if let Some(at) = text {
         cursor = at;
     }
@@ -1978,28 +1997,25 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
         View::Detail(_) => {
             let get = |m| (app.download(m), app.size(m));
             let lines = app.current().map(|m| detail(m, &app.store, app.any_available(), get(m)));
-            lines.map(|(title, mut lines)| {
-                // The note being written on its `note:` line, kept in view. The box keeps the
-                // width it has with the note as kept, the text scrolling sideways in it to keep
-                // the text cursor in view.
+            lines.map(|(title, mut lines, note)| {
+                // The note being written on its `note:` line, kept in view, where the box has a
+                // line and a few cells for it, else the status bar takes it. The box keeps the
+                // width it has with the note as kept: the text scrolls sideways in it to keep the
+                // text cursor in view, padded to that width.
                 let mut writing = None;
-                if let Input::Note { text, cur, .. } = &app.input
-                    && let Some(l) = lines.iter().position(|l| l.spans.first().is_some_and(|s| s.content == "  note:"))
+                let room = usize::from(overlay_rect(body, &title, &lines).width).saturating_sub(4);
+                let lead = |l: &Line| l.spans.iter().take(2).map(Span::width).sum::<usize>();
+                if let (Input::Note { text, cur, .. }, Some(l)) = (&app.input, note)
+                    && room >= lead(&lines[l]) + NOTE_MIN
+                    && body.height > 2
                 {
-                    let room = usize::from(overlay_rect(body, &title, &lines).width).saturating_sub(4);
-                    let v = &lines[l].spans[1].content;
-                    let pad = v.len() - v.trim_start().len();
-                    let lead = lines[l].spans[0].width() + pad;
-                    let start = scrolled(lead, text, *cur, room);
-                    let mut w = lead;
-                    let fits = |c: &char| {
-                        w += Span::raw(c.to_string()).width();
-                        w <= room
-                    };
-                    let shown: String = text[start..].chars().take_while(fits).collect();
-                    lines[l].spans[1] = Span::raw(format!("{}{shown}", " ".repeat(pad)));
-                    text_at = Some((l, lead + Span::raw(&text[start..*cur]).width()));
-                    let shown = usize::from(body.height.saturating_sub(2)).max(1);
+                    let lead = lead(&lines[l]);
+                    let (shown, at) = in_view(lead, text, *cur, room);
+                    let pad = " ".repeat(room - lead - Span::raw(shown).width());
+                    lines[l].spans.truncate(2);
+                    lines[l].spans.push(Span::raw(format!("{shown}{pad}")));
+                    text_at = Some((l, lead + at));
+                    let shown = usize::from(body.height - 2);
                     app.scroll = (app.scroll as usize).clamp((l + 1).saturating_sub(shown), l) as u16;
                     writing = Some(l);
                 }
@@ -2099,6 +2115,12 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
                 _ => l.checked_sub(app.scroll as usize).filter(|&y| y < text.height as usize),
             };
             cursor = Some(y.map(|y| ((text.x + x as u16).min(text.right().saturating_sub(1)), text.y + y as u16)));
+            // The note's line in details, where a click leaves it be. One out of view leaves the
+            // note to the status bar, with its cursor.
+            if matches!(app.view, View::Detail(_)) {
+                app.note_shown = y.map(|y| Rect::new(text.x, text.y + y as u16, text.width, 1));
+                cursor = cursor.flatten().map(Some);
+            }
         }
         // The cursor runs through the box's border, as in a list, and the marks go over its bar.
         if let Some(y) = hit_line.and_then(|l| l.checked_sub(app.scroll as usize)).filter(|&y| y < text.height as usize)
@@ -2278,8 +2300,8 @@ fn head(app: &App) -> u16 {
 
 /// Header plus as many rows as fit in `area`, scrolled so the selection stays in view. Says
 /// whether columns are cut off on the right and rows above and below, for the caller's border,
-/// and where the text cursor of a note written in its cell is.
-fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool, Option<(u16, u16)>) {
+/// and, of a note written in its cell, the cell and the text cursor.
+fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool, Option<NoteCell>) {
     if area.height == 0 {
         return (false, false, false, None);
     }
@@ -2495,9 +2517,9 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool, Opti
                 && key == m.key
                 && usize::from(w) >= NOTE_MIN
             {
-                let start = scrolled(0, written, cur, w as usize);
-                note = &written[start..];
-                typing = Some((area.x + x + Span::raw(&written[start..cur]).width() as u16, y));
+                let (shown, at) = in_view(0, written, cur, w as usize);
+                note = shown;
+                typing = Some((Rect::new(area.x + x, y, w, 1), (area.x + x + at as u16, y)));
             }
             put(buf, area.x + x, y, note, w as usize, text.add_modifier(Modifier::ITALIC));
         }
@@ -2831,7 +2853,7 @@ fn mode(app: &App) -> (&'static str, Color) {
 /// details' `note:` line, rather than in the status bar: compare and recommend show no note, `|`
 /// may leave Notes out, a narrow table has no room for it and its row may be scrolled off.
 fn note_in_place(app: &App) -> bool {
-    matches!(app.input, Input::Note { .. }) && app.note_shown
+    matches!(app.input, Input::Note { .. }) && app.note_shown.is_some()
 }
 
 /// Whether text is written on its entry, a note in its place, a tier's cap or a task of your own:
@@ -2848,8 +2870,74 @@ fn note_in_table(app: &App) -> Option<(&str, &str, usize)> {
     }
 }
 
+/// The cell a note is written in in the table, and its text cursor.
+type NoteCell = (Rect, (u16, u16));
+
 /// Notes is never narrower than this, so it is the least a note is written in.
 const NOTE_MIN: usize = 6;
+
+/// The prompt in the status bar: its label, the text being typed and the cursor's byte offset in it.
+fn prompt(app: &App) -> Option<(String, &str, usize)> {
+    match &app.input {
+        Input::Search { cur, .. } => {
+            let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
+            Some(("/".to_string(), q, *cur))
+        }
+        Input::Note { .. } if note_in_place(app) => None,
+        Input::Note { text, cur, .. } => Some(("note: ".to_string(), text, *cur)),
+        Input::Bound { col, min, text, cur } => {
+            Some((format!("{} {} ", app.bound_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
+        }
+        Input::Menu { col, list, .. } => Some(match (list.typing, list.query.is_empty()) {
+            (false, true) => (format!("{} ▾", base_col_name(*col)), &list.query, list.cur),
+            _ => (format!("{} ▾ /", base_col_name(*col)), &list.query, list.cur),
+        }),
+        Input::Choose { title, list, .. } => Some((format!("{title} /"), &list.query, list.cur)),
+        Input::Quit
+        | Input::Upgrade
+        | Input::Unfavorite
+        | Input::Unexclude
+        | Input::Reset
+        | Input::DeleteTask(_)
+        | Input::Bind { .. }
+        // Written on its header or its row (`recommend`).
+        | Input::Cap { .. }
+        | Input::Task(_)
+        | Input::None => None,
+    }
+}
+
+/// The keys the prompt has after its text, its `label` starting at `x` in a bar ending at
+/// `right`, and the column they start at: none where they would leave the label and a few typed
+/// cells too little room, nor for a choice list, which says its keys in its box.
+fn prompt_keys(app: &App, x: u16, label: &str, right: u16) -> Option<(String, u16)> {
+    let (choose, menu, typing) = match &app.input {
+        Input::Menu { list, .. } => (false, true, list.typing),
+        Input::Choose { list, .. } => (true, false, list.typing),
+        _ => (false, false, true),
+    };
+    // Not under a range, which esc cancels first and whose hint has no search.
+    let kept = app.open_list().is_some_and(|l| !l.query.is_empty() && l.visual.is_none());
+    let hint = match (menu, typing) {
+        _ if choose => return None,
+        (true, false) if matches!(&app.input, Input::Menu { list, .. } if list.visual.is_some()) => {
+            "↓ ↑ extend  space enter toggle  e leave out  esc cancel"
+        }
+        (true, false) if matches!(app.input, Input::Menu { col: 1 | VIA, .. }) => {
+            "↓ ↑ move  / search  v range  space enter toggle  e leave out  esc close"
+        }
+        (true, false) if matches!(app.input, Input::Menu { col: PRICE, .. }) => {
+            "↓ ↑ move  / search  space enter toggle  e leave out  esc close"
+        }
+        (true, false) => "↓ ↑ move  / search  space enter toggle  esc close",
+        (true, true) => "↓ ↑ match  enter apply  esc cancel",
+        _ => "enter apply  esc cancel",
+    };
+    let hint = if menu && kept && !typing { kept_hint(hint, "  ") } else { hint.to_string() };
+    let width = |s: &str| Span::raw(s).width();
+    let w = width(&hint);
+    (usize::from(x) + width(label) + 8 + w < usize::from(right)).then(|| (hint, right - (w as u16 + 1)))
+}
 
 /// Returns the cursor column while a search, note or bound is being typed.
 fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
@@ -2876,35 +2964,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         }
         return None;
     }
-    // The prompt's label, the text being typed and the cursor's byte offset in it.
-    let prompt = match &app.input {
-        Input::Search { cur, .. } => {
-            let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
-            Some(("/".to_string(), q, *cur))
-        }
-        Input::Note { .. } if note_in_place(app) => None,
-        Input::Note { text, cur, .. } => Some(("note: ".to_string(), text, *cur)),
-        Input::Bound { col, min, text, cur } => {
-            Some((format!("{} {} ", app.bound_name(*col), if *min { "≥" } else { "≤" }), text, *cur))
-        }
-        Input::Menu { col, list, .. } => Some(match (list.typing, list.query.is_empty()) {
-            (false, true) => (format!("{} ▾", base_col_name(*col)), &list.query, list.cur),
-            _ => (format!("{} ▾ /", base_col_name(*col)), &list.query, list.cur),
-        }),
-        Input::Choose { title, list, .. } => Some((format!("{title} /"), &list.query, list.cur)),
-        Input::Quit
-        | Input::Upgrade
-        | Input::Unfavorite
-        | Input::Unexclude
-        | Input::Reset
-        | Input::DeleteTask(_)
-        | Input::Bind { .. }
-        // Written on its header or its row (`recommend`).
-        | Input::Cap { .. }
-        | Input::Task(_)
-        | Input::None => None,
-    };
-    if let Some((label, typed, cur)) = prompt {
+    if let Some((label, typed, cur)) = prompt(app) {
         // Ctx is bounded in thousands of tokens, as its cells read: `Ctx ≥ 200k`, and Via by the
         // download's size in GB, `size ≤ 8 GB`. The number stays as typed until enter.
         let unit = match app.input {
@@ -2912,43 +2972,19 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             Input::Bound { col: VIA, .. } => " GB",
             _ => "",
         };
-        // A choice list says its keys in its box, so the bar does not say them again.
-        let (choose, menu, typing) = match &app.input {
-            Input::Menu { list, .. } => (false, true, list.typing),
-            Input::Choose { list, .. } => (true, false, list.typing),
-            _ => (false, false, true),
+        let typing = match &app.input {
+            Input::Menu { list, .. } | Input::Choose { list, .. } => list.typing,
+            _ => true,
         };
-        // Not under a range, which esc cancels first and whose hint has no search.
-        let kept = app.open_list().is_some_and(|l| !l.query.is_empty() && l.visual.is_none());
-        let hint = match (menu, typing) {
-            _ if choose => "",
-            (true, false) if matches!(&app.input, Input::Menu { list, .. } if list.visual.is_some()) => {
-                "↓ ↑ extend  space enter toggle  e leave out  esc cancel"
-            }
-            (true, false) if matches!(app.input, Input::Menu { col: 1 | VIA, .. }) => {
-                "↓ ↑ move  / search  v range  space enter toggle  e leave out  esc close"
-            }
-            (true, false) if matches!(app.input, Input::Menu { col: PRICE, .. }) => {
-                "↓ ↑ move  / search  space enter toggle  e leave out  esc close"
-            }
-            (true, false) => "↓ ↑ move  / search  space enter toggle  esc close",
-            (true, true) => "↓ ↑ match  enter apply  esc cancel",
-            _ => "enter apply  esc cancel",
-        };
-        let hint = if menu && kept && !typing { kept_hint(hint, "  ") } else { hint.to_string() };
-        let hint = hint.as_str();
         let width = |s: &str| Span::raw(s).width();
-        // The hint shows only where it leaves the label and a few typed cells their room.
-        let fits = !hint.is_empty() && usize::from(x) + width(&label) + 8 + width(hint) < usize::from(area.right());
-        let hx = if fits { area.right() - (width(hint) as u16 + 1) } else { area.right() };
+        let keys = prompt_keys(app, x, &label, area.right());
+        let hx = keys.as_ref().map_or(area.right(), |k| k.1);
         // Text too long for the room scrolls sideways, so the cursor stays in view.
         let room = usize::from(hx.saturating_sub(x));
-        let start = scrolled(width(&label) + width(unit), typed, cur, room);
-        let text = format!("{label}{}{unit}", &typed[start..]);
-        put(buf, x, area.y, &text, room, Style::new());
-        if fits {
+        let (shown, at) = in_view(width(&label) + width(unit), typed, cur, room);
+        put(buf, x, area.y, format!("{label}{shown}{unit}"), room, Style::new());
+        if let Some((hint, mut hx)) = keys {
             // Its keys in their colour, as in the hints of the table's bar.
-            let mut hx = hx;
             for part in hint.split("  ") {
                 let (key, what) = split_hint(part);
                 let key = bound_keys(key, &app.store.keys);
@@ -2956,7 +2992,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
                 hx = put(buf, hx, area.y, what, width(what), fg(MUTED)).0 + 2;
             }
         }
-        let cx = x + (width(&label) + width(&typed[start..cur])) as u16;
+        let cx = x + (width(&label) + at) as u16;
         return typing.then_some(cx.min(hx.saturating_sub(1)));
     }
     let parts = parts(app);
@@ -3098,35 +3134,30 @@ fn via_spans(m: &Model, any: bool, get: bool, said: &str, store: &Store, style: 
 /// `room` is cut, so the entry keeps its box's width, and an empty field says in grey what to
 /// write there.
 fn edit_line(e: &Edit, prefix: Span<'static>, name: Style, room: usize) -> (Line<'static>, usize) {
-    // `text` from byte `start`, in `cells` cells.
-    let field = |text: &str, start: usize, cells: usize, empty: &str, style: Style| {
-        let (text, style) = if text.is_empty() { (empty, fg(MUTED)) } else { (&text[start..], style) };
-        let mut w = 0;
-        let fits = |c: &char| {
-            w += Span::raw(c.to_string()).width();
-            w <= cells
-        };
-        Span::styled(text.chars().take_while(fits).collect::<String>(), style)
+    // What shows of a field, or what to write there in grey while it is empty, in `cells` cells.
+    let field = |text: &str, shown: &str, cells: usize, empty: &str, style: Style| match text {
+        "" => Span::styled(fit(empty, cells).to_string(), fg(MUTED)),
+        _ => Span::styled(shown.to_string(), style),
     };
-    let at = |before: usize, start: usize| before + Span::raw(&e.text[start..e.cur]).width();
     // A cell is kept at the end for the text cursor.
     let (lead, room) = (prefix.width(), room.saturating_sub(1));
     let Some((n, a)) = e.fields() else {
-        let start = scrolled(lead, &e.text, e.cur, room);
-        let text = field(&e.text, start, room.saturating_sub(lead), "a folder", Style::new());
-        return (Line::from(vec![prefix, text]), at(lead, start));
+        let (shown, x) = in_view(lead, &e.text, e.cur, room);
+        let text = field(&e.text, shown, room.saturating_sub(lead), "a folder", Style::new());
+        return (Line::from(vec![prefix, text]), lead + x);
     };
     let on_about = matches!(e.what, What::Task { about: true, .. });
-    let n_start = if on_about { 0 } else { scrolled(lead, n, e.cur, room) };
     // While what it is about is written, the name takes half the room at most, so that has some.
     let n_room = room.saturating_sub(lead) / if on_about { 2 } else { 1 };
-    let n = field(n, n_start, n_room, "a name", name);
+    let (n_shown, n_x) = if on_about { (fit(n, n_room), 0) } else { in_view(lead, n, e.cur, room) };
+    let n_span = field(n, n_shown, n_room, "a name", name);
     // One space between them, as recommend's line under the grid has.
-    let before = lead + n.width() + 1;
-    let a_start = if on_about { scrolled(before, a, e.cur, room) } else { 0 };
-    let a = field(a, a_start, room.saturating_sub(before), "a description", Style::new());
-    let x = if on_about { at(before, a_start) } else { at(lead, n_start) };
-    (Line::from(vec![prefix, n, Span::raw(" "), a]), x)
+    let before = lead + n_span.width() + 1;
+    let a_room = room.saturating_sub(before);
+    let (a_shown, a_x) = if on_about { in_view(before, a, e.cur, room) } else { (fit(a, a_room), 0) };
+    let a = field(a, a_shown, a_room, "a description", Style::new());
+    let x = if on_about { before + a_x } else { lead + n_x };
+    (Line::from(vec![prefix, n_span, Span::raw(" "), a]), x)
 }
 
 /// The cells a box of `f`'s grid takes along its row: the cursor's bars around the mark, and
@@ -3509,6 +3540,24 @@ fn scrolled(before: usize, text: &str, cur: usize, room: usize) -> usize {
         start += text[start..].chars().next().map_or(1, char::len_utf8);
     }
     start
+}
+
+/// What of `text` shows in `room` cells, `before` of them taken: from where it scrolls sideways
+/// to keep the cursor at byte `cur` in view (`scrolled`), cut to the cells left. With the cells
+/// from there to the cursor, which the caller adds its own `before` to.
+fn in_view(before: usize, text: &str, cur: usize, room: usize) -> (&str, usize) {
+    let start = scrolled(before, text, cur, room);
+    (fit(&text[start..], room.saturating_sub(before)), Span::raw(&text[start..cur]).width())
+}
+
+/// The start of `text` that fits in `cells` cells, a wide character taking two.
+fn fit(text: &str, cells: usize) -> &str {
+    let mut w = 0;
+    let past = |&(i, c): &(usize, char)| {
+        w += Span::raw(&text[i..i + c.len_utf8()]).width();
+        w > cells
+    };
+    &text[..text.char_indices().find(past).map_or(text.len(), |(i, _)| i)]
 }
 
 /// Where an overlay with these lines sits: centred, as wide as its widest line or title, or as
@@ -4286,21 +4335,23 @@ fn out_of_reach(app: &App, m: &Model) -> Option<Span<'static>> {
 }
 
 /// The model's name, the title, then every detail line, with `key:` labels and section headings
-/// coloured.
+/// coloured, and which line is the note's.
 fn detail(
     m: &Model,
     store: &Store,
     any: bool,
     (get, size): (Option<String>, Option<u64>),
-) -> (String, Vec<Line<'static>>) {
+) -> (String, Vec<Line<'static>>, Option<usize>) {
     let is_label = |k: &str| k.len() < 16 && k.trim().chars().all(|c| c.is_alphabetic() || c == ' ');
     let big = size.zip(crate::view::room(store)).is_some_and(|(b, r)| b > r);
     let mut lines = detail_rows(m, store, any, get.as_deref(), size).into_iter();
     let title = lines.next().map(|r| r.1).unwrap_or_default();
+    let mut note = None;
     // A task's name in its colour, as its ★ in the table: on its fit line and after `favorite:`.
     let named = |t: &str| Span::styled(t.to_string(), fg(task_color(t)).add_modifier(BOLD));
     let lines = lines
-        .map(|(task, s)| {
+        .enumerate()
+        .map(|(i, (task, s))| {
             // Outside the match: an `if let` guard needs a newer Rust than Cargo.toml asks for.
             let fit = task.and_then(|t| Some((t, s.split_once(t)?)));
             match s.split_once(':') {
@@ -4323,6 +4374,13 @@ fn detail(
                     spans.extend(via_spans(m, any, get.is_some(), said, store, Style::new()));
                     Line::from(spans)
                 }
+                // Its label, the gap and the note, apart for the note to be written there.
+                Some((k, v)) if k.trim() == "note" => {
+                    note = Some(i);
+                    let (pad, said) = v.split_at(v.len() - v.trim_start().len());
+                    let label = Span::styled(format!("{k}:"), fg(KEY));
+                    Line::from(vec![label, Span::raw(pad.to_string()), Span::raw(said.to_string())])
+                }
                 // A download's size grey when it is too big for your machine's memory, as in Via.
                 Some((k, v)) if k.trim() == "size" && big => {
                     Line::from(vec![Span::styled(format!("{k}:"), fg(KEY)), Span::styled(v.to_string(), fg(MUTED))])
@@ -4335,7 +4393,7 @@ fn detail(
             }
         })
         .collect();
-    (title, lines)
+    (title, lines, note)
 }
 
 /// What `compare` drew, for `draw` to scroll it and `App` to move over it.
@@ -6488,6 +6546,13 @@ mod tests {
         assert!(!bar.contains("note:") && bar.contains("esc cancel") && !bar.contains("help"), "{bar}");
         let keys: Vec<_> = (0..70).filter_map(|x| hint_at(&a, 70, x)).collect();
         assert!(keys.contains(&KeyCode::Enter) && keys.contains(&KeyCode::Esc), "{keys:?}");
+        let click = |column, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(hit(&a, Rect::new(0, 0, 70, 8), click(pos.x - 2, pos.y)), None, "a click on it keeps it");
         a.key(KeyCode::Esc.into());
         assert_eq!(a.col, col, "esc puts the column back");
 
@@ -6510,8 +6575,24 @@ mod tests {
         assert_eq!((buf[(pos.x - 1, pos.y)].symbol(), buf[(pos.x, pos.y)].symbol()), ("x", " "), "after the text");
         assert!(pos.x < wide.right() - 2, "inside the box");
         assert!(!row(39).contains("note:"), "{}", row(39));
+        assert_eq!(hit(&a, Rect::new(0, 0, 200, 40), click(pos.x - 2, pos.y)), None, "a click on its line keeps it");
         a.key(KeyCode::Enter.into());
         assert_eq!((a.col, a.store.note(&a.current().unwrap().key)), (col, Some("x".repeat(300).as_str())));
+
+        // A kept note the widest line: the box keeps that width while it is written shorter.
+        let key = a.current().unwrap().key.clone();
+        a.store.set_note(&key, &"y".repeat(120));
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let wide = a.panel.unwrap();
+        a.key(KeyCode::Char('i').into());
+        for _ in 0..30 {
+            a.key(KeyCode::Backspace.into());
+        }
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let pos = term.get_cursor_position().unwrap();
+        let buf = term.backend().buffer();
+        assert_eq!(a.panel, Some(wide), "the box keeps its width");
+        assert_eq!((buf[(pos.x - 1, pos.y)].symbol(), buf[(pos.x, pos.y)].symbol()), ("y", " "), "after the text");
     }
 
     #[test]
@@ -6536,7 +6617,33 @@ mod tests {
             let pos = term.get_cursor_position().unwrap();
             let bar: String = (0..w).map(|x| term.backend().buffer()[(x, 7)].symbol()).collect();
             assert!(pos.y == 7 && bar.contains("note: abc"), "{w} {:?}: {bar}", a.view);
+            // A click on the typed text keeps it, and one on `enter apply` keeps the note.
+            let click = |column| MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            };
+            let area = Rect::new(0, 0, w, 8);
+            assert_eq!(hit(&a, area, click(pos.x - 1)), None, "{w} {:?}: on the text", a.view);
+            if let Some(x) = (0..w).find(|&x| hint_at(&a, w, x) == Some(KeyCode::Enter)) {
+                a.mouse(hit(&a, area, click(x)).unwrap());
+                assert_eq!((&a.input, a.store.note("opus")), (&Input::None, Some("abc")), "{w} {:?}", a.view);
+            } else {
+                assert!(w < 40, "{w} {:?}: enter apply fits: {bar}", a.view);
+            }
         }
+        // Details with no room for a few cells of it, on a small screen.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(16, 12)).unwrap();
+        let mut a = app();
+        a.key(KeyCode::Enter.into());
+        for c in "iabc".chars() {
+            a.key(KeyCode::Char(c).into());
+        }
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let pos = term.get_cursor_position().unwrap();
+        let bar: String = (0..16).map(|x| term.backend().buffer()[(x, 11)].symbol()).collect();
+        assert!(matches!(a.view, View::Detail(_)) && pos.y == 11 && bar.contains("note: bc"), "{bar}");
     }
 
     #[test]

@@ -1471,8 +1471,9 @@ pub struct App {
     pub panel: Option<ratatui::layout::Rect>,
     /// The columns of the frame's `⚠ refresh had issues` as last drawn, which a click opens.
     pub issues_at: Option<std::ops::Range<u16>>,
-    /// Whether the last frame drew the note being written in its place, so the status bar does not.
-    pub note_shown: bool,
+    /// Where the last frame drew the note being written in its place, its cell or its line, so
+    /// the status bar does not and a click there leaves it be.
+    pub note_shown: Option<ratatui::layout::Rect>,
     /// Search of the open panel, compare, help, details or recommend, typed with `/` in any.
     pub overlay_query: String,
     /// The search of the panel details were opened from and the match it was on, for esc to
@@ -1572,7 +1573,7 @@ impl App {
             more: vec![],
             panel: None,
             issues_at: None,
-            note_shown: false,
+            note_shown: None,
             overlay_query: String::new(),
             back_query: (String::new(), 0),
             help_back: None,
@@ -3867,7 +3868,8 @@ impl App {
             return self.on_key(KeyCode::Esc.into());
         }
         // A prompt keeps the wheel still, and a click anywhere else leaves it as esc does: an
-        // entry or a note being written, a bound, and what `q`, `U`, `D` and `X` ask. A search
+        // entry or a note being written, a bound, and what `q`, `U`, `D` and `X` ask. One on the
+        // note being written or on the status bar's prompt is no click here (`tui::hit`). A search
         // is kept as enter keeps it, and the click is then on what it found.
         if self.editing() || (self.input != Input::None && self.open_list().is_none()) {
             let search = matches!(self.input, Input::Search { .. });
