@@ -131,8 +131,8 @@ fn month(v: f64) -> String {
 const ARENA: &str = "arena";
 
 /// The release, beside Dev, then prices from the offer you'd pay and context, the ECI and
-/// Arena's score, the two overall scores side by side, then the task scores.
-pub const COLS: [Col; 10] = [
+/// Arena's score, the two overall scores side by side, then the task scores, then the speed.
+pub const COLS: [Col; 11] = [
     Col {
         ranked: false,
         show: month,
@@ -184,6 +184,12 @@ pub const COLS: [Col; 10] = [
     col("Agentic", "agentic", "ECI-scale score from its agentic benchmarks, grey = overall's", |m| {
         task_score(m, "agentic")
     }),
+    Col {
+        show: |v| format!("{v:.0}"),
+        ..col("Tok/s", "tps", "output tokens per second in OpenRouter's GPQA runs, thinking included (median)", |m| {
+            m.tps
+        })
+    },
 ];
 
 /// The task the column `COLS[c]` scores, when it scores one: ECI is overall's.
@@ -223,8 +229,10 @@ fn default_sort() -> (usize, bool) {
 }
 /// Column index of ECI.
 pub const ECI: usize = TEXT + 6;
-/// First column of each group: names and release, price and context, scores, your own.
-pub const GROUPS: [usize; 4] = [0, PRICE, ECI, VIA];
+/// Column index of Tok/s, what a run measured: speed.
+const MEASURED: usize = TEXT + 10;
+/// First column of each group: names and release, price and context, scores, measured, your own.
+pub const GROUPS: [usize; 5] = [0, PRICE, ECI, MEASURED, VIA];
 /// Column index of where you have access.
 pub const VIA: usize = TEXT + COLS.len();
 /// Column index of your note, the last one.
@@ -4051,13 +4059,16 @@ impl App {
                 self.val(self.rows[n], col)?;
                 let m = self.current()?;
                 // Where each comes from: the release, prices and context from models.dev, the
-                // rest from the source that measures it, which is Arena for its own score.
+                // rest from the source that measures it, Arena for its own score and OpenRouter
+                // for the speed.
                 let (site, page) = if col < ECI {
                     ("models.dev", m.price_page())
                 } else if numeric(col).is_some_and(|c| c.id == ARENA) {
                     // A rating opens its own leaderboard, the rest the agent one.
                     let board = crate::data::ARENA_BOARDS.iter().find(|b| self.col_bench(col) == Some(b.0));
                     ("arena.ai", board.map(|b| b.1.to_string()).or_else(|| m.arena_page()))
+                } else if col == MEASURED {
+                    ("openrouter.ai", m.openrouter_page())
                 } else {
                     ("epoch.ai", m.epoch_page())
                 };
@@ -5373,7 +5384,7 @@ mod tests {
         a.store.hide.extend(["via".to_string(), "notes".to_string()]);
         a.set_cols();
         press(&mut a, "$");
-        assert_eq!(a.col, col("agentic"));
+        assert_eq!(a.col, col("tps"));
         // Ticked again, it is back.
         a.col = PRICE + 1;
         press(&mut a, "|k");
@@ -7172,12 +7183,12 @@ mod tests {
         let mut a = app();
         a.col = 0;
         let mut cols = vec![];
-        for _ in 0..4 {
+        for _ in 0..5 {
             press(&mut a, "w");
             cols.push(a.col);
         }
         press(&mut a, "w");
-        assert_eq!((cols, a.col), (vec![PRICE, ECI, VIA, NOTES], 0), "w wraps from the last column");
+        assert_eq!((cols, a.col), (vec![PRICE, ECI, MEASURED, VIA, NOTES], 0), "w wraps from the last column");
         press(&mut a, "b");
         assert_eq!(a.col, VIA, "b wraps from the first");
         a.col = ECI + 2;

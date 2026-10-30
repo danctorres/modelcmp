@@ -21,6 +21,7 @@ means. Green and red mark the best and worst value in a column, here and in comp
 | ECI | Epoch Capabilities Index. From Epoch AI, or grey when estimated from the model's benchmarks |
 | Arena | net improvement in real agent sessions, in percent. From Arena's Agent leaderboard, and its chat and WebDev ratings in the dropdown |
 | Coding, Agentic | the [task scores](#task-columns) |
+| Tok/s | output tokens per second in OpenRouter's GPQA diamond runs, end to end with the thinking. From OpenRouter |
 | Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare. The one the model runs on (`H`) is dark on its colour, here, in the details and compare |
 | Notes | your note on it |
 
@@ -97,6 +98,10 @@ OpenRouter (its benchmark leaderboard, updated daily):
   provider scores near 0, or OpenRouter's auto-routing run when no provider has one. It is
   scored on Epoch's curve for GPQA diamond, so it feeds the overall estimate of a model with no
   ECI. Its tau-bench results are not used.
+- Tok/s is the output tokens a GPQA run produced over the time it took, the median over the same
+  providers: an end-to-end rate, the thinking and the time to the first token included, which a
+  provider's streaming rate is not. A model OpenRouter ran, whether or not Epoch has its GPQA
+  diamond score, has it.
 
 Arena (its Agent, Text and WebDev leaderboards):
 
@@ -213,6 +218,7 @@ stored as `tool-dispatch`).
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
 | `eci`, `coding`, `agentic` | the scores, in whole points as the table shows them |
+| `tps` | tokens per second, from OpenRouter's GPQA runs |
 | `arena` | from Arena's Agent leaderboard, in percent |
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
@@ -508,6 +514,7 @@ Each model carries these fields:
 | `basis` | what each task's score is from: `ECI`, `3 benchmarks` (its own) or `overall` |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `arena_chat`, `arena_webdev` | Arena's chat and WebDev ratings, when Arena rates the model |
+| `tokens_per_second` | from OpenRouter's GPQA diamond runs, when it ran the model |
 
 `price` has:
 

@@ -1154,6 +1154,10 @@ pub fn detail_rows(
     ];
     // What it takes on your machine, next to what it holds.
     v.extend(size.map(|b| format!("  size:       {} (GGUF copy on Hugging Face)", crate::data::gb(b))));
+    // Under context: what the model costs in time, next to what it holds.
+    v.extend(
+        m.tps.map(|t| format!("  speed:      {t:.0} tokens/s in OpenRouter's GPQA runs, thinking included (median)")),
+    );
     v.extend(m.arena.map(|a| format!("  arena:      {}% net improvement in agent sessions (arena.ai)", signed(a))));
     for (b, ..) in crate::data::ARENA_BOARDS {
         v.extend(
@@ -1257,8 +1261,8 @@ pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
 /// Rows for side-by-side comparison, named and ordered as the table's columns, with the
 /// model's first; Via as the table shows it (`shown_via`), and a task as its line ranks it with
 /// `store`'s picks (`line_score`). A model with no value in a row has a `-` there, so no column
-/// of the table seems to be missing. Only Arena and a task are left out, when no model has a
-/// value for them.
+/// of the table seems to be missing. Only Arena, a task and the speed are left out, when no
+/// model has a value for them.
 pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
         scored_row(label, vals, &[], fmt, higher)
@@ -1342,6 +1346,10 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
             let own: Vec<bool> = models.iter().map(|m| own_score(m, t, bench)).collect();
             rows.push(Row { section: "scores", ..scored_row(&label, vals, &own, |v| format!("{v:.0}"), true) });
         }
+    }
+    if models.iter().any(|m| m.tps.is_some()) {
+        let tps = models.iter().map(|m| m.tps).collect();
+        rows.push(Row { section: "speed", ..row(&head("tps"), tps, |v| format!("{v:.0}"), true) });
     }
     rows.push(Row {
         label: "Via".into(),

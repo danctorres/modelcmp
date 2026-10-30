@@ -5222,11 +5222,10 @@ mod tests {
     fn wide_table_shows_every_column_and_extremes() {
         let mut a = app();
         let (buf, lines) = render(&mut a, 229, 6);
-        let header =
-            "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Arena ▾ Coding ▾ Agentic ▾ │ Via ▾ Notes";
+        let header = "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI Arena ▾ Coding ▾ Agentic ▾ │ Tok/s │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
-        assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 3, "{}", lines[1]);
+        assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);
         let sep = cell(&lines[0], "│");
         assert_eq!((cell(&lines[1], "┼"), cell(&lines[3], "│")), (sep, sep), "the group lines run straight down");
         assert_eq!(buf[(sep, 3)].fg, MUTED, "and are muted");
@@ -5925,10 +5924,11 @@ mod tests {
             a.key(KeyCode::Char('h').into());
         }
         let (_, lines) = render(&mut a, 51, 4);
-        assert_eq!(words(&lines[0])[2..], ["‹│", "Coding", "▾", "Agentic", "▾"], "scrolls back only as far as needed");
+        let shown = ["‹│", "Agentic", "▾", "│", "Tok/s", "│", "Vi"];
+        assert_eq!(words(&lines[0])[2..], shown, "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 51, 4);
-        assert_eq!(words(&lines[0])[2..], ["‹│", "Coding", "▾", "Agentic", "▾"], "{}", lines[0]);
+        assert_eq!(words(&lines[0])[2..], shown, "{}", lines[0]);
         a.col = 0;
         let (_, lines) = render(&mut a, 48, 4);
         assert_eq!(words(&lines[0]), ["#", "Model", "Dev", "▾", "Released"], "no │ in Dev's group");

@@ -129,7 +129,7 @@ the subtask to it and has another model review the work.
   (tools, reasoning, vision).
 - [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks.
 - [OpenRouter](https://openrouter.ai/benchmarks/gpqa-diamond) (CC BY 4.0): GPQA diamond
-  results, for the models Epoch AI has not run it on.
+  results, for the models Epoch AI has not run it on, and the speed of those runs.
 - [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions,
   chat and web development (the Arena column).
 

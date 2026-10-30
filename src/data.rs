@@ -20,8 +20,8 @@ const AA_URL: &str = "https://artificialanalysis.ai/sitemap.xml";
 /// OpenRouter's models, for the Hugging Face repo it names for each (`hf_listed`).
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
 /// OpenRouter's benchmark leaderboard, its GPQA diamond results on the models it serves, run
-/// over the last 90 days (CC BY 4.0): a GPQA diamond score for a model Epoch has none for
-/// (`openrouter_gpqa`).
+/// over the last 90 days (CC BY 4.0): a GPQA diamond score for a model Epoch has none for, and
+/// the speed of the runs (`openrouter_gpqa`).
 const OPENROUTER_GPQA_URL: &str = "https://openrouter.ai/api/v1/datasets/exports/benchmark-leaderboard/latest.csv";
 /// The name OpenRouter's GPQA diamond score goes under in `Model::scores`, scored on Epoch's
 /// curve for GPQA diamond.
@@ -109,7 +109,8 @@ const RETRY: Duration = Duration::from_secs(3600);
 /// where that is higher. 36: no Artificial Analysis scores, nor `Model::tps` and `ttft`. 37: the
 /// task scores are on the ECI scale, with what they are from (`fit::Basis`), `Model::scores` has
 /// every benchmark of Epoch's index, and no `Model::shown`. 38: `GPQA_OPENROUTER` in `Model::scores`.
-const FORMAT: u32 = 38;
+/// 39: `Model::tps`.
+const FORMAT: u32 = 39;
 /// Share of input tokens read from the prompt cache by default: an agent resends the whole
 /// conversation every turn, so most of what it sends was sent before. A one-off prompt caches
 /// nothing: `--cache 0`, or `%` in the TUI.
@@ -725,6 +726,11 @@ pub struct Model {
     /// the benchmarks Epoch ran it on.
     #[serde(default)]
     pub epoch: Option<String>,
+    /// Output tokens per second in OpenRouter's GPQA diamond runs, the median over the providers
+    /// that ran it: end to end, the thinking and the time to the first token included
+    /// (`openrouter_gpqa`).
+    #[serde(default)]
+    pub tps: Option<f64>,
     /// Its score on Arena's Agent leaderboard, in percent: the net improvement arena.ai measures
     /// in real agent sessions, the best of its reasoning settings (`Arena`).
     #[serde(default)]
@@ -844,6 +850,11 @@ impl Model {
         self.epoch.as_ref().map(|id| format!("https://epoch.ai/models/{id}"))
     }
 
+    /// The model's page on openrouter.ai, when OpenRouter lists it (`openrouter`).
+    pub fn openrouter_page(&self) -> Option<String> {
+        self.openrouter.as_ref().map(|id| format!("https://openrouter.ai/{id}"))
+    }
+
     /// The model's page on artificialanalysis.ai, when it has one there (`aa`).
     fn aa_page(&self) -> Option<String> {
         self.aa.as_ref().map(|id| format!("https://artificialanalysis.ai/models/{id}"))
@@ -882,7 +893,7 @@ impl Model {
         let md = self.md_page().map(|url| ("models.dev", url));
         let epoch = self.epoch_page().map(|url| ("epoch.ai", url));
         let aa = self.aa_page().map(|url| ("artificialanalysis.ai", url));
-        let or = self.openrouter.as_ref().map(|id| ("openrouter.ai", format!("https://openrouter.ai/{id}")));
+        let or = self.openrouter_page().map(|url| ("openrouter.ai", url));
         let hf = self.hf_repo().map(|repo| ("huggingface.co", format!("https://huggingface.co/{repo}")));
         let arena = self.arena_page().map(|url| ("arena.ai", url));
         md.into_iter().chain(epoch).chain(aa).chain(or).chain(hf).chain(arena).collect()
@@ -1891,8 +1902,9 @@ fn download(steps: &Steps) -> Result<Downloaded, String> {
     match gpqa.map(|csv| openrouter_gpqa(&csv)) {
         Ok(gpqa) => gpqa_scores(&mut data.models, &gpqa, &mut ep.benches),
         Err(e) => {
-            data.warning =
-                Some(format!("could not get OpenRouter's GPQA diamond results ({e}), so some models have no estimate"));
+            data.warning = Some(format!(
+                "could not get OpenRouter's GPQA diamond results ({e}), so some models have no estimate and none a speed"
+            ));
         }
     }
     for m in &mut data.models {
@@ -1901,11 +1913,30 @@ fn download(steps: &Steps) -> Result<Downloaded, String> {
     Ok((data, [aa, epoch_pages, openrouter], release, late))
 }
 
-/// OpenRouter's GPQA diamond accuracy by model slug, from its benchmark leaderboard `csv`: the
+/// A model's GPQA diamond runs on OpenRouter, as one: its accuracy, and its output tokens per
+/// second, end to end, when the rows say how long the runs took.
+#[derive(Debug, PartialEq)]
+struct Gpqa {
+    accuracy: f64,
+    tps: Option<f64>,
+}
+
+/// The median of `xs`, none of an empty list.
+fn median(xs: &mut [f64]) -> Option<f64> {
+    xs.sort_by(f64::total_cmp);
+    match xs.len() {
+        0 => None,
+        n if n % 2 == 1 => Some(xs[n / 2]),
+        n => Some((xs[n / 2 - 1] + xs[n / 2]) / 2.0),
+    }
+}
+
+/// OpenRouter's GPQA diamond runs by model slug, from its benchmark leaderboard `csv`: the
 /// median over the providers that ran it, as a broken one scores near 0, and the auto-routing
-/// row alone when no provider has one. Its tau-bench rows are left out: that one levels off
+/// row alone when no provider has one, of the accuracy and of the output tokens a second, the
+/// tokens a task took over its duration. Its tau-bench rows are left out: that one levels off
 /// around 0.75 by ECI 143 and barely tracks ability above it.
-fn openrouter_gpqa(csv: &[u8]) -> HashMap<String, f64> {
+fn openrouter_gpqa(csv: &[u8]) -> HashMap<String, Gpqa> {
     let mut rdr = csv::Reader::from_reader(csv);
     let headers = rdr.headers().cloned().unwrap_or_default();
     let at = |name: &str| headers.iter().position(|c| c == name);
@@ -1914,41 +1945,45 @@ fn openrouter_gpqa(csv: &[u8]) -> HashMap<String, f64> {
     else {
         return HashMap::new();
     };
-    // slug -> (the providers' accuracies, the auto-routing row's)
-    let mut by_slug: HashMap<String, (Vec<f64>, Option<f64>)> = HashMap::new();
+    let (tokens, ms) = (at("avg_output_tokens_per_task"), at("avg_duration_per_task_ms"));
+    // slug -> the providers' rows, and the auto-routing row: (accuracy, tokens a second)
+    type Rows = (Vec<(f64, Option<f64>)>, Option<(f64, Option<f64>)>);
+    let mut by_slug: HashMap<String, Rows> = HashMap::new();
     for r in rdr.records().flatten() {
         let get = |i: usize| r.get(i).unwrap_or_default();
-        let Some(acc) = get(accuracy).parse::<f64>().ok().filter(|a| a.is_finite()) else { continue };
+        let num = |i: Option<usize>| get(i?).parse::<f64>().ok().filter(|v| v.is_finite());
+        let Some(acc) = num(Some(accuracy)) else { continue };
         if get(bench) != "gpqa_diamond" || get(slug).is_empty() {
             continue;
         }
+        let tps = num(tokens).zip(num(ms).filter(|ms| *ms > 0.0)).map(|(tokens, ms)| tokens / (ms / 1000.0));
         let e = by_slug.entry(get(slug).to_string()).or_default();
-        if get(provider) == "auto-routing" { e.1 = Some(acc) } else { e.0.push(acc) }
+        if get(provider) == "auto-routing" { e.1 = Some((acc, tps)) } else { e.0.push((acc, tps)) }
     }
     by_slug
         .into_iter()
-        .filter_map(|(slug, (mut accs, auto))| {
-            accs.sort_by(f64::total_cmp);
-            let n = accs.len();
-            let median = match n {
-                0 => auto?,
-                n if n % 2 == 1 => accs[n / 2],
-                n => (accs[n / 2 - 1] + accs[n / 2]) / 2.0,
-            };
-            Some((slug, median))
+        .filter_map(|(slug, (providers, auto))| {
+            let rows = if providers.is_empty() { vec![auto?] } else { providers };
+            let accuracy = median(&mut rows.iter().map(|r| r.0).collect::<Vec<_>>())?;
+            let tps = median(&mut rows.iter().filter_map(|r| r.1).collect::<Vec<_>>());
+            Some((slug, Gpqa { accuracy, tps }))
         })
         .collect()
 }
 
-/// Gives each model with an OpenRouter id and no GPQA diamond score from Epoch its `gpqa`
-/// accuracy there, under `GPQA_OPENROUTER`, scored on Epoch's curve for GPQA diamond, which
-/// `benches` gets under that name too. Nothing without that curve.
-fn gpqa_scores(models: &mut [Model], gpqa: &HashMap<String, f64>, benches: &mut HashMap<String, crate::fit::Bench>) {
-    let Some(curve) = benches.get("GPQA diamond").copied() else { return };
-    benches.insert(GPQA_OPENROUTER.into(), curve);
-    for m in models.iter_mut().filter(|m| !m.scores.contains_key("GPQA diamond")) {
-        if let Some(acc) = m.openrouter.as_ref().and_then(|id| gpqa.get(id)) {
-            m.scores.insert(GPQA_OPENROUTER.into(), *acc);
+/// Gives each model with an OpenRouter id its `gpqa` runs there: the speed, and with no GPQA
+/// diamond score from Epoch the accuracy, under `GPQA_OPENROUTER`, scored on Epoch's curve
+/// for GPQA diamond, which `benches` gets under that name too. No score without that curve.
+fn gpqa_scores(models: &mut [Model], gpqa: &HashMap<String, Gpqa>, benches: &mut HashMap<String, crate::fit::Bench>) {
+    let curve = benches.get("GPQA diamond").copied();
+    if let Some(curve) = curve {
+        benches.insert(GPQA_OPENROUTER.into(), curve);
+    }
+    for m in models.iter_mut() {
+        let Some(run) = m.openrouter.as_ref().and_then(|id| gpqa.get(id)) else { continue };
+        m.tps = run.tps;
+        if curve.is_some() && !m.scores.contains_key("GPQA diamond") {
+            m.scores.insert(GPQA_OPENROUTER.into(), run.accuracy);
         }
     }
 }
@@ -5299,18 +5334,30 @@ mod tests {
 
     #[test]
     fn openrouter_gpqa_is_the_median_over_providers() {
-        let csv = b"benchmark,model_slug,provider_name,accuracy\n\
-                    gpqa_diamond,a/one,P,0.9\ngpqa_diamond,a/one,Q,0.5\ngpqa_diamond,a/one,R,0.02\n\
-                    gpqa_diamond,a/one,auto-routing,0.88\n\
-                    gpqa_diamond,a/two,P,0.8\ngpqa_diamond,a/two,Q,0.6\n\
-                    gpqa_diamond,a/auto,auto-routing,0.7\n\
-                    tau_bench_verified_airline,a/tau,P,0.75\ngpqa_diamond,,P,0.75\ngpqa_diamond,a/bad,P,nan\n";
+        let csv = b"benchmark,model_slug,provider_name,accuracy,avg_duration_per_task_ms,avg_output_tokens_per_task\n\
+                    gpqa_diamond,a/one,P,0.9,10000,900\ngpqa_diamond,a/one,Q,0.5,,\ngpqa_diamond,a/one,R,0.02,2000,600\n\
+                    gpqa_diamond,a/one,auto-routing,0.88,1000,10\n\
+                    gpqa_diamond,a/two,P,0.8,2000,100\ngpqa_diamond,a/two,Q,0.6,0,100\n\
+                    gpqa_diamond,a/auto,auto-routing,0.7,1000,50\n\
+                    tau_bench_verified_airline,a/tau,P,0.75,1,1\ngpqa_diamond,,P,0.75,1,1\ngpqa_diamond,a/bad,P,nan,1,1\n";
         let g = openrouter_gpqa(csv);
-        assert_eq!(g["a/one"], 0.5, "the median, not a broken provider's 0.02 nor the auto-routing run");
-        assert_eq!(g["a/two"], 0.7, "the mean of the two middle ones");
-        assert_eq!(g["a/auto"], 0.7, "the auto-routing run when no provider has one");
+        let one = &g["a/one"];
+        assert_eq!(one.accuracy, 0.5, "the median, not a broken provider's 0.02 nor the auto-routing run");
+        assert_eq!(one.tps, Some(195.0), "the median speed of the runs that say how long they took");
+        assert_eq!(
+            g["a/two"],
+            Gpqa { accuracy: 0.7, tps: Some(50.0) },
+            "the mean of the two middle ones, no speed from no time"
+        );
+        assert_eq!(
+            g["a/auto"],
+            Gpqa { accuracy: 0.7, tps: Some(50.0) },
+            "the auto-routing run when no provider has one"
+        );
         assert_eq!(g.len(), 3, "not tau-bench, a row with no slug, nor one with no accuracy");
         assert!(openrouter_gpqa(b"no,such,columns\n1,2,3\n").is_empty());
+        let acc = openrouter_gpqa(b"benchmark,model_slug,provider_name,accuracy\ngpqa_diamond,a/one,P,0.9\n");
+        assert_eq!(acc["a/one"], Gpqa { accuracy: 0.9, tps: None }, "the accuracy alone, without the run columns");
         let curve = crate::fit::Bench { edi: 134.7, slope: 0.13, baseline: 0.25, ceiling: 0.97 };
         let mut benches = HashMap::from([("GPQA diamond".to_string(), curve)]);
         let model = |id: &str, gpqa: Option<f64>| Model {
@@ -5322,13 +5369,18 @@ mod tests {
         gpqa_scores(&mut ms, &g, &mut benches);
         assert_eq!(ms[0].scores.get(GPQA_OPENROUTER), Some(&0.5), "OpenRouter's, under its name");
         assert_eq!((ms[1].scores.get(GPQA_OPENROUTER), ms[1].scores["GPQA diamond"]), (None, 0.95), "Epoch's stands");
+        assert_eq!((ms[0].tps, ms[1].tps, ms[2].tps), (Some(195.0), Some(50.0), None), "the speed either way");
         assert!(ms[2].scores.is_empty(), "no result there");
         assert_eq!(benches[GPQA_OPENROUTER], curve, "scored on Epoch's curve");
         let fit = crate::fit::scored(None, &ms[0].scores, &benches);
         assert_eq!(fit["overall"].1, crate::fit::Basis::Benches(1), "and so it feeds the overall estimate");
         let mut none = HashMap::new();
+        let mut ms = [model("a/one", None)];
         gpqa_scores(&mut ms, &g, &mut none);
-        assert!(none.is_empty(), "without the curve nothing is scored");
+        assert!(
+            none.is_empty() && ms[0].scores.is_empty() && ms[0].tps == Some(195.0),
+            "without the curve, the speed alone"
+        );
     }
 
     #[test]

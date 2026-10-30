@@ -116,6 +116,10 @@ struct ModelOut<'a> {
     /// Rating from people's votes on web development, from arena.ai's WebDev leaderboard
     #[serde(skip_serializing_if = "Option::is_none")]
     arena_webdev: Option<f64>,
+    /// Output tokens per second in OpenRouter's GPQA diamond runs, end to end with the thinking,
+    /// the median over the providers that ran the model
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens_per_second: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmarks: Option<&'a BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,6 +179,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
         arena_agent: m.arena,
         arena_chat: m.arena_more.get(crate::data::ARENA_BOARDS[0].0).copied(),
         arena_webdev: m.arena_more.get(crate::data::ARENA_BOARDS[1].0).copied(),
+        tokens_per_second: m.tps,
         benchmarks: full.then_some(&m.scores),
         providers: full.then(|| m.offers.iter().map(Price::from).collect()),
     }
