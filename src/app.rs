@@ -1471,7 +1471,7 @@ pub struct App {
     /// one of mine, all, selected and favorites.
     pub among: Option<usize>,
     /// The cursor on recommend's tier header, under `among`, on tier `task_sel - 1` (`cap_col`):
-    /// enter writes the cap of `low` or `mid` there. Only while `among` is none.
+    /// enter or space writes the cap of `low` or `mid` there. Only while `among` is none.
     pub caps: bool,
     pub query: String,
     /// The query matched nothing as typed, so it is matched allowing a typo per word.
@@ -4229,14 +4229,16 @@ impl App {
         None
     }
 
-    /// `<` in recommend: the price cap of the cursor's tier, `low` or `mid`, written on its header,
-    /// from the one it has.
+    /// `<` in recommend, or enter on the tiers' header: the price cap of the cursor's tier, `low`
+    /// or `mid`, written on its header, from the one it has.
     fn ask_cap(&mut self) {
-        let one = self.one_pick(self.task_cur) && !self.caps;
-        let sel = if self.caps { self.cap_col() + 1 } else { self.task_sel };
-        let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && !one && (self.caps || !self.on_new_task()));
+        let header = self.caps && self.among.is_none();
+        let one = self.one_pick(self.task_cur) && !header;
+        let sel = if header { self.cap_col() + 1 } else { self.task_sel };
+        let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && !one && (header || !self.on_new_task()));
         match tier.filter(|&c| view::capped(TIERS[c].0)) {
             Some(c) => self.edit_cap(c),
+            None if header => self.refuse("only low and mid have a price cap, h l move to one"),
             None => self.refuse("< sets a price cap, put the cursor on the low or mid tier first"),
         }
     }
@@ -4353,6 +4355,12 @@ impl App {
 
     /// Keys other than motions when no prompt or list is open.
     fn table_key(&mut self, code: KeyCode, n: isize) -> Option<Effect> {
+        // In recommend space does what enter does where no model is under the cursor: the `from`
+        // line, the tiers' header, a task's name, a tier with no model and `+ new task`.
+        let code = match code {
+            KeyCode::Char(' ') if self.view == View::Recommend && self.current().is_none() => KeyCode::Enter,
+            _ => code,
+        };
         let table = self.view == View::Table;
         // Keys that act on the current model, which only help hides.
         // Compare shows none with fewer than 2 selected, and then has no current model to act on.
@@ -4365,7 +4373,7 @@ impl App {
         // its column cursor.
         let across = self.view == View::Recommend;
         let compare = self.view == View::Compare;
-        // On recommend's `from` line the cursor runs over the tabs, and enter or space picks one.
+        // On recommend's `from` line the cursor runs over the tabs, and enter picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
         let caps = self.view == View::Recommend && among.is_none() && self.caps;
         match (code, among) {
@@ -4402,11 +4410,11 @@ impl App {
                 self.task_sel = if c == '$' { TIERS.len() } else { 1 };
                 return None;
             }
-            (KeyCode::Char(' ' | 'e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H'), None) if caps => {
+            (KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H'), None) if caps => {
                 self.refuse("the cursor is on the tier prices, not a model, j moves down to a task");
                 return None;
             }
-            (KeyCode::Enter | KeyCode::Char(' '), Some(i)) => return self.pick_among(i),
+            (KeyCode::Enter, Some(i)) => return self.pick_among(i),
             (KeyCode::Char('h') | KeyCode::Left, Some(i)) => {
                 self.among_by(i, -n);
                 return None;
@@ -4607,12 +4615,12 @@ impl App {
                 }
             }
             // Enter on a task's name is below; on a tier with no model it has none to show either.
-            KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H' | ' ') | KeyCode::Enter
+            KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H') | KeyCode::Enter
                 if self.view == View::Recommend && !row && (code != KeyCode::Enter || self.task_sel > 0) =>
             {
                 self.refuse(match (self.among, self.task_sel) {
                     (Some(_), _) => "no model under the cursor, j moves down to a task",
-                    _ if self.on_new_task() => "no model under the cursor, enter adds a task",
+                    _ if self.on_new_task() => "no model under the cursor, enter or space adds a task",
                     (_, 0) => "no model under the cursor, l moves to a tier",
                     _ => "this tier has no model",
                 });
@@ -6254,7 +6262,12 @@ mod tests {
         let mut a = app();
         press(&mut a, "RG");
         assert!(a.on_new_task(), "G goes to + new task, after the last task");
-        assert_eq!(press(&mut a, " "), None, "no model there");
+        assert_eq!(press(&mut a, " "), None, "nothing saved yet");
+        assert_eq!(a.input, Input::Task(Edit::new(What::New, String::new())), "space writes the name, as enter does");
+        code(&mut a, KeyCode::Esc);
+        a.mouse(Mouse::MarkModel(Stop::Recommend(a.task_count(), 0)));
+        assert_eq!(a.input, Input::Task(Edit::new(What::New, String::new())), "and a right click, as space");
+        code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.input, Input::Task(Edit::new(What::New, String::new())));
         // A task an agent adds meanwhile leaves the cursor on the name.
@@ -7555,7 +7568,8 @@ mod tests {
         let front: Vec<&str> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.as_str()).collect();
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, the best last; llama4 has no access");
-        code(&mut a, KeyCode::Enter);
+        // Space on a task's name does what enter does.
+        press(&mut a, " ");
         assert_eq!(a.view, View::Table);
         assert_eq!(a.task.map(|t| t.name), Some("coding"));
         assert_eq!(keys(&a), ["gpt55", "mini"], "best first, each row down cheaper");
@@ -8254,15 +8268,22 @@ mod tests {
         assert_eq!((&a.input, a.store.tiers.len()), (&Input::None, 0), "esc leaves it");
         press(&mut a, "h<");
         assert!(a.failed && a.input == Input::None, "free has no cap");
-        // Keyboard alone: k from the first task is the tiers' header, h l pick one, enter writes it.
+        // Keyboard alone: k from the first task is the tiers' header, h l pick one, enter or space writes it.
         press(&mut a, "ggj");
         assert!(a.caps && a.current().is_none(), "on the header");
         press(&mut a, "0");
         code(&mut a, KeyCode::Enter);
         assert!(a.failed && a.input == Input::None, "free has none");
-        press(&mut a, "2l");
+        press(&mut a, " ");
+        assert!(a.input == Input::None && a.status.starts_with("only low and mid"), "space neither: {}", a.status);
+        press(&mut a, "$ ");
+        assert!(a.failed && a.input == Input::None, "nor high");
+        press(&mut a, "02l");
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "mid's");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, " ");
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "space too");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "j");
         assert!(!a.caps && a.task_cur == 0, "j to the first task");

@@ -3980,8 +3980,8 @@ fn recommend(
         }
         v.extend(lines.into_iter().map(Line::from));
     }
-    // `+ new task` after the last, where enter writes the name of one of your own and then what
-    // it is about.
+    // `+ new task` after the last, where enter or space writes the name of one of your own and
+    // then what it is about.
     let y = v.len();
     let row = match &app.input {
         Input::Task(e) => {
