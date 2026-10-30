@@ -380,16 +380,15 @@ pub fn task_score(m: &Model, task: &str) -> Option<f64> {
 }
 
 /// The items whose model no other beats on both `score` and blended price: the cheapest at
-/// every quality level. Scores compare as shown, whole points, so a fraction of a point never
-/// justifies a higher price. Free models count at $0; ties on both keep every tied item.
-/// Shown as `{:.0}` prints them, a half to even: 46.5 reads 46.
+/// every quality level. Scores compare as `score` gives them, rounded as they are shown
+/// (`line_rounded`), so a fraction that does not show never justifies a higher price. Free
+/// models count at $0; ties on both keep every tied item.
 pub fn frontier<'m, T: Copy>(
     items: &[T],
     model: impl Fn(T) -> &'m Model,
     score: impl Fn(&Model) -> Option<f64>,
 ) -> Vec<T> {
-    let pts: Vec<Option<(f64, f64)>> =
-        items.iter().map(|&i| Some((score(model(i))?.round_ties_even(), model(i).cost()?))).collect();
+    let pts: Vec<Option<(f64, f64)>> = items.iter().map(|&i| Some((score(model(i))?, model(i).cost()?))).collect();
     let beats = |(s, c): (f64, f64), (t, d): (f64, f64)| s >= t && c <= d && (s > t || c < d);
     // ponytail: O(n²), fine for the few hundred rows the harnesses list.
     items
@@ -423,7 +422,7 @@ pub fn task_frontier<'a>(
     // would take every tier it has the score for. A favorite is still on the line.
     let mut ranked: Vec<_> = models.filter(|m| !m.local()).filter_map(|m| Some((m, score(m)?))).collect();
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let mut v = frontier(&ranked, |(m, _)| m, score);
+    let mut v = frontier(&ranked, |(m, _)| m, |m| score(m).map(|s| line_rounded(t, bench, s)));
     let fav = |m: &Model| favorites.iter().any(|f| f.key == m.key);
     let dearest =
         |a: &(&Model, f64), b: &(&Model, f64)| b.0.cost().partial_cmp(&a.0.cost()).unwrap_or(std::cmp::Ordering::Equal);
@@ -462,6 +461,33 @@ pub fn line_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> Option<f64> 
 /// column every score is, the benchmark's.
 pub fn own_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> bool {
     bench.is_some() || fit::own(m, t.name)
+}
+
+/// Whether `t`'s line shows scores signed and to a tenth, as the table's Agentic column does
+/// (`app::show`): Arena's agent score, or one of its signals picked in the column. The rest are
+/// whole points.
+pub fn tenths(t: &fit::Task, bench: Option<&str>) -> bool {
+    match bench {
+        Some(b) => crate::data::ARENA_MORE.iter().any(|s| s.0 == b),
+        None => t.bench == Some(crate::data::ARENA_AGENT),
+    }
+}
+
+/// A score on `t`'s line as it is shown: `+8.7` with `tenths`, else `48`, and `-` for none (NaN).
+pub fn line_shown(t: &fit::Task, bench: Option<&str>, s: f64) -> String {
+    if s.is_nan() {
+        "-".into()
+    } else if tenths(t, bench) {
+        signed(line_rounded(t, bench, s))
+    } else {
+        format!("{s:.0}")
+    }
+}
+
+/// A score on `t`'s line rounded as `line_shown` shows it, which is how it ranks: a half to even,
+/// so 46.5 reads 46.
+pub fn line_rounded(t: &fit::Task, bench: Option<&str>, s: f64) -> f64 {
+    if tenths(t, bench) { (s * 10.0).round_ties_even() / 10.0 } else { s.round_ties_even() }
 }
 
 /// What of the memory a model runs in its download may take: the rest holds its context.
@@ -766,16 +792,11 @@ pub fn custom_when(store: &Store, t: &str) -> String {
 }
 
 /// `name · $price · score` for a frontier entry, `name [key] · $price · score` with `keyed`,
-/// `★ name ...` when it is your favorite for the task, `· -` for a favorite with no score.
-pub fn priced(m: &Model, s: f64, keyed: bool, favorite: bool) -> String {
+/// `★ name ...` when it is your favorite for the task, the `score` as `line_shown` has it.
+pub fn priced(m: &Model, score: &str, keyed: bool, favorite: bool) -> String {
     let key = if keyed { format!(" [{}]", m.key) } else { String::new() };
     let flag = if favorite { "★ " } else { "" };
-    format!("{flag}{}{key} · {} · {}", m.name, price(m), scored(s))
-}
-
-/// A score on a task as recommend shows it, `48`, or `-` for a model with none.
-pub fn scored(s: f64) -> String {
-    score(Some(s).filter(|s| !s.is_nan()))
+    format!("{flag}{}{key} · {} · {score}", m.name, price(m))
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
@@ -990,7 +1011,8 @@ fn in_bound(m: &Model, b: &crate::store::Bound, store: &Store) -> bool {
     let (lo, hi) = (b.min.unwrap_or(f64::NEG_INFINITY), b.max.unwrap_or(f64::INFINITY));
     !crate::app::bound_applies(crate::app::TEXT + at, &store.hide)
         || crate::app::pick_gone(store, crate::app::TEXT + at)
-        || crate::app::col_value(m, at, store).is_some_and(|v| crate::app::meets(at, v, lo, hi))
+        || crate::app::col_value(m, at, store)
+            .is_some_and(|v| crate::app::meets(at, crate::app::stored_bench(store, crate::app::TEXT + at), v, lo, hi))
 }
 
 /// `bound_said` for a bound the store keeps, named by the benchmark picked in its column.
@@ -1190,7 +1212,8 @@ pub fn detail_rows(
     for t in TASKS {
         if let Some((s, basis)) = fit::fit(m, t) {
             fits.push((v.len(), t.name));
-            v.push(format!("    {:<13}{s:>4.0}  {} · from {}", t.name, t.about_ranked(), basis.said(t)));
+            let s = line_shown(t, None, s);
+            v.push(format!("    {:<13}{s:>5}  {} · from {}", t.name, t.about_ranked(), basis.said(t)));
         }
     }
     if !m.scores.is_empty() {
@@ -1340,7 +1363,8 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
         if vals.iter().any(Option::is_some) {
             let label = head(t.name) + if bench.is_some() { "*" } else { "" };
             let own: Vec<bool> = models.iter().map(|m| own_score(m, t, bench)).collect();
-            rows.push(Row { section: "scores", ..scored_row(&label, vals, &own, |v| format!("{v:.0}"), true) });
+            let fmt = |v| line_shown(t, bench, v);
+            rows.push(Row { section: "scores", ..scored_row(&label, vals, &own, fmt, true) });
         }
     }
     if models.iter().any(|m| m.tps.is_some()) {
@@ -1433,7 +1457,7 @@ fn task_verdict(models: &[&Model], paid: &[Option<f64>], t: &fit::Task, store: &
     let mut scored: Vec<(&Model, f64, Option<f64>)> = models
         .iter()
         .zip(paid)
-        .filter_map(|(m, &c)| Some((*m, line_score(m, t, bench)?.round_ties_even(), c)))
+        .filter_map(|(m, &c)| Some((*m, line_rounded(t, bench, line_score(m, t, bench)?), c)))
         .collect();
     if scored.len() < 2 {
         return None;
@@ -1448,10 +1472,10 @@ fn task_verdict(models: &[&Model], paid: &[Option<f64>], t: &fit::Task, store: &
         }
     }
     let name = |m: &Model| if store.is_favorite(Some(t), &m.key) { format!("★ {}", m.name) } else { m.name.clone() };
-    let at = |m: &Model, v: f64| format!("{v:.0} ({})", price(m));
+    let at = |m: &Model, v: f64| format!("{} ({})", line_shown(t, bench, v), price(m));
     let (top, v, _) = front[0];
     let margin = match &front[1..] {
-        [] => format!("{} vs {:.0}", at(top, v), scored[1].1),
+        [] => format!("{} vs {}", at(top, v), line_shown(t, bench, scored[1].1)),
         rest => {
             let rest = rest.iter().map(|&(m, v, _)| format!("{} {}", name(m), at(m, v)));
             std::iter::once(at(top, v)).chain(rest).collect::<Vec<_>>().join(" · ")
@@ -1524,12 +1548,16 @@ mod tests {
         let mut m = Model { scores, tool_call: true, ..Default::default() };
         m.fit.insert("overall".into(), (160.4, crate::fit::Basis::Benches(2)));
         m.fit.insert("coding".into(), (50.0, crate::fit::Basis::Bench));
-        m.fit.insert("agentic".into(), (160.4, crate::fit::Basis::Benches(1)));
+        m.arena = Some(-0.3);
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
-        assert_eq!(lines[at("    overall")], "    overall       160  general capability · from 2 benchmarks");
-        assert_eq!(lines[at("    coding")], "    coding         50  writing and fixing code · from FrontierCode");
-        assert!(lines[at("    agentic")].ends_with("· from 1 benchmark"), "{}", lines[at("    agentic")]);
+        assert_eq!(lines[at("    overall")], "    overall        160  general capability · from 2 benchmarks");
+        assert_eq!(lines[at("    coding")], "    coding          50  writing and fixing code · from FrontierCode");
+        assert_eq!(
+            lines[at("    agentic")],
+            "    agentic       -0.3  multi-step tool use, long autonomous tasks · from Arena",
+            "Arena's score as the table shows it, to a tenth"
+        );
         assert!(!lines.iter().any(|l| l.starts_with("    vision")), "no image input");
         assert_eq!(at("    FrontierCode"), at("  benchmarks") + 1, "every benchmark, under the task fit");
         assert_eq!(lines[at("    FrontierSWE")], format!("    {:<36} 40.0%", "FrontierSWE"));
@@ -1845,6 +1873,34 @@ mod tests {
         assert_eq!(line.iter().map(|(m, _)| m.key.as_str()).collect::<Vec<_>>(), ["cheap"], "the cheaper of a tie");
         let coding = verdict(&[&dear, &cheap], &Store::default()).into_iter().find(|r| r[0] == "coding").unwrap();
         assert_eq!(coding, ["coding", "cheap", "46 ($1.0) vs 46"].map(String::from), "the score the row shows");
+    }
+
+    /// Arena's agent score shows signed and to a tenth, as the table's Agentic column, and ranks
+    /// so: a tenth apart is no tie. Epoch's benchmarks picked in the column are whole, as elsewhere.
+    #[test]
+    fn agentic_shows_and_ranks_to_a_tenth() {
+        let agentic = fit::task("agentic").unwrap();
+        assert_eq!(line_shown(agentic, None, 1.44), "+1.4");
+        assert_eq!(line_shown(agentic, None, -0.04), "0.0", "not -0.0, nor -0");
+        assert_eq!(line_shown(agentic, Some("Steerability"), -1.24), "-1.2", "one of Arena's signals, as its score");
+        assert_eq!(line_shown(agentic, Some("APEX-Agents"), 41.6), "42", "Epoch's benchmark in the column, whole");
+        assert_eq!(line_shown(fit::task("coding").unwrap(), None, 46.5), "46");
+        assert_eq!((line_rounded(agentic, None, 1.44), line_rounded(agentic, Some("APEX-Agents"), 41.6)), (1.4, 42.0));
+        let mk = |n: &str, arena: f64, p: f64| Model {
+            key: n.into(),
+            name: n.into(),
+            arena: Some(arena),
+            tool_call: true,
+            offers: vec![Offer { input: p, output: p, ..Default::default() }],
+            ..Default::default()
+        };
+        let (dear, cheap) = (mk("dear", 1.4, 1.8), mk("cheap", 1.0, 0.0));
+        let (line, _) = task_frontier([&dear, &cheap].into_iter(), agentic, &[], &[], None);
+        assert_eq!(line.iter().map(|(m, _)| m.key.as_str()).collect::<Vec<_>>(), ["cheap", "dear"], "no tie");
+        let row = verdict(&[&dear, &cheap], &Store::default()).into_iter().find(|r| r[0] == "agentic").unwrap();
+        assert_eq!(row, ["agentic", "dear", "+1.4 ($1.8) · cheap +1.0 (free)"].map(String::from));
+        let rows = compare_rows(&[&dear, &cheap], false, &|_| None, &Store::default());
+        assert_eq!(rows.iter().find(|r| r.label == "Agentic").unwrap().cells, ["+1.4", "+1.0"]);
     }
 
     #[test]

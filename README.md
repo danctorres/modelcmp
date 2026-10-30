@@ -131,8 +131,8 @@ the subtask to it and has another model review the work.
 - [Epoch AI](https://epoch.ai/benchmarks) (CC-BY): benchmarks.
 - [OpenRouter](https://openrouter.ai/benchmarks/gpqa-diamond) (CC BY 4.0): the speed of its GPQA
   diamond runs (Tok/s).
-- [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions,
-  chat and web development (the Agentic column).
+- [Arena](https://arena.ai/leaderboard/agent) (CC-BY): how models do in real agent sessions
+  (the Agentic column), chat and web development.
 
 None needs an API key. Data is cached for 24 hours.
 

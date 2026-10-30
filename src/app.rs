@@ -177,12 +177,9 @@ pub const COLS: [Col; 10] = [
     col("Coding", "coding", "FrontierCode score, % of maintainers' coding tasks solved well enough to merge", |m| {
         task_score(m, "coding")
     }),
-    Col {
-        show: signed,
-        ..col("Agentic", "agentic", "Arena's agent score, net improvement in real agent sessions, %", |m| {
-            task_score(m, "agentic")
-        })
-    },
+    col("Agentic", "agentic", "Arena's agent score, net improvement in real agent sessions, %", |m| {
+        task_score(m, "agentic")
+    }),
     Col {
         show: |v| format!("{v:.0}"),
         ..col("Tok/s", "tps", "output tokens per second in OpenRouter's GPQA runs, thinking included (median)", |m| {
@@ -204,10 +201,15 @@ pub fn on_price(i: usize) -> bool {
     COLS[i].price
 }
 
-/// How `COLS[i]` shows a value with `bench` picked in its dropdown: a rating of `ARENA_BOARDS`
-/// whole, not in percent as the rest of Arena's, and Epoch's benchmarks unsigned in Agentic too.
+/// How `COLS[i]` shows a value with `bench` picked in its dropdown: a task's score as its line
+/// shows it (`view::tenths`), Arena's agent score and signals signed to a tenth, the other
+/// scores and Arena's ratings whole.
 pub fn show(i: usize, bench: Option<&str>) -> fn(f64) -> String {
-    if bench.is_some_and(|b| arena_board(b) || !arena_bench(b)) { |v| score(Some(v)) } else { COLS[i].show }
+    match col_task(i).and_then(crate::fit::task) {
+        Some(t) if crate::view::tenths(t, bench) => signed,
+        Some(_) => |v| score(Some(v)),
+        None => COLS[i].show,
+    }
 }
 
 /// A value of `COLS[i]` as its cell shows it, with `bench` picked: after a `~` when it comes from
@@ -366,11 +368,13 @@ pub fn col_value(m: &Model, at: usize, store: &Store) -> Option<f64> {
     }
 }
 
-/// Whether `v`, a value of `COLS[at]`, is within a bound from `lo` to `hi`. A score counts in
-/// whole points, as its cell shows it, so a model shown at 64 meets a minimum of 64.
-pub fn meets(at: usize, v: f64, lo: f64, hi: f64) -> bool {
-    let score = col_task(at).is_some();
-    let v = if score { v.round_ties_even() } else { v };
+/// Whether `v`, a value of `COLS[at]`, is within a bound from `lo` to `hi`. A score counts as
+/// its cell shows it (`view::line_rounded`), so a model shown at 64 meets a minimum of 64.
+pub fn meets(at: usize, bench: Option<&str>, v: f64, lo: f64, hi: f64) -> bool {
+    let v = match col_task(at).and_then(crate::fit::task) {
+        Some(t) => crate::view::line_rounded(t, bench, v),
+        None => v,
+    };
     v >= lo && v <= hi
 }
 
@@ -2232,7 +2236,7 @@ impl App {
             .position(|&(c, lo, hi)| {
                 (c != skip || skip == PRICE && lo.is_finite() || skip == VIA)
                     && bound_applies(c, hide)
-                    && !self.bound_val(i, m, c).is_some_and(|v| meets(c - TEXT, v, lo, hi))
+                    && !self.bound_val(i, m, c).is_some_and(|v| meets(c - TEXT, self.col_bench(c), v, lo, hi))
             })
             .map(Fail::Bound)
     }
@@ -4182,7 +4186,7 @@ impl App {
         });
         // A line's name, then its price and score, apart to line them up as recommend's boxes do.
         // A task of your own has no score.
-        let parts = |m: &Model, s: f64| (view::price(m), t.map_or(String::new(), |_| view::scored(s)));
+        let parts = |m: &Model, s: f64| (view::price(m), t.map_or(String::new(), |t| view::line_shown(t, bench, s)));
         // What the tier picks with no favorite, as the grid does; a task of your own has nothing to pick.
         let first = match t.map(|t| self.recommended(t, x).0) {
             Some(Some((m, s))) => (format!("recommended: {}", m.name), Some(parts(m, s))),
@@ -7235,7 +7239,7 @@ mod tests {
     #[test]
     fn frontier_keeps_cheapest_per_quality() {
         let models = [model("fable", true, Some(95.4), 20.0), model("opus", true, Some(95.2), 10.0)];
-        let coding = |m: &Model| task_score(m, "coding");
+        let coding = |m: &Model| task_score(m, "coding").map(f64::round_ties_even);
         let front = |ms: &[Model]| frontier(&(0..ms.len()).collect::<Vec<_>>(), |i| &ms[i], coding);
         assert_eq!(front(&models), [1], "95.4 shows as 95: not worth twice the price");
         let models = [model("opus", true, Some(95.0), 10.0), model("free", true, Some(60.0), 0.0)];
@@ -7551,7 +7555,8 @@ mod tests {
         a.rebuild();
         assert_eq!(front(&a), ["opus5", "gpt55"]);
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
-        assert!(crate::view::priced(m, s, false, true).ends_with("· -"));
+        let shown = crate::view::line_shown(fit::task("coding").unwrap(), None, s);
+        assert!(crate::view::priced(m, &shown, false, true).ends_with("· -"));
         assert_eq!(
             crate::view::pick([(m, s)].iter(), f64::INFINITY).map(|e| e.0.key.as_str()),
             Some("opus5"),

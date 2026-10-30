@@ -225,7 +225,7 @@ stored as `tool-dispatch`).
 | `price`, `in`, `cache`, `out` | $ per 1M tokens |
 | `ctx` | thousands of tokens, and a value of 10000 or more is read as tokens |
 | `release` | a date: `--min release=2026-06` is June 2026 on, `--max release=2026-06` up to the end of June |
-| `eci`, `coding`, `agentic` | the scores, in whole points as the table shows them, `agentic` Arena's agent score in percent |
+| `eci`, `coding`, `agentic` | the scores as the table shows them, `eci` and `coding` in whole points, `agentic` Arena's agent score in percent, to a tenth |
 | `tps` | tokens per second, from OpenRouter's GPQA runs |
 
 `list` prints every match unless `-n` limits it, and then says how many it left out. It shows
@@ -262,7 +262,7 @@ hide different models.
 | `free` | the best free model, and none when the list has no free one |
 | `low` | the best up to $2 per 1M tokens |
 | `mid` | the best up to $5 |
-| `high` | the best at any price. Scores count in whole points, so of two models with the same rounded score it takes the cheaper |
+| `high` | the best at any price. Scores count as the table shows them, whole points or Arena's tenths, so of two models with the same shown score it takes the cheaper |
 
 - `modelcmp tier low 1` or `modelcmp tier mid 8` changes a cap, and `--rm` puts it back to its
   default, as an empty cap on the tier's header in the TUI's recommend does. `low` can't cost more

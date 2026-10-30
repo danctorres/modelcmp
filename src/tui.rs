@@ -4024,7 +4024,7 @@ fn entry(
     let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
     let out = out_of_reach(app, m);
     let price = pick_color(app, m, local, off);
-    let score = crate::view::scored(s);
+    let score = built_in.map_or("-".into(), |t| crate::view::line_shown(t, app.task_bench(t), s));
     // A score that is not the task's own, an estimate or the overall in its place: grey, as in the table.
     let own = built_in.is_none_or(|t| crate::view::own_score(m, t, app.task_bench(t)));
     let scored = if own { fg(price) } else { fg(MUTED) };

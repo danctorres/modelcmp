@@ -360,7 +360,7 @@ fn matched<'a>(
                 // On a task not through ollama or llama.cpp: its copy is no pick on merit (`Model::local`).
                 && (o.via.is_empty()
                     || shown_via(m, any).iter().any(|v| has(&o.via, v) && !(task && crate::data::runs_here(v))))
-                && o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| meets(c, v, lo, hi)))
+                && o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| meets(c, crate::app::stored_bench(store, crate::app::TEXT + c), v, lo, hi)))
                 && !(task && excluded(m, store, any))
                 && !o.not.contains(&m.key)
     };
@@ -595,8 +595,12 @@ const NO_MODEL: &str = "no model";
 /// A tier's line in `pick`: your favorite when `o`'s harness has it and its bounds allow it,
 /// else the tier's pick on merit, followed by the favorite's command on the harness that has it.
 fn tier_line<'a>(data: &'a Data, store: &'a Store, o: &ListOpts, lines: &Lines<'a>) -> Result<String> {
-    let allowed =
-        |m: &&Model| o.bounds.iter().all(|&(c, lo, hi)| col_value(m, c, store).is_some_and(|v| meets(c, v, lo, hi)));
+    let allowed = |m: &&Model| {
+        o.bounds.iter().all(|&(c, lo, hi)| {
+            col_value(m, c, store)
+                .is_some_and(|v| meets(c, crate::app::stored_bench(store, crate::app::TEXT + c), v, lo, hi))
+        })
+    };
     let said = |m: &Model, id: String| {
         let ctx = COLS.iter().find(|c| c.id == "ctx").and_then(|c| Some((c.show)((c.get)(m)?)));
         let note = store.note(&m.key).map(|n| format!("  note: {n}")).unwrap_or_default();
@@ -1307,17 +1311,19 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     for t in TASKS {
         // What ranks it where that is not its own score, as in the TUI: a benchmark picked in its
         // column, or what a task with none goes by.
-        let by = crate::app::task_bench(store, t).or(t.ranked).map(|b| format!(", ranked by {b}")).unwrap_or_default();
+        let bench = crate::app::task_bench(store, t);
+        let by = bench.or(t.ranked).map(|b| format!(", ranked by {b}")).unwrap_or_default();
         println!("{}  {}{by}  (modelcmp list --task {})", t.name, t.about, t.name);
         println!("  use for:         {}", t.when);
         let (line, off) = front(data, store, t);
         let (picks, took, local) = local_picks(data, store, t, &line, &off);
         // `local_took`: the best model your machine runs took the tier.
         let said = |m: &Model, s: f64, fav: bool, local_took: bool| {
-            let p = priced(m, s, true, fav);
+            let score = crate::view::line_shown(t, bench, s);
+            let p = priced(m, &score, true, fav);
             match local_took {
                 // Free on your machine, which its price would not say.
-                true => format!("{} [{}] · free on your machine · {}", m.name, m.key, crate::view::scored(s)),
+                true => format!("{} [{}] · free on your machine · {score}", m.name, m.key),
                 false if off.contains(&m.key.as_str()) => format!("{p} not recommended"),
                 false => p,
             }
