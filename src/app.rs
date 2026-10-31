@@ -405,6 +405,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("↺", "`enter` here puts every key back to its default"),
             ("esc", "back: close the panel, then drop the highlight, filter, `S` `F` `E`, task"),
             ("q", "quit, asks first"),
+            ("K", "all keys of the status bar in a list, `enter` presses one"),
             ("r", "refresh data now (auto at a day's first start, and after 24h)"),
             ("!", "list warnings from the last refresh, or click the ⚠"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
@@ -715,6 +716,8 @@ pub enum Kind {
     Pick,
     /// `B`: every benchmark of the task columns shown, picked in its column.
     Bench,
+    /// `K`: every key the status bar has, in a list, picked to press it where `K` was.
+    Keys,
 }
 
 /// The cursor and the search of an open list, a dropdown or a choice list.
@@ -1115,6 +1118,11 @@ pub enum Effect {
     /// The slot's favorite, or none for the model recommended there; the `d` list's items,
     /// applied by `App` itself.
     Pick(String, Option<String>),
+    /// A key of the status bar, pressed where `K` was, none for a hint of several keys. The
+    /// items of `K`'s list, applied by `App` itself.
+    Press(Option<KeyCode>),
+    /// `K`: list the status bar's keys, which the shell knows (`tui::open_keys`, `App::list_keys`).
+    Keys,
 }
 
 /// A mouse action, already mapped to the table by the shell.
@@ -1475,6 +1483,11 @@ pub struct App {
     pub spots: Vec<(ratatui::layout::Rect, Stop)>,
     /// Where the last draw put each `‹` `›` `▲` `▼`, and the scroll a click on it does.
     pub more: Vec<(u16, u16, Mouse)>,
+    /// What `K` listed the keys over, which picking a key or esc goes back to.
+    keys_from: Input,
+    /// Where the status bar has the key that confirms the question asked, as last drawn: where
+    /// the hint that asked it was, so a second click there confirms.
+    pub asked_at: Option<u16>,
     /// The box of the open panel as last drawn, for a click outside it to close it.
     pub panel: Option<ratatui::layout::Rect>,
     /// The columns of the frame's `⚠ refresh had issues` as last drawn, which a click opens.
@@ -1601,6 +1614,8 @@ impl App {
             cache_on: 0.0,
             cache_hint: "",
             asked_from: Input::None,
+            keys_from: Input::None,
+            asked_at: None,
             term_bg: None,
             term_ansi: None,
         };
@@ -2133,7 +2148,8 @@ impl App {
 
     /// The theme under the cursor of the open `t` list, which the screen previews.
     pub fn theme_preview(&self) -> Option<&'static str> {
-        match &self.input {
+        // Under `K`'s list, the theme list it is open over.
+        match if self.listing_keys() { &self.keys_from } else { &self.input } {
             Input::Choose { items, list, .. } => match items.get(list.sel) {
                 Some((_, Effect::Theme(name))) => Some(name),
                 _ => None,
@@ -2668,9 +2684,12 @@ impl App {
                 Download::Gone => " (no GGUF copy)".into(),
                 _ => continue,
             };
-            if let Input::Choose { kind: Kind::Launch, items, .. } = &mut self.input {
-                for (label, _) in items.iter_mut().filter(|i| got(&i.1) == Some(key)) {
-                    label.push_str(&said);
+            // The list `K` or `q` is open over takes it too.
+            for input in [&mut self.input, &mut self.keys_from, &mut self.asked_from] {
+                if let Input::Choose { kind: Kind::Launch, items, .. } = input {
+                    for (label, _) in items.iter_mut().filter(|i| got(&i.1) == Some(key)) {
+                        label.push_str(&said);
+                    }
                 }
             }
         }
@@ -3706,6 +3725,38 @@ impl App {
         Some(Effect::Save)
     }
 
+    /// Whether `K` lists the status bar's keys: where nothing is typed or asked, as a question
+    /// takes any key for its answer, and not in that list itself.
+    pub fn lists_keys(&self) -> bool {
+        self.input == Input::None || (self.open_list().is_some_and(List::idle) && !self.listing_keys())
+    }
+
+    /// Whether `K`'s list is open.
+    fn listing_keys(&self) -> bool {
+        matches!(self.input, Input::Choose { kind: Kind::Keys, .. })
+    }
+
+    /// Open `K`'s list of the status bar's `keys`, each as the bar has it and the key it presses,
+    /// in place of what is open, which picking one or esc goes back to.
+    pub fn list_keys(&mut self, keys: Vec<(String, Option<KeyCode>)>) {
+        let items = keys.into_iter().map(|(hint, k)| (hint, Effect::Press(k))).collect();
+        self.keys_from = std::mem::replace(&mut self.input, Input::choose("all keys", Kind::Keys, items, 0));
+    }
+
+    /// `f` on the app as it was when the question open was asked: `q` from what it keeps to go
+    /// back to, the others from no input.
+    pub fn as_asked<R>(&mut self, f: impl FnOnce(&App) -> R) -> R {
+        let quit = self.input == Input::Quit;
+        let from = if quit { std::mem::replace(&mut self.asked_from, Input::None) } else { Input::None };
+        let asked = std::mem::replace(&mut self.input, from);
+        let r = f(self);
+        let from = std::mem::replace(&mut self.input, asked);
+        if quit {
+            self.asked_from = from;
+        }
+        r
+    }
+
     /// Ask whether to quit, keeping what was open to go back to.
     fn ask_quit(&mut self) {
         self.asked_from = std::mem::replace(&mut self.input, Input::Quit);
@@ -3821,6 +3872,7 @@ impl App {
                 self.jump_ticked(if c == ']' { n } else { -n })
             }
             KeyCode::Char(c @ ('n' | 'N')) if list => self.list_hit(if c == 'n' { n } else { -n }),
+            KeyCode::Char('K') if self.lists_keys() => return Some(Effect::Keys),
             _ if list => return self.input_key(k.code, k.modifiers),
             _ => return self.table_key(k.code, n),
         }
@@ -3840,6 +3892,7 @@ impl App {
         // A click is no key typed for the task that was ended.
         self.ended = false;
         let effect = self.on_mouse(m);
+        self.snap_fav_col();
         self.follow();
         effect
     }
@@ -5179,6 +5232,15 @@ impl App {
                         let (_, effect) = items.swap_remove(at?);
                         self.input = Input::None;
                         match effect {
+                            // Back to where `K` was, to press it there.
+                            Effect::Press(k) => {
+                                self.input = std::mem::replace(&mut self.keys_from, Input::None);
+                                let Some(k) = k else {
+                                    self.refuse("those are several keys, press one of them");
+                                    return None;
+                                };
+                                return self.on_key(k.into());
+                            }
                             Effect::Theme(name) => {
                                 self.store.theme = if name == THEMES[0].0 { String::new() } else { name.to_string() };
                                 self.report(Ok(format!("theme {name}")));
@@ -5252,6 +5314,9 @@ impl App {
                         }
                         _ => self.input = Input::None,
                     },
+                    KeyCode::Esc | KeyCode::Char('K') if *kind == Kind::Keys => {
+                        self.input = std::mem::replace(&mut self.keys_from, Input::None);
+                    }
                     // The key that opens the theme list also closes it, and so the columns' and the benchmarks'.
                     KeyCode::Char('t') if *kind == Kind::Theme => self.input = Input::None,
                     KeyCode::Char('|') if *kind == Kind::Cols => self.input = Input::None,

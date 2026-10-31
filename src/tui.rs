@@ -604,7 +604,10 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
                     }
                     let m = hit(app, Rect::new(0, 0, size.width, size.height), e);
                     match dragged(&mut press, e, m) {
-                        Some(m) => Some(Err(double(&mut click, m, Instant::now()))),
+                        Some(m) => match double(&mut click, m, Instant::now()) {
+                            Some(m) => Some(Err(m)),
+                            None => continue,
+                        },
                         None => continue,
                     }
                 }
@@ -653,6 +656,7 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
                     Some(Effect::Copy(text)) => off(&said_tx, &mut saying, move || {
                         if copy(&text) { Ok(format!("copied {text}")) } else { Err("no clipboard tool found".into()) }
                     }),
+                    Some(Effect::Keys) => open_keys(app, size.width),
                     Some(Effect::Refresh) => {
                         data::clear_gone(&mut gone);
                         rx = Some(spawn_refresh());
@@ -674,7 +678,8 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
                         | Effect::Harness(_)
                         | Effect::Col(_)
                         | Effect::Bench(..)
-                        | Effect::Pick(..),
+                        | Effect::Pick(..)
+                        | Effect::Press(_),
                     )
                     | None => {}
                 }
@@ -828,6 +833,19 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         return None;
     }
     let plain = m.kind == MouseEventKind::Down(MouseButton::Left) && !pick && !extend;
+    // A question takes a click on the key that confirms it, in the status bar or on "q confirms"
+    // in its box, and any other click cancels it, as any other key does.
+    if let Some((hint, title)) = question(app) {
+        let key = bound_keys(split_hint(hint).0, &app.store.keys);
+        let body = Rect { y: area.y + 2, height: area.height - 3, ..area };
+        let rect = overlay_rect(body, &title, &[ask_line(&key)]);
+        let x = rect.x + 2;
+        let w = Span::raw(format!("{key}{CONFIRMS}")).width() as u16;
+        let on_box = rect.height > 2 && m.row == rect.y + 1 && (x..x + w).contains(&m.column);
+        let (x, w) = asked_spot(app, area.width, hint);
+        let on_bar = m.row == area.bottom() - 1 && (x..x + w).contains(&m.column);
+        return if plain && (on_box || on_bar) { hint_key(hint).map(Mouse::Key) } else { Some(Mouse::Outside) };
+    }
     // Under the tabs' two lines and the frame's top border.
     let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
     let l = layout(inner.width, app);
@@ -872,7 +890,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             && m.row == area.bottom() - 1
             && let Some(k) = hint_at(app, area.width, m.column)
         {
-            return Some(Mouse::Key(k));
+            return Some(k);
         }
         if !rect.contains(pos) {
             // A tab over the theme list, one itself, leaves it for that tab.
@@ -913,7 +931,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // which a click elsewhere on it leaves be.
     if m.row == area.bottom() - 1 {
         let close = close.filter(|_| prompt(app).is_none());
-        return (!mark && !extend).then(|| hint_at(app, area.width, m.column).map(Mouse::Key)).flatten().or(close);
+        return (!mark && !extend).then(|| hint_at(app, area.width, m.column)).flatten().or(close);
     }
     if on_tabs {
         return tab.or(close);
@@ -1049,18 +1067,26 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// A cell opens on a double click, two presses on it within `DOUBLE_CLICK`: a single press,
 /// the first of the two included, is a click on its row. `last` is the press to pair with.
-fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Mouse {
+fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Option<Mouse> {
+    let soon = |t: Instant| at.duration_since(t) < DOUBLE_CLICK;
     let single = match m {
         Mouse::Cell(n, _) | Mouse::Harness(n, _) => Mouse::Row(n),
         Mouse::Open(s) => Mouse::Model(s),
+        // A key's hint presses once on a double click: the first press puts a question's confirm
+        // or `K`'s `esc` under the second, which a click out of habit must not press.
+        Mouse::Key(_) => {
+            let again = last.is_some_and(|(t, was)| matches!(was, Mouse::Key(_)) && soon(t));
+            *last = (!again).then_some((at, m));
+            return (!again).then_some(m);
+        }
         _ => {
             *last = None;
-            return m;
+            return Some(m);
         }
     };
-    let again = last.is_some_and(|(t, was)| was == m && at.duration_since(t) < DOUBLE_CLICK);
+    let again = last.is_some_and(|(t, was)| was == m && soon(t));
     *last = (!again).then_some((at, m));
-    if again { m } else { single }
+    Some(if again { m } else { single })
 }
 
 /// Open `cmd` in a new terminal, in `dir` when one was written, and say how it went.
@@ -1307,14 +1333,16 @@ fn key_line(hint: &str, bound: &BTreeMap<char, char>) -> Line<'static> {
     Line::from(spans).style(fg(MUTED))
 }
 
-/// The key a click on a hint presses: only a hint with a single key has one.
+/// The key a click on a hint presses: a hint with a single key has one, and so one whose first
+/// key is named, as `space enter toggle` and `esc t close`, whose keys do the same.
 fn hint_key(hint: &str) -> Option<KeyCode> {
-    match split_hint(hint).0 {
+    let k = split_hint(hint).0;
+    match k.split(' ').next()? {
         "enter" => Some(KeyCode::Enter),
         "esc" => Some(KeyCode::Esc),
         "space" => Some(KeyCode::Char(' ')),
         "tab" => Some(KeyCode::Tab),
-        k => {
+        _ => {
             let mut chars = k.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) => Some(KeyCode::Char(c)),
@@ -1324,44 +1352,79 @@ fn hint_key(hint: &str) -> Option<KeyCode> {
     }
 }
 
+/// The hint of `K`, which lists every key of the status bar.
+const ALL_KEYS: &str = "K all keys";
+
+/// What of `keys` fits `room` cells: whole keys dropped from the front, the way back the last to
+/// go. With `all`, where `K` lists them (`App::lists_keys`), any cut off leave `K all keys` after
+/// the rest, the last of all to go, where it fits. However narrow, the last key stays, which may
+/// not fit.
+fn fit_keys(keys: &[&str], room: usize, all: bool) -> Vec<String> {
+    let width = |k: &[&str]| Span::raw(k.join("  ")).width();
+    if width(keys) <= room {
+        return keys.iter().map(|k| k.to_string()).collect();
+    }
+    let tail: &[&str] = if all && width(&[ALL_KEYS]) <= room { &[ALL_KEYS] } else { &[] };
+    let from = (1..keys.len())
+        .find(|&i| keys[i] != SEP && width(&[&keys[i..], tail].concat()) <= room)
+        .unwrap_or(keys.len() - usize::from(tail.is_empty()));
+    [&keys[from..], tail].concat().into_iter().map(String::from).collect()
+}
+
 /// The hints that fit a status bar `width` wide and the column the first starts at.
-fn hint_layout(app: &App, parts: &[Line], width: u16) -> (Vec<&'static str>, u16) {
+fn hint_layout(app: &App, parts: &[Line], width: u16) -> (Vec<String>, u16) {
     // The pill, a space, then each part and its " · ".
     let left = mode(app).0.chars().count() + 3 + parts.iter().map(|p| p.width() + 3).sum::<usize>();
-    let all = hints(app, width);
-    let mut hints = &all[..];
-    while hints.len() > 1 && (hints[0] == SEP || left + hints.join("  ").chars().count() + 1 > width as usize) {
-        hints = &hints[1..];
+    let hints = fit_keys(&hints(app, width), usize::from(width).saturating_sub(left + 1), app.lists_keys());
+    let w = Span::raw(hints.join("  ")).width() as u16;
+    (hints, width.saturating_sub(w))
+}
+
+/// Whether the status bar is a prompt's, or says `said` under a list or a question, and has no
+/// hints.
+fn in_prompt(app: &App) -> bool {
+    prompt(app).is_some() || saying(app)
+}
+
+/// Every key the status bar has, as `K` lists them: a prompt's or a list's, else the hints.
+fn bar_hints(app: &App, width: u16) -> Vec<String> {
+    match prompt_hint(app) {
+        Some(hint) if in_prompt(app) => hint.split("  ").map(String::from).collect(),
+        _ => hints(app, width).into_iter().filter(|&h| h != SEP).map(String::from).collect(),
     }
-    (hints.to_vec(), width.saturating_sub(hints.join("  ").chars().count() as u16))
+}
+
+/// The status bar's keys, as `status` lays them out: each with the column it starts at.
+fn bar_layout(app: &App, width: u16) -> Vec<(u16, String)> {
+    let (hints, mut x) = if in_prompt(app) {
+        // After the prompt's text, which starts after the pill and a space.
+        let Some((hint, x)) = bar_keys(app, mode(app).0.chars().count() as u16 + 3, width) else { return vec![] };
+        (hint.split("  ").map(String::from).collect(), x)
+    } else if app.input == Input::None || written_in_place(app) {
+        hint_layout(app, &parts(app), width)
+    } else {
+        return vec![];
+    };
+    let at = |h: String| {
+        let start = x;
+        x += Span::raw(&h).width() as u16 + 2;
+        (h != SEP).then_some((start, h))
+    };
+    hints.into_iter().filter_map(at).collect()
 }
 
 /// A click on the status bar at column `x` presses the key of the hint under it, as in tuiman.
-fn hint_at(app: &App, width: u16, x: u16) -> Option<KeyCode> {
-    // A prompt's keys after its text, which start after the pill and a space, as `status` has them.
-    if prompt(app).is_some() {
-        let (hint, mut start) = bar_keys(app, mode(app).0.chars().count() as u16 + 3, width)?;
-        for part in hint.split("  ") {
-            let w = Span::raw(part).width() as u16;
-            if (start..start + w).contains(&x) {
-                return hint_key(part);
-            }
-            start += w + 2;
-        }
-        return None;
-    }
-    if app.input != Input::None && !written_in_place(app) {
-        return None;
-    }
-    let (hints, mut start) = hint_layout(app, &parts(app), width);
-    for hint in hints {
-        let w = hint.chars().count() as u16;
-        if (start..start + w).contains(&x) {
-            return (hint != SEP).then(|| hint_key(hint)).flatten();
-        }
-        start += w + 2;
-    }
-    None
+fn hint_at(app: &App, width: u16, x: u16) -> Option<Mouse> {
+    let mut keys = bar_layout(app, width).into_iter();
+    let (_, hint) = keys.find(|(start, h)| (*start..start + Span::raw(h).width() as u16).contains(&x))?;
+    hint_key(&hint).map(Mouse::Key)
+}
+
+/// Where the status bar has the key that confirms the question asked, `hint` in its default key:
+/// where the hint that asked it was (`App::asked_at`), else at the right end. Its start and width.
+fn asked_spot(app: &App, width: u16, hint: &str) -> (u16, u16) {
+    let w = Span::raw(hint).width() as u16;
+    (app.asked_at.filter(|&x| x + w <= width).unwrap_or(width.saturating_sub(w)), w)
 }
 
 /// Data past the cache's 24h with no refresh under way: the status bar says how old, and
@@ -1895,6 +1958,13 @@ fn draw(app: &mut App, f: &mut Frame) {
         });
     }
     let text = panel(app, buf, area, body);
+    // Under a question the status bar has the key that confirms it where the hint that asked it
+    // was, found in the bar it was asked from.
+    app.asked_at = question(app).and_then(|(hint, _)| {
+        let at =
+            app.as_asked(|app| bar_layout(app, area.width).into_iter().find(|(_, h)| hint_key(h) == hint_key(hint)));
+        at.map(|(x, _)| x)
+    });
     // Where the text cursor goes: in the status bar's prompt, on a note written in its place, on
     // a cap in recommend or on an entry written in a list. After the panel's lines, as finding
     // its search's match says so there.
@@ -1904,27 +1974,8 @@ fn draw(app: &mut App, f: &mut Frame) {
     }
     // `q`, `U`, `D`, `X` and `↺` ask first: the same box, confirmed by the same key again, each
     // as it is bound now.
-    let key = |k: char| app.key_of(k).to_string();
-    let ask = match app.input {
-        Input::Quit => Some((key('q'), "quit?".to_string())),
-        Input::Upgrade => app.data.update().map(|new| (key('U'), format!("upgrade to v{new}?"))),
-        Input::Unfavorite => Some((key('D'), "unfavorite every model?".to_string())),
-        Input::DeleteTask(ref t) => Some((key('D'), format!("delete {t}?"))),
-        Input::Reset => Some(("enter".to_string(), "put every key back to its default?".to_string())),
-        Input::Unexclude => Some((
-            key('X'),
-            if app.filters_exclude() {
-                "unexclude every model, hidden ones included?"
-            } else {
-                "unexclude every model?"
-            }
-            .to_string(),
-        )),
-        _ => None,
-    };
-    if let Some((key, title)) = ask {
-        let key = Span::styled(key, fg(KEY).add_modifier(BOLD));
-        let lines = vec![Line::from(vec![key, Span::raw(" confirms · any other key cancels")])];
+    if let Some((hint, title)) = question(app) {
+        let lines = vec![ask_line(&bound_keys(split_hint(hint).0, &app.store.keys))];
         overlay(buf, body, &title, lines, &mut 0, (0, 0, 0..0));
     }
     let chooser = chooser(app, area);
@@ -2875,6 +2926,7 @@ fn mode(app: &App) -> (&'static str, Color) {
                 Kind::Open => "OPEN",
                 Kind::Pick => "PICK",
                 Kind::Bench => "BENCH",
+                Kind::Keys => "KEYS",
             };
             (name, Color::Green)
         }
@@ -2914,6 +2966,42 @@ type NoteCell = (Rect, (u16, u16));
 
 /// Notes is never narrower than this, so it is the least a note is written in.
 const NOTE_MIN: usize = 6;
+
+/// `K`: every key the status bar has, as it has them, in a list to pick one from.
+fn open_keys(app: &mut App, width: u16) {
+    let bound = |h: &str| {
+        let (key, what) = split_hint(h);
+        format!("{}{what}", bound_keys(key, &app.store.keys))
+    };
+    let keys = bar_hints(app, width).iter().map(|h| (bound(h), hint_key(h))).collect();
+    app.list_keys(keys);
+}
+
+/// What `q`, `U`, `D`, `X` and `↺` ask: the hint of the key that confirms, in its default key,
+/// and the question.
+fn question(app: &App) -> Option<(&'static str, String)> {
+    Some(match &app.input {
+        Input::Quit => ("q quit", "quit?".into()),
+        Input::Upgrade => ("U upgrade", format!("upgrade to v{}?", app.data.update()?)),
+        Input::Unfavorite => ("D unfavorite all", "unfavorite every model?".into()),
+        Input::DeleteTask(t) => ("D delete", format!("delete {t}?")),
+        Input::Reset => ("enter reset keys", "put every key back to its default?".into()),
+        Input::Unexclude if app.filters_exclude() => {
+            ("X unexclude all", "unexclude every model, hidden ones included?".into())
+        }
+        Input::Unexclude => ("X unexclude all", "unexclude every model?".into()),
+        _ => return None,
+    })
+}
+
+/// What follows the key in a question's box, which a click on confirms too.
+const CONFIRMS: &str = " confirms";
+
+/// The line of a question's box, `key` confirming it.
+fn ask_line(key: &str) -> Line<'static> {
+    let key = Span::styled(key.to_string(), fg(KEY).add_modifier(BOLD));
+    Line::from(vec![key, Span::raw(CONFIRMS), Span::raw(" · any other key cancels")])
+}
 
 /// The prompt in the status bar: its label, the text being typed and the cursor's byte offset in it.
 fn prompt(app: &App) -> Option<(String, &str, usize)> {
@@ -2983,10 +3071,19 @@ fn bar_keys(app: &App, x: u16, right: u16) -> Option<(String, u16)> {
 
 /// The keys the prompt has after its text, its `label` starting at `x` in a bar ending at
 /// `right`, and the column they start at. Those that would leave the label and a few typed
-/// cells too little room drop from the front, as the table's hints do, the way back the last
-/// to go.
+/// cells too little room drop from the front, as the table's hints do (`fit_keys`).
 fn prompt_keys(app: &App, x: u16, label: &str, right: u16) -> Option<(String, u16)> {
-    let hint = match &app.input {
+    let hint = prompt_hint(app)?;
+    let width = |s: &str| Span::raw(s).width();
+    let room = usize::from(right).saturating_sub(usize::from(x) + width(label) + 9);
+    let hint = fit_keys(&hint.split("  ").collect::<Vec<_>>(), room, app.lists_keys()).join("  ");
+    let w = width(&hint);
+    (w > 0 && w <= room).then(|| (hint, right - (w as u16 + 1)))
+}
+
+/// Every key a prompt or a list has in the status bar.
+fn prompt_hint(app: &App) -> Option<String> {
+    Some(match &app.input {
         Input::Choose { .. } => choose_keys(app)?,
         Input::Menu { col, list, .. } => {
             let keys = match *col {
@@ -3000,15 +3097,7 @@ fn prompt_keys(app: &App, x: u16, label: &str, right: u16) -> Option<(String, u1
             if list.query.is_empty() || list.typing || list.visual.is_some() { keys.into() } else { kept_hint(keys) }
         }
         _ => "enter apply  esc cancel".into(),
-    };
-    let width = |s: &str| Span::raw(s).width();
-    let mut parts: Vec<&str> = hint.split("  ").collect();
-    while !parts.is_empty() && usize::from(x) + width(label) + 8 + width(&parts.join("  ")) >= usize::from(right) {
-        parts.remove(0);
-    }
-    let hint = parts.join("  ");
-    let w = width(&hint) as u16;
-    (!parts.is_empty()).then(|| (hint, right - (w + 1)))
+    })
 }
 
 /// A prompt's keys from `x` on row `y`, in their colour, as in the hints of the table's bar.
@@ -3030,8 +3119,11 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let mut x = end + 1;
     if saying(app) {
         // The question is in a box in the middle of the screen. Under it `said`, and a list's
-        // keys on the right, as when its search is typed.
-        let keys = bar_keys(app, x, area.right());
+        // keys on the right, as when its search is typed, or the key that confirms the question
+        // where the hint that asked it was.
+        let keys = bar_keys(app, x, area.right()).or_else(|| {
+            question(app).map(|(hint, _)| (hint.to_string(), area.x + asked_spot(app, area.width, hint).0))
+        });
         let room = keys.as_ref().map_or(area.right(), |k| k.1.saturating_sub(1)).saturating_sub(x);
         if let Some((w, style)) = said(app) {
             put(buf, x, area.y, w, usize::from(room), style);
@@ -3068,7 +3160,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     }
     let parts = parts(app);
     // Key hints fill what the left side leaves free; whole hints drop from the front on
-    // narrow terminals, and the way back is the last to go.
+    // narrow terminals, `K all keys` the last to go (`fit_keys`).
     let (hints, start) = hint_layout(app, &parts, area.width);
     let limit = (area.x + start).saturating_sub(1);
     for (i, line) in parts.iter().enumerate() {
@@ -3267,6 +3359,7 @@ fn choose_keys(app: &App) -> Option<String> {
         (_, Kind::Bench) => "↓ ↑ move  / search  space enter picks  esc B close",
         (_, Kind::Via) => "↓ ↑ move  / search  space enter picks  esc back",
         (_, Kind::Launch) => "↓ ↑ move  / search  space enter opens  esc close",
+        (_, Kind::Keys) => "↓ ↑ move  / search  space enter presses  esc K close",
     };
     Some(if list.query.is_empty() { keys.into() } else { kept_hint(keys) })
 }
@@ -3491,6 +3584,12 @@ fn choice_lines(
                 spans.push(Span::raw(" "));
                 let color = colors.get(n).copied().unwrap_or(Color::Reset);
                 return lit_at(Line::from(spans).style(fg(color)), &label_hits(1));
+            }
+            // `K`'s keys as the status bar has them, the key bold.
+            if let Effect::Press(_) = effect {
+                let (key, what) = split_hint(label);
+                let key = Span::styled(format!(" {key}"), fg(KEY).add_modifier(BOLD));
+                return lit_at(Line::from(vec![key, Span::raw(format!("{what} "))]), &label_hits(1));
             }
             // A benchmark has its box too, ticked while its column shows it, as in the dropdown.
             if let Effect::Bench(..) = effect {
@@ -4853,7 +4952,7 @@ mod tests {
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
         assert!(
-            lines[3].contains("d dropdown  % no cache  r refresh  │  enter details  x launch  H model's harness"),
+            lines[3].contains("% no cache  r refresh  │  enter details  x launch  H model's harness"),
             "{}",
             lines[3]
         );
@@ -5376,7 +5475,7 @@ mod tests {
         };
         let hit = hit(&a, Rect::new(0, 0, 120, 30), click);
         assert_eq!(hit, Some(Mouse::Open(Stop::Help(2))));
-        a.mouse(double(&mut None, hit.unwrap(), Instant::now()));
+        a.mouse(double(&mut None, hit.unwrap(), Instant::now()).unwrap());
         assert_eq!(a.help_sel, 2);
     }
 
@@ -5637,6 +5736,7 @@ mod tests {
             (hint_key("s sort"), hint_key("esc back"), hint_key("space select"), hint_key("↓ ↑ scroll")),
             (Some(KeyCode::Char('s')), Some(KeyCode::Esc), Some(KeyCode::Char(' ')), None)
         );
+        assert_eq!(hint_key("esc t close"), Some(KeyCode::Esc), "keys that do the same: the first");
         let mut a = app();
         // Too narrow for the help tab, so its hint is in the bar.
         let (w, h) = (100, 6);
@@ -5653,6 +5753,142 @@ mod tests {
         assert_eq!(hit, Some(Mouse::Key(KeyCode::Char('?'))));
         a.mouse(hit.unwrap());
         assert_eq!(a.view, View::Help);
+    }
+
+    #[test]
+    fn the_mouse_quits_and_k_lists_every_key() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let (mut w, h) = (100, 12);
+        // A left click where `pat` last shows on a screen `w` wide, after a draw.
+        let click = |a: &mut App, w: u16, pat: &str| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            let lines = text(term.backend().buffer());
+            let y = lines.iter().rposition(|l| l.contains(pat)).unwrap_or_else(|| panic!("{pat}: {lines:#?}"));
+            let x = lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16;
+            let e = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y as u16,
+                modifiers: KeyModifiers::NONE,
+            };
+            hit(a, Rect::new(0, 0, w, h), e)
+        };
+        // `q quit` in the bar asks, and every cell of it then quits, as `qq` does, however wide the
+        // bar and whatever follows `q quit` in it. In a panel too, where a click elsewhere on the
+        // bar only cancels and leaves the panel open.
+        let on = |a: &mut App, w: u16, x: u16, y: u16| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            let e = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            };
+            hit(a, Rect::new(0, 0, w, h), e)
+        };
+        let key_q = Mouse::Key(KeyCode::Char('q'));
+        let q = Some(key_q);
+        for (w, panel) in [(60, false), (100, false), (150, false), (220, false), (120, true)] {
+            let mut a = app();
+            let view = || if panel { View::Recommend } else { View::Table };
+            a.view = view();
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(&mut a, f)).unwrap();
+            let bar = &text(term.backend().buffer())[h as usize - 1];
+            let x = bar[..bar.find("q quit").unwrap()].chars().count() as u16;
+            assert_eq!(on(&mut a, w, x, h - 1), q, "{w}: {bar}");
+            a.mouse(key_q);
+            assert_eq!(a.input, Input::Quit);
+            for x in x..x + 6 {
+                assert_eq!(on(&mut a, w, x, h - 1), q, "{w} {:?}: the same cell quits", a.view);
+            }
+            assert_eq!(on(&mut a, w, 12, h - 1), Some(Mouse::Outside), "{w}: the rest of the bar cancels");
+            a.mouse(Mouse::Outside);
+            assert_eq!((&a.input, &a.view), (&Input::None, &view()), "{w}: and leaves the panel open");
+        }
+        let mut a = app();
+        a.input = Input::Quit;
+        assert_eq!(click(&mut a, w, "q confirms"), q, "the box's q confirms too");
+        assert_eq!(click(&mut a, w, "s ·"), q, "and so does the end of its \"q confirms\"");
+        assert_eq!(click(&mut a, w, "· any"), Some(Mouse::Outside), "the rest cancels");
+        assert_eq!(a.mouse(key_q), Some(Effect::Quit));
+
+        // Too narrow for every hint: `K all keys` on the right lists them all, one a line, and a pick
+        // presses its key.
+        let mut a = app();
+        assert_eq!(click(&mut a, w, "K all keys"), Some(Mouse::Key(KeyCode::Char('K'))));
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        assert!(text(term.backend().buffer())[h as usize - 1].trim_end().ends_with("q quit  ? help  K all keys"));
+        assert_eq!(a.mouse(Mouse::Key(KeyCode::Char('K'))), Some(Effect::Keys));
+        open_keys(&mut a, w);
+        let Input::Choose { kind: Kind::Keys, items, .. } = &a.input else { panic!("{:?}", a.input) };
+        let has = |k: &str| items.iter().any(|(i, _)| i == k);
+        assert!(has("/ filter") && has("q quit") && !has(ALL_KEYS), "every key of the bar but K's");
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let lines = text(term.backend().buffer());
+        let row = lines.iter().find(|l| l.contains("| columns")).unwrap();
+        assert!(!row.contains("s sort"), "one a line: {lines:#?}");
+        a.key(KeyCode::Char('j').into());
+        assert!(matches!(&a.input, Input::Choose { list, .. } if list.sel == 1), "j moves down");
+        let m = click(&mut a, w, "| columns").unwrap();
+        a.mouse(m);
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Cols, .. }), "a click on | listed the columns");
+        a.key(KeyCode::Esc.into());
+
+        // Over a dropdown it goes back to the dropdown, to press it there.
+        w = 60;
+        a.col = 1;
+        a.key(KeyCode::Char('d').into());
+        assert_eq!(click(&mut a, w, "K all keys"), Some(Mouse::Key(KeyCode::Char('K'))));
+        assert_eq!(a.key(KeyCode::Char('K').into()), Some(Effect::Keys));
+        open_keys(&mut a, w);
+        a.key(KeyCode::Char('K').into());
+        assert!(matches!(a.input, Input::Menu { col: 1, .. }), "K again goes back to it");
+        open_keys(&mut a, w);
+        let Input::Choose { items, .. } = &a.input else { panic!() };
+        let close = items.iter().position(|(k, _)| k == "esc close").unwrap();
+        a.mouse(Mouse::Item(close));
+        assert_eq!(a.input, Input::None, "and esc close closes it");
+
+        // With room for every hint, no `K all keys`, and `K` still lists them.
+        assert!(click(&mut a, 220, "q quit").is_some());
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(220, h)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        assert!(!text(term.backend().buffer())[h as usize - 1].contains("all keys"));
+        assert_eq!(a.key(KeyCode::Char('K').into()), Some(Effect::Keys));
+
+        // A screen too short for every row: they scroll with the cursor, `▼` saying more are below,
+        // and a click on the box's bottom border presses nothing.
+        let (w, h) = (30, 9);
+        let mut a = app();
+        open_keys(&mut a, w);
+        let screen = |a: &mut App| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            text(term.backend().buffer())
+        };
+        let lines = screen(&mut a);
+        assert!(lines.iter().any(|l| l.starts_with("▼") || l.contains("│▼") || l.contains("▼ ")), "{lines:#?}");
+        let border = lines.iter().rposition(|l| l.contains('╰')).unwrap() as u16;
+        let e = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: border,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!matches!(hit(&a, Rect::new(0, 0, w, h), e), Some(Mouse::Item(_))), "{lines:#?}");
+        a.key(KeyCode::Char('G').into());
+        let Input::Choose { items, .. } = &a.input else { panic!() };
+        let last = items.last().unwrap().0.clone();
+        assert!(screen(&mut a).iter().any(|l| l.contains(&last)), "the last key scrolled into view");
+        // A hint of several keys says so, as a click on it in the bar presses none.
+        a.key(KeyCode::Char('g').into());
+        a.key(KeyCode::Char('g').into());
+        a.key(KeyCode::Enter.into());
+        assert_eq!((&a.input, a.failed, a.status.contains("several keys")), (&Input::None, true, true), "{}", a.status);
     }
 
     #[test]
@@ -5685,7 +5921,7 @@ mod tests {
         let on = |x, y| hit(&a, Rect::new(0, 0, w, h), click(x, y));
         assert_eq!(on(0, 5), Some(Mouse::Close), "beside the panel: closes it");
         assert_eq!(on(w - 1, 0), Some(Mouse::Close), "past the tabs too");
-        assert_eq!(on(w - 1, h - 1), Some(Mouse::Key(KeyCode::Char('q'))), "a hint is still its key");
+        assert_eq!(on(w - 1, h - 1), Some(Mouse::Key(KeyCode::Char('K'))), "a hint is still its key");
         assert_eq!(on(9, 0), Some(Mouse::Tab(0)), "a tab is still that tab");
         assert_eq!(
             at(&mut a, "flash", KeyModifiers::CONTROL),
@@ -5732,16 +5968,31 @@ mod tests {
         let (t, ms) = (Instant::now(), Duration::from_millis);
         let (cell, row) = (Mouse::Cell(3, PRICE), Mouse::Row(3));
         let mut last = None;
-        assert_eq!(double(&mut last, cell, t), row, "one press highlights the row");
-        assert_eq!(double(&mut last, cell, t + ms(200)), cell, "a second on the cell opens it");
-        assert_eq!(double(&mut last, cell, t + ms(300)), row, "a third starts over");
-        assert_eq!(double(&mut last, cell, t + ms(800)), row, "too slow: two clicks");
-        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(900)), row, "another cell: a click");
-        assert_eq!(double(&mut last, Mouse::Extend(4), t + ms(950)), Mouse::Extend(4), "a drag is itself");
+        assert_eq!(double(&mut last, cell, t), Some(row), "one press highlights the row");
+        assert_eq!(double(&mut last, cell, t + ms(200)), Some(cell), "a second on the cell opens it");
+        assert_eq!(double(&mut last, cell, t + ms(300)), Some(row), "a third starts over");
+        assert_eq!(double(&mut last, cell, t + ms(800)), Some(row), "too slow: two clicks");
+        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(900)), Some(row), "another cell: a click");
+        assert_eq!(double(&mut last, Mouse::Extend(4), t + ms(950)), Some(Mouse::Extend(4)), "a drag is itself");
         let (open, model) = (Mouse::Open(Stop::Compare(1)), Mouse::Model(Stop::Compare(1)));
-        assert_eq!(double(&mut last, open, t + ms(1000)), model, "a model: a click moves");
-        assert_eq!(double(&mut last, open, t + ms(1100)), open, "and a double click opens");
-        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(999)), row, "and breaks the pair");
+        assert_eq!(double(&mut last, open, t + ms(1000)), Some(model), "a model: a click moves");
+        assert_eq!(double(&mut last, open, t + ms(1100)), Some(open), "and a double click opens");
+        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(999)), Some(row), "and breaks the pair");
+        // A hint presses once on a double click, as the second would land on what the first opened.
+        let (d, k, esc) = (Mouse::Key(KeyCode::Char('D')), Mouse::Key(KeyCode::Char('K')), Mouse::Key(KeyCode::Esc));
+        assert_eq!(double(&mut last, d, t + ms(2000)), Some(d), "a hint presses its key");
+        assert_eq!(double(&mut last, d, t + ms(2200)), None, "not its confirm at once");
+        assert_eq!(double(&mut last, d, t + ms(2300)), Some(d), "a third click does");
+        assert_eq!(double(&mut last, k, t + ms(3000)), Some(k));
+        assert_eq!(double(&mut last, esc, t + ms(3200)), None, "and K's list stays open");
+    }
+
+    #[test]
+    fn k_all_keys_shows_only_where_it_fits() {
+        let keys = ["/ search", "esc close"];
+        assert_eq!(fit_keys(&keys, 12, true), ["K all keys"], "K the last to go");
+        assert_eq!(fit_keys(&keys, 9, true), ["esc close"], "too narrow for K: the last key");
+        assert_eq!(fit_keys(&keys, 19, true), keys, "every key fits: no K");
     }
 
     #[test]
@@ -6127,7 +6378,7 @@ mod tests {
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, true, false, None), "then above");
         let mut buf = Buffer::empty(Rect::new(0, 0, 46, 9));
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false, None), "all rows fit");
-        assert!(lines[3].ends_with("? help"), "{}", lines[3]);
+        assert!(lines[3].ends_with("? help  K all keys"), "{}", lines[3]);
         assert!(!lines[3].contains("space select"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Model, Dev too; Model stays.
         a.col = NCOLS - 1;
@@ -6544,7 +6795,7 @@ mod tests {
         ] {
             let lines = rows(&mut a, w);
             assert!(lines[2].starts_with(left) && lines[2].ends_with(" ▼ by ECI ╮"), "{}", lines[2]);
-            assert!(lines[19].contains("✗ excluded only"), "E left S: {}", lines[19]);
+            assert!(lines[19].contains("✗ excluded"), "E left S: {}", lines[19]);
         }
         // ✓'s, further left, leaves the wider side on its right.
         a.key(KeyCode::Char('S').into());
@@ -6633,7 +6884,7 @@ mod tests {
         let bar = row(7);
         assert!(!bar.contains("note:") && bar.contains("esc cancel") && !bar.contains("help"), "{bar}");
         let keys: Vec<_> = (0..70).filter_map(|x| hint_at(&a, 70, x)).collect();
-        assert!(keys.contains(&KeyCode::Enter) && keys.contains(&KeyCode::Esc), "{keys:?}");
+        assert!(keys.contains(&Mouse::Key(KeyCode::Enter)) && keys.contains(&Mouse::Key(KeyCode::Esc)), "{keys:?}");
         let click = |column, row| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
@@ -6714,7 +6965,7 @@ mod tests {
             };
             let area = Rect::new(0, 0, w, 8);
             assert_eq!(hit(&a, area, click(pos.x - 1)), None, "{w} {:?}: on the text", a.view);
-            if let Some(x) = (0..w).find(|&x| hint_at(&a, w, x) == Some(KeyCode::Enter)) {
+            if let Some(x) = (0..w).find(|&x| hint_at(&a, w, x) == Some(Mouse::Key(KeyCode::Enter))) {
                 a.mouse(hit(&a, area, click(x)).unwrap());
                 assert_eq!((&a.input, a.store.note("opus")), (&Input::None, Some("abc")), "{w} {:?}", a.view);
             } else {
@@ -6777,7 +7028,11 @@ mod tests {
         a.key(KeyCode::Char('o').into());
         // Too narrow for them all, the first drop, esc the last to go.
         let (_, lines) = render(&mut a, 60, 10);
-        assert!(lines[9].trim_end().ends_with("esc close") && !lines[9].contains("↓ ↑ move"), "{}", lines[9]);
+        assert!(
+            lines[9].trim_end().ends_with("esc close  K all keys") && !lines[9].contains("↓ ↑ move"),
+            "{}",
+            lines[9]
+        );
         // A click on one presses it.
         let (_, lines) = render(&mut a, 100, 10);
         let column = cell(&lines[9], "v range");
