@@ -6795,14 +6795,14 @@ mod tests {
             Input::Choose { kind: Kind::Bench, list, .. } => list.sel,
             _ => panic!("{:?}", a.input),
         };
-        // Each column shows its task's score, its first entry: 0, 8 after ECI's six benchmarks and
-        // Arena's chat rating, and 21 after coding's eleven and Arena's WebDev rating.
+        // A column's entries: its task's score first, then its benchmarks.
+        let entries = |id| benched(id).unwrap().1.len() + 1;
         press(&mut a, "]");
-        assert_eq!(sel(&a), 8, "] to the next ticked one");
+        assert_eq!(sel(&a), entries("eci"), "] to the next ticked one");
         press(&mut a, "]]");
         assert_eq!(sel(&a), 0, "wrapping from the last to the first");
         press(&mut a, "[");
-        assert_eq!(sel(&a), 21, "[ the other way round");
+        assert_eq!(sel(&a), entries("eci") + entries("coding"), "[ the other way round");
     }
 
     #[test]

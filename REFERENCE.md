@@ -51,11 +51,10 @@ Each column's dropdown (`d`) lists other benchmarks, each shown alone when picke
 - ECI: FrontierMath T4, SimpleQA Verified, Chess Puzzles, Mystery Game Puzzles, LMCA and
   Furniture Assembly, general benchmarks that still tell the best models apart, and Arena's
   chat rating
-- Coding: CursorBench, DeepSWE, FrontierSWE, MirrorCode, SWE-Bench verified, Aider polyglot,
-  Terminal Bench, GSO-Bench, WeirdML v3, WeirdML, Surface Evolver Bench and Arena's WebDev rating
+- Coding: CursorBench, DeepSWE, FrontierSWE, MirrorCode, GSO-Bench, WeirdML v3, Surface Evolver
+  Bench and Arena's WebDev rating
 - Agentic: the signals Arena's agent score is made of, then APEX-Agents, Remote Labor Index,
-  OSWorld 2.0, OSWorld, EBR-bench, SpireClimb, METR Time Horizons, The Agent Company, GDPval and
-  Terminal Bench
+  OSWorld 2.0, EBR-bench and SpireClimb
 
 The overall score, in ECI, is Epoch's own ECI, or in grey the same fit over every benchmark the
 model has. Vision is ranked by overall. At the same score, a measured ECI sorts before a grey one.
