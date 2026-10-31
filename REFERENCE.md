@@ -63,9 +63,9 @@ model has. Vision is ranked by overall. At the same score, a measured ECI sorts 
 A row has no scores when its offers are another release than the one scored, as a `-latest`
 id is.
 
-`modelcmp recommend --json` names each task's benchmarks in `benchmarks`. A benchmark picked in
-the task's column in the TUI takes their place, and the column then shows that benchmark's
-score alone, 0-100.
+`modelcmp recommend --json` names what ranks each task in `benchmarks`: FrontierCode for coding,
+Arena's agent score for agentic, none for overall and vision. A benchmark picked in the task's
+column in the TUI takes its place, and the column then shows that benchmark's score alone, 0-100.
 
 [Scores](#scores) says how each of these numbers is obtained.
 

@@ -1280,7 +1280,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             // The key of the best model your machine runs.
             let local = local.map(|(m, _)| &m.key);
             let tiers = tiers(picks);
-            serde_json::json!({"name": t.name, "when": t.when, "benchmarks": crate::app::task_bench(store, t).map_or_else(|| t.benches.to_vec(), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
+            serde_json::json!({"name": t.name, "when": t.when, "benchmarks": crate::app::task_bench(store, t).or(t.bench).map_or_else(|| t.benches.to_vec(), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -1944,6 +1944,7 @@ mod tests {
         data.models[1].scores.insert("LMCA".into(), 0.8);
         let mut store = Store::default();
         let coding = |s: &Store| recommend_json(&data, s).into_iter().find(|t| t["name"] == "coding").unwrap();
+        assert_eq!(coding(&store)["benchmarks"], serde_json::json!(["FrontierCode"]), "none picked, what ranks it");
         store.bench.insert("coding".into(), "FrontierSWE".into());
         let t = coding(&store);
         assert_eq!(t["benchmarks"], serde_json::json!(["FrontierSWE"]));
