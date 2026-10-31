@@ -477,7 +477,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("i", "write a note on the model, agents read it"),
             ("y", "copy the model name"),
             ("Y", "copy the model id"),
-            ("o", "open the model's page on a site"),
+            ("o", "open the model's page on a site, or several"),
             ("x", "open a harness on the model in a new terminal"),
             ("H", "choose the harness the model runs on, for `x`, `Y`, --cmd and agents"),
             ("P", "choose your default harness, for a model with none of its own"),
@@ -736,7 +736,7 @@ pub struct List {
     pub edit: Option<Edit>,
     /// The box under the cursor along a row of `f`'s grid: its tier's, in `view::TIERS` order.
     pub col: usize,
-    /// Entry where `v` started a range in the Dev or Via dropdown; it runs to the cursor.
+    /// Entry where `v` started a range in the Dev or Via dropdown or `o`'s list; it runs to the cursor.
     pub visual: Option<usize>,
 }
 
@@ -1080,6 +1080,8 @@ pub enum Effect {
     Upgrade,
     Save,
     Open(String),
+    /// Several pages, a tab each: the range `v` highlighted in `o`'s list.
+    OpenAll(Vec<String>),
     Copy(String),
     Refresh,
     /// Run this command in a new terminal window.
@@ -3901,8 +3903,10 @@ impl App {
         }
         if list {
             // A click is for its entry alone, as a plain click in the table drops the range, and
-            // one outside then closes the dropdown with its esc.
-            if let Input::Menu { list, .. } = &mut self.input {
+            // one outside then closes the list with its esc. The sideways wheel keeps it.
+            if !matches!(m, Mouse::Cols(_) | Mouse::ToCol(..))
+                && let Input::Menu { list, .. } | Input::Choose { list, .. } = &mut self.input
+            {
                 list.visual = None;
             }
             return match m {
@@ -5136,6 +5140,22 @@ impl App {
                             list.write(at?, Edit::task(task, &self.store));
                         }
                     }
+                    // `v` starts a range in `o`'s list, as in the table, and again cancels it.
+                    KeyCode::Char('v') if *kind == Kind::Open && list.idle() => {
+                        list.visual = if list.visual.is_some() { None } else { Some(list.sel) };
+                    }
+                    // Enter on a range opens every site in it, a tab each.
+                    KeyCode::Enter | KeyCode::Char(' ') if !list.typing && list.visual.is_some() => {
+                        let urls = (list.range()?)
+                            .filter_map(|i| match items.get(i) {
+                                Some((_, Effect::Open(url))) => Some(url.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        self.input = Input::None;
+                        return Some(Effect::OpenAll(urls));
+                    }
+                    KeyCode::Esc if list.visual.is_some() && !list.typing => list.visual = None,
                     // Space picks as enter does, in every list, once a search is no longer typed.
                     KeyCode::Enter | KeyCode::Char(' ') if !list.typing => {
                         // A harness asks the folder to open it in, on its entry, starting
@@ -5915,7 +5935,10 @@ mod tests {
         assert_eq!(a.input, Input::Bind { key: 's', wrong: true }, "a digit is a count, and not taken");
         assert_eq!(press(&mut a, "o"), Some(Effect::Save));
         assert_eq!(a.store.keys, BTreeMap::from([('o', 's'), ('s', 'o')]), "open's page takes s, as in a game");
-        assert_eq!(a.status, "o: sort by the column, press again to reverse, and s: open the model's page on a site");
+        assert_eq!(
+            a.status,
+            "o: sort by the column, press again to reverse, and s: open the model's page on a site, or several"
+        );
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         let was = a.descending;
@@ -8765,6 +8788,14 @@ mod tests {
         let last = Some(Effect::Open("https://openrouter.ai/x/gpt55".into()));
         assert_eq!(code(&mut a, KeyCode::Enter), last, "openrouter.ai last");
         assert_eq!(press(&mut a, "oG "), last, "space picks as enter does");
+        let both = vec!["https://epoch.ai/models/gpt55".into(), "https://openrouter.ai/x/gpt55".into()];
+        assert_eq!(press(&mut a, "ovj "), Some(Effect::OpenAll(both)), "v opens a range, a tab each");
+        press(&mut a, "ov");
+        a.mouse(Mouse::Cols(1));
+        assert!(matches!(&a.input, Input::Choose { list, .. } if list.visual.is_some()), "the sideways wheel keeps it");
+        assert_eq!(code(&mut a, KeyCode::Esc), None);
+        assert!(matches!(&a.input, Input::Choose { list, .. } if list.visual.is_none()), "esc cancels the range only");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));
         a.data.models[0].openrouter = None;
         assert_eq!(press(&mut a, "o"), None, "one page: still listed");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Open("https://epoch.ai/models/gpt55".into())));

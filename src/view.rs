@@ -791,7 +791,11 @@ pub fn priced(m: &Model, score: &str, keyed: bool, favorite: bool) -> String {
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.into() } else { s.chars().take(n - 1).chain(['…']).collect() }
+    match n {
+        _ if s.chars().count() <= n => s.into(),
+        0 => String::new(),
+        _ => s.chars().take(n - 1).chain(['…']).collect(),
+    }
 }
 
 fn or_dash(s: &str) -> &str {
