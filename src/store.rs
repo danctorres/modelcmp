@@ -79,9 +79,6 @@ pub struct Store {
     /// (`P`, `modelcmp harness`); a model's own comes first.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub harness: String,
-    /// The TUI asked for `harness` at its first start with two harnesses or more.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub harness_asked: bool,
     /// The folder of the `.gguf` files you downloaded (`modelcmp models-dir`), read when
     /// llama.cpp's own `LLAMA_ARG_MODELS_DIR` is not set.
     #[serde(skip_serializing_if = "String::is_empty")]

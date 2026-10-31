@@ -148,7 +148,7 @@ modelcmp memory 24                             # the GB your GPU has, when the o
 modelcmp select sonnet-5                       # shortlist it, list --selected shows them
 modelcmp note sonnet-5 "fast enough for refactors"
 modelcmp exclude llama-4-maverick              # have it, can't use it
-modelcmp harness opencode                      # your default harness (`P` in the TUI)
+modelcmp harness opencode                      # your preferred harness (`P` in the TUI)
 modelcmp harness claude opus-5.5 sonnet-5      # the harness these run on (`H` in the TUI)
 modelcmp fav coding gemini-3.7-flash --tier low   # your favorite for one tier of a task, at its price or under
 modelcmp tier mid 8                            # mid takes models up to $8, `modelcmp tier` shows every cap
@@ -291,7 +291,7 @@ hide different models.
    `claude-opus-5-5`, `--via opencode` the id opencode takes, for a script that always starts
    opencode). It is an error when the harness lacks the model.
 2. The id the model's harness takes (`modelcmp harness claude opus-5.5`, `H`), while it has the model.
-3. The id your default harness takes (`modelcmp harness`, `P`), when it has the model.
+3. The id your preferred harness takes (`modelcmp harness`, `P`), when it has the model.
 4. The id its developer's own harness takes (claude for a Claude model), as `--cmd` starts it.
 5. The id the harness running modelcmp takes, when an agent in claude, opencode, pi, omp, codex
    or gemini runs it (copilot does not say so).
@@ -301,7 +301,7 @@ hide different models.
 7. The id at the provider you'd pay.
 
 `--cmd` prints the command that starts the harness on the model instead (`claude --model
-claude-opus-5-5`). The harness is the model's, else your default one, else its developer's own
+claude-opus-5-5`). The harness is the model's, else your preferred one, else its developer's own
 (claude for a Claude model, codex for OpenAI's, gemini for Google's), else the one running
 modelcmp, else the first that has the model in Via's order, among `--via`'s when given. Without
 `--via` these last three skip a harness you left out in the TUI's Via dropdown while another has

@@ -893,8 +893,8 @@ pub fn exclude(data: &Data, store: &mut Store, q: &str, rm: bool) -> Result {
     Ok(())
 }
 
-/// Show your default harness, or set or clear it: the one `--cmd` and `--id` go by when none is
-/// asked for and it has the model. With models, the harness each runs on, ahead of the default.
+/// Show your preferred harness, or set or clear it: the one `--cmd` and `--id` go by when none is
+/// asked for and it has the model. With models, the harness each runs on, ahead of the preferred one.
 pub fn harness(data: &Data, store: &mut Store, name: Option<&str>, models: &[String], rm: bool) -> Result {
     let known = vias;
     let unknown = |h: &str| {
@@ -942,16 +942,16 @@ pub fn harness(data: &Data, store: &mut Store, name: Option<&str>, models: &[Str
         Some(h) => {
             store.harness = h;
             store.save()?;
-            println!("harness: {}", store.harness);
+            println!("preferred harness: {}", store.harness);
         }
         None if rm => {
             store.harness.clear();
             store.save()?;
-            println!("no default harness");
+            println!("no preferred harness");
         }
         None => {
             match store.harness.as_str() {
-                "" => println!("no default harness, modelcmp harness <name> sets one"),
+                "" => println!("no preferred harness, modelcmp harness <name> sets one"),
                 h => println!("{h}"),
             }
             for (k, h) in &store.runs_on {
@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     /// A tier judges a model at the price paid where it runs: one opencode has free and pi at a
-    /// price is the free tier's on opencode, your default harness pi aside, and none of pi's.
+    /// price is the free tier's on opencode, your preferred harness pi aside, and none of pi's.
     #[test]
     fn a_tier_s_pick_runs_where_its_price_fits() {
         let mut flash = model("flash", 60.0, 0.0);
@@ -1697,7 +1697,7 @@ mod tests {
     }
 
     /// With `--via` naming both, the free tier's pick, free on one of them, starts on that one:
-    /// on opencode, which has it free, not on pi, your default, which charges for it.
+    /// on opencode, which has it free, not on pi, your preferred one, which charges for it.
     #[test]
     fn a_tier_s_pick_on_two_harnesses_runs_where_its_price_fits() {
         let mut flash = model("flash", 60.0, 0.0);
@@ -1859,7 +1859,7 @@ mod tests {
         assert_eq!(
             cmd(&[None, Some("opencode")], &[]).as_deref(),
             Some("opencode --model p/gpt55"),
-            "your default one"
+            "your preferred one"
         );
         assert_eq!(
             cmd(&[Some("codex"), Some("opencode")], &[]).as_deref(),
@@ -1874,7 +1874,7 @@ mod tests {
         assert_eq!(harness_id(&store, &m, &[], &none), "p/gpt55", "codex left out: opencode's");
         assert_eq!(harness_id(&store, &m, &["codex".into()], &none), "gpt55", "--via codex");
         store.harness = "codex".into();
-        assert_eq!(harness_id(&store, &m, &[], &none), "gpt55", "your default, left out or not");
+        assert_eq!(harness_id(&store, &m, &[], &none), "gpt55", "your preferred one, left out or not");
         store.via_not = vec!["codex".into(), "opencode".into()];
         store.harness.clear();
         assert_eq!(harness_id(&store, &m, &[], &none), "gpt55", "every one left out: as if none were");

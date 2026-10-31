@@ -479,8 +479,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Y", "copy the model id"),
             ("o", "open the model's page on a site, or several"),
             ("x", "open a harness on the model in a new terminal"),
-            ("H", "choose the harness the model runs on, for `x`, `Y`, --cmd and agents"),
-            ("P", "choose your default harness, for a model with none of its own"),
+            ("H", "choose this model's own harness, for `x`, `Y`, --cmd and agents"),
+            ("P", "choose your preferred harness, for the models with none of their own"),
         ],
     ),
     (
@@ -552,8 +552,10 @@ pub fn bound_keys(keys: &str, bound: &BTreeMap<char, char>) -> String {
 /// runs through ollama or llama.cpp, and the ones `x` can download.
 pub const DOWNLOAD: &str = "↓ downloadable";
 
-/// The first entry of `P`'s list, and of `H`'s when no harness the model is on fits: what a model runs on then (`command`).
-const ANY_HARNESS: &str = "any harness (the developer's own first)";
+/// The first entry of `H`'s list when no harness the model is on fits: what a model runs on then (`command`).
+const ANY_HARNESS: &str = "any harness (Claude on claude, GPT on codex, Gemini on gemini)";
+/// The first entry of `P`'s list: no preferred harness, so a model runs on its developer's own first, the rest on the first that has them.
+pub const NO_PREFERENCE: &str = "none (Claude on claude, GPT on codex, Gemini on gemini)";
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
@@ -579,6 +581,8 @@ pub const RECOMMEND: usize = 5;
 const COMPARE: usize = 6;
 const THEME: usize = 7;
 pub const HELP_TAB: usize = 8;
+/// `App::among` on recommend's preferred harness line, under its `from` line, past every tab.
+pub const PREFERRED: usize = usize::MAX;
 
 /// What hides a model from the table (`App::failing`): the entries picked in the dropdown of
 /// column 1 (Dev), `PRICE` or `VIA`, or the bound at that index of `App::bounds`.
@@ -703,10 +707,8 @@ pub enum Kind {
     PickedVia,
     /// `t`: the theme, previewed under the cursor.
     Theme,
-    /// `P`: your default harness.
+    /// `P`: your preferred harness.
     Harness,
-    /// The same, asked at the first start (`App::ask_default`), which says `P` changes it later.
-    FirstHarness,
     /// `|`: the columns the table shows; space or enter ticks one and the list stays open.
     Cols,
     /// `d` on a tier in recommend: the model it picks, your favorite there or the recommended one.
@@ -1103,7 +1105,7 @@ pub enum Effect {
     NewTask(String),
     /// A `view::THEMES` name; the `t` chooser's items, applied by `App` itself.
     Theme(&'static str),
-    /// Your default harness, or none; the `P` chooser's items, applied by `App` itself.
+    /// Your preferred harness, or none; the `P` chooser's items, applied by `App` itself.
     Harness(Option<&'static str>),
     /// The column at this cursor index; the `|` chooser's items, applied by `App` itself.
     Col(usize),
@@ -1191,6 +1193,8 @@ pub enum Stop {
     Recommend(usize, usize),
     /// Tab `i` on recommend's `from` line.
     Among(usize),
+    /// Your preferred harness under it, or its ▾: a click opens its dropdown.
+    Preferred,
     /// The header of tier `i` in recommend, `low` or `mid`: a click writes its price cap.
     Cap(usize),
     /// The ▾ on stop `i` of task `t` in recommend, as `Recommend`: a click opens its dropdown.
@@ -1244,7 +1248,7 @@ pub fn runs_on<'a>(store: &'a Store, m: &Model) -> Option<&'a str> {
 }
 
 /// The command `x` and `--cmd` start on `m`, among `only` when it names any: the harness you run
-/// it on (`H`), else your default one, but not ollama or llama.cpp for a model another harness
+/// it on (`H`), else your preferred one, but not ollama or llama.cpp for a model another harness
 /// runs in full, then as `command` goes on.
 pub fn harness_cmd(
     store: &Store,
@@ -1274,7 +1278,7 @@ pub fn harness_id(store: &Store, m: &Model, only: &[String], listed: &BTreeMap<S
 }
 
 /// The command that starts a harness on `m`: the first of `first` to have the model (the
-/// model's harness, then your default one), else its developer's own, else `ours` (the harness
+/// model's harness, then your preferred one), else its developer's own, else `ours` (the harness
 /// running modelcmp), else the first that does, in Via's order and among `only` when it names
 /// any. Those three skip the harnesses in `not` (left out in Via) while another has the model.
 pub fn command(
@@ -1412,7 +1416,8 @@ pub struct App {
     pub task_cur: usize,
     pub task_sel: usize,
     /// The cursor on recommend's `from` line instead, the models it ranks: on the tab `among`,
-    /// one of mine, all, selected and favorites.
+    /// one of mine, all, selected and favorites. `PREFERRED` is the line under it, your
+    /// preferred harness, whose dropdown is `P`'s list.
     pub among: Option<usize>,
     /// The cursor on recommend's tier header, under `among`, on tier `task_sel - 1` (`cap_col`):
     /// enter or space writes the cap of `low` or `mid` there. Only while `among` is none.
@@ -2942,7 +2947,7 @@ impl App {
         Some(Effect::Save)
     }
 
-    /// The harnesses you have a model on and did not leave out in Via, and your default, in Via's order.
+    /// The harnesses you have a model on and did not leave out in Via, and your preferred one, in Via's order.
     fn harnesses(&self) -> Vec<&'static str> {
         let mine = |h: &&str| {
             *h == self.store.harness
@@ -2952,29 +2957,15 @@ impl App {
         crate::data::vias().filter(mine).collect()
     }
 
-    /// `P`: your default harness, after "any", with the cursor on it. It is the one `x`, `Y`,
+    /// `P`: your preferred harness, after "any", with the cursor on it. It is the one `x`, `Y`,
     /// `--cmd` and `--id` go by for a model with no harness of its own (`harness_cmd`).
-    fn ask_harness(&mut self, title: &'static str, kind: Kind) {
-        let items: Vec<_> = std::iter::once((ANY_HARNESS.to_string(), Effect::Harness(None)))
+    fn ask_harness(&mut self) {
+        let items: Vec<_> = std::iter::once((NO_PREFERENCE.to_string(), Effect::Harness(None)))
             .chain(self.harnesses().into_iter().map(|h| (h.to_string(), Effect::Harness(Some(h)))))
             .collect();
         let has = |e: &Effect| matches!(e, Effect::Harness(Some(h)) if *h == self.store.harness);
         let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
-        self.input = Input::choose(title, kind, items, sel);
-    }
-
-    /// A start with two harnesses or more asks for your default, once: the caller saves that it
-    /// asked. True when it asks.
-    pub fn ask_default(&mut self) -> bool {
-        if self.store.harness_asked || !self.store.harness.is_empty() || self.input != Input::None {
-            return false;
-        }
-        if self.harnesses().len() < 2 {
-            return false;
-        }
-        self.store.harness_asked = true;
-        self.ask_harness("which harness do you use by default?", Kind::FirstHarness);
-        true
+        self.input = Input::choose("preferred harness?", Kind::Harness, items, sel);
     }
 
     /// `H` on a model, or in `f`'s grid (`back`, its box): the harnesses that have the model
@@ -3010,7 +3001,7 @@ impl App {
             .collect();
         let has = |e: &Effect| matches!(e, Effect::Via(_, h, _) if h.as_deref() == self.store.runs_on(key));
         let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
-        Some(Input::choose("run on which harness?", kind, items, sel))
+        Some(Input::choose("run this model on which harness?", kind, items, sel))
     }
 
     /// `f`'s grid for the model `key`, opened on the box of `slot`: where `f` starts, and where
@@ -3353,19 +3344,19 @@ impl App {
         } else if self.view == View::Compare {
             self.compare_sel = go(self.compare_sel, self.marked_shown);
         } else if self.view == View::Recommend {
-            // The `from` line comes before the tiers' header, and that before the first task,
-            // `+ new task` after the last.
-            let at = if self.among.is_some() {
-                0
-            } else if self.caps {
-                1
-            } else {
-                self.task_cur + 2
+            // The `from` line comes before your preferred harness, that before the tiers' header,
+            // and that before the first task, `+ new task` after the last.
+            let at = match self.among {
+                Some(PREFERRED) => 1,
+                Some(_) => 0,
+                None if self.caps => 2,
+                None => self.task_cur + 3,
             };
-            match go(at, self.task_count() + 3) {
+            match go(at, self.task_count() + 4) {
                 0 => self.among = Some(self.among_on()),
-                1 => (self.among, self.caps) = (None, true),
-                t => self.task_to(t - 2),
+                1 => self.among = Some(PREFERRED),
+                2 => (self.among, self.caps) = (None, true),
+                t => self.task_to(t - 3),
             }
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
@@ -3971,6 +3962,11 @@ impl App {
                     (self.task_cur, self.task_sel, self.among, self.caps) = (t, i, None, false);
                 }
                 (Stop::Among(i), View::Recommend) => return self.pick_among(i),
+                (Stop::Preferred, View::Recommend) => {
+                    self.among = Some(PREFERRED);
+                    self.ask_harness();
+                    return None;
+                }
                 (Stop::Cap(c), View::Recommend) => {
                     (self.among, self.caps, self.task_sel) = (None, true, c + 1);
                     self.edit_cap(c);
@@ -4291,6 +4287,19 @@ impl App {
             }
             (KeyCode::Char('<'), _) if self.view == View::Recommend => {
                 self.ask_cap();
+                return None;
+            }
+            // On your preferred harness enter, space and `d` open its dropdown, and `h` `l` have
+            // nothing to move over.
+            (KeyCode::Char('d') | KeyCode::Enter, Some(PREFERRED)) => {
+                self.ask_harness();
+                return None;
+            }
+            (KeyCode::Char('h' | 'l' | '0' | '_' | '$') | KeyCode::Left | KeyCode::Right, Some(PREFERRED)) => {
+                return None;
+            }
+            (KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H'), Some(PREFERRED)) => {
+                self.refuse("the cursor is on your preferred harness, not a model, j moves down to a task");
                 return None;
             }
             (KeyCode::Char('d'), _) if self.view == View::Recommend => {
@@ -4677,7 +4686,7 @@ impl App {
                 let key = self.current()?.key.clone();
                 self.ask_via(&key, None);
             }
-            KeyCode::Char('P') => self.ask_harness("default harness?", Kind::Harness),
+            KeyCode::Char('P') => self.ask_harness(),
             KeyCode::Enter if self.view == View::Recommend && !row => {
                 let Some(t) = self.cur_task() else {
                     // A task of your own has no line to rank: the table, on its cheapest model.
@@ -5217,7 +5226,9 @@ impl App {
                             }
                             Effect::Harness(h) => {
                                 self.store.harness = h.unwrap_or("").to_string();
-                                self.report(Ok(format!("default harness: {}", h.unwrap_or("any harness"))));
+                                self.report(Ok(
+                                    h.map_or("no preferred harness".into(), |h| format!("preferred harness: {h}"))
+                                ));
                                 return Some(Effect::Save);
                             }
                             Effect::Via(key, h, back) => {
@@ -5842,7 +5853,7 @@ mod tests {
             _ => None,
         };
         let (key, name) = a.current().map(|m| (m.key.clone(), m.name.clone())).unwrap();
-        // Your default harness, set on the command line, is where x starts with none of its own.
+        // Your preferred harness, set on the command line, is where x starts with none of its own.
         a.store.harness = "codex".into();
         press(&mut a, "x");
         assert_eq!(at(&a), Some((Kind::Launch, 2, 1)), "x starts on the default");
@@ -5866,17 +5877,12 @@ mod tests {
     }
 
     #[test]
-    fn p_picks_the_default_harness_and_the_first_start_asks_for_it() {
+    fn p_picks_the_preferred_harness() {
         let mut a = app();
         let at = |a: &App| match &a.input {
             Input::Choose { kind, items, list, .. } => Some((*kind, items.len(), list.sel)),
             _ => None,
         };
-        // With one harness there is nothing to choose.
-        for m in &mut a.data.models {
-            m.via = vec!["opencode".into()];
-        }
-        assert!(!a.ask_default() && !a.store.harness_asked, "one harness: not asked");
         for m in &mut a.data.models {
             m.via = vec!["opencode".into(), "codex".into()];
             m.offers[0].via = m.via.clone();
@@ -5889,10 +5895,10 @@ mod tests {
         // With none of yours, the harness it starts on all the same, as x does.
         assert_eq!(first(&a), "any harness (default: codex)", "no default yet: its developer's own");
         code(&mut a, KeyCode::Esc);
-        assert!(a.ask_default() && a.store.harness_asked, "two: asked");
-        assert_eq!(at(&a), Some((Kind::FirstHarness, 3, 0)), "any, opencode and codex: on any, it has none yet");
+        press(&mut a, "P");
+        assert_eq!(at(&a), Some((Kind::Harness, 3, 0)), "none, opencode and codex: on none, it has none yet");
+        assert_eq!(first(&a), "none (Claude on claude, GPT on codex, Gemini on gemini)");
         code(&mut a, KeyCode::Esc);
-        assert!(!a.ask_default(), "and it asks once");
         // A harness left out in Via is not offered, and P closes its list.
         a.store.via_not = vec!["opencode".into()];
         press(&mut a, "P");
@@ -5903,7 +5909,7 @@ mod tests {
         press(&mut a, "P");
         press(&mut a, "jj");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert_eq!((a.store.harness.as_str(), a.status.as_str()), ("codex", "default harness: codex"));
+        assert_eq!((a.store.harness.as_str(), a.status.as_str()), ("codex", "preferred harness: codex"));
         press(&mut a, "x");
         assert_eq!(at(&a), Some((Kind::Launch, 2, 1)), "x starts on it");
         code(&mut a, KeyCode::Esc);
@@ -6137,7 +6143,7 @@ mod tests {
         a.store.delete_task("bug-hunt-a");
         a.rebuild();
         // On a built-in task, or off the tasks, T says it can't.
-        press(&mut a, "ggjjT");
+        press(&mut a, "ggjjjT");
         assert!(a.failed && a.input == Input::None && a.status.contains("is built in"), "{}", a.status);
         press(&mut a, "ggT");
         assert!(a.failed && a.input == Input::None);
@@ -6148,7 +6154,7 @@ mod tests {
         assert_eq!(a.input, Input::DeleteTask("bug-hunts".into()));
         assert_eq!(press(&mut a, "D"), Some(Effect::Save));
         assert!(a.store.custom_tasks().is_empty() && a.store.about("bug-hunts").is_none());
-        press(&mut a, "ggjjD");
+        press(&mut a, "ggjjjD");
         assert!(a.failed && a.input == Input::None);
     }
 
@@ -7310,7 +7316,7 @@ mod tests {
     #[test]
     fn picking_a_task_shows_its_frontier() {
         let mut a = app();
-        press(&mut a, "Rjjjj");
+        press(&mut a, "Rjjjjj");
         assert_eq!(a.task_cur, 2);
         press(&mut a, "G");
         assert_eq!(a.task_cur, TASKS.len(), "on + new task");
@@ -7474,7 +7480,7 @@ mod tests {
         assert!(a.status.starts_with("the cursor is on the from line"), "{}", a.status);
         a.mouse(Mouse::Model(Stop::Among(MINE)));
         assert_eq!((&a.view, a.among_on()), (&View::Recommend, MINE), "a click picks too");
-        press(&mut a, "j");
+        press(&mut a, "jj");
         assert_eq!((a.among, a.task_cur), (None, 0), "j is back on the first task");
         press(&mut a, "Ggg");
         assert_eq!(a.among, Some(MINE), "gg is the top, the from line");
@@ -7855,7 +7861,7 @@ mod tests {
     }
 
     /// `x` and `Y` on a tier's pick start it where its price fits the tier, as `--cmd` does: on
-    /// opencode, which has mini free, not on codex, your default, which charges for it.
+    /// opencode, which has mini free, not on codex, your preferred one, which charges for it.
     #[test]
     fn x_in_recommend_starts_a_tier_pick_where_its_price_fits() {
         let mut a = app();
@@ -7881,7 +7887,7 @@ mod tests {
         assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/mini".into())), "Y the id it takes");
         code(&mut a, KeyCode::Esc);
         assert_eq!(press(&mut a, "Y"), Some(Effect::Copy("p/mini".into())), "opencode's id");
-        // In the table, with no tier, x starts on your default.
+        // In the table, with no tier, x starts on your preferred one.
         code(&mut a, KeyCode::Esc);
         let row = a.rows.iter().position(|&i| a.data.models[i].key == "mini").unwrap();
         a.table.select(Some(row));
@@ -7967,7 +7973,7 @@ mod tests {
         );
         code(&mut a, KeyCode::Esc);
         // In recommend, f starts on the task under the cursor, on the box its favorite has there.
-        press(&mut a, "Rjjj2l");
+        press(&mut a, "Rjjjj2l");
         assert_eq!(a.current().unwrap().key, "mini", "high's favorite is not low's");
         press(&mut a, "2l");
         assert_eq!(a.current().unwrap().key, "gpt55", "but high's");
@@ -8033,7 +8039,7 @@ mod tests {
     #[test]
     fn lt_in_recommend_writes_a_tier_cap_on_its_header() {
         let mut a = app();
-        press(&mut a, "Rjjj<");
+        press(&mut a, "Rjjjj<");
         assert!(a.failed && a.input == Input::None, "on a task's name: no tier");
         press(&mut a, "ll<");
         assert_eq!(a.input, Input::Cap { tier: 1, text: "2".into(), cur: 1 }, "low's, from the cap it has");
@@ -8056,7 +8062,7 @@ mod tests {
         press(&mut a, "h<");
         assert!(a.failed && a.input == Input::None, "free has no cap");
         // Keyboard alone: k from the first task is the tiers' header, h l pick one, enter or space writes it.
-        press(&mut a, "ggj");
+        press(&mut a, "ggjj");
         assert!(a.caps && a.current().is_none(), "on the header");
         press(&mut a, "0");
         code(&mut a, KeyCode::Enter);
@@ -8088,7 +8094,7 @@ mod tests {
     #[test]
     fn a_click_outside_recommend_only_leaves_the_tier_cap_being_written() {
         let mut a = app();
-        press(&mut a, "Rjl");
+        press(&mut a, "Rjjl");
         code(&mut a, KeyCode::Enter);
         press(&mut a, "9");
         assert_eq!(a.input, Input::Cap { tier: 2, text: "59".into(), cur: 2 });
@@ -8102,7 +8108,7 @@ mod tests {
     #[test]
     fn d_in_recommend_picks_a_tiers_model() {
         let mut a = app();
-        press(&mut a, "Rjjjd");
+        press(&mut a, "Rjjjjd");
         assert!(a.failed && a.input == Input::None, "on a task's name: no tier");
         press(&mut a, "$");
         let was = a.current().map(|m| m.key.clone());
@@ -8175,7 +8181,7 @@ mod tests {
         // A cap lowered after it: the grid keeps it, so d lists it, on it, and enter keeps it.
         a.store.set_favorite("coding:mid", "gpt55");
         a.rebuild_in_place();
-        press(&mut a, "Rjj");
+        press(&mut a, "Rjjj");
         (a.task_cur, a.task_sel) = (TASKS.iter().position(|t| t.name == "coding").unwrap(), 3);
         press(&mut a, "d");
         let Input::Choose { kind: Kind::Pick, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
@@ -8193,7 +8199,7 @@ mod tests {
         // Its model gone, as a harness logged out takes its models: recommended clears it all the same.
         a.store.set_favorite("coding:high", "gone");
         a.rebuild_in_place();
-        press(&mut a, "Rjj");
+        press(&mut a, "Rjjj");
         (a.task_cur, a.task_sel) = (TASKS.iter().position(|t| t.name == "coding").unwrap(), 4);
         press(&mut a, "d");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
@@ -8220,7 +8226,7 @@ mod tests {
         let mut a = app();
         press(&mut a, "R");
         assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "the cursor starts on the from line");
-        press(&mut a, "jjj");
+        press(&mut a, "jjjj");
         let front: Vec<String> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, best last");
@@ -8286,7 +8292,7 @@ mod tests {
     fn the_table_cursor_follows_the_model_picked_in_an_overlay() {
         let mut a = app();
         let row = |a: &App, key: &str| a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
-        press(&mut a, "Rjjj2l");
+        press(&mut a, "Rjjjj2l");
         assert_eq!(a.selected(), row(&a, "mini"), "recommend's pick");
         a.mouse(Mouse::Cols(1));
         assert_eq!(a.selected(), row(&a, "mini"), "mid's too");
@@ -8591,7 +8597,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only == Some(FAV), a.rows.len()), (false, 3), "and F");
         a.store.toggle_favorite("coding:high", "opus5");
-        press(&mut a, "Rjjj");
+        press(&mut a, "Rjjjj");
         code(&mut a, KeyCode::Enter);
         assert!(a.task.is_some());
         code(&mut a, KeyCode::Esc);
@@ -9220,7 +9226,7 @@ mod tests {
         let mut a = app();
         a.store.toggle_favorite("coding:high", "mini");
         a.rebuild();
-        press(&mut a, "Rjjj2l");
+        press(&mut a, "Rjjjj2l");
         assert_eq!(a.current().unwrap().key, "mini", "low's pick on merit");
         press(&mut a, "f");
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 1, .. }, .. }), "low's box, not high's");

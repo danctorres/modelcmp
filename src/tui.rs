@@ -9,8 +9,9 @@
 
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HELP, HELP_TAB, Input, Kind, List, MARKED, MINE,
-    Mouse, NCOLS, NEW_TASK, NOTES, PRICE, RECOMMEND, Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys,
-    box_slot, found, got, group_starts, help_rows, hidden, on_price, runs_on, shown, slot_box,
+    Mouse, NCOLS, NEW_TASK, NO_PREFERENCE, NOTES, PREFERRED, PRICE, RECOMMEND, Stop, TABS, VIA, View, What,
+    base_col_name, bindable, bound_keys, box_slot, found, got, group_starts, help_rows, hidden, on_price, runs_on,
+    shown, slot_box,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -469,7 +470,8 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
     // The store's lock, from the first input of a batch to the save after its frame, so an agent's
     // write cannot land in between (`relock`). What that save is to write: the store, and the sizes
     // and the downloads with no copy that Hugging Face said meanwhile.
-    let (mut held, mut unsaved, mut sized, mut gone_now) = (None, false, false, vec![]);
+    let mut held;
+    let (mut unsaved, mut sized, mut gone_now) = (false, false, vec![]);
     app.set_sizes(data::load_sizes());
     let mut gone = data::load_gone();
     app.set_gone(gone.keys().cloned());
@@ -495,7 +497,6 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
     // The last press on a cell, which a second one makes a double click (`double`), and the
     // screen row of the last press on a table row, which a drag extends from (`dragged`).
     let (mut click, mut press) = (None, None);
-    let mut ask_harness = true;
     loop {
         // Before the draw, so one that ended under the intro is in the first frame.
         let done = rx.as_ref().and_then(|r| match r.0.try_recv() {
@@ -543,14 +544,6 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
         if progress != app.progress {
             app.progress = progress;
             dirty = true;
-        }
-        // A start with two harnesses asks for your default, on its first frame with nothing open
-        // (after the key prompt), and saves that it asked at once: later it would take keys meant
-        // for the table, and a quit would ask again.
-        if ask_harness && app.input == Input::None {
-            ask_harness = false;
-            relock(&mut held, app);
-            unsaved |= app.ask_default();
         }
         let mut painted = if dirty { paint(terminal, app) } else { Ok(()) };
         // Only now, after the frame: what the input changed shows at once, not after its write.
@@ -1137,8 +1130,17 @@ const SEP: &str = "│";
 /// Every box in recommend has it, two cells wide, muted but on the cursor's: `d` opens its dropdown.
 const MENU: &str = " ▾";
 /// The actions on one model, in the one order every view shows them in.
-const ACTIONS: [&str; 9] =
-    ["enter details", "x launch", "H harness", "o open", "y copy name", "space select", "f fav", "e exclude", "i note"];
+const ACTIONS: [&str; 9] = [
+    "enter details",
+    "x launch",
+    "H model's harness",
+    "o open",
+    "y copy name",
+    "space select",
+    "f fav",
+    "e exclude",
+    "i note",
+];
 
 /// The last group of every overlay, the last hints a narrow terminal drops.
 const BACK: [&str; 2] = ["esc back", "q quit"];
@@ -1160,6 +1162,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     // On a box of `low` or `mid` in recommend, `<` writes its cap.
     let tier = app.task_sel.checked_sub(1).filter(|_| app.among.is_none() && !app.caps && !app.on_new_task());
     let cap = if tier.is_some_and(|c| crate::view::capped(TIERS[c].0)) { vec!["< price cap"] } else { vec![] };
+    // Recommend's search, then `P`, as recommend shows your preferred harness.
+    let panel = [&search[..], &["P preferred harness"]].concat();
     let groups: Vec<Vec<&'static str>> = match app.view {
         _ if note_in_place(app) => vec![vec!["enter apply", "esc cancel"]],
         View::Table if app.selecting() => {
@@ -1227,13 +1231,16 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         View::Recommend if matches!(app.input, Input::Cap { .. }) => vec![vec!["enter apply", "esc cancel"]],
         View::Recommend if app.among.is_none() && app.caps => {
             let enter = if crate::view::capped(TIERS[app.cap_col()].0) { vec!["enter price cap"] } else { vec![] };
-            vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), BACK.to_vec()]
+            vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, panel].concat(), BACK.to_vec()]
+        }
+        View::Recommend if app.among == Some(PREFERRED) => {
+            vec![vec!["↓ ↑ task"], [&["d dropdown"], &panel[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.among.is_some() => {
-            vec![vec!["↓ ↑ task", "← → 0 $ which models"], [&["enter pick"], &search[..]].concat(), BACK.to_vec()]
+            vec![vec!["↓ ↑ task", "← → 0 $ which models"], [&["enter pick"], &panel[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.on_new_task() => {
-            vec![vec!["↓ ↑ task"], [&["enter new task"], &search[..]].concat(), BACK.to_vec()]
+            vec![vec!["↓ ↑ task"], [&["enter new task"], &panel[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.current().is_none() => {
             // A tier with no model has nothing for enter either.
@@ -1242,10 +1249,10 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 (_, Some(_)) => vec!["enter your model", "T edit", "D delete"],
                 _ => vec!["enter best per price"],
             };
-            vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, search].concat(), cap, BACK.to_vec()]
+            vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, panel].concat(), cap, BACK.to_vec()]
         }
         View::Recommend => {
-            let view = [&["d dropdown"], &search[..]].concat();
+            let view = [&["d dropdown"], &panel[..]].concat();
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], view, actions("enter x H o y space f e i"), cap, BACK.to_vec()]
         }
     };
@@ -2861,7 +2868,7 @@ fn mode(app: &App) -> (&'static str, Color) {
         (Input::Choose { kind, .. }, _) => {
             let name = match kind {
                 Kind::Launch => "LAUNCH",
-                Kind::Via | Kind::PickedVia | Kind::Harness | Kind::FirstHarness => "HARNESS",
+                Kind::Via | Kind::PickedVia | Kind::Harness => "HARNESS",
                 Kind::Fav => "FAV",
                 Kind::Theme => "THEME",
                 Kind::Cols => "COLUMNS",
@@ -2942,7 +2949,7 @@ fn prompt(app: &App) -> Option<(String, &str, usize)> {
 
 /// What the status bar says under a question in a box, or a choice list with no search: what a
 /// pick or a key did or could not do, which the next key clears, as a pick that opens another
-/// list says what it saved, else the start's warning, kept while the first start's question is open.
+/// list says what it saved, else the start's warning.
 fn said(app: &App) -> Option<(&str, Style)> {
     let status = (!app.status.is_empty()).then(|| (app.status.as_str(), if app.failed { fg(BAD) } else { fg(GOOD) }));
     status.or(app.store.warning.as_deref().map(|w| (w, fg(BAD))))
@@ -3248,15 +3255,15 @@ fn choose_keys(app: &App) -> Option<String> {
         // `T` is said once there is a task of your own. `↓ ↑`, enter and esc work too, left
         // unsaid: with them the keys are wider than 80 columns hold.
         (_, Kind::Fav) if items.iter().any(|(_, e)| matches!(e, Effect::Fav(_, t) if fit::task(t).is_none())) => {
-            "← → tier  / search  space toggle  H harness  T edit"
+            "← → tier  / search  space toggle  H model's harness  T edit"
         }
-        (_, Kind::Fav) => "↓ ↑ ← → move  / search  space enter toggle  H harness  esc close",
+        (_, Kind::Fav) => "↓ ↑ ← → move  / search  space enter toggle  H model's harness  esc close",
         (_, Kind::Open) => "↓ ↑ move  / search  v range  space enter opens  esc close",
         (_, Kind::Cols) => "↓ ↑ move  / search  space enter toggle  esc | close",
         (_, Kind::Theme) => "↓ ↑ preview  / search  space enter saves  esc t close",
         (_, Kind::Pick) => "↓ ↑ move  / search  space enter picks  esc close",
         (_, Kind::Harness) => "↓ ↑ move  / search  space enter picks  esc P close",
-        (_, Kind::FirstHarness | Kind::PickedVia) => "↓ ↑ move  / search  space enter picks  esc skips",
+        (_, Kind::PickedVia) => "↓ ↑ move  / search  space enter picks  esc skips",
         (_, Kind::Bench) => "↓ ↑ move  / search  space enter picks  esc B close",
         (_, Kind::Via) => "↓ ↑ move  / search  space enter picks  esc back",
         (_, Kind::Launch) => "↓ ↑ move  / search  space enter opens  esc close",
@@ -3405,13 +3412,10 @@ fn fav_room(lines: &[Line], room: usize) -> usize {
 /// `out` are the harnesses left out in the Via dropdown, grey as in the table, and `colors` a
 /// tier's models' colours (`pick_colors`), an item each, and `ticks` which entries have their box
 /// ticked (`App::ticked`). `f`'s grid has lines of its own, `fav_lines`.
-#[allow(clippy::too_many_arguments)]
 fn choice_lines(
-    kind: Kind,
     items: &[(String, Effect)],
     list: &List,
     room: usize,
-    bound: &BTreeMap<char, char>,
     fits: Option<bool>,
     out: &[String],
     colors: &[Color],
@@ -3463,7 +3467,7 @@ fn choice_lines(
                 return lit_at(Line::from(spans), &label_hits(at));
             }
             // A tier's model in its colour with its dots grey, as in recommend's boxes, its ★ in
-            // the task's colour and "recommended:" in the text's.
+            // the task's colour and "recommended:" bold in the text's.
             if let Effect::Pick(slot, _) = effect {
                 let mut spans = vec![Span::raw(" ")];
                 let mut parts = label.split(" · ");
@@ -3474,7 +3478,10 @@ fn choice_lines(
                         Span::raw(name.to_string()),
                     ]);
                 } else if let Some(name) = first.strip_prefix("recommended: ") {
-                    spans.extend([Span::styled("recommended: ", fg(Color::Reset)), Span::raw(name.to_string())]);
+                    spans.extend([
+                        Span::styled("recommended: ", fg(Color::Reset).add_modifier(BOLD)),
+                        Span::raw(name.to_string()),
+                    ]);
                 } else {
                     spans.push(Span::raw(first.to_string()));
                 }
@@ -3541,14 +3548,6 @@ fn choice_lines(
         }
         return lines;
     }
-    // P is no key of this box: said in a sentence of its own, not with the keys in the status bar.
-    if kind == Kind::FirstHarness {
-        let p = Span::styled(bound_keys("P", bound), fg(KEY).add_modifier(BOLD));
-        lines.extend([
-            Line::default(),
-            Line::from(vec![Span::raw(" you can change it later with "), p, Span::raw(" ")]).style(fg(MUTED)),
-        ]);
-    }
     if let Some(Edit { err: Some(err), .. }) = &list.edit {
         lines.push(Line::from(format!("{:<width$}", format!(" {err}"))).style(fg(BAD)));
     }
@@ -3578,9 +3577,9 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
         _ => {
             let fits = app.current().and_then(|m| app.fits_here(m)).filter(|_| *kind == Kind::Launch);
             let colors = if *kind == Kind::Pick { pick_colors(app, items) } else { vec![] };
-            let (keys, out) = (&app.store.keys, &app.store.via_not);
+            let out = &app.store.via_not;
             let ticks: Vec<bool> = items.iter().map(|(_, e)| app.ticked(e)).collect();
-            choice_lines(*kind, items, list, edit_room(within), keys, fits, out, &colors, &ticks)
+            choice_lines(items, list, edit_room(within), fits, out, &colors, &ticks)
         }
     };
     Some((within, lines))
@@ -3858,6 +3857,20 @@ fn recommend(
         }
         v.last_mut().unwrap().push_span(note);
     }
+    // Your preferred harness (`P`), for the models with none of their own, a dropdown: its ▾
+    // grey but on the cursor's, as a tier's, and a click on it or the name opens it.
+    // P's entry for none whole when it fits, else its first word.
+    let on = app.among == Some(PREFERRED);
+    let x = "preferred harness:".len();
+    let fits = x + NO_PREFERENCE.chars().count() + MENU.chars().count() + 2 <= text;
+    let name = match app.store.harness.as_str() {
+        "" => Span::raw(if fits { NO_PREFERENCE } else { "none" }),
+        h => Span::styled(h.to_string(), fg(via_color(&app.store.via_not, h))),
+    };
+    let menu = Span::styled(MENU, if on { Style::new() } else { fg(MUTED) });
+    spots.push(Spot { lines: v.len()..v.len() + 1, x: x..x + name.width() + menu.width() + 2, at: Stop::Preferred });
+    v.push(Line::from([label("preferred harness:"), cursor(on, vec![name, menu])].concat()));
+    // The lines the cursor is on above the tiers, kept in view.
     let among = v.len();
     v.extend(
         wrapped(vec![], words(&TIER_LEGEND.replace(" x ", &format!(" {} ", app.key_of('x')))), &space, text)
@@ -4840,7 +4853,7 @@ mod tests {
         assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
         assert!(
-            lines[3].contains("d dropdown  % no cache  r refresh  │  enter details  x launch  H harness"),
+            lines[3].contains("d dropdown  % no cache  r refresh  │  enter details  x launch  H model's harness"),
             "{}",
             lines[3]
         );
@@ -5449,7 +5462,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
+                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
             ),
             "{}",
             lines[5]
@@ -6004,6 +6017,7 @@ mod tests {
             Some(Color::Reset),
             "recommended: in the text's colour"
         );
+        assert!(line("recommended: opus").spans[1].style.add_modifier.contains(BOLD), "and bold");
         let flash = line("★ flash");
         assert_eq!(flash.style.fg, Some(LEVEL[level(6.0)]), "colour by price, the list being what the tier takes");
         assert_eq!(flash.spans[1].style.fg, Some(task_color("coding")));
@@ -6437,7 +6451,7 @@ mod tests {
         let first = screen(&mut a, "gg");
         assert!(first.contains("the best model for each task"), "{first}");
         // The lines under the grid, which say what the cursor is on, stay under the rows that scroll.
-        let top = screen(&mut a, "jj2l");
+        let top = screen(&mut a, "jjj2l");
         assert!(top.contains("overall") && top.contains("  low:         flash"), "{top}");
         let last = screen(&mut a, "Gk");
         assert!(last.contains("vision screenshots") && !last.contains("from:"), "{last}");
@@ -7178,42 +7192,30 @@ mod tests {
     /// site, a theme or a source, whose names would give one that says nothing.
     #[test]
     fn a_list_colours_what_the_table_does() {
-        let fgs = |kind, label: &str, effect| {
-            let lines = choice_lines(
-                kind,
-                &[(label.to_string(), effect)],
-                &List::default(),
-                80,
-                &BTreeMap::new(),
-                None,
-                &[],
-                &[],
-                &[],
-            );
+        let fgs = |label: &str, effect| {
+            let lines = choice_lines(&[(label.to_string(), effect)], &List::default(), 80, None, &[], &[], &[]);
             lines[0].spans.iter().map(|s| lines[0].style.patch(s.style).fg).collect::<Vec<_>>()
         };
-        assert_eq!(fgs(Kind::Theme, "nord", Effect::Theme("nord")), [Some(Color::Reset)]);
-        assert_eq!(fgs(Kind::Open, "epoch.ai", Effect::Open(String::new())), [Some(Color::Reset)]);
-        let pi = fgs(Kind::Launch, "pi --model x", Effect::Launch(vec![]));
+        assert_eq!(fgs("nord", Effect::Theme("nord")), [Some(Color::Reset)]);
+        assert_eq!(fgs("epoch.ai", Effect::Open(String::new())), [Some(Color::Reset)]);
+        let pi = fgs("pi --model x", Effect::Launch(vec![]));
         assert_eq!(pi, [Some(dev_color("pi")), Some(MUTED)], "the harness as in Via, its command muted");
         let items = [("pi --model x".to_string(), Effect::Launch(vec!["pi".into()]))];
-        let lines =
-            choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &["pi".into()], &[], &[]);
+        let lines = choice_lines(&items, &List::default(), 80, None, &["pi".into()], &[], &[]);
         assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(MUTED), "left out in Via, grey");
         // llama.cpp's command starts with the binary the machine has, and `H`'s list grey too.
         let llama = |bin: &str| (format!("{bin} -hf x"), Effect::Launch(vec![bin.into()]));
         let via = ("pi --model x".to_string(), Effect::Via("k".into(), Some("pi".into()), None));
         let items = [llama("llama-server"), llama("llama"), via];
         let out = [crate::data::LLAMA.into(), "pi".into()];
-        let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), None, &out, &[], &[]);
+        let lines = choice_lines(&items, &List::default(), 80, None, &out, &[], &[]);
         assert!(lines.iter().all(|l| l.style.patch(l.spans[0].style).fg == Some(MUTED)), "{lines:?}");
-        let lines =
-            choice_lines(Kind::Launch, &items[..1], &List::default(), 80, &BTreeMap::new(), None, &[], &[], &[]);
+        let lines = choice_lines(&items[..1], &List::default(), 80, None, &[], &[], &[]);
         assert_eq!(lines[0].style.patch(lines[0].spans[0].style).fg, Some(dev_color(crate::data::LLAMA)));
         let get = || Effect::Launch(["modelcmp", "get", "x"].map(String::from).to_vec());
         let size = |fits| {
             let items = [("ollama download and run (2.5 GB)".to_string(), get())];
-            let lines = choice_lines(Kind::Launch, &items, &List::default(), 80, &BTreeMap::new(), fits, &[], &[], &[]);
+            let lines = choice_lines(&items, &List::default(), 80, fits, &[], &[], &[]);
             lines[0].spans.iter().map(|s| (s.content.to_string(), lines[0].style.patch(s.style).fg)).next_back()
         };
         assert_eq!(size(Some(true)), Some((" (2.5 GB) ".into(), None)), "a download that fits, in the text's colour");
@@ -7231,20 +7233,10 @@ mod tests {
         assert!(!hits.is_empty() && hits.iter().all(|h| h.eq_ignore_ascii_case("theme")), "{hits:?}");
         let items = vec![("nord".to_string(), Effect::Theme("nord")), ("gruvbox".into(), Effect::Theme("gruvbox"))];
         let search = |q: &str| List { query: q.into(), typing: true, ..Default::default() };
-        let lines = choice_lines(Kind::Theme, &items, &search("uv"), 80, &BTreeMap::new(), None, &[], &[], &[]);
+        let lines = choice_lines(&items, &search("uv"), 80, None, &[], &[], &[]);
         assert_eq!(lit_text(&lines), ["uv"]);
         // Under the cursor too a hit is yellow, as the cursor keeps colours.
-        let lines = choice_lines(
-            Kind::Theme,
-            &items,
-            &List { sel: 1, ..search("gr") },
-            80,
-            &BTreeMap::new(),
-            None,
-            &[],
-            &[],
-            &[],
-        );
+        let lines = choice_lines(&items, &List { sel: 1, ..search("gr") }, 80, None, &[], &[], &[]);
         let hit = lines[1].spans.iter().find(|s| s.content == "gr").unwrap();
         assert_eq!(hit.style.fg, Some(MATCH));
         // f's grid marks what it searches, the task's name.
@@ -7355,7 +7347,38 @@ mod tests {
         );
         let gap = text.iter().position(String::is_empty).unwrap();
         let warn = text.iter().position(|l| l.starts_with("warning: ")).unwrap();
-        assert!(warn > 2 && text[1..warn].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..warn]);
+        // Then your preferred harness, P's, a dropdown, its name in its colour as in Via.
+        assert_eq!(text[1], "preferred harness: none ▾ ", "P's entry for none cut to its first word");
+        let wide = recommend(&a, 80, &mut vec![]).0;
+        assert_eq!(
+            wide[1].to_string(),
+            "preferred harness: none (Claude on claude, GPT on codex, Gemini on gemini) ▾ "
+        );
+        assert!(hints(&a, 400).contains(&"P preferred harness"), "and P says how to change it");
+        a.store.harness = "pi".into();
+        let mut spots = vec![];
+        let pi = recommend(&a, 60, &mut spots).0.swap_remove(1);
+        assert_eq!((pi.to_string().as_str(), pi.spans[2].style), ("preferred harness: pi ▾ ", fg(dev_color("pi"))));
+        let spot = spots.iter().find(|s| s.at == Stop::Preferred).expect("a click opens it");
+        assert_eq!((spot.lines.clone(), spot.x.clone()), (1..2, 18..24), "on the name and its ▾");
+        // j from the from line is on it, its ▾ out of grey, and d, enter or space opens P's list.
+        let was = (a.among, a.task_cur);
+        a.among = Some(MINE);
+        a.key(KeyCode::Char('j').into());
+        assert_eq!(a.among, Some(PREFERRED));
+        let on = recommend(&a, 60, &mut vec![]).0.swap_remove(1);
+        assert_eq!((on.spans[1].content.as_ref(), on.spans[3].style.fg), ("▌", None), "{on:?}");
+        assert!(["d dropdown", "P preferred harness"].iter().all(|h| hints(&a, 400).contains(h)));
+        for k in ['d', '\n', ' '] {
+            a.key(if k == '\n' { KeyCode::Enter } else { KeyCode::Char(k) }.into());
+            assert!(matches!(a.input, Input::Choose { kind: Kind::Harness, .. }), "{k:?}: {:?}", a.input);
+            a.key(KeyCode::Esc.into());
+        }
+        a.key(KeyCode::Char('j').into());
+        assert!(a.caps, "then the tiers' header");
+        a.store.harness.clear();
+        (a.among, a.caps, a.task_cur) = (was.0, false, was.1);
+        assert!(warn > 3 && text[2..warn].join(" ") == TIER_LEGEND, "the legend wraps: {:?}", &text[..warn]);
         // Then what it leaves out.
         let said = text[warn..gap].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
         assert_eq!(said, format!("warning: {UNRATED}"));
@@ -7392,7 +7415,7 @@ mod tests {
         (b.among, b.query) = (Some(1), "o".into());
         let (top, block, ..) = recommend(&b, 200, &mut vec![]);
         let on: Vec<&Span> = top.iter().flat_map(|l| l.spans.iter()).filter(|s| s.style.bg == Some(CURSOR)).collect();
-        assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..1), "{on:?} {block:?}");
+        assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..2), "{on:?} {block:?}");
         let mine = top[0].spans.iter().find(|s| s.content == "● mine").unwrap();
         assert!(mine.style == TAB_ON && top[0].to_string().ends_with(" (filtered)"), "{}", top[0]);
         let narrow = recommend(&b, 44, &mut vec![]).0;
@@ -7415,7 +7438,8 @@ mod tests {
         let marks: Vec<&Span> = all.iter().flat_map(|l| l.spans.iter()).filter(|s| s.content.ends_with('▾')).collect();
         let muted = marks.iter().filter(|s| s.style.fg == Some(MUTED)).count();
         assert!(marks.len() > 1 && muted == marks.len() - 1, "every box's ▾, muted off the cursor: {marks:?}");
-        assert_eq!(spots.iter().filter(|p| matches!(p.at, Stop::Menu(..))).count(), marks.len(), "each ▾ clicks");
+        let clicks = spots.iter().filter(|p| matches!(p.at, Stop::Menu(..) | Stop::Preferred)).count();
+        assert_eq!(clicks, marks.len(), "each ▾ clicks, the preferred harness's too");
         // Narrow, the ▾ goes on a line with room for it, so it adds none: overall stays 2 lines.
         let text: Vec<String> = recommend(&b, 60, &mut vec![]).0.iter().map(ToString::to_string).collect();
         let at = text.iter().position(|l| l.starts_with(" overall")).unwrap();
