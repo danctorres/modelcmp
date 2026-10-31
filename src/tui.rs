@@ -2467,8 +2467,6 @@ fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool, Opti
             let style = match ext[i] {
                 // A list price is not one you'd pay: no level, no best or worst.
                 _ if listed && on_price(i) => tint(MUTED).add_modifier(Modifier::ITALIC),
-                // A score that is not the task's own, an estimate or the overall in its place: grey.
-                _ if app.estimated(r, i) => tint(MUTED),
                 // The blended price is coloured by level, so its colour says the same thing on every screen.
                 _ if i + 2 == PRICE => soft(LEVEL[level(v)]),
                 // Free is green and no more, in $in, $cache and $out as in Price: every free
@@ -3737,7 +3735,7 @@ const TIER_LEGEND: &str = "the best model for each task at each price, or ★ yo
 
 /// What recommend leaves out, and how to pick it anyway.
 const UNRATED: &str =
-    "models without a benchmark score aren't recommended, but you can still pick one with d on a tier.";
+    "models without a score for the task aren't recommended for it, but you can still pick one with d on a tier.";
 
 /// A row per task, the built-in ones and then your own, with a box per tier for the model it
 /// picks, as `--tier` does, wrapped to `width`; under the grid, what the cursor's task is, when
@@ -4150,9 +4148,6 @@ fn entry(
     let out = out_of_reach(app, m);
     let price = pick_color(app, m, local, off);
     let score = built_in.map_or("-".into(), |t| crate::view::line_shown(t, app.task_bench(t), s));
-    // A score that is not the task's own, an estimate or the overall in its place: grey, as in the table.
-    let own = built_in.is_none_or(|t| crate::view::own_score(m, t, app.task_bench(t)));
-    let scored = if own { fg(price) } else { fg(MUTED) };
     let (cost, score) = match built_in {
         // On `all`, a download that fits is free here too, once `x` fetches it.
         Some(_) if local => {
@@ -4176,7 +4171,7 @@ fn entry(
         Span::styled(" ·", fg(MUTED)),
         Span::styled(cost, fg(price)),
         Span::styled(dot, fg(MUTED)),
-        Span::styled(score, scored),
+        Span::styled(score, fg(price)),
     ]);
     if !boxed {
         // The harness the model runs on (`H`), as `f`'s grid says it, before what else the line
@@ -4620,8 +4615,6 @@ fn compare(
                 _ if muted[i] => fg(MUTED),
                 // A list price, as in the table: not one you'd pay.
                 _ if r.listed.get(i) == Some(&true) => fg(MUTED).add_modifier(Modifier::ITALIC),
-                // A score that is not the task's own, as in the table.
-                _ if r.estimated.get(i) == Some(&true) => fg(MUTED),
                 Some((best, _)) if cell == best => fg(GOOD).add_modifier(BOLD),
                 Some((_, worst)) if cell == worst => fg(BAD),
                 _ => Style::new(),
@@ -4735,7 +4728,6 @@ mod tests {
             available: true,
             via: vec!["opencode".into()],
             eci,
-            fit: eci.map(|e| ("overall".to_string(), (e, crate::fit::Basis::Eci))).into_iter().collect(),
             epoch: eci.map(|_| name.into()),
             context: 200_000,
             offers: vec![Offer {
@@ -5407,11 +5399,11 @@ mod tests {
         a.col = ECI + 1;
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 6 && lines[5].contains("d dropdown"), "{lines:?}");
-        assert!(a.col_about(a.col).ends_with("blank = not tested, d for other benchmarks"), "what its dropdown is for");
+        assert!(a.col_about(a.col).ends_with("to merge, d for other benchmarks"), "what its dropdown is for");
         a.task = fit::task("agentic");
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 3 && !lines[5].contains("d dropdown"), "{lines:?}");
-        assert!(a.col_about(a.col).ends_with("blank = not tested"), "no dropdown, no hint");
+        assert!(a.col_about(a.col).ends_with("to merge"), "no dropdown, no hint");
         // An entry left out or picked turns its header's ▾ yellow, and that one alone.
         let yellow = |a: &mut App| {
             let (buf, lines) = render(a, 206, 6);
@@ -5890,7 +5882,7 @@ mod tests {
         // The recommend panel: the task name and the favorite's ★ in the task's colour, the model in its price level's.
         let mut data = std::mem::take(&mut a.data);
         for (m, pct) in data.models.iter_mut().zip([90.0, 60.0]) {
-            m.fit.insert("coding".into(), (pct, crate::fit::Basis::Benches(1)));
+            m.scores.insert("FrontierCode".into(), pct / 100.0);
         }
         a.set_data(data);
         let lines = recommend(&a, 200, &mut vec![]).0;
@@ -6229,7 +6221,7 @@ mod tests {
         let offer = |p: f64| Offer { input: p, output: p, ..Default::default() };
         let mk = |n: &str, coding: f64, p: f64| Model {
             name: n.into(),
-            fit: [("coding".to_string(), (coding, crate::fit::Basis::Benches(1)))].into(),
+            scores: [("FrontierCode".to_string(), coding / 100.0)].into(),
             offers: vec![offer(p)],
             ..Default::default()
         };
@@ -6450,8 +6442,8 @@ mod tests {
         };
         // ✗'s tab, on, opens the border left of the sort at 70 columns and is over the sort at 60.
         for (w, left) in [
-            (60, "╭─────────── ECI: Epoch AI's overall index, gre…─"),
-            (70, "╭ ECI: Epoch AI's overall index, grey = estimate…╯"),
+            (60, "╭─────────── ECI: Epoch AI's overall index, d f…─"),
+            (70, "╭ ECI: Epoch AI's overall index, d for other ben…╯"),
         ] {
             let lines = rows(&mut a, w);
             assert!(lines[2].starts_with(left) && lines[2].ends_with(" ▼ by ECI ╮"), "{}", lines[2]);
@@ -6461,7 +6453,7 @@ mod tests {
         a.key(KeyCode::Char('S').into());
         let top = &rows(&mut a, 100)[2];
         assert!(
-            top.contains("╯              ╰ ECI: Epoch AI's overall index, grey = estimate, d for…"),
+            top.contains("╯              ╰ ECI: Epoch AI's overall index, d for other benchmarks "),
             "right of it: {top}"
         );
         // A panel's tab stands on the frame, closed, and a cut one is a hint there too.
@@ -6718,13 +6710,13 @@ mod tests {
         assert!(on.unwrap().contains("price:"), "the cursor on it");
         a.key(KeyCode::Char('n').into());
         let (scroll, status, on) = at(&mut a);
-        assert_eq!((scroll, status.as_str()), (12, "line 2 of 2"), "the providers' row, as far down as it scrolls");
+        assert_eq!((scroll, status.as_str()), (11, "line 2 of 2"), "the providers' row, as far down as it scrolls");
         let on = on.unwrap();
         assert!(on.contains("5.0  opus"), "the cursor on it, not at the top: {on}");
         a.key(KeyCode::Char('n').into());
         assert_eq!(at(&mut a).0, 3, "round again after the last");
         a.key(KeyCode::Char('N').into());
-        assert_eq!(at(&mut a).0, 12, "N the previous, round to the last");
+        assert_eq!(at(&mut a).0, 11, "N the previous, round to the last");
         a.key(KeyCode::Char('N').into());
         assert_eq!(at(&mut a).1, "line 1 of 2");
         type_in(&mut a, "/zzz");
@@ -6860,8 +6852,7 @@ mod tests {
         let top = row(&term, 2);
         assert!(top.ends_with("─ ▼ by ECI ╮"), "{top}");
         assert!(top.starts_with("╭╯        ╰───"), "{top}");
-        let (l, r) =
-            top.split_once(" ECI: Epoch AI's overall index, grey = estimate, d for other benchmarks ").unwrap();
+        let (l, r) = top.split_once(" ECI: Epoch AI's overall index, d for other benchmarks ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         // Recommend's tab is the one on over its panel.
         a.view = View::Recommend;
@@ -6963,7 +6954,7 @@ mod tests {
         let text: Vec<String> =
             detail(&m, &a.store, a.any_available(), (None, None)).1.iter().map(ToString::to_string).collect();
         assert!(text.iter().any(|l| l == "  country:    USA"), "{text:?}");
-        m.fit.insert("coding".into(), (50.0, crate::fit::Basis::Benches(1)));
+        m.scores.insert("FrontierCode".into(), 50.0 / 100.0);
         let lines = detail(&m, &a.store, a.any_available(), (None, None)).1;
         let coding = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == "coding").expect("a coding fit line");
         assert_eq!(coding.style.fg, Some(task_color("coding")), "a task's name is in its colour");
@@ -7202,7 +7193,10 @@ mod tests {
         let mut a = app();
         // Unscored, so no box has a model and every row is one line, at 60 columns too.
         let mut data = std::mem::take(&mut a.data);
-        data.models.iter_mut().for_each(|m| m.fit.clear());
+        for m in &mut data.models {
+            (m.eci, m.arena) = (None, None);
+            m.scores.clear();
+        }
         a.set_data(data);
         (a.view, a.task_cur) = (View::Recommend, TASKS.iter().position(|t| t.name == "vision").unwrap());
         let lines = recommend(&a, 60, &mut vec![]).0;

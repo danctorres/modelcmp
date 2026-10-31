@@ -106,7 +106,7 @@ modelcmp get gemma-3-4b-it                 # download a model and run it on your
 
 Recommendations come from each task's Pareto frontier of price and score. Coding is the model's
 FrontierCode score and Agentic its Arena agent score, each the same measure for every model.
-Overall is on Epoch AI's ECI scale, from the benchmarks the model has. A model with no score for a task is never
+Overall is Epoch AI's ECI. A model with no score for a task is never
 recommended for it, but you can still make it your favorite.
 
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`

@@ -173,7 +173,7 @@ pub const COLS: [Col; 10] = [
         read: |s, _| s.parse().ok().filter(|v: &f64| !v.is_nan()).map(|v| if v >= 10_000.0 { v / 1000.0 } else { v }),
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
-    col("ECI", "eci", "Epoch AI's overall index, grey = estimate", |m| task_score(m, "overall")),
+    col("ECI", "eci", "Epoch AI's overall index", |m| task_score(m, "overall")),
     col("Coding", "coding", "FrontierCode score, % of maintainers' coding tasks solved well enough to merge", |m| {
         task_score(m, "coding")
     }),
@@ -390,20 +390,8 @@ pub fn base_col_about(col: usize) -> String {
             COLS[PRICE - TEXT].about,
             crate::data::cached() * 100.0
         ),
-        _ => {
-            let about = numeric(col).map_or("", Col::about).to_string();
-            // ECI's blank is a model with no score at all, which needs no saying.
-            if TASK_COLS.contains(&col) && col != ECI { of_source(&about) } else { about }
-        }
+        _ => numeric(col).map_or("", Col::about).to_string(),
     }
-}
-
-/// Why a task column's cell is empty, in its description.
-const UNTESTED: &str = "blank = not tested";
-
-/// `about` and what an empty cell means.
-fn of_source(about: &str) -> String {
-    format!("{about}, {UNTESTED}")
 }
 
 /// The keys, in groups, each with what it does, the keys it names between backticks. A row
@@ -1725,7 +1713,7 @@ impl App {
             Some(b) if arena_bench(b) => {
                 "net improvement on this signal alone in real agent sessions, %, measured by arena.ai".into()
             }
-            Some(_) => format!("Epoch AI, score on this benchmark alone, 0-100, {UNTESTED}"),
+            Some(_) => "Epoch AI, score on this benchmark alone, 0-100".into(),
             None => base_col_about(col),
         };
         // The ▾ says there is a dropdown, not that a task's swaps the benchmark.
@@ -1741,14 +1729,6 @@ impl App {
     /// Value of the column at cursor index `col` for `data.models[i]`.
     fn val(&self, i: usize, col: usize) -> Option<f64> {
         *self.vals[i].get(col.checked_sub(TEXT)?)?
-    }
-
-    /// Whether the value of `COLS[c]` for `data.models[i]` is a score that is not its task's own
-    /// (`fit::own`), an estimated overall: drawn dimmed, neither the
-    /// best nor the worst, and after an own score it ties in a sort. Never with a benchmark picked.
-    pub fn estimated(&self, i: usize, c: usize) -> bool {
-        let t = col_task(c).filter(|_| self.bench[c].is_none());
-        t.is_some_and(|t| self.data.models[i].fit.get(t).is_some_and(|f| !f.1.own(t)))
     }
 
     fn selected(&self) -> usize {
@@ -2386,13 +2366,13 @@ impl App {
         self.sort_rows(rows);
         let ms = &self.data.models;
         // Among the models to use: a muted row is grey throughout, so it holds no extreme, nor
-        // does a list price or an estimated score.
+        // does a list price.
         self.ext = std::array::from_fn(|c| {
             if !COLS[c].ranked {
                 return None;
             }
-            let own = |r: usize| !(self.listed[r] && on_price(c)) && !self.estimated(r, c);
-            let mut it = self.rows.iter().filter(|&&r| !self.muted(&ms[r]) && own(r)).filter_map(|&r| self.vals[r][c]);
+            let paid = |r: usize| !(self.listed[r] && on_price(c));
+            let mut it = self.rows.iter().filter(|&&r| !self.muted(&ms[r]) && paid(r)).filter_map(|&r| self.vals[r][c]);
             let first = it.next()?;
             let (lo, hi) = it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
             (lo != hi).then_some(if COLS[c].lower_better { (lo, hi) } else { (hi, lo) })
@@ -2410,11 +2390,9 @@ impl App {
         let keep = key_of(self.selected());
         let ms = &self.data.models;
         if numeric(self.sort_col).is_some() {
-            // An own score before an estimate it ties, then names breaking ties.
-            let estimated = |r: usize| self.estimated(r, self.sort_col - TEXT);
+            // Names breaking ties.
             rows.sort_by(|&a, &b| {
                 by_value(self.val(a, self.sort_col), self.val(b, self.sort_col), self.descending)
-                    .then_with(|| estimated(a).cmp(&estimated(b)))
                     .then_with(|| ms[a].name.cmp(&ms[b].name))
             });
         } else {
@@ -4207,11 +4185,8 @@ impl App {
             .chain(has)
             .map(|m| (m, t.and_then(|t| view::line_score(m, t, bench))))
             .collect();
-        // An own score before an estimate it ties (`fit::own`), unless a benchmark ranks the task.
-        let own = |m: &Model| bench.is_some() || t.is_some_and(|t| crate::fit::own(m, t.name));
         ms.sort_by(|a, b| {
             view::by_value(a.1, b.1, true)
-                .then_with(|| own(b.0).cmp(&own(a.0)))
                 .then_with(|| view::by_value(a.0.cost(), b.0.cost(), false))
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
@@ -5483,8 +5458,7 @@ mod tests {
             ..Default::default()
         };
         if let Some(c) = coding {
-            m.fit.insert("overall".into(), (c + 100.0, crate::fit::Basis::Eci));
-            m.fit.insert("coding".into(), (c, crate::fit::Basis::Benches(1)));
+            m.scores.insert("FrontierCode".into(), c / 100.0);
         }
         m
     }
@@ -7137,46 +7111,15 @@ mod tests {
         assert_eq!(a.col, NCOLS - 1);
     }
 
-    /// A score that is not the task's own is grey, sorts after an own one it ties and is no
-    /// extreme: an estimated overall in ECI. Not with a
-    /// benchmark picked, whose scores are all its own.
-    #[test]
-    fn an_estimate_is_grey_and_sorts_after_an_own_score() {
-        use crate::fit::Basis;
-        let mut a = app();
-        let (eci, coding) = (ECI - TEXT, ECI + 1 - TEXT);
-        let mut data = std::mem::take(&mut a.data);
-        let mini = data.models.iter_mut().find(|m| m.key == "mini").unwrap();
-        mini.fit.insert("overall".into(), (180.0, Basis::Benches(3)));
-        mini.fit.insert("coding".into(), (80.0, Basis::Bench));
-        let opus = data.models.iter_mut().find(|m| m.key == "opus5").unwrap();
-        opus.fit.insert("overall".into(), (150.0, Basis::Eci));
-        a.set_data(data);
-        let at = |a: &App, key: &str| a.data.models.iter().position(|m| m.key == key).unwrap();
-        let (mini, gpt) = (at(&a, "mini"), at(&a, "gpt55"));
-        assert!(a.estimated(mini, eci) && !a.estimated(mini, coding), "an estimated overall, CursorBench's own");
-        assert!(!a.estimated(gpt, eci) && !a.estimated(gpt, coding), "Epoch's ECI, and coding's own");
-        assert!(!a.estimated(mini, PRICE - TEXT), "a price is no score");
-        // Sorted by ECI, best first: gpt55 (180, Epoch's) before mini (180, an estimate).
-        assert_eq!(keys(&a)[..2], ["gpt55", "mini"]);
-        // And mini's 180 is no extreme: gpt55's is the best, opus5's 150 the worst.
-        assert_eq!(a.ext[eci], Some((180.0, 150.0)), "{:?}", a.ext[eci]);
-        // A benchmark picked in the column: its scores are all its own.
-        a.bench[eci] = Some("LMCA");
-        assert!(!a.estimated(mini, eci));
-    }
-
     #[test]
     fn every_column_says_what_it_means() {
         assert!(base_col_about(0).contains("Via"));
         assert!(base_col_about(1).contains("trained"));
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
-        assert_eq!(
-            about("coding"),
-            "FrontierCode score, % of maintainers' coding tasks solved well enough to merge, blank = not tested"
-        );
-        assert!(about("eci").ends_with("grey = estimate"), "a blank there is no score at all");
+        // No word on a blank cell.
+        assert_eq!(about("coding"), "FrontierCode score, % of maintainers' coding tasks solved well enough to merge");
+        assert_eq!(about("eci"), "Epoch AI's overall index");
     }
 
     #[test]
@@ -7542,7 +7485,7 @@ mod tests {
         let mut data = std::mem::take(&mut a.data);
         let llama = &mut data.models[2];
         (llama.offers[0].input, llama.offers[0].output) = (0.1, 0.1);
-        llama.fit.insert("coding".into(), (60.0, crate::fit::Basis::Benches(1)));
+        llama.scores.insert("FrontierCode".into(), 60.0 / 100.0);
         a.store.toggle_marked("llama4");
         a.set_data(data);
         assert!(shown(&a).contains(&"llama4".into()), "{:?}", shown(&a));

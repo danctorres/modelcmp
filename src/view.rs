@@ -374,9 +374,9 @@ pub fn signed(v: f64) -> String {
     if v == 0.0 { "0.0".into() } else { format!("{v:+.1}") }
 }
 
-/// The model's score on the task, on the ECI scale, when it qualifies.
+/// The model's score on the task (`fit::fit`), when it qualifies.
 pub fn task_score(m: &Model, task: &str) -> Option<f64> {
-    Some(fit::fit(m, fit::task(task)?)?.0)
+    fit::fit(m, fit::task(task)?)
 }
 
 /// The items whose model no other beats on both `score` and blended price: the cheapest at
@@ -453,14 +453,8 @@ pub fn task_frontier<'a>(
 pub fn line_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> Option<f64> {
     match bench {
         Some(b) => m.picked(b).filter(|_| fit::qualifies(m, t)),
-        None => fit::fit(m, t).map(|f| f.0),
+        None => fit::fit(m, t),
     }
-}
-
-/// Whether `m`'s score on `t`'s line is the task's own (`fit::own`): with `bench` picked in the
-/// column every score is, the benchmark's.
-pub fn own_score(m: &Model, t: &fit::Task, bench: Option<&str>) -> bool {
-    bench.is_some() || fit::own(m, t.name)
 }
 
 /// Whether `t`'s line shows scores signed and to a tenth, as the table's Agentic column does
@@ -1201,17 +1195,17 @@ pub fn detail_rows(
             "  favorite:   {}",
             Some(store.favorite_for(&m.key).join(", ")).filter(|s| !s.is_empty()).unwrap_or("-".into())
         ),
-        String::new(),
-        format!("  ECI {}", score(m.eci)),
-        "  task fit (and what the score is from):".into(),
     ]);
     let mut fits = vec![];
     for t in TASKS {
-        if let Some((s, basis)) = fit::fit(m, t) {
+        if let Some(s) = fit::fit(m, t) {
+            if fits.is_empty() {
+                v.extend([String::new(), "  task fit (and what the score is from):".into()]);
+            }
             fits.push((v.len(), t.name));
             let s = line_shown(t, None, s);
             let ranked = t.ranked.map_or(String::new(), |r| format!(", ranked by {r}"));
-            v.push(format!("    {:<13}{s:>5}  from {}{ranked}", t.name, basis.said(t)));
+            v.push(format!("    {:<13}{s:>5}  from {}{ranked}", t.name, fit::basis(t)));
         }
     }
     if !m.scores.is_empty() {
@@ -1266,9 +1260,6 @@ pub struct Row {
     pub ext: Option<(f64, f64)>,
     /// The cells holding a list price (`Model::listed`), drawn muted; empty off the price rows.
     pub listed: Vec<bool>,
-    /// The cells holding a score that is not the task's own (`own_score`), drawn dimmed and
-    /// neither the best nor the worst; empty off the score rows.
-    pub estimated: Vec<bool>,
     /// Whether a higher value is the better, as the sort takes it: highest first, else lowest.
     pub higher: bool,
     /// The group of columns the row is in, as the table's, split from the next by a rule: `""`
@@ -1286,13 +1277,7 @@ pub type Get<'a> = &'a dyn Fn(&Model) -> Option<String>;
 /// model has a value for them.
 pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Vec<Row> {
     fn row(label: &str, vals: Vec<Option<f64>>, fmt: impl Fn(f64) -> String, higher: bool) -> Row {
-        scored_row(label, vals, &[], fmt, higher)
-    }
-    /// `row` with the cells of `own` false, a score not the task's own, drawn dimmed and neither
-    /// the best nor the worst; empty is all own.
-    fn scored_row(label: &str, vals: Vec<Option<f64>>, own: &[bool], fmt: impl Fn(f64) -> String, higher: bool) -> Row {
-        let is_own = |i: usize| own.get(i).copied().unwrap_or(true);
-        let mut it = vals.iter().enumerate().filter(|(i, _)| is_own(*i)).filter_map(|(_, v)| v.as_ref());
+        let mut it = vals.iter().flatten();
         // As shown, like the verdict: 60.6 and 61.4 both read 61, and neither is the better.
         let ext = it.next().and_then(|&first| {
             let (lo, hi) = it.fold((first, first), |(lo, hi), &v| (lo.min(v), hi.max(v)));
@@ -1305,8 +1290,7 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
         let snap =
             |v: f64, cell: &String| read.as_ref().and_then(|r| r.iter().find(|e| e.0 == *cell)).map_or(v, |e| e.1);
         let vals = vals.into_iter().zip(&cells).map(|(v, cell)| v.map(|v| snap(v, cell))).collect();
-        let estimated = own.iter().map(|o| !o).collect();
-        Row { label: label.into(), cells, vals, ext, higher, estimated, ..Default::default() }
+        Row { label: label.into(), cells, vals, ext, higher, ..Default::default() }
     }
     // A list price, yours having none, after a `~` as in the table, and as there neither the
     // best nor the worst: it has no value to colour. Found once for the four rows, as it is slow
@@ -1343,26 +1327,22 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
             |c| ctx(c as u64),
             true,
         ),
-        Row {
-            section: "scores",
-            ..scored_row(
-                &head("eci"),
-                models.iter().map(|m| task_score(m, "overall")).collect(),
-                &models.iter().map(|m| fit::own(m, "overall")).collect::<Vec<_>>(),
-                |v| format!("{v:.1}"),
-                true,
-            )
-        },
     ];
+    // ECI as the table's column has it: the overall, or a benchmark picked there, marked `*`.
+    let overall = &TASKS[0];
+    let bench = crate::app::task_bench(store, overall);
+    let label = head("eci") + if bench.is_some() { "*" } else { "" };
+    let eci = |v| if bench.is_some() { line_shown(overall, bench, v) } else { format!("{v:.1}") };
+    let vals = models.iter().map(|m| line_score(m, overall, bench)).collect();
+    rows.push(Row { section: "scores", ..row(&label, vals, eci, true) });
     for t in TASKS.iter().filter(|t| t.name != "overall" && !as_overall(models, t.name)) {
         // A benchmark picked in the task's column, marked `*` as the table's header is.
         let bench = crate::app::task_bench(store, t);
         let vals: Vec<Option<f64>> = models.iter().map(|m| line_score(m, t, bench)).collect();
         if vals.iter().any(Option::is_some) {
             let label = head(t.name) + if bench.is_some() { "*" } else { "" };
-            let own: Vec<bool> = models.iter().map(|m| own_score(m, t, bench)).collect();
             let fmt = |v| line_shown(t, bench, v);
-            rows.push(Row { section: "scores", ..scored_row(&label, vals, &own, fmt, true) });
+            rows.push(Row { section: "scores", ..row(&label, vals, fmt, true) });
         }
     }
     if models.iter().any(|m| m.tps.is_some()) {
@@ -1407,7 +1387,6 @@ impl Row {
         // Empty off the rows that have none.
         self.vals = order.iter().filter_map(|&i| self.vals.get(i).copied()).collect();
         self.listed = order.iter().filter_map(|&i| self.listed.get(i).copied()).collect();
-        self.estimated = order.iter().filter_map(|&i| self.estimated.get(i).copied()).collect();
     }
 }
 
@@ -1544,12 +1523,11 @@ mod tests {
     fn details_say_each_tasks_score_and_what_it_is_from() {
         let scores = [("FrontierCode", 0.5), ("FrontierSWE", 0.4)].map(|(b, s)| (b.to_string(), s)).into();
         let mut m = Model { scores, tool_call: true, ..Default::default() };
-        m.fit.insert("overall".into(), (160.4, crate::fit::Basis::Benches(2)));
-        m.fit.insert("coding".into(), (50.0, crate::fit::Basis::Bench));
+        m.eci = Some(160.4);
         m.arena = Some(-0.3);
         let lines = detail_lines(&m, &Store::default(), false);
         let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
-        assert_eq!(lines[at("    overall")], "    overall        160  from 2 benchmarks");
+        assert_eq!(lines[at("    overall")], "    overall        160  from ECI");
         assert_eq!(lines[at("    coding")], "    coding          50  from FrontierCode");
         assert_eq!(
             lines[at("    agentic")],
@@ -1559,14 +1537,11 @@ mod tests {
         assert!(!lines.iter().any(|l| l.starts_with("    vision")), "no image input");
         assert_eq!(at("    FrontierCode"), at("  benchmarks") + 1, "every benchmark, under the task fit");
         assert_eq!(lines[at("    FrontierSWE")], format!("    {:<36} 40.0%", "FrontierSWE"));
-        m.fit.insert("overall".into(), (165.0, crate::fit::Basis::Eci));
-        let lines = detail_lines(&m, &Store::default(), false);
-        assert!(lines[at("    overall")].ends_with("  from ECI"), "{}", lines[at("    overall")]);
+        assert!(!lines.iter().any(|l| l.starts_with("  ECI")), "said once, on the overall's line");
         m.vision = true;
-        m.fit.insert("vision".into(), (165.0, crate::fit::Basis::Eci));
         let lines = detail_lines(&m, &Store::default(), false);
         let vision = lines.iter().find(|l| l.starts_with("    vision")).unwrap();
-        assert_eq!(vision, "    vision         165  from ECI, ranked by overall");
+        assert_eq!(vision, "    vision         160  from ECI, ranked by overall");
     }
 
     #[test]
@@ -1575,7 +1550,7 @@ mod tests {
         let model = |key: &str, score: f64, price: f64| Model {
             key: key.into(),
             hf: Some(format!("org/{key}")),
-            fit: [("coding".to_string(), (score, crate::fit::Basis::Benches(1)))].into(),
+            scores: [("FrontierCode".to_string(), score / 100.0)].into(),
             offers: vec![Offer { input: price, output: price, available: true, ..Default::default() }],
             ..Default::default()
         };
@@ -1647,7 +1622,7 @@ mod tests {
     fn a_favorite_takes_the_place_of_a_model_it_ties() {
         let model = |key: &str, coding: f64, price: f64| Model {
             key: key.into(),
-            fit: [("coding".to_string(), (coding, crate::fit::Basis::Benches(1)))].into(),
+            scores: [("FrontierCode".to_string(), coding / 100.0)].into(),
             offers: vec![Offer { input: price, output: price, ..Default::default() }],
             ..Default::default()
         };
@@ -1729,8 +1704,7 @@ mod tests {
 
     #[test]
     fn compare_keeps_a_column_with_one_value() {
-        let fit = [("overall".to_string(), (150.0, fit::Basis::Eci))].into();
-        let a = Model { eci: Some(150.0), fit, context: 1, ..Default::default() };
+        let a = Model { eci: Some(150.0), context: 1, ..Default::default() };
         let b = Model { context: 2, ..Default::default() };
         let cols = compare_cols(&[&a, &b], false, &|_| None, &Store::default()).1;
         let eci = cols.iter().find(|c| c.label == "ECI").expect("ECI stays with one value");
@@ -1738,17 +1712,18 @@ mod tests {
         let price = cols.iter().find(|c| c.label == "Price").expect("Price stays with no value");
         assert_eq!(price.cells, ["-", "-"], "neither has an offer");
         assert_eq!(cols.last().unwrap().label, "Via");
+        // A benchmark picked in the ECI column, as the table and the verdict take it, marked `*`.
+        let a = Model { scores: [("LMCA".to_string(), 0.6)].into(), ..a };
+        let mut store = Store::default();
+        store.bench.insert("eci".into(), "LMCA".into());
+        let cols = compare_cols(&[&a, &b], false, &|_| None, &store).1;
+        let eci = cols.iter().find(|c| c.label == "ECI*").expect("marked as the table's header is");
+        assert_eq!(eci.cells, ["60", "-"], "LMCA's score, 0-100");
     }
 
     #[test]
     fn compare_marks_best() {
-        let mk = |n: &str, c: u64, eci: Option<f64>| Model {
-            name: n.into(),
-            context: c,
-            eci,
-            fit: eci.map(|e| ("overall".to_string(), (e, fit::Basis::Eci))).into_iter().collect(),
-            ..Default::default()
-        };
+        let mk = |n: &str, c: u64, eci: Option<f64>| Model { name: n.into(), context: c, eci, ..Default::default() };
         let (a, b) = (mk("a", 100, Some(150.0)), mk("b", 200, None));
         let rows = compare_rows(&[&a, &b], false, &|_| None, &Store::default());
         let find = |l: &str| rows.iter().find(|r| r.label == l).unwrap();
@@ -1785,7 +1760,7 @@ mod tests {
         let offer = |p: f64| Offer { input: p, output: p, ..Default::default() };
         let mk = |n: &str, coding: Option<f64>, p: f64| Model {
             name: n.into(),
-            fit: coding.map(|c| ("coding".to_string(), (c, crate::fit::Basis::Benches(1)))).into_iter().collect(),
+            scores: coding.map(|c| ("FrontierCode".to_string(), c / 100.0)).into_iter().collect(),
             offers: vec![offer(p)],
             ..Default::default()
         };
@@ -1816,13 +1791,7 @@ mod tests {
 
     #[test]
     fn vision_shows_only_when_it_differs_from_overall() {
-        let mk = |eci: f64, vision| Model {
-            eci: Some(eci),
-            vision,
-            fit: [("overall".to_string(), (eci, fit::Basis::Eci)), ("vision".to_string(), (eci, fit::Basis::Eci))]
-                .into(),
-            ..Default::default()
-        };
+        let mk = |eci: f64, vision| Model { eci: Some(eci), vision, ..Default::default() };
         let has = |ms: &[&Model]| {
             let col = compare_rows(ms, false, &|_| None, &Store::default()).iter().any(|r| r.label == "Vision");
             (col, verdict(ms, &Store::default()).iter().any(|r| r[0] == "vision"))
@@ -1838,7 +1807,7 @@ mod tests {
         let mk = |n: &str, coding: f64, p: f64| Model {
             key: n.into(),
             name: n.into(),
-            fit: [("coding".to_string(), (coding, crate::fit::Basis::Benches(1)))].into(),
+            scores: [("FrontierCode".to_string(), coding / 100.0)].into(),
             offers: vec![offer(p)],
             ..Default::default()
         };
@@ -1866,7 +1835,7 @@ mod tests {
         let mk = |n: &str, coding: f64, p: f64| Model {
             key: n.into(),
             name: n.into(),
-            fit: [("coding".to_string(), (coding, crate::fit::Basis::Benches(1)))].into(),
+            scores: [("FrontierCode".to_string(), coding / 100.0)].into(),
             offers: vec![Offer { input: p, output: p, ..Default::default() }],
             ..Default::default()
         };
@@ -1913,7 +1882,7 @@ mod tests {
             key: n.into(),
             name: n.into(),
             tool_call: true,
-            fit: [("agentic".to_string(), (agentic, crate::fit::Basis::Benches(1)))].into(),
+            arena: Some(agentic),
             scores: [("Remote Labor Index".to_string(), rli)].into(),
             offers: vec![offer(p)],
             ..Default::default()
@@ -1933,7 +1902,7 @@ mod tests {
     fn a_tier_picks_the_best_of_its_price_on_the_line() {
         let model = |key: &str, score: f64, price: f64| Model {
             key: key.into(),
-            fit: [("coding".to_string(), (score, crate::fit::Basis::Benches(1)))].into(),
+            scores: [("FrontierCode".to_string(), score / 100.0)].into(),
             offers: vec![Offer { input: price, output: price, ..Default::default() }],
             ..Default::default()
         };

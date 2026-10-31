@@ -18,7 +18,7 @@ means. Green and red mark the best and worst value in a column, here and in comp
 | $cache | $ per 1M cached input tokens, `$in` when a provider has no discount |
 | $out | $ per 1M output tokens |
 | Ctx | context window, in tokens |
-| ECI | Epoch Capabilities Index. From Epoch AI, or grey when estimated from the model's benchmarks |
+| ECI | Epoch Capabilities Index, from Epoch AI. Blank when Epoch has not rated the model |
 | Coding, Agentic | the [task scores](#task-columns) |
 | Tok/s | output tokens per second in OpenRouter's GPQA diamond runs, end to end with the thinking. From OpenRouter |
 | Via | the harnesses that have the model, by a [short name](#what-you-have). `↓` with the download's size when ollama or llama.cpp can download it, grey when it is too big for your machine's memory. A harness left out in the Via dropdown is grey, here and in `x`, the details and compare. The one the model runs on (`H`) is dark on its colour, here, in the details and compare |
@@ -44,7 +44,8 @@ in its developer's own agent, so one model's score is not from other benchmarks 
 Agentic is Arena's agent score: the net improvement arena.ai measures in real agent sessions,
 in percent, the same measure for every model (see [Scores](#scores)). It needs tool calling.
 
-A model with none of a task's benchmarks has no score for it, and is not recommended for it.
+A model without that score has none for the task, whatever other benchmarks it has, and is not
+recommended for it.
 
 Each column's dropdown (`d`) lists other benchmarks, each shown alone when picked:
 
@@ -56,15 +57,15 @@ Each column's dropdown (`d`) lists other benchmarks, each shown alone when picke
 - Agentic: the signals Arena's agent score is made of, then APEX-Agents, Remote Labor Index,
   OSWorld 2.0, EBR-bench and SpireClimb
 
-The overall score, in ECI, is Epoch's own ECI, or in grey the same fit over every benchmark the
-model has. Vision is ranked by overall. At the same score, a measured ECI sorts before a grey one.
-`modelcmp show` says what each task's score is from, as `--json`'s `basis`.
+The overall score, in ECI, is Epoch's own ECI. A model Epoch has not rated has no overall score,
+whatever benchmarks it has. Vision is ranked by overall.
+`modelcmp show` says what each task's score is from.
 
 A row has no scores when its offers are another release than the one scored, as a `-latest`
 id is.
 
-`modelcmp recommend --json` names what ranks each task in `benchmarks`: FrontierCode for coding,
-Arena's agent score for agentic, none for overall and vision. A benchmark picked in the task's
+`modelcmp recommend --json` names what ranks each task in `benchmarks`, as `modelcmp show` does:
+`ECI` for overall and vision, `FrontierCode` for coding and `Arena` for agentic. A benchmark picked in the task's
 column in the TUI takes its place, and the column then shows that benchmark's score alone, 0-100.
 
 [Scores](#scores) says how each of these numbers is obtained.
@@ -90,14 +91,6 @@ Epoch AI (<https://epoch.ai/data/benchmark_data.zip>):
 - ECI is Epoch's Capabilities Index as Epoch publishes it. modelcmp does not compute it.
 - A benchmark score is the best one Epoch lists for any version of the model, of every
   benchmark in Epoch's index, and of CursorBench and DeepSWE, which Epoch lists outside it.
-- The overall of a model Epoch has not given an ECI yet is computed by modelcmp with Epoch's own
-  model of benchmark scores: each benchmark has a difficulty and a slope on the ECI scale
-  (`edi_scores.csv`), a score is normalized between the benchmark's random baseline and its
-  ceiling, and the estimate is the capability that fits the model's scores. Over every benchmark
-  it recovers Epoch's ECI within a point for most models.
-- An estimate needs at least one score between 10% and 90% of the way from the random baseline
-  to the ceiling. Near either end a point moves the estimate far: one such score alone can be
-  off by tens of ECI points. With one in that range, the model's other scores count too.
 - A task's benchmarks are in its column's dropdown (`d`). `B` finds a benchmark of any task
   without knowing which task it is for.
 
@@ -517,7 +510,6 @@ Each model carries these fields:
 | `url` | its page, the first of `pages` below, null when no site has one |
 | `eci` | the Epoch Capabilities Index, as Epoch publishes it |
 | `tasks` | each task's table column: coding's FrontierCode score, 0-100, agentic's Arena agent score in percent, the others on the ECI scale, or a benchmark's 0-100 score when one is picked in the TUI |
-| `basis` | what each task's score is from: `ECI`, `3 benchmarks`, `FrontierCode` or `Arena` |
 | `arena_agent` | Arena, in percent, when Arena ranks the model |
 | `arena_chat`, `arena_webdev` | Arena's chat and WebDev ratings, when Arena rates the model |
 | `tokens_per_second` | from OpenRouter's GPQA diamond runs, when it ran the model |

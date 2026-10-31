@@ -1,8 +1,7 @@
 //! Non-interactive commands. Text for humans, `--json` for agents.
 
 use crate::app::{
-    COLS, Col, TEXT, col_task, col_value, harness_cmd, harness_id, launch_cmd, meets, on_price, runs_on, shown,
-    stored_bench,
+    COLS, Col, TEXT, col_value, harness_cmd, harness_id, launch_cmd, meets, on_price, runs_on, shown, stored_bench,
 };
 use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
@@ -100,12 +99,9 @@ struct ModelOut<'a> {
     pages: Option<BTreeMap<&'static str, String>>,
     /// Epoch Capabilities Index, as Epoch publishes it
     eci: Option<f64>,
-    /// Task -> its score on the ECI scale, as the table shows it, or a benchmark's 0..100 score
-    /// when one is picked in the task's column
+    /// Task -> its score as the table shows it (ECI, FrontierCode's percent, Arena's), or a
+    /// benchmark's 0..100 score when one is picked in the task's column
     tasks: BTreeMap<&'static str, f64>,
-    /// Task -> what its score is from: "ECI", "3 benchmarks" (its own), "overall" (none of its
-    /// own, so the overall score) or the benchmark picked in its column
-    basis: BTreeMap<&'static str, String>,
     /// Net improvement in real agent sessions, in percent, from arena.ai's Agent leaderboard
     #[serde(skip_serializing_if = "Option::is_none")]
     arena_agent: Option<f64>,
@@ -166,13 +162,6 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
             .filter_map(|t| {
                 let score = crate::view::line_score(m, t, crate::app::task_bench(s, t))?;
                 Some((t.name, (score * 10.0).round() / 10.0))
-            })
-            .collect(),
-        basis: TASKS
-            .iter()
-            .filter_map(|t| match crate::app::task_bench(s, t) {
-                Some(b) => m.picked(b).is_some().then(|| (t.name, b.to_string())),
-                None => Some((t.name, fit::fit(m, t)?.1.said(t))),
             })
             .collect(),
         arena_agent: m.arena,
@@ -419,11 +408,7 @@ fn matched<'a>(
         if let Some(i) = o.sort {
             // Best first, names breaking ties, by what the column shows, as the bounds go.
             let (v, desc) = (|m: &Model| col_value(m, i, store), !COLS[i].lower_better);
-            // An own score before an estimate it ties, as in the TUI.
-            let own = |m: &Model| stored_bench(store, i + TEXT).is_some() || col_task(i).is_none_or(|t| fit::own(m, t));
-            models.sort_by(|a, b| {
-                by_value(v(a), v(b), desc).then_with(|| own(b).cmp(&own(a))).then_with(|| a.name.cmp(&b.name))
-            });
+            models.sort_by(|a, b| by_value(v(a), v(b), desc).then_with(|| a.name.cmp(&b.name)));
         }
         models
     };
@@ -1280,7 +1265,7 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
             // The key of the best model your machine runs.
             let local = local.map(|(m, _)| &m.key);
             let tiers = tiers(picks);
-            serde_json::json!({"name": t.name, "when": t.when, "benchmarks": crate::app::task_bench(store, t).or(t.bench).map_or_else(|| t.benches.to_vec(), |b| vec![b]), "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
+            serde_json::json!({"name": t.name, "when": t.when, "benchmarks": [crate::app::task_bench(store, t).unwrap_or(fit::basis(t))], "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
         })
         .chain(custom)
         .collect()
@@ -1372,7 +1357,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        m.fit.insert("coding".into(), (coding, crate::fit::Basis::Benches(1)));
+        m.scores.insert("FrontierCode".into(), coding / 100.0);
         m
     }
 
@@ -1507,7 +1492,7 @@ mod tests {
         let mut data =
             Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
         data.models[0].developer = "openai".into();
-        data.models[0].fit.clear();
+        data.models[0].scores.clear();
         let mut store = Store::default();
         let o = ListOpts {
             task: fit::task("coding"),
@@ -1785,7 +1770,6 @@ mod tests {
         let short = serde_json::to_value(out(&m, &store, false, false)).unwrap();
         let fields = [
             "available",
-            "basis",
             "context",
             "developer",
             "eci",

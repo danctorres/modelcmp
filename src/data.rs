@@ -716,9 +716,6 @@ pub struct Model {
     /// Benchmark name -> best score across reasoning-effort settings, as Epoch scales it,
     /// 0..1 or as `score_ceiling` says, of every benchmark in Epoch's index.
     pub scores: BTreeMap<String, f64>,
-    /// Task name -> its score on the ECI scale and what it is from (`fit::scored`), which
-    /// ranks it.
-    pub fit: crate::fit::Fit,
     /// The model's page name on artificialanalysis.ai, when it has one (`aa_pages`).
     #[serde(default)]
     pub aa: Option<String>,
@@ -1910,9 +1907,6 @@ fn download(steps: &Steps) -> Result<Downloaded, String> {
         Err(e) => {
             data.warning = Some(format!("could not get OpenRouter's GPQA diamond runs ({e}), so no model has a speed"))
         }
-    }
-    for m in &mut data.models {
-        m.fit = crate::fit::scored(m.eci, &m.scores, &ep.benches);
     }
     Ok((data, [aa, epoch_pages, openrouter], release, late))
 }
@@ -3188,9 +3182,6 @@ struct Scores {
     org: HashMap<String, String>,
     /// Developer (`dev_key`) -> its country.
     country: HashMap<String, String>,
-    /// The benchmarks of Epoch's index, by the name `groups` score them under, with their
-    /// curves in Epoch's model of scores (`fit::scored`).
-    benches: HashMap<String, crate::fit::Bench>,
     /// The task benchmarks no row scored (`Data::missed`).
     missed: Vec<String>,
 }
@@ -3399,7 +3390,7 @@ const SHORT_NAMES: [(&str, &str); 2] =
     [("FrontierMath-Tiers-1-3-v2-Private", "FrontierMath T1-3"), ("FrontierMath-Tier-4-v2-Private", "FrontierMath T4")];
 
 /// Benchmarks outside Epoch's index, whose rows its zip has though its metadata names no file:
-/// (name, file, score column). With no curve they are in no estimate, but in coding's dropdown.
+/// (name, file, score column). With no curve they are in no ECI, but in coding's dropdown.
 const UNFITTED: [(&str, &str, &str); 2] =
     [("CursorBench", "cursorbench_external.csv", "Score"), ("DeepSWE", "deepswe_external.csv", "Pass@1")];
 
@@ -3436,12 +3427,13 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
         version_group.get(version).cloned().unwrap_or_else(|| version.split('_').next().unwrap_or(version).to_string())
     };
 
-    // The curves of Epoch's model of scores, by the benchmark's long name.
-    let mut curves: HashMap<String, (f64, f64)> = HashMap::new();
+    // The benchmarks Epoch's ECI is fit to, by their long names: those with a curve, a difficulty
+    // and a slope.
+    let mut curves: HashSet<String> = HashSet::new();
     for r in csv_rows(&mut zip, "epoch_capabilities_index/edi_scores.csv").unwrap_or_default() {
-        let num = |c: &str| col(&r, c)?.parse::<f64>().map_err(|e| format!("epoch csv: {c}: {e}"));
-        if let (Ok(edi), Ok(slope)) = (num("edi"), num("estimated_slope_scaled")) {
-            curves.insert(col(&r, "benchmark_name")?.to_string(), (edi, slope));
+        let num = |c: &str| col(&r, c).is_ok_and(|v| v.parse::<f64>().is_ok());
+        if num("edi") && num("estimated_slope_scaled") {
+            curves.insert(col(&r, "benchmark_name")?.to_string());
         }
     }
     let mut unscored: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -3455,21 +3447,10 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             continue;
         }
         // "nan" and "inf" parse as numbers, and are none.
-        let num =
-            |c: &str, or: f64| b.get(c).and_then(|v| v.parse().ok()).filter(|v: &f64| v.is_finite()).unwrap_or(or);
-        col(b, "scale")?;
-        let scale = num("scale", 1.0);
+        let scale = col(b, "scale")?.parse().ok().filter(|v: &f64| v.is_finite()).unwrap_or(1.0);
         // One in the index but with no curve, as SuperGLUE, scores nothing.
-        let curve = curves.get(bench).map(|&(edi, slope)| crate::fit::Bench {
-            edi,
-            slope,
-            baseline: num("random_baseline", 0.0),
-            ceiling: num("score_ceiling", 1.0),
-        });
+        let curve = curves.contains(bench);
         let bench = SHORT_NAMES.iter().find(|(long, _)| *long == bench).map_or(bench, |(_, short)| short);
-        if let Some(curve) = curve {
-            ep.benches.insert(bench.to_string(), curve);
-        }
         let Some(rows) = csv_rows(&mut zip, file) else { continue };
         for r in &rows {
             // A row without a version is no model's: together they would be one that outscores most.
@@ -3479,7 +3460,7 @@ fn parse_epoch(bytes: &[u8]) -> Result<Scores, String> {
             let Some(s) = s.trim_end_matches('%').parse::<f64>().ok().filter(|s| s.is_finite()) else { continue };
             let g = group_of(v);
             // The ids its scores are of, else those of any result.
-            let scores = curve.is_some() || unfitted.is_some();
+            let scores = curve || unfitted.is_some();
             let scored = if scores { &mut ep.versions } else { &mut unscored };
             scored.entry(norm(&g)).or_default().insert(v.clone());
             // Any benchmark result may give the model a page on Epoch, only one with a curve or
@@ -5134,11 +5115,11 @@ mod tests {
         }
         let paid =
             |p: &str| Offer { provider: p.into(), id: "m".into(), input: 1.0, output: 1.0, ..Default::default() };
-        let fit = BTreeMap::from([("coding".to_string(), (50.0, crate::fit::Basis::Benches(1)))]);
+        let scores = BTreeMap::from([("FrontierCode".to_string(), 0.5)]);
         let m = |key: &str, p: &str| Model {
             key: key.into(),
             offers: vec![paid(p)],
-            fit: fit.clone(),
+            scores: scores.clone(),
             ..Default::default()
         };
         let mut d = Data {
@@ -5496,8 +5477,7 @@ mod tests {
         assert!(!missed("FrontierSWE") && missed("MirrorCode"), "a task benchmark no row scored, as one with no file");
         assert!(!missed("HLE") && !ep.groups["foo2sep2025"].2.contains_key("HLE"), "not in Epoch's index");
         assert_eq!(ep.groups["foo2sep2025"].2.get("FrontierMath T4"), Some(&0.8), "under its short name");
-        assert_eq!(ep.benches["FrontierMath T4"].edi, 158.3, "with its curve, under that name too");
-        assert!(!ep.benches.contains_key("Some OCR"), "in the index but with no curve: pages alone");
+        assert!(!ep.groups["flash9jun2025"].2.contains_key("Some OCR"), "in the index but with no curve: pages alone");
         assert_eq!(ep.alias["gpt4o"], "gpt4onov2024", "the one with an index, before the newest without");
         assert_eq!(ep.alias["foo2"], "foo2sep2025", "one scored on a task, before the bare id's with no score");
         assert_eq!(ep.alias["bar3"], "bar3jul2025", "and before a newer one scored on a task");
