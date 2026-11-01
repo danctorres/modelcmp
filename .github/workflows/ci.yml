@@ -72,6 +72,7 @@ jobs:
           name="modelcmp-${{ matrix.target }}-$GITHUB_REF_NAME"
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/modelcmp" README.md KEYS.md REFERENCE.md LICENSE "$name/"
+          cp -r skills "$name/"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v7
         with:
@@ -86,12 +87,14 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
       - run: cd dist && sha256sum *.tar.gz > SHA256SUMS
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+      # The skill is an asset of its own, which the README installs from the latest release.
+      - run: gh release create "$GITHUB_REF_NAME" dist/* skills/modelcmp/SKILL.md --title "$GITHUB_REF_NAME" --generate-notes
   # Fills pkg/modelcmp.rb from SHA256SUMS and pushes it to the tap. Needs the
   # HOMEBREW_TAP_TOKEN secret (contents: write on danctorres/homebrew-tap).
   homebrew:

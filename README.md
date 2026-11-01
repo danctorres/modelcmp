@@ -62,7 +62,7 @@ The TUI says when a newer version is out, and `UU` upgrades to it.
 Install the [skill](skills/modelcmp/SKILL.md) for your agents:
 
 ```sh
-npx skills add danctorres/modelcmp -g
+npx skills add https://github.com/danctorres/modelcmp/releases/latest/download/SKILL.md -g
 ```
 
 ## Usage
