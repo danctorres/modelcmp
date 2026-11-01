@@ -3390,7 +3390,7 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
     let model = key.and_then(|k| app.data.models.iter().find(|m| m.key == *k));
     let runs = model.and_then(|m| runs_on(&app.store, m));
     // What the box of `task` at `col` holds, said under the grid, and the harness its favorite
-    // runs on, a `chip` after it as in Via.
+    // runs on after it, in its colour as in recommend.
     let holds = |task: &str, col: usize| {
         let slot = box_slot(task, col);
         let over = model.and_then(|m| crate::view::over_cap(&app.store, &slot, m));
@@ -3462,7 +3462,7 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
         if let Some(h) = runs {
             words.last_mut().into_iter().for_each(|w| w.spans.push(Span::styled(",", fg(MUTED))));
             words.push(word("via"));
-            words.push(Line::from(Span::styled(h.to_string(), chip(via_color(&app.store.via_not, h)))));
+            words.push(Line::from(Span::styled(h.to_string(), fg(via_color(&app.store.via_not, h)))));
         }
         wrapped(vec![Span::raw(" ")], words, &Span::raw(" "), width)
     };
@@ -4369,11 +4369,12 @@ fn entry(
     ]);
     if !boxed {
         // The harness the model runs on (`H`), as `f`'s grid says it, before what else the line
-        // says of it, as a list, the harness a `chip` as in Via.
+        // says of it, as a list. In its colour, not a chip: the line names one harness, while a
+        // chip in Via picks one out of several.
         if let Some(h) = runs_on(&app.store, m) {
             let and = if off || out.is_some() { "," } else { "" };
             spans.push(Span::styled(" via ", fg(MUTED)));
-            spans.push(Span::styled(h.to_string(), chip(via_color(&app.store.via_not, h))));
+            spans.push(Span::styled(h.to_string(), fg(via_color(&app.store.via_not, h))));
             spans.push(Span::styled(and, fg(MUTED)));
         }
         if off {
@@ -6290,13 +6291,14 @@ mod tests {
         assert_eq!(text.iter().filter(|l| l.contains("via claude")).count(), 1, "{text:?}");
         let lines = recommend(&a, 200, &mut vec![]).0;
         let claude = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == "claude").unwrap();
-        assert_eq!(claude.style.bg, Some(dev_color("claude")), "a chip, as in Via");
+        assert_eq!((claude.style.fg, claude.style.bg), (Some(dev_color("claude")), None), "its colour, no chip");
         // And under `f`'s grid, on the tier it is the favorite of.
         let items = vec![("coding".to_string(), Effect::Fav("opus".into(), "coding".into()))];
         let lines = fav_lines(&a, &items, &List { col: 3, ..Default::default() }, 200);
         let line = lines.iter().find(|l| l.to_string().contains("coding:high")).unwrap();
         assert!(line.to_string().ends_with("via claude"), "{line}");
-        assert_eq!(line.spans.last().unwrap().style.bg, Some(dev_color("claude")), "a chip, as in Via");
+        let style = line.spans.last().unwrap().style;
+        assert_eq!((style.fg, style.bg), (Some(dev_color("claude")), None), "its colour, no chip");
     }
 
     #[test]
