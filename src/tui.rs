@@ -5800,13 +5800,10 @@ mod tests {
         };
         let key_q = Mouse::Key(KeyCode::Char('q'));
         let q = Some(key_q);
-        for (w, panel) in [(220, None), (150, Some(View::Recommend)), (100, Some(View::Compare))] {
+        let views: [(u16, fn() -> View); 3] =
+            [(220, || View::Table), (150, || View::Recommend), (100, || View::Compare)];
+        for (w, view) in views {
             let mut a = app();
-            let view = || match panel {
-                Some(View::Recommend) => View::Recommend,
-                Some(_) => View::Compare,
-                None => View::Table,
-            };
             a.view = view();
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
             term.draw(|f| draw(&mut a, f)).unwrap();
