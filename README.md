@@ -41,26 +41,25 @@ It works with:
 
 ## Install
 
+Linux and macOS are supported.
+
+With Homebrew:
+
 ```sh
 brew install danctorres/tap/modelcmp
-# or
+```
+
+With Cargo, which builds it and needs Rust 1.89 or later:
+
+```sh
 cargo install --locked --git https://github.com/danctorres/modelcmp
 ```
 
-Linux and macOS are supported.
-The binaries are provided on the [releases](https://github.com/danctorres/modelcmp/releases) page.
-
-Building from source requires Rust 1.89 or later:
-
-```sh
-git clone https://github.com/danctorres/modelcmp
-cd modelcmp
-cargo install --locked --path .   # or cargo build --release, for target/release/modelcmp
-```
+Or download a binary from the [releases](https://github.com/danctorres/modelcmp/releases) page.
 
 The TUI says when a newer version is out, and `UU` upgrades to it.
 
-To let your agent use it, install the skill too:
+Install the [skill](skills/modelcmp/SKILL.md) for your agents:
 
 ```sh
 npx skills add danctorres/modelcmp -g
