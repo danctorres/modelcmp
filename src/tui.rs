@@ -7625,10 +7625,7 @@ mod tests {
         // Then your preferred harness, P's, a dropdown, its name in its colour as in Via.
         assert_eq!(text[1], "preferred harness: none ▾ ", "P's entry for none cut to its first word");
         let wide = recommend(&a, 80, &mut vec![]).0;
-        assert_eq!(
-            wide[1].to_string(),
-            "preferred harness: none (Claude on claude, GPT on codex, Gemini on gemini) ▾ "
-        );
+        assert_eq!(wide[1].to_string(), "preferred harness: none (each model on its developer's default harness) ▾ ");
         assert!(hints(&a, 400).contains(&"P preferred harness"), "and P says how to change it");
         a.store.harness = "pi".into();
         let mut spots = vec![];

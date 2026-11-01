@@ -554,9 +554,9 @@ pub fn bound_keys(keys: &str, bound: &BTreeMap<char, char>) -> String {
 pub const DOWNLOAD: &str = "↓ downloadable";
 
 /// The first entry of `H`'s list when no harness the model is on fits: what a model runs on then (`command`).
-const ANY_HARNESS: &str = "any harness (Claude on claude, GPT on codex, Gemini on gemini)";
+const ANY_HARNESS: &str = "any harness (its developer's default)";
 /// The first entry of `P`'s list: no preferred harness, so a model runs on its developer's own first, the rest on the first that has them.
-pub const NO_PREFERENCE: &str = "none (Claude on claude, GPT on codex, Gemini on gemini)";
+pub const NO_PREFERENCE: &str = "none (each model on its developer's default harness)";
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
@@ -5962,7 +5962,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "P");
         assert_eq!(at(&a), Some((Kind::Harness, 3, 0)), "none, opencode and codex: on none, it has none yet");
-        assert_eq!(first(&a), "none (Claude on claude, GPT on codex, Gemini on gemini)");
+        assert_eq!(first(&a), "none (each model on its developer's default harness)");
         code(&mut a, KeyCode::Esc);
         // A harness left out in Via is not offered, and P closes its list.
         a.store.via_not = vec!["opencode".into()];
