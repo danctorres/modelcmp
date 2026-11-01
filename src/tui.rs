@@ -1168,7 +1168,7 @@ const ACTIONS: [&str; 9] = [
     "i note",
 ];
 
-/// The last group of every overlay, the last hints a narrow terminal drops.
+/// The last group of every overlay, `esc` the last hint a narrow terminal drops.
 const BACK: [&str; 2] = ["esc back", "q quit"];
 
 /// The model actions a view offers, in `ACTIONS` order whatever order they are asked in.
@@ -1178,7 +1178,8 @@ fn actions(keys: &str) -> Vec<&'static str> {
 
 /// Key reminders in the status bar, in groups every view keeps in the same order: moving,
 /// the view's own keys, the model's actions, then the way back. Narrow terminals
-/// drop them from the front, so the actions outlast the view's keys and the way back goes last.
+/// drop them from the front, so the actions outlast the view's keys and `esc` goes last, `q quit`
+/// and `? help` first, as `K` lists them (`fit_keys`).
 /// A toggle names what pressing it does; `A a S F E R C t ?` are on their tabs above the frame, and
 /// one cut off a terminal `width` wide is here instead; the rest of the keys are in `?`. `s` acts
 /// on the column picked with `← →`.
@@ -1285,7 +1286,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
     // drops last. Off the table only the panels', whose keys work there. `? help` goes after
-    // the way back, so it is the last to go.
+    // the way back.
     if written_in_place(app) {
         return groups.join(&SEP);
     }
@@ -1355,19 +1356,26 @@ fn hint_key(hint: &str) -> Option<KeyCode> {
 /// The hint of `K`, which lists every key of the status bar.
 const ALL_KEYS: &str = "K all keys";
 
+/// The hints a bar too narrow for every key cuts first, wherever they are: not worth the room,
+/// as `K`'s list has them.
+const CUT_FIRST: [&str; 2] = ["q quit", "? help"];
+
 /// What of `keys` fits `room` cells: whole keys dropped from the front, the way back the last to
-/// go. With `all`, where `K` lists them (`App::lists_keys`), any cut off leave `K all keys` after
-/// the rest, the last of all to go, where it fits. However narrow, the last key stays, which may
-/// not fit.
+/// go. With `all`, where `K` lists them (`App::lists_keys`), `CUT_FIRST` go first and any cut off
+/// leave `K all keys` after the rest, the last of all to go, where it fits. However narrow, the
+/// last key stays, which may not fit.
 fn fit_keys(keys: &[&str], room: usize, all: bool) -> Vec<String> {
     let width = |k: &[&str]| Span::raw(k.join("  ")).width();
     if width(keys) <= room {
         return keys.iter().map(|k| k.to_string()).collect();
     }
+    let kept: Vec<&str> =
+        if all { keys.iter().copied().filter(|k| !CUT_FIRST.contains(k)).collect() } else { keys.to_vec() };
+    let keys = kept.strip_suffix(&[SEP]).unwrap_or(&kept);
     let tail: &[&str] = if all && width(&[ALL_KEYS]) <= room { &[ALL_KEYS] } else { &[] };
-    let from = (1..keys.len())
+    let from = (0..keys.len())
         .find(|&i| keys[i] != SEP && width(&[&keys[i..], tail].concat()) <= room)
-        .unwrap_or(keys.len() - usize::from(tail.is_empty()));
+        .unwrap_or(keys.len().saturating_sub(usize::from(tail.is_empty())));
     [&keys[from..], tail].concat().into_iter().map(String::from).collect()
 }
 
@@ -5739,7 +5747,8 @@ mod tests {
         );
         assert_eq!(hint_key("esc t close"), Some(KeyCode::Esc), "keys that do the same: the first");
         let mut a = app();
-        // Too narrow for the help tab, so its hint is in the bar.
+        // Too narrow for the help tab, so its hint is in the bar: compare's, which has room for it.
+        a.view = View::Compare;
         let (w, h) = (100, 6);
         let (_, lines) = render(&mut a, w, h);
         let bar = &lines[h as usize - 1];
@@ -5777,7 +5786,7 @@ mod tests {
         };
         // `q quit` in the bar asks, and every cell of it then quits, as `qq` does, however wide the
         // bar and whatever follows `q quit` in it. In a panel too, where a click elsewhere on the
-        // bar only cancels and leaves the panel open.
+        // bar only cancels and leaves the panel open. The bar has `q quit` where every key fits.
         let on = |a: &mut App, w: u16, x: u16, y: u16| {
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
             term.draw(|f| draw(a, f)).unwrap();
@@ -5791,9 +5800,13 @@ mod tests {
         };
         let key_q = Mouse::Key(KeyCode::Char('q'));
         let q = Some(key_q);
-        for (w, panel) in [(60, false), (100, false), (150, false), (220, false), (120, true)] {
+        for (w, panel) in [(220, None), (150, Some(View::Recommend)), (100, Some(View::Compare))] {
             let mut a = app();
-            let view = || if panel { View::Recommend } else { View::Table };
+            let view = || match panel {
+                Some(View::Recommend) => View::Recommend,
+                Some(_) => View::Compare,
+                None => View::Table,
+            };
             a.view = view();
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
             term.draw(|f| draw(&mut a, f)).unwrap();
@@ -5817,17 +5830,19 @@ mod tests {
         assert_eq!(a.mouse(key_q), Some(Effect::Quit));
 
         // Too narrow for every hint: `K all keys` on the right lists them all, one a line, and a pick
-        // presses its key.
+        // presses its key. The room is for keys worth showing: `q quit` and `? help` go first.
         let mut a = app();
         assert_eq!(click(&mut a, w, "K all keys"), Some(Mouse::Key(KeyCode::Char('K'))));
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert!(text(term.backend().buffer())[h as usize - 1].trim_end().ends_with("q quit  ? help  K all keys"));
+        let bar = text(term.backend().buffer())[h as usize - 1].trim_end().to_string();
+        assert!(bar.ends_with("space select  f fav  e exclude  i note  │  t theme  K all keys"), "{bar}");
+        assert!(!bar.contains("q quit") && !bar.contains("? help"), "{bar}");
         assert_eq!(a.mouse(Mouse::Key(KeyCode::Char('K'))), Some(Effect::Keys));
         open_keys(&mut a, w);
         let Input::Choose { kind: Kind::Keys, items, .. } = &a.input else { panic!("{:?}", a.input) };
         let has = |k: &str| items.iter().any(|(i, _)| i == k);
-        assert!(has("/ filter") && has("q quit") && !has(ALL_KEYS), "every key of the bar but K's");
+        assert!(has("/ filter") && has("q quit") && has("? help") && !has(ALL_KEYS), "every key of the bar but K's");
         term.draw(|f| draw(&mut a, f)).unwrap();
         let lines = text(term.backend().buffer());
         let row = lines.iter().find(|l| l.contains("| columns")).unwrap();
@@ -5994,6 +6009,12 @@ mod tests {
         assert_eq!(fit_keys(&keys, 12, true), ["K all keys"], "K the last to go");
         assert_eq!(fit_keys(&keys, 9, true), ["esc close"], "too narrow for K: the last key");
         assert_eq!(fit_keys(&keys, 19, true), keys, "every key fits: no K");
+        // Cut, the bar is for keys worth showing: `q quit` and `? help` go first, as K's list has
+        // them, and no `│` is left hanging. Without K they stay, the last to go.
+        let keys = ["/ search", SEP, "q quit", "? help"];
+        assert_eq!(fit_keys(&keys, 27, true), keys, "every key fits");
+        assert_eq!(fit_keys(&keys, 26, true), ["/ search", "K all keys"]);
+        assert_eq!(fit_keys(&keys, 26, false), ["q quit", "? help"]);
     }
 
     #[test]
@@ -6380,7 +6401,7 @@ mod tests {
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, true, false, None), "then above");
         let mut buf = Buffer::empty(Rect::new(0, 0, 46, 9));
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false, None), "all rows fit");
-        assert!(lines[3].ends_with("? help  K all keys"), "{}", lines[3]);
+        assert!(lines[3].ends_with("t theme  K all keys"), "{}", lines[3]);
         assert!(!lines[3].contains("space select"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Model, Dev too; Model stays.
         a.col = NCOLS - 1;
