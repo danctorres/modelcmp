@@ -3694,8 +3694,7 @@ fn chooser(app: &App, area: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
 
 /// The colours of the models `d` lists for a tier, an item each: their price level's, the first
 /// line's the model the tier picks with no favorite. By the price the line shows, so the best
-/// model your machine runs is not green there as in its box, and a favorite not recommended is
-/// not grey, everything listed being one to pick.
+/// model your machine runs is not green there as in its box.
 fn pick_colors(app: &App, items: &[(String, Effect)]) -> Vec<Color> {
     let by_key: HashMap<&str, &Model> = app.data.models.iter().map(|m| (m.key.as_str(), m)).collect();
     let picked = |slot: &str| {
@@ -3709,7 +3708,7 @@ fn pick_colors(app: &App, items: &[(String, Effect)]) -> Vec<Color> {
                 Effect::Pick(slot, None) => picked(slot),
                 _ => None,
             };
-            m.map_or(MUTED, |m| pick_color(app, m, false, false))
+            m.map_or(MUTED, |m| pick_color(app, m, false))
         })
         .collect()
 }
@@ -4321,9 +4320,9 @@ fn wrapped_at(
 
 /// What tier `col` of `task` picks, for its box of recommend's grid: `name · $price · score` in
 /// its price level's colour as in the Price column, with no score on a task of your own, after
-/// a ★ in the task's colour when it is your favorite for the tier; grey when that favorite is
-/// not one recommended, or is out of reach as its row in the table, and `-` with no model. Out of
-/// its `boxed` grid the entry says why it is grey.
+/// a ★ in the task's colour when it is your favorite for the tier, grey when it is out of reach
+/// as its row in the table, and `-` with no model. Out of its `boxed` grid the entry says when the
+/// favorite is not one recommended, and why it is grey.
 /// `local`: the pick is the best model your machine runs, in place of the tier's own
 /// (`view::with_local`).
 fn entry(
@@ -4346,9 +4345,7 @@ fn entry(
         return vec![Span::styled(none, fg(MUTED))];
     };
     let fav = crate::view::fav_pick(&app.store, task, TIERS[col].0, m);
-    let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
-    let out = out_of_reach(app, m);
-    let price = pick_color(app, m, local, off);
+    let price = pick_color(app, m, local);
     let score = built_in.map_or("-".into(), |t| crate::view::line_shown(t, app.task_bench(t), s));
     let (cost, score) = match built_in {
         // On `all`, a download that fits is free here too, once `x` fetches it.
@@ -4376,6 +4373,8 @@ fn entry(
         Span::styled(score, fg(price)),
     ]);
     if !boxed {
+        let off = fav && built_in.is_some_and(|t| app.favorite_unrecommended(t, &m.key));
+        let out = out_of_reach(app, m);
         // The harness the model runs on (`H`), as `f`'s grid says it, before what else the line
         // says of it, as a list. In its colour, not a chip: the line names one harness, while a
         // chip in Via picks one out of several.
@@ -4396,12 +4395,12 @@ fn entry(
 }
 
 /// A tier's model's colour in recommend, its boxes and its dropdown: its price level's as in the
-/// Price column, the best your machine runs free's, and grey when `off`, out of reach or with only
-/// list prices.
-fn pick_color(app: &App, m: &Model, local: bool, off: bool) -> Color {
+/// Price column, the best your machine runs free's, and grey when out of reach or with only list
+/// prices. A favorite not recommended keeps its colour, `entry` saying so under the grid.
+fn pick_color(app: &App, m: &Model, local: bool) -> Color {
     match m.quoted() {
         _ if local => LEVEL[0],
-        q => q.filter(|q| !(off || q.1 || !app.accessible(m))).map_or(MUTED, |q| LEVEL[level(q.0.blended())]),
+        q => q.filter(|q| !(q.1 || !app.accessible(m))).map_or(MUTED, |q| LEVEL[level(q.0.blended())]),
     }
 }
 
@@ -6257,7 +6256,8 @@ mod tests {
         let star = spans.iter().position(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
         assert!(spans[star + 1].content == "opus", "★ then the name: {:?}", spans[star + 1]);
         assert_eq!(spans[star + 1].style.fg, Some(LEVEL[level(5.0)]), "the name keeps its price level");
-        // A favorite off the frontier, flash dearer than opus and scoring less, is grey and says so.
+        // A favorite off the frontier, flash dearer than opus and scoring less, keeps its price
+        // level's colour and says it is not recommended.
         let mut data = std::mem::take(&mut a.data);
         for o in &mut data.models.iter_mut().find(|m| m.key == "flash").unwrap().offers {
             (o.input, o.output) = (6.0, 6.0);
@@ -6269,10 +6269,12 @@ mod tests {
         (a.view, a.among, a.task_cur, a.task_sel) = (View::Recommend, None, 1, 4);
         let lines = recommend(&a, 200, &mut vec![]).0;
         let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
-        let star = spans.iter().rposition(|s| s.content == "★ " && s.style.fg == Some(task_color("coding"))).unwrap();
-        assert_eq!(spans[star + 1].content, "flash");
-        assert_eq!(spans[star + 1].style.fg, Some(MUTED));
-        assert_eq!(spans[star + 6].content, " not recommended");
+        let flash: Vec<usize> = (1..spans.len())
+            .filter(|&i| spans[i].content == "flash" && spans[i - 1].style.fg == Some(task_color("coding")))
+            .collect();
+        assert_eq!(flash.len(), 2, "in its box and under the grid: {spans:?}");
+        assert!(flash.iter().all(|&i| spans[i].style.fg == Some(LEVEL[level(6.0)])), "{spans:?}");
+        assert_eq!(spans[flash[1] + 5].content, " not recommended");
         // And the line after it names the model the tier would recommend.
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let at = text.iter().position(|l| l.starts_with("  high:") && l.contains("flash")).unwrap();
