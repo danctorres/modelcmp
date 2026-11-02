@@ -1274,6 +1274,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             let enter = match (app.task_sel, app.custom_at()) {
                 (1.., _) => vec!["d dropdown"],
                 (_, Some(_)) => vec!["enter your model", "T edit", "D delete"],
+                _ if app.name_menu(app.task_cur).is_some() => vec!["enter best per price", "d dropdown"],
                 _ => vec!["enter best per price"],
             };
             vec![vec!["↓ ↑ task", "← → 0 $ tier"], [enter, panel].concat(), cap, BACK.to_vec()]
@@ -3997,7 +3998,11 @@ fn recommend(
     let (picks, took): (Vec<_>, Vec<_>) = (0..tasks.len()).map(|i| app.tier_picks_took(i)).unzip();
     let (tasks, picks, took) = (&tasks, &picks, &took);
     let cells = |i: usize| (0..TIERS.len()).map(move |c| entry(app, tasks[i].0, c, picks[i][c], took[i][c], true));
-    let w = tasks.iter().map(|t| Span::raw(t.0).width()).max().unwrap_or(0).min(20);
+    // A name with a column, whose benchmarks its ▾ lists, has room for it even while the ▾ is
+    // off, so the grid stays put.
+    let menus: Vec<_> = (0..tasks.len()).map(|i| app.name_menu(i)).collect();
+    let mark_w = |i: usize| if app.name_col(i).is_some() { Span::raw(MENU).width() } else { 0 };
+    let w = tasks.iter().enumerate().map(|(i, t)| Span::raw(t.0).width() + mark_w(i)).max().unwrap_or(0).min(20);
     let mut grid: Vec<Vec<_>> = (0..tasks.len()).map(|i| cells(i).collect()).collect();
     for c in 0..TIERS.len() {
         align(grid.iter_mut().map(|r| &mut r[c]));
@@ -4081,14 +4086,29 @@ fn recommend(
         // The name being written under the grid shows here too, as it is typed. Cut to the cells
         // the column has, as it is sized: a wide character takes two.
         let shown = edit.filter(|e| e.0 == i).and_then(|e| e.1.fields()).map_or(t.0, |f| f.0);
-        let mut name = truncate(shown, w);
-        while Span::raw(name.as_str()).width() > w {
+        let fits = w - mark_w(i);
+        let mut name = truncate(shown, fits);
+        while Span::raw(name.as_str()).width() > fits {
             name = truncate(&name, name.chars().count() - 1);
         }
-        let pad = w.saturating_sub(Span::raw(name.as_str()).width());
+        let name_w = Span::raw(name.as_str()).width();
         let name = Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD));
-        let mut first = cursor(cur == Some((i, 0)), lit_span(name, &app.overlay_query));
-        first.push(Span::raw(" ".repeat(pad)));
+        let on = cur == Some((i, 0));
+        let mut spans = lit_span(name, &app.overlay_query);
+        // Its ▾ as a header's: yellow while a benchmark is picked in it, else a tier's.
+        if let Some(c) = menus[i] {
+            let style = match app.col_bench(c) {
+                Some(_) => fg(Color::Yellow),
+                None if on => Style::new(),
+                None => fg(MUTED),
+            };
+            spans.push(Span::styled(MENU, style));
+            // A click on it opens the dropdown, ahead of the name's own spot.
+            let at = 2 + name_w;
+            spots.push(Spot { lines: y..y + 1, x: at..at + 1, at: Stop::Menu(i, 0) });
+        }
+        let mut first = cursor(on, spans);
+        first.push(Span::raw(" ".repeat(w - name_w - mark_w(i))));
         // The model in each box, where the search found its name, after a ★.
         let hits = |c: usize, cell: &[Span]| {
             let star = if cell.first().is_some_and(|s| s.content == "★ ") { 2 } else { 0 };
@@ -7706,16 +7726,20 @@ mod tests {
             .collect();
         assert_eq!(bars.concat(), "▌opus · $5.0 ·\u{a0}150 ▾▐", "mid of overall, with its dropdown's ▾");
         // A click on the ▾ opens the dropdown, the box's other cells move the cursor to it.
-        let menu = spots.iter().find(|p| matches!(p.at, Stop::Menu(..))).expect("a spot on the ▾");
-        let line = all[menu.lines.start].to_string();
-        assert_eq!(line.chars().nth(menu.x.start), Some('▾'), "{line}");
+        // A task's name has one too, on overall, coding and agentic.
+        for tier in [true, false] {
+            let at = |p: &&Spot| matches!(p.at, Stop::Menu(_, c) if (c > 0) == tier);
+            let menu = spots.iter().find(at).expect("a spot on the ▾");
+            let line = all[menu.lines.start].to_string();
+            assert_eq!(line.chars().nth(menu.x.start), Some('▾'), "{line}");
+        }
         let marks: Vec<&Span> = all.iter().flat_map(|l| l.spans.iter()).filter(|s| s.content.ends_with('▾')).collect();
         let muted = marks.iter().filter(|s| s.style.fg == Some(MUTED)).count();
         assert!(marks.len() > 1 && muted == marks.len() - 1, "every box's ▾, muted off the cursor: {marks:?}");
         let clicks = spots.iter().filter(|p| matches!(p.at, Stop::Menu(..) | Stop::Preferred)).count();
         assert_eq!(clicks, marks.len(), "each ▾ clicks, the preferred harness's too");
         // Narrow, the ▾ goes on a line with room for it, so it adds none: overall stays 2 lines.
-        let text: Vec<String> = recommend(&b, 60, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        let text: Vec<String> = recommend(&b, 62, &mut vec![]).0.iter().map(ToString::to_string).collect();
         let at = text.iter().position(|l| l.starts_with(" overall")).unwrap();
         assert!(text[at + 1].contains("120 ▾") && text[at + 2].starts_with(" coding"), "{text:#?}");
         let row = all.iter().map(ToString::to_string).find(|l| l.starts_with(" overall")).unwrap();

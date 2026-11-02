@@ -443,7 +443,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("N", "previous match in a panel or a list, also `↑` while typing"),
             (">", "minimum for the column, e.g. `>` 60 `enter`"),
             ("<", "maximum for the column, or a tier's price cap in recommend"),
-            ("d", "dropdown on a ▾ header or a recommend tier, `space` `enter` toggle"),
+            ("d", "dropdown on a ▾: a header, or a tier or task in recommend, `space` `enter` toggle"),
             ("B", "find a benchmark of any task column and show it in its column"),
             ("|", "columns to show, `space` `enter` toggle"),
             ("a", "all models, including ones you have no access to"),
@@ -2521,15 +2521,16 @@ impl App {
 
     /// The `B` chooser: the entries of every shown task column's dropdown, each named with its
     /// column, so a benchmark is found without knowing which task it is for. On the one the
-    /// column under the cursor shows.
-    fn ask_benches(&mut self) {
+    /// column under the cursor shows. With `only`, that column's alone, as `d` on a task's name
+    /// in recommend lists them.
+    fn ask_benches(&mut self, only: Option<usize>) {
         // A task's line is drawn from its score, so its columns show that.
         if self.task.is_some() {
             return self.refuse("a task is in use, so the task columns show its score, c clears the task");
         }
         // Each column's dropdown entries, with how many models each scored, as `d` lists them.
         let mut entries = vec![];
-        for c in TASK_COLS.into_iter().filter(|&c| !hidden(c)) {
+        for c in TASK_COLS.into_iter().filter(|&c| !hidden(c) && only.is_none_or(|o| o == c)) {
             let Some((_, more)) = col_benches(c) else { continue };
             let names = std::iter::once(None).chain(more.into_iter().map(Some));
             for ((label, n), b) in self.menu_items(c).0.into_iter().zip(names) {
@@ -2537,13 +2538,17 @@ impl App {
             }
         }
         if entries.is_empty() {
-            return self.refuse("no task column is shown, | shows them");
+            return self.refuse(match only {
+                Some(c) => format!("{} is hidden, | shows it", base_col_name(c)),
+                None => "no task column is shown, | shows them".into(),
+            });
         }
         // The counts in a column of their own, as in the dropdown.
         let w = entries.iter().map(|(l, ..)| l.chars().count()).max().unwrap_or(0);
         let nw = entries.iter().map(|(_, n, _)| n.to_string().len()).max().unwrap_or(0);
         let items: Vec<_> = entries.into_iter().map(|(l, n, e)| (format!("{l:<w$}  {n:>nw$}"), e)).collect();
-        let shown = Effect::Bench(self.col, self.col_bench(self.col));
+        let col = only.unwrap_or(self.col);
+        let shown = Effect::Bench(col, self.col_bench(col));
         let sel = items.iter().position(|(_, e)| *e == shown).unwrap_or(0);
         self.input = Input::choose("benchmark?", Kind::Bench, items, sel);
     }
@@ -4027,7 +4032,7 @@ impl App {
                 }
                 (Stop::Menu(t, i), View::Recommend) => {
                     (self.task_cur, self.task_sel, self.among, self.caps) = (t, i, None, false);
-                    self.ask_pick();
+                    self.recommend_menu();
                     return None;
                 }
                 (Stop::Help(i), View::Help) => self.help_sel = i,
@@ -4215,6 +4220,28 @@ impl App {
         Some((task, c))
     }
 
+    /// The column of task `i` in recommend, whose benchmarks `d` on its name lists: overall's,
+    /// coding's and agentic's.
+    pub fn name_col(&self, i: usize) -> Option<usize> {
+        Some(TEXT + task_col(TASKS.get(i)?)?)
+    }
+
+    /// `name_col` when `d` opens its list, as its header's ▾ shows: not while a task is in use
+    /// or the column is hidden, where `d` says so.
+    pub fn name_menu(&self, i: usize) -> Option<usize> {
+        self.name_col(i).filter(|&c| self.menu(c) && !hidden(c))
+    }
+
+    /// `d` in recommend, or a click on a ▾ there: on a task's name the benchmarks of its column,
+    /// which rank it, else the models of the tier under the cursor.
+    fn recommend_menu(&mut self) {
+        let on_name = self.task_sel == 0 && self.among.is_none() && !self.caps;
+        match self.name_col(self.task_cur).filter(|_| on_name) {
+            Some(c) => self.ask_benches(Some(c)),
+            None => self.ask_pick(),
+        }
+    }
+
     /// `d` on a tier in recommend, its ▾: the models it can take, to make one its favorite, best first
     /// and the pick with none ahead of them, the cursor on the one it has. They are the ones
     /// recommend ranks at the tier's price or under, scored or not, as a new model may not be yet,
@@ -4356,7 +4383,7 @@ impl App {
                 return None;
             }
             (KeyCode::Char('d'), _) if self.view == View::Recommend => {
-                self.ask_pick();
+                self.recommend_menu();
                 return None;
             }
             // On the tiers' header `h` `l` move over the tiers, and enter writes the cap of `low` or `mid`.
@@ -4734,7 +4761,7 @@ impl App {
                 self.input = Input::choose("theme?", Kind::Theme, items, crate::view::theme(&self.store.theme));
             }
             KeyCode::Char('|') => self.ask_cols(),
-            KeyCode::Char('B') => self.ask_benches(),
+            KeyCode::Char('B') => self.ask_benches(None),
             KeyCode::Char('H') if row => {
                 let key = self.current()?.key.clone();
                 self.ask_via(&key, None);
@@ -5280,7 +5307,10 @@ impl App {
                                     ));
                                     return None;
                                 };
-                                self.col = c;
+                                // Recommend's `d` leaves the table's cursor where it was.
+                                if self.view == View::Table {
+                                    self.col = c;
+                                }
                                 self.pick_bench(c, i);
                                 self.rebuild();
                                 let shows = self.col_bench(c).map_or("its task's score".into(), bench_label);
@@ -8170,11 +8200,47 @@ mod tests {
         assert_eq!(a.view, View::Table, "the next click closes it");
     }
 
+    /// `d` on a task's name in recommend lists its column's benchmarks, as the header's
+    /// dropdown does, and the pick ranks the task.
+    #[test]
+    fn d_on_a_tasks_name_picks_its_benchmark() {
+        let mut a = app();
+        press(&mut a, "R");
+        let col = a.col;
+        (a.task_cur, a.task_sel, a.among, a.caps) = (1, 0, None, false);
+        press(&mut a, "d");
+        let Input::Choose { kind: Kind::Bench, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
+        assert!(items.iter().all(|i| matches!(i.1, Effect::Bench(c, _) if c == ECI + 1)), "coding's alone");
+        assert!(items[0].0.starts_with("FrontierCode") && items[0].0.contains("· Coding"), "{items:?}");
+        assert_eq!(list.sel, 0, "on the task's own score");
+        press(&mut a, "/frontierswe");
+        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Enter);
+        assert!(a.view == View::Recommend && a.input == Input::None, "{}", a.status);
+        assert_eq!(a.col, col, "the table's cursor stays");
+        assert_eq!(a.task_bench(crate::fit::task("coding").unwrap()), Some("FrontierSWE"));
+        a.mouse(Mouse::Model(Stop::Menu(2, 0)));
+        let Input::Choose { kind: Kind::Bench, items, .. } = &a.input else { panic!("{:?}", a.input) };
+        assert!(matches!(items[0].1, Effect::Bench(c, None) if c == ECI + 2), "a click on agentic's ▾");
+        code(&mut a, KeyCode::Esc);
+        // Vision has no column of its own, so no ▾ and nothing to list.
+        assert_eq!((a.name_menu(0), a.name_menu(3)), (Some(ECI), None));
+        (a.task_cur, a.task_sel) = (3, 0);
+        press(&mut a, "d");
+        assert!(a.failed && a.input == Input::None, "{}", a.status);
+        // With a task in use the ▾ goes, as on its header, and `d` says why.
+        (a.task, a.task_cur) = (crate::fit::task("overall"), 0);
+        assert_eq!(a.name_menu(0), None);
+        press(&mut a, "d");
+        assert!(a.input == Input::None && a.status.starts_with("a task is in use"), "{}", a.status);
+    }
+
     #[test]
     fn d_in_recommend_picks_a_tiers_model() {
         let mut a = app();
         press(&mut a, "Rjjjjd");
-        assert!(a.failed && a.input == Input::None, "on a task's name: no tier");
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Bench, .. }), "on a task's name: its benchmarks");
+        code(&mut a, KeyCode::Esc);
         press(&mut a, "$");
         let was = a.current().map(|m| m.key.clone());
         press(&mut a, "d");
