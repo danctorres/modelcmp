@@ -1271,13 +1271,13 @@ fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// `recommend --json`'s `tiers`: the key each tier picks, as recommend's grid in the TUI shows.
+/// `recommend --json`'s `tiers`: the key each tier picks, as recommend in the TUI shows.
 fn tiers(picks: Picks) -> serde_json::Value {
     let key = |p: Option<(&Model, f64)>| p.map(|e| e.0.key.clone());
     TIERS.iter().zip(picks).map(|(t, p)| (t.0.to_string(), key(p).into())).collect::<serde_json::Map<_, _>>().into()
 }
 
-/// The best model at each price for each task, as recommend's grid in the TUI shows it, and when
+/// The best model at each price for each task, as recommend in the TUI shows it, and when
 /// to use each task.
 pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
     say_filters(store, "");
@@ -1979,7 +1979,7 @@ mod tests {
         let t = coding(&recommend_json(&data, &store));
         assert_eq!(keys(&t), ["benchmarks", "frontier", "local", "name", "tier_favorites", "tiers", "when"]);
         let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "gpt55"});
-        assert_eq!(t["tiers"], tiers, "as recommend's grid in the TUI");
+        assert_eq!(t["tiers"], tiers, "as recommend in the TUI");
         assert_eq!(keys(&t["frontier"][0]), ["context", "key", "name", "price", "recommended", "score", "via"]);
         assert_eq!(names(&t), ["mini", "gpt55"]);
         store.set_note("gpt55", "slow");

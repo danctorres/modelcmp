@@ -257,7 +257,7 @@ hide different models.
 | `high` | the best at any price. Scores count as the table shows them, whole points or Arena's tenths, so of two models with the same shown score it takes the cheaper |
 
 - `modelcmp tier low 1` or `modelcmp tier mid 8` changes a cap, and `--rm` puts it back to its
-  default, as an empty cap on the tier's header in the TUI's recommend does. `low` can't cost more
+  default, as an empty cap on a tier's line in the TUI's recommend does. `low` can't cost more
   than `mid`. The list splits at the caps too, so a tier picks the best model up to its cap.
 - Two tiers pick the same model when the higher tier's cap lets in no better one. A tier never
   takes a worse model just to differ from the next.

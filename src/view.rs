@@ -740,7 +740,7 @@ pub fn custom_front<'m>(line: &[&'m Model]) -> (Vec<(&'m Model, f64)>, Vec<&'m s
     (line.iter().map(|&m| (m, f64::NAN)).collect(), line.iter().map(|m| m.key.as_str()).collect())
 }
 
-/// What each tier of a task picks (`tier_pick`), as recommend's grid and `modelcmp recommend` show them.
+/// What each tier of a task picks (`tier_pick`), as recommend in the TUI and `modelcmp recommend` show them.
 pub fn tier_picks<'m>(
     front: &[(&'m Model, f64)],
     off: &[&str],
@@ -765,7 +765,7 @@ pub fn price(m: &Model) -> String {
     m.quoted().map_or("-".into(), |(o, listed)| format!("{}{}", if listed { "~" } else { "" }, usd(o.blended())))
 }
 
-/// What a tier's line of `modelcmp recommend` shows, as recommend's grid in the TUI picks them.
+/// What a tier's line of `modelcmp recommend` shows, as recommend in the TUI picks them.
 /// `{tiers}` is `tiers_said`.
 pub const RECOMMEND_LEGEND: &str = "The best model for each task at each price: {tiers}. \
      Each line shows name [key] · $ per 1M tokens · score on the task. ★ marks your favorite, \

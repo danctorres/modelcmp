@@ -416,7 +416,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("j", "down (or `↓`), a count repeats it, `3j` goes down 3 rows"),
             ("k", "up (or `↑`)"),
-            ("h", "column left (or `←`), previous tier in recommend"),
+            ("h", "column left (or `←`), in recommend along the line"),
             ("l", "column right (or `→`)"),
             ("_", "first column (or `0`)"),
             ("$", "last column"),
@@ -461,7 +461,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("✗", "excluded: you have it but cannot use it, and recommendations skip it"),
             ("space", "select the model, `C` compares the selected"),
             ("f", "favorite the model for a task's tier, or for a task you add"),
-            ("T", "edit a task you added in `R` or `f`: its name, then its description"),
+            ("T", "edit a task you added in `R` or `f`: its name and its description"),
             ("R: D", "delete a task you added, asks first"),
             ("e", "exclude the model"),
             ("u", "deselect every model"),
@@ -584,6 +584,11 @@ const THEME: usize = 7;
 pub const HELP_TAB: usize = 8;
 /// `App::among` on recommend's preferred harness line, under its `from` line, past every tab.
 pub const PREFERRED: usize = usize::MAX;
+/// The columns of recommend's cursor along a line (`App::rec_col`): a task's name or a tier's
+/// cap, what a task of your own is about or a tier's model, and the harness the tier starts it on.
+pub const NAME_CELL: usize = 0;
+pub const MODEL_CELL: usize = 1;
+pub const HARNESS_CELL: usize = 2;
 
 /// What hides a model from the table (`App::failing`): the entries picked in the dropdown of
 /// column 1 (Dev), `PRICE` or `VIA`, or the bound at that index of `App::bounds`.
@@ -637,11 +642,13 @@ pub enum Input {
         text: String,
         cur: usize,
     },
-    /// Typing the price cap of tier `tier`, `low` or `mid`, on its header in recommend.
+    /// Typing the price cap of tier `tier`, `low` or `mid`, on its line in recommend. `fresh`
+    /// until a key changes it: the cap it had, which the first character typed replaces.
     Cap {
         tier: usize,
         text: String,
         cur: usize,
+        fresh: bool,
     },
     /// Naming a task of your own on recommend's `+ new task` row, then what it is about.
     Task(Edit),
@@ -776,10 +783,15 @@ impl Edit {
     }
 
     /// `T` on the task of your own `task`: its name and what it is about, as they are, the
-    /// cursor on the name.
-    fn task(task: String, store: &Store) -> Self {
-        let other = store.about(&task).unwrap_or("").to_string();
-        Edit::new(What::Task { was: Some(task.clone()), other, about: false }, task)
+    /// cursor at the end of what it is about when `about`, which is what changes most, else of
+    /// its name.
+    pub fn task(task: String, store: &Store, about: bool) -> Self {
+        let said = store.about(&task).unwrap_or("").to_string();
+        let was = Some(task.clone());
+        match about {
+            true => Edit::new(What::Task { was, other: task, about }, said),
+            false => Edit::new(What::Task { was, other: said, about }, task),
+        }
     }
 
     /// `+ new task`: both fields empty.
@@ -914,9 +926,9 @@ struct SearchFrom {
     hit: isize,
     scroll: u16,
     among: Option<usize>,
-    caps: bool,
     task_cur: usize,
     task_sel: usize,
+    rec_col: usize,
     help_sel: usize,
 }
 
@@ -1203,10 +1215,15 @@ pub enum Stop {
     Among(usize),
     /// Your preferred harness under it, or its ▾: a click opens its dropdown.
     Preferred,
-    /// The header of tier `i` in recommend, `low` or `mid`: a click writes its price cap.
-    Cap(usize),
+    /// The label of tier `i` on task `t`'s line in recommend, `low` or `mid`: a click writes its
+    /// price cap there.
+    Cap(usize, usize),
     /// The ▾ on stop `i` of task `t` in recommend, as `Recommend`: a click opens its dropdown.
     Menu(usize, usize),
+    /// The ▾ after the harness in tier box `i` of task `t` in recommend: a click opens `H`'s list.
+    Harness(usize, usize),
+    /// What task `t` of your own is about, on its line in recommend: a click writes it there.
+    About(usize),
     /// Row `i` of `HELP` in `?`.
     Help(usize),
 }
@@ -1419,17 +1436,17 @@ pub struct App {
     pub dir: String,
     /// Task whose price frontier the table shows, picked in the recommend overlay.
     pub task: Option<&'static Task>,
-    /// Cursor in the recommend overlay: the task, and on its row 0 for its name, else the tier
-    /// `task_sel - 1` of `TIERS`.
+    /// Cursor in the recommend overlay: the task, and among its lines 0 for its name, else the
+    /// tier `task_sel - 1` of `TIERS`.
     pub task_cur: usize,
     pub task_sel: usize,
+    /// The column `h` `l` put recommend's cursor in along its line, kept as it moves to a line
+    /// without that cell, which has the cursor on its nearest (`rec_cell`).
+    pub rec_col: usize,
     /// The cursor on recommend's `from` line instead, the models it ranks: on the tab `among`,
     /// one of mine, all, selected and favorites. `PREFERRED` is the line under it, your
     /// preferred harness, whose dropdown is `P`'s list.
     pub among: Option<usize>,
-    /// The cursor on recommend's tier header, under `among`, on tier `task_sel - 1` (`cap_col`):
-    /// enter or space writes the cap of `low` or `mid` there. Only while `among` is none.
-    pub caps: bool,
     pub query: String,
     /// The query matched nothing as typed, so it is matched allowing a typo per word.
     pub typos: bool,
@@ -1565,8 +1582,8 @@ impl App {
             task: None,
             task_cur: 0,
             task_sel: 0,
+            rec_col: MODEL_CELL,
             among: None,
-            caps: false,
             query: String::new(),
             typos: false,
             rows: vec![],
@@ -1845,7 +1862,7 @@ impl App {
             return shown.get(self.compare_sel.min(shown.len().saturating_sub(1))).copied();
         }
         if self.view == View::Recommend {
-            if self.among.is_some() || self.caps {
+            if self.among.is_some() {
                 return None;
             }
             let tier = self.task_sel.checked_sub(1)?;
@@ -1855,12 +1872,6 @@ impl App {
             return self.data.models.iter().find(|m| m.key == self.detail);
         }
         self.rows.get(self.selected()).map(|&i| &self.data.models[i])
-    }
-
-    /// How many stops recommend's sideways cursor moves over: the task's name and its tiers, or
-    /// `+ new task` alone, which has no tiers.
-    fn across_len(&self) -> usize {
-        if self.on_new_task() { 1 } else { 1 + TIERS.len() }
     }
 
     /// What each tier of recommend's task `i` picks, as `--tier` does, with its score: your
@@ -1944,6 +1955,34 @@ impl App {
     /// Whether recommend's cursor is on `+ new task`, the row after the last task.
     pub fn on_new_task(&self) -> bool {
         self.task_cur == self.task_count()
+    }
+
+    /// The cells along recommend's line under the cursor: a task's name, and what one of your
+    /// own is about, or a tier's cap where it has one, its model and the harness its line shows.
+    pub fn rec_cells(&self) -> Vec<usize> {
+        match self.task_sel.checked_sub(1) {
+            _ if self.among.is_some() || self.on_new_task() => vec![NAME_CELL],
+            None if self.custom_at().is_some() => vec![NAME_CELL, MODEL_CELL],
+            None => vec![NAME_CELL],
+            Some(c) => {
+                let cap = view::capped(TIERS[c].0).then_some(NAME_CELL);
+                let harness = self.current().and_then(|m| self.starts_on(m, c)).map(|_| HARNESS_CELL);
+                cap.into_iter().chain([MODEL_CELL]).chain(harness).collect()
+            }
+        }
+    }
+
+    /// The cell recommend's cursor is on: `rec_col`, or the nearest its line has.
+    pub fn rec_cell(&self) -> usize {
+        let cells = self.rec_cells();
+        cells.into_iter().min_by_key(|c| c.abs_diff(self.rec_col)).unwrap_or(NAME_CELL)
+    }
+
+    /// `H`'s list for the model of recommend's tier under the cursor, as a click on its harness opens it.
+    fn ask_tier_via(&mut self) {
+        if let Some(key) = self.current().map(|m| m.key.clone()) {
+            self.ask_via(&key, None);
+        }
     }
 
     /// The line of a task of your own in recommend: the models you gave it and its tiers that
@@ -3048,7 +3087,7 @@ impl App {
         self.relist(key, slot, None);
     }
 
-    /// Enter on a task written in recommend, under the grid (`task_enter`).
+    /// Enter on a task written in recommend, on its line (`task_enter`).
     fn new_task(&mut self) -> Option<Effect> {
         let Input::Task(e) = std::mem::replace(&mut self.input, Input::None) else { return None };
         let (effect, back) = self.task_enter(e, None);
@@ -3184,7 +3223,7 @@ impl App {
 
     /// The task of your own whose name recommend's cursor is on.
     fn own_name(&self) -> Option<&str> {
-        self.custom_at().filter(|_| self.among.is_none() && !self.caps && self.task_sel == 0)
+        self.custom_at().filter(|_| self.among.is_none() && self.task_sel == 0)
     }
 
     /// Recommend's cursor back on the task of your own it was `on`, after a change to them: they
@@ -3381,19 +3420,21 @@ impl App {
         } else if self.view == View::Compare {
             self.compare_sel = go(self.compare_sel, self.marked_shown);
         } else if self.view == View::Recommend {
-            // The `from` line comes before your preferred harness, that before the tiers' header,
-            // and that before the first task, `+ new task` after the last.
+            // The `from` line comes before your preferred harness, that before the first task's
+            // name, then its tiers, each a line, and so on to `+ new task` after the last.
+            let lines = 1 + TIERS.len();
             let at = match self.among {
                 Some(PREFERRED) => 1,
                 Some(_) => 0,
-                None if self.caps => 2,
-                None => self.task_cur + 3,
+                None => 2 + self.task_cur * lines + self.task_sel,
             };
-            match go(at, self.task_count() + 4) {
+            match go(at, 3 + self.task_count() * lines) {
                 0 => self.among = Some(self.among_on()),
                 1 => self.among = Some(PREFERRED),
-                2 => (self.among, self.caps) = (None, true),
-                t => self.task_to(t - 3),
+                t => {
+                    self.task_to((t - 2) / lines);
+                    self.task_sel = (t - 2) % lines;
+                }
             }
         } else {
             self.scroll = self.scroll.saturating_add_signed(n.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
@@ -3432,7 +3473,7 @@ impl App {
             self.hit = (if n == 0 { 0 } else { self.hit.0 + n }, true);
             return;
         }
-        // Recommend's are its tasks' names and the models in their boxes, row by row.
+        // Recommend's are its tasks' names and the models on their tiers' lines, in order.
         let has = |s: &str| !found(s, &self.overlay_query).is_empty();
         let mut stops = vec![];
         let names: Vec<&str> = TASKS.iter().map(|t| t.name).chain(self.store.custom_tasks()).collect();
@@ -3446,7 +3487,7 @@ impl App {
             return self.refuse(format!("no task or model matches {}", self.overlay_query));
         };
         // On the `from` line, before the first task, `n` goes to the first and `N` the last.
-        let cur = (self.among.is_none() && !self.caps).then_some((self.task_cur, self.task_sel));
+        let cur = self.among.is_none().then_some((self.task_cur, self.task_sel));
         let at = match (n, cur) {
             (0, _) | (1.., None) => 0,
             (..0, None) => last,
@@ -3457,6 +3498,7 @@ impl App {
         let (t, b) = stops[at];
         self.task_to(t);
         self.task_sel = b;
+        self.rec_col = if b == 0 { NAME_CELL } else { MODEL_CELL };
         self.status = format!("match {} of {}", at + 1, stops.len());
     }
 
@@ -3491,14 +3533,13 @@ impl App {
         }
     }
 
-    /// Recommend's cursor to task `t`, on the name or the tier it was on.
+    /// Recommend's cursor to task `t`, on the name or the tier it was on, and on `+ new task`
+    /// on that, which has no tiers.
     fn task_to(&mut self, t: usize) {
-        (self.among, self.caps, self.task_cur) = (None, false, t);
-    }
-
-    /// The tier recommend's header cursor is on: the cursor's tier, `low` from a task's name.
-    pub fn cap_col(&self) -> usize {
-        self.task_sel.checked_sub(1).filter(|&c| c > 0 || self.task_sel == 1).unwrap_or(1).min(TIERS.len() - 1)
+        (self.among, self.task_cur) = (None, t);
+        if self.on_new_task() {
+            self.task_sel = 0;
+        }
     }
 
     fn go_to(&mut self, row: usize) {
@@ -4016,7 +4057,7 @@ impl App {
                 }
             };
         }
-        // The sideways wheel does what h and l do: compare's columns, recommend's model cursor.
+        // The sideways wheel does what h and l do: compare's columns, recommend's cells.
         if let (View::Compare | View::Recommend, Input::None, Mouse::Cols(n)) = (&self.view, &self.input, &m) {
             return self.table_key(KeyCode::Char(if *n < 0 { 'h' } else { 'l' }), n.abs());
         }
@@ -4030,7 +4071,10 @@ impl App {
                     return None;
                 }
                 (Stop::Recommend(t, i), View::Recommend) => {
-                    (self.task_cur, self.task_sel, self.among, self.caps) = (t, i, None, false);
+                    (self.task_cur, self.task_sel, self.among) = (t, i, None);
+                    // On a task's name, past what one of your own is about, else on the tier's
+                    // model, so a double click there opens it.
+                    self.rec_col = if i == 0 { NAME_CELL } else { MODEL_CELL };
                 }
                 (Stop::Among(i), View::Recommend) => return self.pick_among(i),
                 (Stop::Preferred, View::Recommend) => {
@@ -4038,14 +4082,25 @@ impl App {
                     self.ask_harness();
                     return None;
                 }
-                (Stop::Cap(c), View::Recommend) => {
-                    (self.among, self.caps, self.task_sel) = (None, true, c + 1);
+                (Stop::Cap(t, c), View::Recommend) => {
+                    (self.task_cur, self.task_sel, self.among) = (t, c + 1, None);
                     self.edit_cap(c);
                     return None;
                 }
                 (Stop::Menu(t, i), View::Recommend) => {
-                    (self.task_cur, self.task_sel, self.among, self.caps) = (t, i, None, false);
+                    (self.task_cur, self.task_sel, self.among) = (t, i, None);
+                    self.rec_col = if i == 0 { NAME_CELL } else { MODEL_CELL };
                     self.recommend_menu();
+                    return None;
+                }
+                (Stop::About(t), View::Recommend) => {
+                    (self.task_cur, self.task_sel, self.among, self.rec_col) = (t, 0, None, MODEL_CELL);
+                    self.edit_task();
+                    return None;
+                }
+                (Stop::Harness(t, i), View::Recommend) => {
+                    (self.task_cur, self.task_sel, self.among, self.rec_col) = (t, i, None, HARNESS_CELL);
+                    self.ask_tier_via();
                     return None;
                 }
                 (Stop::Help(i), View::Help) => self.help_sel = i,
@@ -4206,21 +4261,39 @@ impl App {
         None
     }
 
-    /// `<` in recommend, or enter on the tiers' header: the price cap of the cursor's tier, `low`
-    /// or `mid`, written on its header, from the one it has.
-    fn ask_cap(&mut self) {
-        let header = self.caps && self.among.is_none();
-        let sel = if header { self.cap_col() + 1 } else { self.task_sel };
-        let tier = sel.checked_sub(1).filter(|_| self.among.is_none() && (header || !self.on_new_task()));
-        match tier.filter(|&c| view::capped(TIERS[c].0)) {
-            Some(c) => self.edit_cap(c),
-            None if header => self.refuse("only low and mid have a price cap, h l move to one"),
-            None => self.refuse("< sets a price cap, put the cursor on the low or mid tier first"),
+    /// `T` in recommend: the name of the task of your own under the cursor and what it is about
+    /// written together on its name's line, the cursor in its name when on it, else in what it is
+    /// about.
+    fn edit_task(&mut self) {
+        let on = self.among.is_none();
+        match (self.custom_at().filter(|_| on), self.cur_task().filter(|_| on)) {
+            (Some(task), _) => {
+                let about = self.task_sel > 0 || self.rec_cell() != NAME_CELL;
+                self.input = Input::Task(Edit::task(task.to_string(), &self.store, about));
+            }
+            (_, Some(t)) => self.refuse(self.built_in(t.name)),
+            _ => self.refuse(format!("{} edits a task you added, put the cursor on it", self.key_of('T'))),
         }
     }
 
+    /// `<` in recommend: the price cap of the cursor's tier, `low` or `mid`, written on its
+    /// line, from the one it has.
+    fn ask_cap(&mut self) {
+        let tier = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.on_new_task());
+        match tier.filter(|&c| view::capped(TIERS[c].0)) {
+            Some(c) => self.edit_cap(c),
+            None => self.refuse("< sets a price cap, put the cursor on a low or mid tier first"),
+        }
+    }
+
+    /// The harness `x` starts tier `c`'s model `m` on in recommend, as its line shows it.
+    pub fn starts_on(&self, m: &Model, c: usize) -> Option<&'static str> {
+        let cmd = harness_cmd(&self.store, &within(&self.store, TIERS[c].0, m), &[], &self.data.harness)?;
+        crate::data::vias().find(|h| launch_cmd(m, h, &self.data.harness).is_some_and(|l| l[0] == cmd[0]))
+    }
+
     /// `m`, recommend's pick under the cursor, on the harnesses alone where its price fits the
-    /// box's tier (`within`), for `x` and `Y` to start it where `--cmd` does. None elsewhere.
+    /// tier (`within`), for `x` and `Y` to start it where `--cmd` does. None elsewhere.
     fn capped(&self, m: &Model) -> Option<Model> {
         let c = self.tier_at().filter(|_| self.view == View::Recommend)?.1;
         Some(within(&self.store, TIERS[c].0, m))
@@ -4228,7 +4301,7 @@ impl App {
 
     /// The task and the tier under recommend's cursor.
     fn tier_at(&self) -> Option<(&str, usize)> {
-        let c = self.task_sel.checked_sub(1).filter(|_| self.among.is_none() && !self.caps)?;
+        let c = self.task_sel.checked_sub(1).filter(|_| self.among.is_none())?;
         let task = self.cur_task().map(|t| t.name).or(self.custom_at())?;
         Some((task, c))
     }
@@ -4246,11 +4319,12 @@ impl App {
     }
 
     /// `d` in recommend, or a click on a ▾ there: on a task's name the benchmarks of its column,
-    /// which rank it, else the models of the tier under the cursor.
+    /// which rank it, on a tier's harness `H`'s list, else the models of the tier under the cursor.
     fn recommend_menu(&mut self) {
-        let on_name = self.task_sel == 0 && self.among.is_none() && !self.caps;
+        let on_name = self.task_sel == 0 && self.among.is_none();
         match self.name_col(self.task_cur).filter(|_| on_name) {
             Some(c) => self.ask_benches(Some(c)),
+            None if !on_name && self.rec_cell() == HARNESS_CELL => self.ask_tier_via(),
             None => self.ask_pick(),
         }
     }
@@ -4325,10 +4399,11 @@ impl App {
         view::recommended(&self.task_frontier(t), &self.off(t), self.store.tier_cap(tier), self.local_best(t))
     }
 
-    /// Tier `c`'s cap written on its header, from the one it has.
+    /// Tier `c`'s cap written on its line, from the one it has, the cursor on it.
     fn edit_cap(&mut self, c: usize) {
         let text = self.store.tier_cap(TIERS[c].0).to_string();
-        self.input = Input::Cap { tier: c, cur: text.len(), text };
+        self.input = Input::Cap { tier: c, cur: text.len(), text, fresh: true };
+        self.rec_col = NAME_CELL;
     }
 
     /// Index in `LEVELS` of the Price maximum picked in its dropdown, if any.
@@ -4346,7 +4421,7 @@ impl App {
     /// Keys other than motions when no prompt or list is open.
     fn table_key(&mut self, code: KeyCode, n: isize) -> Option<Effect> {
         // In recommend space does what enter does where no model is under the cursor: the `from`
-        // line, the tiers' header, a task's name, a tier with no model and `+ new task`.
+        // line, a task's name, a tier with no model and `+ new task`.
         let code = match code {
             KeyCode::Char(' ') if self.view == View::Recommend && self.current().is_none() => KeyCode::Enter,
             _ => code,
@@ -4359,13 +4434,11 @@ impl App {
             || matches!(self.view, View::Detail(_))
             || (self.view == View::Recommend && self.current().is_some())
             || (self.view == View::Compare && self.marked_shown >= 2);
-        // Recommend moves a model cursor sideways, wrapping, instead of the column, and compare
-        // its column cursor.
-        let across = self.view == View::Recommend;
+        // Compare moves its column cursor sideways, and recommend its cursor along the line.
         let compare = self.view == View::Compare;
+        let across = self.view == View::Recommend;
         // On recommend's `from` line the cursor runs over the tabs, and enter picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
-        let caps = self.view == View::Recommend && among.is_none() && self.caps;
         match (code, among) {
             // With access to none `a` and `m` say so and stay, as in the table.
             (KeyCode::Char('a' | 'm'), _) if self.view == View::Recommend && self.no_access() => {
@@ -4399,23 +4472,20 @@ impl App {
                 self.recommend_menu();
                 return None;
             }
-            // On the tiers' header `h` `l` move over the tiers, and enter writes the cap of `low` or `mid`.
-            (KeyCode::Enter, None) if caps => {
-                self.ask_cap();
-                return None;
-            }
-            (KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right, None) if caps => {
-                let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
-                self.task_sel = step(self.cap_col(), n, TIERS.len()) + 1;
-                return None;
-            }
-            (KeyCode::Char(c @ ('0' | '_' | '$')), None) if caps => {
-                self.task_sel = if c == '$' { TIERS.len() } else { 1 };
-                return None;
-            }
-            (KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H'), None) if caps => {
-                self.refuse("the cursor is on the tier prices, not a model, j moves down to a task");
-                return None;
+            // Along a tier's line enter writes its cap or opens its harness's list, and on what a task
+            // of your own is about it writes that, as a click there does. On a model it opens its
+            // details, as everywhere.
+            (KeyCode::Enter, None) if self.view == View::Recommend && !self.on_new_task() => {
+                let act: Option<fn(&mut Self)> = match (self.task_sel, self.rec_cell()) {
+                    (1.., NAME_CELL) => Some(Self::ask_cap),
+                    (1.., HARNESS_CELL) => Some(Self::ask_tier_via),
+                    (0, MODEL_CELL) => Some(Self::edit_task),
+                    _ => None,
+                };
+                if let Some(act) = act {
+                    act(self);
+                    return None;
+                }
             }
             (KeyCode::Enter, Some(i)) => return self.pick_among(i),
             (KeyCode::Char('h') | KeyCode::Left, Some(i)) => {
@@ -4443,23 +4513,27 @@ impl App {
         match code {
             KeyCode::Char('h') | KeyCode::Left if table => self.col = step_col(self.col, -n),
             KeyCode::Char('l') | KeyCode::Right if table => self.col = step_col(self.col, n),
-            KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if across => {
-                let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
-                let len = self.across_len();
-                self.task_sel = step(self.task_sel.min(len.saturating_sub(1)), n, len);
-            }
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if compare => {
                 let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
                 let len = self.compare_cols();
                 self.compare_col = step(self.compare_col.min(len.saturating_sub(1)), n, len);
             }
+            KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if across => {
+                let n = if matches!(code, KeyCode::Char('h') | KeyCode::Left) { -n } else { n };
+                let cells = self.rec_cells();
+                let at = cells.iter().position(|&c| c == self.rec_cell()).unwrap_or(0);
+                // A line of one cell keeps the column for the next.
+                if cells.len() > 1 {
+                    self.rec_col = cells[step(at, n, cells.len())];
+                }
+            }
+            KeyCode::Char('0' | '_') if across => self.rec_col = NAME_CELL,
+            KeyCode::Char('$') if across => self.rec_col = HARNESS_CELL,
             KeyCode::Char('0' | '_') if compare => self.compare_col = 0,
             KeyCode::Char('$') if compare => self.compare_col = self.compare_cols().saturating_sub(1),
             KeyCode::Char('s') if compare && self.marked_shown >= 2 => self.sort_compare(),
             KeyCode::Char('0' | '_') if table => self.col = 0,
             KeyCode::Char('$') if table => self.col = step_col(0, -1),
-            KeyCode::Char('0' | '_') if across => self.task_sel = 0,
-            KeyCode::Char('$') if across => self.task_sel = self.across_len().saturating_sub(1),
             KeyCode::Char('w') if table => {
                 let (starts, last) = (group_starts(), step_col(0, -1));
                 for _ in 0..n {
@@ -4597,8 +4671,8 @@ impl App {
             }
             KeyCode::Char('R') => {
                 self.view = if self.view == View::Recommend { View::Table } else { View::Recommend };
-                // It opens on its `from` line, the models it ranks.
-                (self.task_sel, self.among) = (0, Some(self.among_on()));
+                // It opens on its `from` line, the models it ranks, and then on the models' column.
+                (self.task_sel, self.among, self.rec_col) = (0, Some(self.among_on()), MODEL_CELL);
                 self.scroll = 0;
                 self.overlay_query.clear();
             }
@@ -4606,16 +4680,7 @@ impl App {
             KeyCode::Enter if self.view == View::Recommend && self.among.is_none() && self.on_new_task() => {
                 self.input = Input::Task(Edit::new_task());
             }
-            // `T` writes the name of the task of your own on the cursor's row and what it is about
-            // together, under the grid, where they show.
-            KeyCode::Char('T') if self.view == View::Recommend => {
-                let on = self.among.is_none() && !self.caps;
-                match (self.custom_at().filter(|_| on), self.cur_task().filter(|_| on)) {
-                    (Some(task), _) => self.input = Input::Task(Edit::task(task.to_string(), &self.store)),
-                    (_, Some(t)) => self.refuse(self.built_in(t.name)),
-                    _ => self.refuse(format!("{} edits a task you added, put the cursor on it", self.key_of('T'))),
-                }
-            }
+            KeyCode::Char('T') if self.view == View::Recommend => self.edit_task(),
             // Elsewhere it says where it works.
             KeyCode::Char('T') => {
                 let (t, r, f) = (self.key_of('T'), self.key_of('R'), self.key_of('f'));
@@ -4632,7 +4697,7 @@ impl App {
                 self.refuse(match (self.among, self.task_sel) {
                     (Some(_), _) => "no model under the cursor, j moves down to a task",
                     _ if self.on_new_task() => "no model under the cursor, enter or space adds a task",
-                    (_, 0) => "no model under the cursor, l moves to a tier",
+                    (_, 0) => "no model under the cursor, j moves to a tier",
                     _ => "this tier has no model",
                 });
             }
@@ -4865,8 +4930,8 @@ impl App {
                 self.input = Input::Search { cur: 0, was };
                 let (hit, scroll, among, task_cur, task_sel) =
                     (self.hit.0, self.scroll, self.among, self.task_cur, self.task_sel);
-                let (help_sel, caps) = (self.help_sel, self.caps);
-                self.search_from = SearchFrom { hit, scroll, among, caps, task_cur, task_sel, help_sel };
+                let (help_sel, rec_col) = (self.help_sel, self.rec_col);
+                self.search_from = SearchFrom { hit, scroll, among, task_cur, task_sel, rec_col, help_sel };
                 if table && cleared {
                     self.rebuild();
                 }
@@ -4909,9 +4974,9 @@ impl App {
                         // A panel goes back to where the search started, as in vim, with no match
                         // count left in the status bar.
                         if overlay {
-                            let SearchFrom { hit, scroll, among, caps, task_cur, task_sel, help_sel } =
+                            let SearchFrom { hit, scroll, among, task_cur, task_sel, rec_col, help_sel } =
                                 self.search_from;
-                            (self.hit, self.scroll, self.among, self.caps) = ((hit, false), scroll, among, caps);
+                            (self.hit, self.scroll, self.among, self.rec_col) = ((hit, false), scroll, among, rec_col);
                             (self.task_cur, self.task_sel, self.help_sel) = (task_cur, task_sel, help_sel);
                             self.status.clear();
                             return None;
@@ -4963,8 +5028,18 @@ impl App {
                 KeyCode::Tab | KeyCode::BackTab => e.switch(),
                 _ => e.key(code, mods),
             },
-            Input::Cap { tier, text, cur } => match code {
+            Input::Cap { tier, text, cur, fresh } => match code {
                 KeyCode::Esc => self.input = Input::None,
+                _ if std::mem::take(fresh)
+                    && matches!(code, KeyCode::Char('0'..='9' | '.') | KeyCode::Backspace | KeyCode::Delete) =>
+                {
+                    // The cap it had goes, for the one typed.
+                    (*text, *cur) = (String::new(), 0);
+                    if let KeyCode::Char(c) = code {
+                        (*text, *cur) = (c.to_string(), 1);
+                    }
+                    self.status.clear();
+                }
                 _ if edit(text, cur, code, mods, |c| matches!(c, '0'..='9' | '.')) => self.status.clear(),
                 KeyCode::Enter => {
                     // Nothing typed is back to the default.
@@ -5239,7 +5314,7 @@ impl App {
                         } else if !self.store.custom_tasks().contains(&task.as_str()) {
                             self.refuse(format!("{task} has no favorite left, tick one of its tiers first"));
                         } else {
-                            list.write(at?, Edit::task(task, &self.store));
+                            list.write(at?, Edit::task(task, &self.store, true));
                         }
                     }
                     // `v` starts a range in `o`'s list, as in the table, and again cancels it.
@@ -6193,27 +6268,26 @@ mod tests {
         assert_eq!(a.store.about("api"), Some("the agent's"));
         code(&mut a, KeyCode::Esc);
         a.store.delete_task("api");
-        // `T` anywhere on its row writes its name and what it is about together, under the grid,
-        // and enter saves both.
+        // `T` on any of its lines writes its name and what it is about together, on its line, the
+        // cursor at the end of what it is about, and enter saves both.
         a.store.set_about("bug-hunt-a", "other");
         a.rebuild();
-        press(&mut a, "Gkk0lT");
-        assert_eq!((fields(&a), on_about(&a)), (Some(("bug-hunt".into(), "finding bugs".into())), false));
+        press(&mut a, "G9kT");
+        assert_eq!((fields(&a), on_about(&a)), (Some(("bug-hunt".into(), "finding bugs".into())), true));
         assert_eq!(a.edit_row(), Some(a.task_cur), "for its own row");
-        code(&mut a, KeyCode::Tab);
         a.paste(" fast");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!((a.input == Input::None, a.store.about("bug-hunt")), (true, Some("finding bugs fast")));
         assert_eq!(a.status, "bug-hunt: finding bugs fast");
         // With no model it is its description, so that is not emptied: D deletes it.
         press(&mut a, "T");
-        code(&mut a, KeyCode::Tab);
         ctrl(&mut a, 'u');
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         assert!(err(&a).is_some() && on_about(&a) && a.store.about("bug-hunt").is_some());
         code(&mut a, KeyCode::Esc);
         // A name another task has is said, in the name's field, and neither is saved.
         press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
         a.paste("-a");
         code(&mut a, KeyCode::Tab);
         a.paste(" now");
@@ -6233,6 +6307,7 @@ mod tests {
         );
         // No name is said too.
         press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
         ctrl(&mut a, 'u');
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         assert_eq!(err(&a).as_deref(), Some("a task needs a name"));
@@ -6251,14 +6326,14 @@ mod tests {
         a.store.delete_task("bug-hunt-a");
         a.rebuild();
         // On a built-in task, or off the tasks, T says it can't.
-        press(&mut a, "ggjjjT");
+        press(&mut a, "ggjjT");
         assert!(a.failed && a.input == Input::None && a.status.contains("is built in"), "{}", a.status);
         press(&mut a, "ggT");
         assert!(a.failed && a.input == Input::None);
         // D on it asks, then deletes it. On a built-in task it says it can't.
-        press(&mut a, "GklD");
+        press(&mut a, "GkD");
         assert!(a.failed && a.input == Input::None, "D on a tier deletes nothing");
-        press(&mut a, "0D");
+        press(&mut a, "4kD");
         assert_eq!(a.input, Input::DeleteTask("bug-hunts".into()));
         assert_eq!(press(&mut a, "D"), Some(Effect::Save));
         assert!(a.store.custom_tasks().is_empty() && a.store.about("bug-hunts").is_none());
@@ -7447,8 +7522,9 @@ mod tests {
     #[test]
     fn picking_a_task_shows_its_frontier() {
         let mut a = app();
-        press(&mut a, "Rjjjjj");
-        assert_eq!(a.task_cur, 2);
+        // j goes through each task's name and tiers.
+        press(&mut a, "R12j");
+        assert_eq!((a.task_cur, a.task_sel), (2, 0));
         press(&mut a, "G");
         assert_eq!(a.task_cur, TASKS.len(), "on + new task");
         press(&mut a, "1gg");
@@ -7748,16 +7824,20 @@ mod tests {
         let mut a = app();
         a.store.toggle_favorite("debugging:high", "opus5");
         a.rebuild();
-        // After a built-in task's line, which its model is not on.
+        // After a built-in task's line, which its model is not on. j k land on what it is about,
+        // in the models' column, and h goes to its name.
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
-        press(&mut a, "RGk");
+        press(&mut a, "RG5k");
+        assert_eq!((a.task_sel, a.rec_cell()), (0, MODEL_CELL), "on what it is about");
+        press(&mut a, "h");
+        assert_eq!(a.rec_cell(), NAME_CELL, "on its name");
         code(&mut a, KeyCode::Enter);
         assert_eq!((a.task.is_none(), a.current().map(|m| m.key.as_str())), (true, Some("opus5")));
         // Filtered out, it says so rather than name the row the cursor is on.
         press(&mut a, "/gpt");
         code(&mut a, KeyCode::Enter);
-        press(&mut a, "RGk");
+        press(&mut a, "RG5kh");
         code(&mut a, KeyCode::Enter);
         assert!(a.failed && a.status.contains("hidden by a filter"), "{}", a.status);
         // Compare with one selected shows no model, so a model's keys act on none.
@@ -7775,7 +7855,7 @@ mod tests {
         // the built-in task picked before.
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
-        press(&mut a, "RGk");
+        press(&mut a, "RG5kh");
         code(&mut a, KeyCode::Enter);
         assert_eq!((&a.view, a.custom_at(), a.task.is_some()), (&View::Recommend, Some("tool-dispatch"), true));
         assert_eq!(a.status, "tool-dispatch has no model yet, press d on a tier to choose one");
@@ -7814,16 +7894,14 @@ mod tests {
         assert_eq!((under(&a).as_str(), edit(&a), a.store.about("tool-dispatch")), ("tool-dispatch", None, None));
         assert!(a.choosing_favs(), "the list is open still");
         // T on it writes its name and what it is about together, starting from what they are,
-        // tab going from one to the other, and its entry shows them.
+        // the cursor in what it is about, tab going from one to the other, and its entry shows them.
         press(&mut a, "T");
         assert_eq!(edit(&a), Some(("tool-dispatch".into(), String::new())));
-        code(&mut a, KeyCode::Tab);
         a.paste("routing tool calls");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!((a.store.about("tool-dispatch"), under(&a).as_str()), (Some("routing tool calls"), "tool-dispatch"));
         // While writing, the keys that move are text, the wheel is still and esc leaves the entry alone.
         press(&mut a, "T");
-        code(&mut a, KeyCode::Tab);
         press(&mut a, "jk");
         a.mouse(Mouse::Scroll(-3));
         assert_eq!(edit(&a), Some(("tool-dispatch".into(), "routing tool callsjk".into())));
@@ -7837,7 +7915,6 @@ mod tests {
         press(&mut a, " ");
         assert_eq!(a.store.custom_tasks(), ["tool-dispatch"]);
         press(&mut a, "T");
-        code(&mut a, KeyCode::Tab);
         ctrl(&mut a, 'u');
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         assert!(err(&a).is_some_and(|e| e.starts_with("a task with no model keeps its description")), "{:?}", err(&a));
@@ -7851,9 +7928,10 @@ mod tests {
         );
         press(&mut a, " ");
         assert!(ticked(&a) && under(&a) == "tool-dispatch");
-        // T writes another name on it, starting from its own; one a task has is said under the
-        // list, the name still there to change.
+        // T, then tab, writes another name on it, starting from its own, and one a task has is said
+        // under the list, the name still there to change.
         press(&mut a, "T");
+        code(&mut a, KeyCode::Tab);
         ctrl(&mut a, 'u');
         a.paste("coding");
         assert_eq!(code(&mut a, KeyCode::Enter), None);
@@ -7889,24 +7967,24 @@ mod tests {
         a.store.rename_task("dispatch", "tool-dispatch").unwrap();
         // Recommend lists it after the built-in tasks, the cursor on its name, its model after
         // it; enter on the name goes to the table, on that model.
-        press(&mut a, "RGk");
+        press(&mut a, "RG5k");
         assert_eq!((a.task_cur, a.custom_at(), a.task_at_hand().is_none()), (TASKS.len(), Some("tool-dispatch"), true));
         assert!(a.current().is_none(), "on the name");
-        press(&mut a, "l");
+        press(&mut a, "j");
         assert!(a.current().is_none(), "free holds a free model alone");
-        press(&mut a, "l");
+        press(&mut a, "j");
         assert!(a.current().is_none(), "low holds it alone at its price or under");
-        press(&mut a, "2l");
+        press(&mut a, "2j");
         assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "its model is high's");
-        press(&mut a, "4h");
+        press(&mut a, "4k0");
         code(&mut a, KeyCode::Enter);
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, on.as_str()));
         assert!(a.status.ends_with("your model for tool-dispatch"), "{}", a.status);
         // f on its row starts on it; without its model the task is gone, and the cursor is on
         // + new task after the task before.
-        press(&mut a, "RGkf");
+        press(&mut a, "RG5kf");
         assert!(a.failed && a.input == Input::None, "f on a task's name has no model to favorite");
-        press(&mut a, "4lf");
+        press(&mut a, "4jf");
         assert!(ticked(&a) && under(&a) == "tool-dispatch");
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);
@@ -7928,10 +8006,10 @@ mod tests {
         a.store.toggle_favorite("tool-dispatch:high", &on);
         a.store.toggle_favorite("tool-dispatch:low", "mini");
         a.rebuild();
-        press(&mut a, "Gk02l");
+        press(&mut a, "G3k");
         assert_eq!((&a.view, a.current().map(|m| m.key.as_str())), (&View::Recommend, Some("mini")));
-        press(&mut a, "2l");
-        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "h l move along its tiers: high's");
+        press(&mut a, "2j");
+        assert_eq!(a.current().map(|m| m.key.clone()), Some(on.clone()), "j k move along its tiers: high's");
         press(&mut a, "fl");
         assert_eq!(
             (under(&a).as_str(), a.open_list().map(|l| l.col)),
@@ -7939,7 +8017,6 @@ mod tests {
             "l: past the tiers it is dearer than, to high"
         );
         press(&mut a, "T");
-        code(&mut a, KeyCode::Tab);
         a.paste(" fast");
         assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
         assert_eq!(a.open_list().map(|l| l.col), Some(3), "what it is about leaves the cursor on its box");
@@ -7970,10 +8047,6 @@ mod tests {
         // Off a tier, the status says where one is, as for the other model keys.
         press(&mut a, "H");
         assert!(a.input == Input::None && a.status.ends_with("j moves down to a task"), "the from line: {}", a.status);
-        (a.among, a.caps) = (None, true);
-        press(&mut a, "H");
-        assert!(a.status.starts_with("the cursor is on the tier prices"), "the tiers' header: {}", a.status);
-        a.caps = false;
         let coding = TASKS.iter().position(|t| t.name == "coding").unwrap();
         (a.among, a.task_cur, a.task_sel) = (None, coding, 1);
         press(&mut a, "H");
@@ -8104,9 +8177,9 @@ mod tests {
         );
         code(&mut a, KeyCode::Esc);
         // In recommend, f starts on the task under the cursor, on the box its favorite has there.
-        press(&mut a, "Rjjjj2l");
+        press(&mut a, "R2gg2j");
         assert_eq!(a.current().unwrap().key, "mini", "high's favorite is not low's");
-        press(&mut a, "2l");
+        press(&mut a, "2j");
         assert_eq!(a.current().unwrap().key, "gpt55", "but high's");
         press(&mut a, "f");
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 3, .. }, .. }));
@@ -8114,7 +8187,7 @@ mod tests {
         a.store.toggle_favorite("coding:high", "gpt55");
         a.rebuild();
         // On a tier's own pick, f starts on that tier's box, so f enter is for the tier alone.
-        press(&mut a, "2h");
+        press(&mut a, "2k");
         assert_eq!(a.current().unwrap().key, "mini");
         assert_eq!(press(&mut a, "f"), None);
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 1, .. }, .. }));
@@ -8168,14 +8241,83 @@ mod tests {
     }
 
     #[test]
-    fn lt_in_recommend_writes_a_tier_cap_on_its_header() {
+    fn h_l_in_recommend_move_along_a_line_where_enter_changes_what_is_there() {
         let mut a = app();
-        press(&mut a, "Rjjjj<");
+        // Each on its harnesses.
+        for m in &mut a.data.models {
+            m.offers.iter_mut().for_each(|o| o.via = m.via.clone());
+        }
+        // Coding's mid: its cap, its model and the harness it starts on, the cursor on the model.
+        press(&mut a, "R2gg3j");
+        assert_eq!((a.task_cur, a.task_sel, a.rec_cells(), a.rec_cell()), (1, 3, vec![0, 1, 2], MODEL_CELL));
+        press(&mut a, "l");
+        assert_eq!(a.rec_cell(), HARNESS_CELL);
+        code(&mut a, KeyCode::Enter);
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Via, .. }), "enter on the harness: H's list");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "d");
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Via, .. }), "and d, its ▾");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "l");
+        assert_eq!(a.rec_cell(), NAME_CELL, "from the last, l wraps to the cap");
+        code(&mut a, KeyCode::Enter);
+        assert!(matches!(a.input, Input::Cap { tier: 2, .. }), "enter on the cap writes it: {:?}", a.input);
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "l");
+        code(&mut a, KeyCode::Enter);
+        assert!(matches!(a.view, View::Detail(_)), "enter on the model shows its details, as everywhere");
+        code(&mut a, KeyCode::Esc);
+        // The column stays as the cursor moves: high has no cap, so its model, and the next
+        // task's name.
+        press(&mut a, "hj");
+        assert_eq!((a.task_sel, a.rec_cell()), (4, MODEL_CELL), "high has no cap");
+        press(&mut a, "k");
+        assert_eq!((a.task_sel, a.rec_cell()), (3, NAME_CELL), "mid's cap again");
+        press(&mut a, "$j");
+        assert_eq!(a.rec_cell(), HARNESS_CELL, "$ to the harness, kept down the column");
+        // The sideways wheel moves as h l do.
+        a.mouse(Mouse::Cols(-1));
+        assert_eq!(a.rec_cell(), MODEL_CELL);
+        // A task of your own: its name and what it is about, enter writing that, T the field
+        // under the cursor.
+        a.store.toggle_favorite("bugs:high", "mini");
+        a.store.set_about("bugs", "finding bugs");
+        a.rebuild();
+        press(&mut a, "G5k");
+        assert_eq!((a.custom_at(), a.rec_cells(), a.rec_cell()), (Some("bugs"), vec![0, 1], MODEL_CELL));
+        code(&mut a, KeyCode::Enter);
+        assert!(matches!(&a.input, Input::Task(e) if matches!(e.what, What::Task { about: true, .. })));
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "hT");
+        let Input::Task(e) = &a.input else { panic!("{:?}", a.input) };
+        assert_eq!(
+            (e.text.as_str(), &e.what),
+            ("bugs", &What::Task { was: Some("bugs".into()), other: "finding bugs".into(), about: false }),
+            "T on its name, in the name"
+        );
+        code(&mut a, KeyCode::Esc);
+        // A built-in task's name has one cell, which keeps the column for the next line.
+        press(&mut a, "R2ggl");
+        assert_eq!((a.rec_cells(), a.rec_col), (vec![NAME_CELL], MODEL_CELL));
+    }
+
+    #[test]
+    fn lt_in_recommend_writes_a_tier_cap_on_its_line() {
+        let mut a = app();
+        press(&mut a, "Rjj<");
         assert!(a.failed && a.input == Input::None, "on a task's name: no tier");
-        press(&mut a, "ll<");
-        assert_eq!(a.input, Input::Cap { tier: 1, text: "2".into(), cur: 1 }, "low's, from the cap it has");
-        code(&mut a, KeyCode::Backspace);
+        press(&mut a, "jj<");
+        assert_eq!(
+            a.input,
+            Input::Cap { tier: 1, text: "2".into(), cur: 1, fresh: true },
+            "low's, from the cap it has"
+        );
         assert_eq!(press(&mut a, "9"), None);
+        assert_eq!(
+            a.input,
+            Input::Cap { tier: 1, text: "9".into(), cur: 1, fresh: false },
+            "the first typed replaces it"
+        );
         assert_eq!(code(&mut a, KeyCode::Enter), None);
         assert!(a.failed && matches!(a.input, Input::Cap { .. }), "dearer than mid: still written");
         code(&mut a, KeyCode::Backspace);
@@ -8190,47 +8332,31 @@ mod tests {
         press(&mut a, "<");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.input, a.store.tiers.len()), (&Input::None, 0), "esc leaves it");
-        press(&mut a, "h<");
+        press(&mut a, "k<");
         assert!(a.failed && a.input == Input::None, "free has no cap");
-        // Keyboard alone: k from the first task is the tiers' header, h l pick one, enter or space writes it.
-        press(&mut a, "ggjj");
-        assert!(a.caps && a.current().is_none(), "on the header");
-        press(&mut a, "0");
-        code(&mut a, KeyCode::Enter);
-        assert!(a.failed && a.input == Input::None, "free has none");
-        press(&mut a, " ");
-        assert!(a.input == Input::None && a.status.starts_with("only low and mid"), "space neither: {}", a.status);
-        press(&mut a, "$ ");
+        press(&mut a, "jjj<");
         assert!(a.failed && a.input == Input::None, "nor high");
-        press(&mut a, "02l");
-        code(&mut a, KeyCode::Enter);
-        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "mid's");
+        press(&mut a, "k<");
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1, fresh: true }, "mid's");
+        code(&mut a, KeyCode::Left);
+        press(&mut a, "1");
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "15".into(), cur: 1, fresh: false }, "after a move it inserts");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, " ");
-        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "space too");
-        code(&mut a, KeyCode::Esc);
-        press(&mut a, "j");
-        assert!(!a.caps && a.task_cur == 0, "j to the first task");
-        press(&mut a, "k");
-        assert!(a.caps, "k back to the header");
-        press(&mut a, "/gpt");
-        assert!(!a.caps, "the search goes to a match");
-        code(&mut a, KeyCode::Esc);
-        assert!(a.caps, "and esc back to the header");
-        a.mouse(Mouse::Model(Stop::Cap(2)));
-        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1 }, "a click on mid's header");
+        // A click on the label writes it, on that task's line.
+        a.mouse(Mouse::Model(Stop::Cap(1, 2)));
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "5".into(), cur: 1, fresh: true }, "a click on mid's label");
+        assert_eq!((a.task_cur, a.task_sel), (1, 3), "on coding's mid");
     }
 
     /// A click outside recommend while a tier cap is written only leaves the cap, as for a task's name.
     #[test]
     fn a_click_outside_recommend_only_leaves_the_tier_cap_being_written() {
         let mut a = app();
-        press(&mut a, "Rjjl");
-        code(&mut a, KeyCode::Enter);
+        press(&mut a, "Rjjjjj<");
         press(&mut a, "9");
-        assert_eq!(a.input, Input::Cap { tier: 2, text: "59".into(), cur: 2 });
+        assert_eq!(a.input, Input::Cap { tier: 2, text: "9".into(), cur: 1, fresh: false });
         a.mouse(Mouse::Close);
-        assert_eq!((&a.view, &a.input, a.caps), (&View::Recommend, &Input::None, true), "still on mid's header");
+        assert_eq!((&a.view, &a.input, a.task_sel), (&View::Recommend, &Input::None, 3), "still on mid's line");
         assert_eq!(a.store.tier_cap("mid"), 5.0, "as it was");
         a.mouse(Mouse::Close);
         assert_eq!(a.view, View::Table, "the next click closes it");
@@ -8243,7 +8369,7 @@ mod tests {
         let mut a = app();
         press(&mut a, "R");
         let col = a.col;
-        (a.task_cur, a.task_sel, a.among, a.caps) = (1, 0, None, false);
+        (a.task_cur, a.task_sel, a.among) = (1, 0, None);
         press(&mut a, "d");
         let Input::Choose { kind: Kind::Bench, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
         assert!(items.iter().all(|i| matches!(i.1, Effect::Bench(c, _) if c == ECI + 1)), "coding's alone");
@@ -8274,10 +8400,10 @@ mod tests {
     #[test]
     fn d_in_recommend_picks_a_tiers_model() {
         let mut a = app();
-        press(&mut a, "Rjjjjd");
+        press(&mut a, "R2ggd");
         assert!(matches!(a.input, Input::Choose { kind: Kind::Bench, .. }), "on a task's name: its benchmarks");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "$");
+        press(&mut a, "4j");
         let was = a.current().map(|m| m.key.clone());
         press(&mut a, "d");
         let Input::Choose { kind: Kind::Pick, items, list, .. } = &a.input else { panic!("{:?}", a.input) };
@@ -8393,48 +8519,45 @@ mod tests {
         let mut a = app();
         press(&mut a, "R");
         assert_eq!((a.among, a.current().is_none()), (Some(MINE), true), "the cursor starts on the from line");
-        press(&mut a, "jjjj");
+        // Your preferred harness, overall's name and its four tiers, then coding's name.
+        press(&mut a, "7j");
         let front: Vec<String> =
             a.task_frontier(fit::task("coding").unwrap()).iter().map(|(m, _)| m.key.clone()).collect();
         assert_eq!(front, ["mini", "gpt55"], "cheapest first, best last");
         assert!(a.current().is_none(), "j k land on the name");
         assert!(press(&mut a, "o").is_none() && a.failed, "where the row keys have no model");
-        assert_eq!(a.status, "no model under the cursor, l moves to a tier");
-        press(&mut a, "l");
+        assert_eq!(a.status, "no model under the cursor, j moves to a tier");
+        press(&mut a, "j");
         assert!(a.current().is_none(), "free has no model here");
-        press(&mut a, "l");
+        press(&mut a, "j");
         assert_eq!(a.current().unwrap().key, "mini", "low is the cheapest");
-        press(&mut a, "l");
+        press(&mut a, "j");
         assert_eq!(a.current().unwrap().key, "mini", "mid's too: none up to $5 is better");
-        press(&mut a, "l");
+        press(&mut a, "j");
         assert_eq!(a.current().unwrap().key, "gpt55", "high is the best");
-        press(&mut a, "l");
-        assert!(a.current().is_none(), "wraps to the name");
-        press(&mut a, "h");
+        press(&mut a, "j");
+        assert_eq!((a.task_cur, a.task_sel), (2, 0), "then the next task's name");
+        press(&mut a, "k");
         assert_eq!(a.current().unwrap().key, "gpt55", "and back");
-        press(&mut a, "0");
-        assert!(a.current().is_none(), "0 goes to the name");
-        a.mouse(Mouse::Cols(2));
-        assert_eq!(a.current().unwrap().key, "mini", "the sideways wheel moves the cursor as in compare");
+        press(&mut a, "hl0$");
+        assert_eq!((a.task_cur, a.task_sel), (1, TIERS.len()), "a list has nothing sideways");
+        press(&mut a, "k");
         code(&mut a, KeyCode::Enter);
         assert!(matches!(a.view, View::Detail(Back::Recommend(_))), "enter on a model opens its details");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Recommend, "mini"), "esc goes back");
-        press(&mut a, "0$");
+        press(&mut a, "j");
         assert_eq!(a.current().unwrap().key, "gpt55");
-        // j k stay on the tier, on a task with no ranking but the favorites of its tiers.
+        // A task with no ranking but the favorites of its tiers.
         let tiers = [crate::store::slot(TASKS[2].name, "low"), crate::store::slot(TASKS[2].name, "high")];
         tiers.iter().for_each(|s| a.store.toggle_favorite(s, "mini"));
         a.rebuild();
-        press(&mut a, "j");
+        press(&mut a, "5j");
         assert_eq!((a.task_cur, a.task_sel, a.current().unwrap().key.as_str()), (2, TIERS.len(), "mini"));
-        press(&mut a, "k");
+        press(&mut a, "5k");
         assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "gpt55"), "high again");
-        press(&mut a, "j02lk");
-        assert_eq!((a.task_cur, a.current().unwrap().key.as_str()), (1, "mini"), "low of both");
         tiers.iter().for_each(|s| a.store.toggle_favorite(s, "mini"));
         a.rebuild();
-        press(&mut a, "$");
         press(&mut a, "oG");
         assert_eq!(
             code(&mut a, KeyCode::Enter),
@@ -8449,8 +8572,6 @@ mod tests {
         assert!(press(&mut a, "o").is_none() && a.failed, "where the row keys say so");
         code(&mut a, KeyCode::Enter);
         assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, "this tier has no model"), "and enter too");
-        press(&mut a, "j");
-        assert_eq!((a.task_cur, a.task_sel, a.current().is_none()), (2, TIERS.len(), true), "j k stay on the tier");
         press(&mut a, "RR");
         assert_eq!((a.among, a.task_sel), (Some(MINE), 0), "reopening starts on the from line");
     }
@@ -8459,13 +8580,13 @@ mod tests {
     fn the_table_cursor_follows_the_model_picked_in_an_overlay() {
         let mut a = app();
         let row = |a: &App, key: &str| a.rows.iter().position(|&i| a.data.models[i].key == key).unwrap();
-        press(&mut a, "Rjjjj2l");
+        press(&mut a, "R2gg2j");
         assert_eq!(a.selected(), row(&a, "mini"), "recommend's pick");
-        a.mouse(Mouse::Cols(1));
+        press(&mut a, "j");
         assert_eq!(a.selected(), row(&a, "mini"), "mid's too");
-        a.mouse(Mouse::Cols(1));
-        assert_eq!(a.selected(), row(&a, "gpt55"), "the wheel too");
-        a.mouse(Mouse::Cols(1));
+        press(&mut a, "j");
+        assert_eq!(a.selected(), row(&a, "gpt55"), "high's");
+        press(&mut a, "j");
         assert_eq!(a.selected(), row(&a, "gpt55"), "a task's name leaves it");
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Table, "gpt55"), "esc lands on it");
@@ -8764,7 +8885,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.only == Some(FAV), a.rows.len()), (false, 3), "and F");
         a.store.toggle_favorite("coding:high", "opus5");
-        press(&mut a, "Rjjjj");
+        press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         assert!(a.task.is_some());
         code(&mut a, KeyCode::Esc);
@@ -9393,7 +9514,7 @@ mod tests {
         let mut a = app();
         a.store.toggle_favorite("coding:high", "mini");
         a.rebuild();
-        press(&mut a, "Rjjjj2l");
+        press(&mut a, "R2gg2j");
         assert_eq!(a.current().unwrap().key, "mini", "low's pick on merit");
         press(&mut a, "f");
         assert!(matches!(&a.input, Input::Choose { list: List { sel: 1, col: 1, .. }, .. }), "low's box, not high's");
