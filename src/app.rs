@@ -1907,7 +1907,8 @@ impl App {
     /// A download counts on `all` and among the `✓ selected`, not on `mine`: there a model not on
     /// your machine is not one you have.
     fn set_locals(&mut self, pool: &[usize]) {
-        let pool: Vec<usize> = pool.iter().copied().filter(|&i| !self.excluded(&self.data.models[i])).collect();
+        let pool: Vec<usize> =
+            pool.iter().copied().filter(|&i| !self.excluded(&self.data.models[i], self.downloads_count())).collect();
         let room = view::room(&self.store).filter(|_| self.downloads_count());
         self.locals = TASKS
             .iter()
@@ -2204,29 +2205,37 @@ impl App {
                 && (e || self.failing(i, m, skip).is_none())
                 && (skip == 1 || e || !view::dev_out(m, &self.store))
                 && (skip == PRICE || e || !view::price_out(self.val(i, PRICE), &self.store))
-                && (skip == VIA || e || !self.via_out(m))
+                && (skip == VIA || e || !self.via_out(m, self.downloads_keep(only)))
         })
     }
 
-    /// `view::via_out`, as only the TUI knows what `x` can download.
-    fn via_out(&self, m: &Model) -> bool {
-        view::via_out(m, &self.store, self.any_available, self.left_downloads(m))
+    /// `view::via_out`, as only the TUI knows what `x` can download. `keep` is `downloads_keep`.
+    fn via_out(&self, m: &Model, keep: bool) -> bool {
+        view::via_out(m, &self.store, self.any_available, self.left_downloads(m, keep))
     }
 
-    /// Whether `x` can download `m`, asked only with an entry left out in Via, the one thing it
-    /// matters to (`view::via_out`), as it is slow to find for every model.
-    fn left_downloads(&self, m: &Model) -> bool {
-        !self.store.via_not.is_empty() && self.download(m).is_some()
+    /// Whether a download keeps a model whose harnesses are all left out in Via, on tab `only`:
+    /// on `all` and `✓ selected`, where it counts as a model you have, not on `mine`, `★` or `✗`,
+    /// whatever `a`, so `E` lists every model `mine` hides.
+    fn downloads_keep(&self, only: Option<usize>) -> bool {
+        only == Some(MARKED) || only.is_none() && (self.all || self.no_access())
+    }
+
+    /// Whether `x` can download `m` and that, not its harnesses, decides what Via's entries left
+    /// out do to it (`view::via_out`): with `↓ downloadable` left out, or with `keep`
+    /// (`downloads_keep`). Asked only then, as it is slow to find for every model.
+    fn left_downloads(&self, m: &Model, keep: bool) -> bool {
+        !self.store.via_not.is_empty() && (keep || view::left_out(&self.store, DOWNLOAD)) && self.download(m).is_some()
     }
 
     /// `view::excluded`, knowing what `x` can download as `via_out` does.
-    fn excluded(&self, m: &Model) -> bool {
-        self.store.is_excluded(&m.key) || self.left_out_by(m).is_some()
+    fn excluded(&self, m: &Model, keep: bool) -> bool {
+        self.store.is_excluded(&m.key) || self.left_out_by(m, keep).is_some()
     }
 
     /// `view::left_out_by`, knowing what `x` can download as `via_out` does.
-    fn left_out_by(&self, m: &Model) -> Option<String> {
-        view::left_out_by(m, &self.store, self.any_available, self.left_downloads(m))
+    fn left_out_by(&self, m: &Model, keep: bool) -> Option<String> {
+        view::left_out_by(m, &self.store, self.any_available, self.left_downloads(m, keep))
     }
 
     /// Whether "↓ downloadable" is left out and `x` can download `m`.
@@ -2754,10 +2763,14 @@ impl App {
     }
 
     /// What the Via dropdown picks `m` by: its harnesses, then `DOWNLOAD` for one `x` can download
-    /// (`download`). `OUT_OF_REACH` is no entry, as `m` and `a` already split by access.
+    /// (`download`). `OUT_OF_REACH` is no entry, as `m` and `a` already split by access. Where a
+    /// download does not keep one whose harnesses are all left out (`downloads_keep`), no `DOWNLOAD`.
     fn via_labels<'a>(&self, m: &'a Model) -> Vec<&'a str> {
         let mut v: Vec<&str> = self.shown_via(m).into_iter().filter(|&v| v != OUT_OF_REACH).collect();
-        v.extend(self.download(m).map(|_| DOWNLOAD));
+        let kept = self.downloads_keep(self.only) || !view::via_out(m, &self.store, self.any_available, false);
+        if kept && self.download(m).is_some() {
+            v.push(DOWNLOAD);
+        }
         v
     }
 
@@ -2802,7 +2815,7 @@ impl App {
     fn in_excluded(&self, i: usize, m: &Model) -> bool {
         self.store.is_excluded(&m.key)
             || (self.in_reach(m) || self.store.is_marked(&m.key))
-                && (self.excluded(m) || self.failing(i, m, usize::MAX).is_some())
+                && (self.excluded(m, false) || self.failing(i, m, usize::MAX).is_some())
     }
 
     /// Why `E` shows the model under the cursor with a grey `✗`: the filter that hides it, as
@@ -2818,7 +2831,7 @@ impl App {
             return None;
         }
         let picks = |l: &[String]| l.join(", ");
-        self.left_out_by(m).or_else(|| match self.failing(i, m, usize::MAX)? {
+        self.left_out_by(m, false).or_else(|| match self.failing(i, m, usize::MAX)? {
             Fail::Pick(PRICE) => Some(format!("{} picked in Price", level_label(self.store.price_pick?))),
             Fail::Pick(VIA) => Some(format!("{} picked in Via", picks(&self.store.via_pick))),
             Fail::Pick(_) => Some(format!("{} picked in Dev", picks(&self.store.dev_pick))),
@@ -6625,6 +6638,29 @@ mod tests {
         a.store.via_not = vec!["codex".into()];
         a.rebuild();
         assert!(keys(&a).contains(&"llama4"), "its harness left out, x still downloads it");
+        let downloads = |a: &mut App| {
+            press(a, "d");
+            assert!(!menu(a).is_empty(), "the dropdown is open");
+            let n = menu(a).iter().find(|e| e.0 == DOWNLOAD).map_or(0, |e| e.1);
+            code(a, KeyCode::Esc);
+            n
+        };
+        assert_eq!(downloads(&mut a), 1);
+        // On mine a download is not one you have, so it does not keep the model.
+        press(&mut a, "m");
+        assert!(!keys(&a).contains(&"llama4"), "on mine its harness left out hides it");
+        assert_eq!(downloads(&mut a), 0, "and picking ↓ downloadable would not show it");
+        // ✓ selected keeps it as all does, and E lists what mine hides, from all too.
+        a.store.toggle_marked("llama4");
+        a.rebuild();
+        press(&mut a, "S");
+        assert!(keys(&a).contains(&"llama4"), "selected, a download keeps it");
+        press(&mut a, "a");
+        press(&mut a, "E");
+        assert_eq!((a.only, keys(&a).contains(&"llama4")), (Some(EXCLUDED), true), "E from all");
+        assert_eq!(a.hidden_by().as_deref(), Some("codex left out in Via"));
+        a.store.toggle_marked("llama4");
+        press(&mut a, "a");
         (a.data.models[2].via, a.data.models[2].available) = (vec![], false);
         a.store.via_not.clear();
         a.rebuild();
