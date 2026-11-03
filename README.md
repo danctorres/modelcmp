@@ -78,7 +78,7 @@ models and `C` compares them. `enter` shows everything about a model, `f` makes 
 for a task and `x` starts it in a harness, or downloads and runs a local one. `?` lists every key,
 and `qq` quits.
 
-![The model recommended for each task and tier](https://github.com/user-attachments/assets/781a6bce-e79b-4a00-af14-4cdd3c3767c5)
+![The model recommended for each task and tier](https://github.com/user-attachments/assets/353230e6-b2cc-4a88-901f-5d83db1b80fa)
 
 <p align="center"><i>The model recommended for each task and tier.</i></p>
 
