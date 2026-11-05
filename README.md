@@ -13,6 +13,7 @@
   <a href="#install">Install</a> ·
   <a href="#usage">Usage</a> ·
   <a href="#for-agents">For agents</a> ·
+  <a href="https://www.youtube.com/watch?v=JN2O32m3spE">Video</a> ·
   <a href="KEYS.md">Keys</a> ·
   <a href="REFERENCE.md">Reference</a>
 </p>
@@ -24,6 +25,10 @@
   your favorite or the recommended one for its price tier, and hands the subtask to a cheaper model in
   another harness, or to a local one, say from `Opus 5.5` in `Claude Code` to `GLM-5.3` in `pi` or to
   `Qwen3.8 27B` in `ollama`.
+
+[![Stop picking AI models by hand](https://img.youtube.com/vi/JN2O32m3spE/maxresdefault.jpg)](https://www.youtube.com/watch?v=JN2O32m3spE)
+
+<p align="center"><i>Watch: stop picking AI models by hand.</i></p>
 
 ![Filtering to the Opus models, sorting them by price and opening a model's details](https://github.com/user-attachments/assets/ec554a4a-0f82-4a77-91fc-ac2d1e5c155b)
 
