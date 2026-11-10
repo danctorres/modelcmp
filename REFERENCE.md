@@ -158,6 +158,7 @@ modelcmp fav debugging opus-5.5 --tier high --about "finding and fixing a bug"
 modelcmp fav debugging --about "bugs and flaky tests"   # rewrite what it is about, "" clears it
 modelcmp fav debugging gemini-3.7-flash --tier low   # its model for one tier
 modelcmp fav debugging --rename triage         # another name, its models stay
+modelcmp fav math --bench "FrontierMath T4" --about "proofs and hard math"   # ranked by a benchmark, as a built-in task is
 
 # recommendations
 modelcmp recommend                             # best model per price for each task, and when to use it
@@ -195,7 +196,10 @@ the context instead: `--min ctx=200`.
 Any other name given to `fav` is a task of your own (`debugging`, and `"Tool Dispatch"` is
 stored as `tool-dispatch`).
 
-- No benchmark ranks it. It has the models you give its tiers, and a tier you give none has none.
+- `--bench` ranks it by a benchmark, one of the task columns' dropdowns, as a built-in task is
+  by its score: each tier then picks the best model at its price, your favorite first, and `d` on
+  its name in recommend picks it too. Without one it has the models you give its tiers, and a
+  tier you give none has none.
 - `--task` lists them, cheapest first. With `--tier` it returns that tier's model when it fits
   the tier's cap, unless you excluded it or lost access to it.
 - `recommend` lists it after the built-in tasks, with what you wrote it is about and the model
@@ -203,9 +207,10 @@ stored as `tool-dispatch`).
 - It is the task to pick for work that fits it, even when a built-in task fits too: for a bug,
   your `debugging` over `coding`.
 - `--about` alone makes one with no model yet, as recommend's `+ new task` does in the TUI.
-  Agents see it only once it has a model.
-- It is gone when its last model and what it is about are cleared.
-- `fav <task> --rm` and then `fav <task> --about ""` delete it, as `D` on its name in recommend does.
+  Agents see it only once it has a model or a benchmark.
+- It is gone when its last model, what it is about and its benchmark are cleared.
+- `fav <task> --rm`, then `fav <task> --about ""` and `--bench ""` delete it, as `D` on its name
+  in recommend does.
 - `--rename` gives it another name, one no task has yet.
 
 ### Sorting and bounds
@@ -551,5 +556,6 @@ A task of your own follows the built-in ones with the same fields and `"custom":
 | Field | What it is |
 |---|---|
 | `when` | what the user wrote, and that it wins over a built-in task that fits too |
+| `benchmarks` | the benchmark that ranks it, when the user picked one, else empty |
 | `tier_favorites` | the models the user gave its tiers |
-| `frontier` | those models, cheapest first, with a null `score` |
+| `frontier` | with a benchmark, as a built-in task's, else those models, cheapest first, with a null `score` |

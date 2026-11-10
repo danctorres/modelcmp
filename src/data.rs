@@ -754,6 +754,10 @@ impl Model {
         if b == ARENA_AGENT {
             return self.arena;
         }
+        // The ECI column's own, which a task of your own can be ranked by.
+        if b == "ECI" {
+            return self.eci;
+        }
         self.arena_more.get(b).copied().or_else(|| self.scores.get(b).map(|s| s * 100.0))
     }
 

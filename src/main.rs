@@ -223,15 +223,18 @@ enum Cmd {
         /// The tier it is the favorite for, e.g. a cheap model for low and a strong one for high
         #[arg(long, requires = "task", value_parser = PossibleValuesParser::new(view::TIERS.map(|t| t.0)))]
         tier: Option<String>,
-        /// Clear the task's favorites, or only the tier's with --tier. A task of your own is deleted with its last favorite, unless it has an --about text (--about "" clears that)
+        /// Clear the task's favorites, or only the tier's with --tier. A task of your own is deleted with its last favorite, unless it has an --about text or a --bench ("" clears either)
         #[arg(long, requires = "task")]
         rm: bool,
         /// Rename a task of your own. Its favorites stay
         #[arg(long, value_name = "NAME", requires = "task", conflicts_with_all = ["model", "tier", "rm"], value_parser = store::task_name)]
         rename: Option<String>,
-        /// Describe a task of your own in your words. Agents choose the task by this text, even over a built-in task that also fits. It can create a task before it has a model, but agents only see the task once it has one. "" clears it
+        /// Describe a task of your own in your words. Agents choose the task by this text, even over a built-in task that also fits. It can create a task before it has a model, but agents only see the task once it has a model or a --bench. "" clears it
         #[arg(long, value_name = "TEXT", requires = "task", conflicts_with_all = ["rm", "rename"])]
         about: Option<String>,
+        /// Rank a task of your own by a benchmark, as a built-in task is by its score: each tier then picks the best model at its price, your favorite first. One of the task columns' dropdowns, e.g. "FrontierMath T4" (a wrong name lists them). "" clears it, back to your favorites alone
+        #[arg(long, value_name = "BENCHMARK", requires = "task", conflicts_with_all = ["rm", "rename"])]
+        bench: Option<String>,
     },
     /// The best model at each price for each task, and when to use each task (`R` in the TUI)
     Recommend {
@@ -401,8 +404,9 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
         Cmd::Memory { gb, rm } => cli::memory(&mut store, gb, rm),
         Cmd::Note { model, text, rm } => cli::note(&data, &mut store, &model, text.as_deref(), rm),
         Cmd::Fav { task: Some(task), rename: Some(new), .. } => cli::rename(&mut store, &task, &new),
-        Cmd::Fav { task, model, tier, rm, about, .. } => {
-            cli::fav(&data, &mut store, task.as_deref(), tier.as_deref(), model.as_deref(), rm, about.as_deref())
+        Cmd::Fav { task, model, tier, rm, about, bench, .. } => {
+            let (about, bench) = (about.as_deref(), bench.as_deref());
+            cli::fav(&data, &mut store, task.as_deref(), tier.as_deref(), model.as_deref(), rm, about, bench)
         }
         Cmd::Recommend { json } => cli::recommend(&data, &store, json),
     }

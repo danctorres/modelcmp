@@ -7,9 +7,9 @@ use crate::data::{Data, Model, Offer, vias};
 use crate::fit::{self, TASKS, Task};
 use crate::store::{Store, slot, task_slots};
 use crate::view::{
-    CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_front, custom_line,
-    custom_when, detail_lines, excluded, fits, left_out, left_out_by, local_best, or_local, over_cap, price, priced,
-    reach, shown_via, task_line, tier_pick, tier_picks, truncate, verdict, via, visible, with_local, within,
+    CUSTOM_WHEN, Picks, RECOMMEND_LEGEND, TIERS, by_value, can_fav, compare_rows, custom_when, detail_lines, excluded,
+    fits, left_out, left_out_by, line, local_best, or_local, over_cap, priced, ranking, reach, shown_via, tier_pick,
+    tier_picks, truncate, verdict, via, visible, with_local, within,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -160,7 +160,7 @@ fn out<'a>(m: &'a Model, s: &'a Store, any: bool, full: bool) -> ModelOut<'a> {
         tasks: TASKS
             .iter()
             .filter_map(|t| {
-                let score = crate::view::line_score(m, t, crate::app::task_bench(s, t))?;
+                let score = crate::view::line_score(m, ranking(s, t.name))?;
                 Some((t.name, (score * 10.0).round() / 10.0))
             })
             .collect(),
@@ -359,23 +359,16 @@ fn matched<'a>(
         let usable = |m: &&Model| !excluded(m, store, any) && !o.not.contains(&m.key);
         visible(data, store, o.all, false).map(|(_, m)| m).filter(usable)
     };
-    let mut models: Vec<&Model> = if let Some(c) = &o.custom {
-        // A task of your own has no ranking: the models you gave it, or with a tier that
-        // tier's.
-        let line = custom_line(pool(), store, c);
-        match &o.tier {
-            // It has no pick on merit: a built-in task that fits has.
-            Some(_) if o.no_fav => vec![],
-            Some(tier) => store
-                .tier_favorite(c, tier)
-                .and_then(|k| line.iter().find(|m| m.key == k && fits(store, tier, m)).copied())
-                .into_iter()
-                .collect(),
-            None => line,
-        }
-    } else if let Some(t) = o.task {
-        let line = || {
-            let (front, off) = task_line(filtered(), pool(), store, t);
+    // Your caps still hold with `--no-fav`.
+    let mut none = Store::default();
+    none.tiers.clone_from(&store.tiers);
+    let favs = if o.no_fav { &none } else { store };
+    // A task by name, built in or your own: one of your own with a benchmark has a line as a
+    // built-in task's, one without only the models you gave it (`view::line`).
+    let name = o.custom.as_deref().or(o.task.map(|t| t.name));
+    let mut models: Vec<&Model> = if let Some(name) = name {
+        let found = || {
+            let (front, off) = line(filtered(), pool(), store, name);
             // None with `--via`, whose harnesses an agent that cannot start another one names,
             // and where a copy on your machine is picked only as your favorite.
             // No download, as on the TUI's `mine`: a model not on your machine is not one you have.
@@ -383,21 +376,17 @@ fn matched<'a>(
                 .tier
                 .as_ref()
                 .filter(|_| o.via.is_empty())
-                .and_then(|_| local_best(filtered(), t, store, |_| None, None));
+                .and_then(|_| local_best(filtered(), ranking(store, name), store, |_| None, None));
             (front, off, local)
         };
         let (front, off, local) = match lines {
-            Some(l) => l.borrow_mut().entry((t.name, o.not.clone())).or_insert_with(line).clone(),
-            None => line(),
+            Some(l) => l.borrow_mut().entry((name.to_string(), o.not.clone())).or_insert_with(found).clone(),
+            None => found(),
         };
         match &o.tier {
             Some(tier) => {
-                // Your caps still hold.
-                let mut none = Store::default();
-                none.tiers.clone_from(&store.tiers);
-                let favs = if o.no_fav { &none } else { store };
-                let pick = tier_pick(&front, &off, favs, t.name, tier);
-                let won = or_local(pick, local, favs, t.name, tier).map(|e| e.0);
+                let pick = tier_pick(&front, &off, favs, name, tier);
+                let won = or_local(pick, local, favs, name, tier).map(|e| e.0);
                 ran = won.is_some_and(|m| pick.is_none_or(|p| p.0.key != m.key));
                 won.into_iter().collect()
             }
@@ -421,7 +410,7 @@ fn matched<'a>(
 
 /// A task's line and the best model your machine runs for it, by task and the models left out:
 /// the same for every tier, which `pick` asks one by one.
-type Lines<'a> = std::cell::RefCell<HashMap<(&'static str, Vec<String>), Line<'a>>>;
+type Lines<'a> = std::cell::RefCell<HashMap<(String, Vec<String>), Line<'a>>>;
 type Line<'a> = (Vec<(&'a Model, f64)>, Vec<&'a str>, Option<(&'a Model, f64)>);
 
 /// `launch`, with a model your machine runs that took the tier (`or_local`, `ran`) started on
@@ -503,7 +492,7 @@ fn picked(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result<Ve
     if !data.any_available() {
         return Err(format!("{NO_HARNESS}. Do not choose a model, tell the user").into());
     }
-    let own = store.tasks_with_models();
+    let own = own_tasks(data, store);
     let own = own.iter().map(|&c| (c, None, format!("the user's own task, {}", store.about(c).unwrap_or(CUSTOM_WHEN))));
     let tasks: Vec<_> = TASKS.iter().map(|t| (t.name, Some(t), t.when.to_string())).chain(own).collect();
     // One task, or one tier, for an agent that chose it already.
@@ -1048,9 +1037,22 @@ pub fn rename(store: &mut Store, task: &str, new: &str) -> Result {
     Ok(())
 }
 
-/// Show the favorite model of every task, of one, or set or clear one; with `about`, write what
-/// a task of your own is about, alone or with its model. `q`: the model, and the harness to
-/// run it on when one is given.
+/// The benchmark `app::all_benches` names as `b`, whatever its case, or none for "". Err lists them.
+fn bench_named(b: &str) -> Result<Option<&'static str>> {
+    let all = crate::app::all_benches();
+    match b.trim() {
+        "" => Ok(None),
+        b => match all.iter().find(|x| x.eq_ignore_ascii_case(b)) {
+            Some(x) => Ok(Some(x)),
+            None => Err(Exit { code: 2, msg: format!("no benchmark '{b}': they are {}", all.join(", ")) }),
+        },
+    }
+}
+
+/// Show the favorite model of every task, of one, or set or clear one; with `about` or `bench`,
+/// write what a task of your own is about or the benchmark that ranks it, alone or with its
+/// model. `q`: the model, and the harness to run it on when one is given.
+#[allow(clippy::too_many_arguments)]
 pub fn fav(
     data: &Data,
     store: &mut Store,
@@ -1059,29 +1061,51 @@ pub fn fav(
     q: Option<&str>,
     rm: bool,
     about: Option<&str>,
+    bench: Option<&str>,
 ) -> Result {
     let model = |key: &str| data.models.iter().find(|m| m.key == key);
-    // A favorite the task cannot score still makes its line, unranked.
-    let unscored =
-        |s: &str, m: &Model| fit::task(s.split(':').next().unwrap_or(s)).is_some_and(|t| fit::fit(m, t).is_none());
-    if let (Some(t), Some(text)) = (task, about) {
+    // A favorite the task cannot score, as its line is ranked, is on the line unranked.
+    let unscored = |store: &Store, s: &str, m: &Model| {
+        let r = ranking(store, s.split(':').next().unwrap_or(s));
+        r.ranks() && crate::view::line_score(m, r).is_none()
+    };
+    if let Some(t) = task.filter(|_| about.is_some() || bench.is_some()) {
         if fit::task(t).is_some() {
-            return Err(format!("{t} is built in: --about is for a task of your own").into());
+            let flag = if about.is_some() { "--about" } else { "--bench" };
+            return Err(format!("{t} is built in: {flag} is for a task of your own").into());
         }
         // A tier is for a model alone, not for what the task is about.
         if let (None, Some(x)) = (q, tier) {
             let msg = format!("--tier needs a model: modelcmp fav {t} <model> --tier {x}");
             return Err(Exit { code: 2, msg });
         }
+        // Checked before anything is written, so a wrong model or benchmark changes nothing.
+        let picked = bench.map(bench_named).transpose()?;
+        if let Some(q) = q {
+            resolve(data, q)?;
+        }
         let new = !store.custom_tasks().contains(&t);
-        store.set_about(t, text);
+        if let Some(b) = picked {
+            store.set_task_bench(t, b);
+        }
+        if let Some(text) = about {
+            store.set_about(t, text);
+        }
         // With a model, saved with it below.
         if q.is_none() {
             store.save()?;
             println!("{t}: {}", store.about(t).unwrap_or("no --about text"));
+            if let Some(b) = store.task_bench(t) {
+                println!("ranked by {b}");
+            }
             // A typo of a task's name makes one too, so it is said.
-            if new && store.about(t).is_some() {
-                println!("new task {t}: agents see it once it has a model (modelcmp fav {t} <model> --tier <tier>)");
+            if new && store.custom_tasks().contains(&t) {
+                match store.task_bench(t) {
+                    Some(_) => println!("new task {t}: its tiers pick the best model by the benchmark at their price"),
+                    None => println!(
+                        "new task {t}: agents see it once it has a model (modelcmp fav {t} <model> --tier <tier>)"
+                    ),
+                }
             }
             return Ok(());
         }
@@ -1096,7 +1120,7 @@ pub fn fav(
     let what = task.map(|t| tier.map_or(t.to_string(), |x| slot(t, x))).unwrap_or_default();
     let line = |store: &Store, t: &str, k: &str| {
         let m = model(k);
-        let skipped = if m.is_some_and(|m| unscored(t, m)) { "  (no score)" } else { "" };
+        let skipped = if m.is_some_and(|m| unscored(store, t, m)) { "  (no score)" } else { "" };
         let about = store.about(t.split(':').next().unwrap_or(t)).map_or(String::new(), |a| format!("  {a}"));
         let via = m.and_then(|m| crate::app::runs_on(store, m)).map_or(String::new(), |h| format!("  via {h}"));
         // One a later cap left dearer than its tier: kept for when the cap is raised.
@@ -1120,6 +1144,9 @@ pub fn fav(
                     "no task '{name}'. To make it a task of your own, run modelcmp fav {name} <model> --tier <tier>"
                 );
                 return Err(Exit { code: 2, msg });
+            }
+            if let Some(b) = store.task_bench(name) {
+                println!("{name} ranked by {b}");
             }
             match (favs.as_slice(), tier) {
                 ([], _) => println!("no favorite for {what}"),
@@ -1181,27 +1208,37 @@ pub fn note(data: &Data, store: &mut Store, q: &str, text: Option<&str>, rm: boo
     Ok(())
 }
 
-/// The frontier among the models you have and can use, the ones the TUI's filters exclude left
-/// out, as its recommend ranks them, and the favorites on it only for being favorites.
-fn front<'a>(data: &'a Data, store: &'a Store, t: &Task) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
-    task_line(usable(data, store), usable(data, store), store, t)
+/// The line of the task named `name` among the models you have and can use, the ones the TUI's
+/// filters exclude left out, as its recommend ranks them, and the favorites on it only for
+/// being favorites (`view::line`).
+fn front<'a>(data: &'a Data, store: &'a Store, name: &str) -> (Vec<(&'a Model, f64)>, Vec<&'a str>) {
+    line(usable(data, store), usable(data, store), store, name)
 }
 
-/// Each tier's pick of task `t`, whose line is `front` (`tier_picks`), with the best model your
-/// machine runs in a tier whose pick it beats, the tiers it took (`with_local`)
+/// Each tier's pick of the task named `name`, whose line is `front` (`tier_picks`), with the
+/// best model your machine runs in a tier whose pick it beats, the tiers it took (`with_local`)
 /// and that model with its score.
 fn local_picks<'a>(
     data: &'a Data,
     store: &Store,
-    t: &Task,
+    name: &str,
     front: &[(&'a Model, f64)],
     off: &[&str],
 ) -> (Picks<'a>, [bool; TIERS.len()], Option<(&'a Model, f64)>) {
     let any = data.any_available();
     // No download, as on the TUI's `mine`: a model not on your machine is not one you have.
-    let local = local_best(data.models.iter().filter(|m| !excluded(m, store, any)), t, store, |_| None, None);
-    let (picks, took) = with_local(tier_picks(front, off, store, t.name), local, store, t.name);
+    let usable = data.models.iter().filter(|m| !excluded(m, store, any));
+    let local = local_best(usable, ranking(store, name), store, |_| None, None);
+    let (picks, took) = with_local(tier_picks(front, off, store, name), local, store, name);
     (picks, took, local)
+}
+
+/// Your own tasks agents see (`Store::tasks_for_agents`), the ones with a model on their line:
+/// one ranked by a benchmark that scores no model you can use has nothing for them either.
+fn own_tasks<'a>(data: &Data, store: &'a Store) -> Vec<&'a str> {
+    let mut v = store.tasks_for_agents();
+    v.retain(|t| !front(data, store, t).0.is_empty());
+    v
 }
 
 /// The models you have and can use: only they are recommended.
@@ -1242,33 +1279,29 @@ fn entry(m: &Model, store: &Store, score: f64, recommended: bool) -> serde_json:
 }
 
 /// `recommend --json`: what agents read to choose a task and its model. Your own tasks with a
-/// model come after the built-in ones, in their shape and marked `custom`.
+/// model on their line come after the built-in ones, in their shape and marked `custom`.
 fn recommend_json(data: &Data, store: &Store) -> Vec<serde_json::Value> {
-    let custom = store.tasks_with_models().into_iter().map(|t| {
-        let line = custom_line(usable(data, store), store, t);
-        let front: Vec<_> = line.iter().map(|m| entry(m, store, f64::NAN, false)).collect();
-        let tier_favs = favorites(data, store, t, |k| line.iter().any(|m| m.key == k));
-        let (own, off) = custom_front(&line);
-        let tiers = tiers(tier_picks(&own, &off, store, t));
-        serde_json::json!({"name": t, "custom": true, "when": custom_when(store, t), "benchmarks": [], "tier_favorites": tier_favs, "tiers": tiers, "frontier": front})
-    });
-    TASKS
-        .iter()
-        .map(|t| {
-            let (line, off) = front(data, store, t);
-            let front: Vec<_> = line
-                .iter()
-                .map(|&(m, s)| entry(m, store, s, !off.contains(&m.key.as_str())))
-                .collect();
-            let tier_favs = favorites(data, store, t.name, |k| line.iter().any(|(m, _)| m.key == k));
-            let (picks, _, local) = local_picks(data, store, t, &line, &off);
-            // The key of the best model your machine runs.
-            let local = local.map(|(m, _)| &m.key);
-            let tiers = tiers(picks);
-            serde_json::json!({"name": t.name, "when": t.when, "benchmarks": [crate::app::task_bench(store, t).unwrap_or(fit::basis(t))], "tier_favorites": tier_favs, "tiers": tiers, "local": local, "frontier": front})
-        })
-        .chain(custom)
-        .collect()
+    let own = own_tasks(data, store);
+    let built = TASKS.iter().map(|t| (t.name, t.when.to_string(), false));
+    let own = own.iter().map(|&c| (c, custom_when(store, c), true));
+    let task = |(name, when, custom): (&str, String, bool)| {
+        let (line, off) = front(data, store, name);
+        let frontier: Vec<_> = line.iter().map(|&(m, s)| entry(m, store, s, !off.contains(&m.key.as_str()))).collect();
+        let tier_favs = favorites(data, store, name, |k| line.iter().any(|(m, _)| m.key == k));
+        let (picks, _, local) = local_picks(data, store, name, &line, &off);
+        // The key of the best model your machine runs.
+        let local = local.map(|(m, _)| &m.key);
+        // What ranks it: a built-in task's own score with no benchmark picked in its column,
+        // nothing for a task of your own without one.
+        let r = ranking(store, name);
+        let benches: Vec<&str> = r.bench.or(r.task.map(fit::basis)).into_iter().collect();
+        let mut v = serde_json::json!({"name": name, "when": when, "benchmarks": benches, "tier_favorites": tier_favs, "tiers": tiers(picks), "local": local, "frontier": frontier});
+        if custom {
+            v["custom"] = true.into();
+        }
+        v
+    };
+    built.chain(own).map(task).collect()
 }
 
 /// `recommend --json`'s `tiers`: the key each tier picks, as recommend in the TUI shows.
@@ -1292,28 +1325,33 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
             println!("  {label:<17}{}", p.map_or("-".into(), |(m, s)| text(m, s, t.0)));
         }
     };
-    for t in TASKS {
+    // The built-in tasks, then your own, each with when to use it.
+    let own = own_tasks(data, store);
+    let built = TASKS.iter().map(|t| (t.name, t.when.to_string()));
+    let own = own.iter().map(|&c| (c, custom_when(store, c)));
+    for (name, when) in built.chain(own) {
         // What ranks it where that is not its own score, as in the TUI: a benchmark picked in its
-        // column, or what a task with none goes by.
-        let bench = crate::app::task_bench(store, t);
-        let by = bench.or(t.ranked).map(|b| format!(", ranked by {b}")).unwrap_or_default();
-        println!("{}{by}  (modelcmp list --task {})", t.name, t.name);
-        println!("  use for:         {}", t.when);
-        let (line, off) = front(data, store, t);
-        let (picks, took, local) = local_picks(data, store, t, &line, &off);
-        // `local_took`: the best model your machine runs took the tier.
+        // column or for a task of your own, or what a task with none goes by.
+        let r = ranking(store, name);
+        let by = r.bench.or(r.task.and_then(|t| t.ranked)).map(|b| format!(", ranked by {b}")).unwrap_or_default();
+        println!("{name}{by}  (modelcmp list --task {name})");
+        println!("  use for:         {when}");
+        let (line, off) = front(data, store, name);
+        let (picks, took, local) = local_picks(data, store, name, &line, &off);
+        // `local_took`: the best model your machine runs took the tier. A task of your own with
+        // no benchmark ranks nothing, so none of its models is "not recommended".
         let said = |m: &Model, s: f64, fav: bool, local_took: bool| {
-            let score = crate::view::line_shown(t, bench, s);
+            let score = crate::view::line_shown(r, s);
             let p = priced(m, &score, true, fav);
             match local_took {
                 // Free on your machine, which its price would not say.
                 true => format!("{} [{}] · free on your machine · {score}", m.name, m.key),
-                false if off.contains(&m.key.as_str()) => format!("{p} not recommended"),
+                false if off.contains(&m.key.as_str()) && r.ranks() => format!("{p} not recommended"),
                 false => p,
             }
         };
         show(picks, &|m, s, tier| {
-            let fav = crate::view::fav_pick(store, t.name, tier, m);
+            let fav = crate::view::fav_pick(store, name, tier, m);
             let mut text = said(m, s, fav, took[TIERS.iter().position(|x| x.0 == tier).unwrap_or(0)]);
             // A favorite in place of the tier's own pick, with what it would recommend, as the TUI.
             if fav {
@@ -1324,15 +1362,6 @@ pub fn recommend(data: &Data, store: &Store, json: bool) -> Result {
             }
             text
         });
-        println!();
-    }
-    for t in store.tasks_with_models() {
-        // What you wrote about it is when to use it.
-        println!("{t}  (modelcmp list --task {t})");
-        println!("  use for:         {}", custom_when(store, t));
-        let line = custom_line(usable(data, store), store, t);
-        let (own, off) = custom_front(&line);
-        show(tier_picks(&own, &off, store, t), &|m, _, _| format!("★ {} [{}] {}", m.name, m.key, price(m)));
         println!();
     }
     Ok(())
@@ -1401,7 +1430,7 @@ mod tests {
             Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
         data.models[0].developer = "openai".into();
         let t = TASKS.iter().find(|t| t.name == "coding").unwrap();
-        let line = |s: &Store| front(&data, s, t).0.iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
+        let line = |s: &Store| front(&data, s, t.name).0.iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
         let mut store = Store::default();
         assert_eq!(line(&store), ["mini", "gpt55"]);
         store.dev_not = vec!["openai".into()];
@@ -1418,7 +1447,7 @@ mod tests {
             Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
         (data.models[0].developer, data.models[1].developer) = ("openai".into(), "mistral".into());
         let t = TASKS.iter().find(|t| t.name == "coding").unwrap();
-        let line = |s: &Store| front(&data, s, t).0.iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
+        let line = |s: &Store| front(&data, s, t.name).0.iter().map(|(m, _)| m.key.clone()).collect::<Vec<_>>();
         let listed = |s: &Store, o: &ListOpts| {
             matched(&data, &flagged(s, o), o, None).ok().unwrap().0.iter().map(|m| m.key.clone()).collect::<Vec<_>>()
         };
@@ -1532,7 +1561,7 @@ mod tests {
     fn a_favorite_needs_a_tier() {
         let data = Data { models: vec![model("mini", 60.0, 1.0)], ..Default::default() };
         let mut store = Store::default();
-        let e = fav(&data, &mut store, Some("coding"), None, Some("mini"), false, None).unwrap_err();
+        let e = fav(&data, &mut store, Some("coding"), None, Some("mini"), false, None, None).unwrap_err();
         assert_eq!((e.code, store.favorite.is_empty()), (2, true), "{}", e.msg);
     }
 
@@ -1970,6 +1999,37 @@ mod tests {
         assert_eq!(json["tasks"]["coding"], 70.0, "FrontierSWE, not the coding score of 60");
     }
 
+    /// A task of your own with a benchmark is in a built-in task's shape, ranked by it.
+    #[test]
+    fn recommend_json_ranks_a_task_of_your_own_by_its_benchmark() {
+        let mut dud = model("dud", 0.0, 2.0);
+        dud.scores.clear();
+        let models = vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0), dud];
+        let data = Data { models, ..Default::default() };
+        let mut store = Store::default();
+        store.set_task_bench("debugging", Some("FrontierCode"));
+        assert!(store.tasks_for_agents().contains(&"debugging"), "agents see it with no model given");
+        let own = recommend_json(&data, &store).pop().unwrap();
+        assert_eq!((&own["name"], &own["benchmarks"]), (&"debugging".into(), &serde_json::json!(["FrontierCode"])));
+        let tiers = serde_json::json!({"free": null, "low": "mini", "mid": "mini", "high": "gpt55"});
+        assert_eq!(own["tiers"], tiers, "picked on merit, as coding's");
+        let first = &own["frontier"][0];
+        assert_eq!(
+            (first["key"].as_str(), first["score"].as_f64(), &first["recommended"]),
+            (Some("mini"), Some(60.0), &true.into())
+        );
+        // Your favorite first, and one with no score on the line only as a favorite.
+        store.set_favorite("debugging:high", "dud");
+        let own = recommend_json(&data, &store).pop().unwrap();
+        assert_eq!(own["tiers"]["high"], "dud");
+        let dud = own["frontier"].as_array().unwrap().iter().find(|e| e["key"] == "dud").unwrap();
+        assert_eq!((&dud["recommended"], &dud["score"]), (&false.into(), &Value::Null));
+        // One ranked by a benchmark no model you have is scored on has nothing for agents.
+        store.set_task_bench("niche", Some("Furniture Assembly"));
+        assert!(store.tasks_for_agents().contains(&"niche"));
+        assert!(recommend_json(&data, &store).iter().all(|t| t["name"] != "niche"), "an empty line is not offered");
+    }
+
     #[test]
     fn recommend_json_leaves_excluded_models_out() {
         let data = Data { models: vec![model("gpt55", 90.0, 10.0), model("mini", 60.0, 1.0)], ..Default::default() };
@@ -2016,7 +2076,7 @@ mod tests {
         store.toggle_favorite("debugging:high", "gpt55");
         let all = recommend_json(&data, &store);
         let own = all.last().unwrap();
-        let fields = ["benchmarks", "custom", "frontier", "name", "tier_favorites", "tiers", "when"];
+        let fields = ["benchmarks", "custom", "frontier", "local", "name", "tier_favorites", "tiers", "when"];
         assert_eq!((keys(own), all.len()), (fields.to_vec(), TASKS.len() + 1));
         assert_eq!(
             (&own["name"], &own["tier_favorites"], names(own)),

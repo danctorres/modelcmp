@@ -91,6 +91,11 @@ pub struct Store {
     /// One with no model yet is a task by it alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub about: BTreeMap<String, String>,
+    /// Task of your own -> the benchmark that ranks it (`app::all_benches`), as a built-in task's
+    /// score ranks it: its tiers then pick on merit where you gave them no model. One is a task by
+    /// it alone.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub ranked: BTreeMap<String, String>,
     /// A `view::THEMES` name, picked with `t`; empty is the terminal's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub theme: String,
@@ -434,23 +439,24 @@ impl Store {
         self.favorite(&slot(task, tier))
     }
 
-    /// Your own tasks, by name: the favorites, of a tier of a task, and the abouts of no
-    /// built-in task. One has no ranking, only the models you gave it, and is gone when they
-    /// and what it is about are cleared.
+    /// Your own tasks, by name: the favorites, of a tier of a task, the abouts and the
+    /// benchmarks of no built-in task. One is gone when its models, what it is about and its
+    /// benchmark are cleared.
     pub fn custom_tasks(&self) -> Vec<&str> {
         let favs = self.favorite.keys().filter_map(|k| Some(k.split_once(':')?.0));
-        let mut v: Vec<&str> = favs.chain(self.about.keys().map(String::as_str)).collect();
+        let named = self.about.keys().chain(self.ranked.keys()).map(String::as_str);
+        let mut v: Vec<&str> = favs.chain(named).collect();
         v.retain(|t| crate::fit::task(t).is_none());
         v.sort_unstable();
         v.dedup();
         v
     }
 
-    /// Your own tasks agents see: the ones with a model, as one with none yet has nothing
-    /// for them to run.
-    pub fn tasks_with_models(&self) -> Vec<&str> {
+    /// Your own tasks agents see: the ones with a model or a benchmark, as one with neither
+    /// has nothing for them to run.
+    pub fn tasks_for_agents(&self) -> Vec<&str> {
         let mut v = self.custom_tasks();
-        v.retain(|t| task_slots(t).any(|s| self.favorite.contains_key(&s)));
+        v.retain(|t| self.task_bench(t).is_some() || task_slots(t).any(|s| self.favorite.contains_key(&s)));
         v
     }
 
@@ -459,10 +465,11 @@ impl Store {
         crate::fit::task(name).is_some() || self.custom_tasks().contains(&name)
     }
 
-    /// Delete a task of your own: its models, their harnesses and what it is about.
+    /// Delete a task of your own: its models, what it is about and its benchmark.
     pub fn delete_task(&mut self, task: &str) {
         task_slots(task).for_each(|s| _ = self.clear_favorite(&s));
         self.about.remove(task);
+        self.ranked.remove(task);
     }
 
     /// Give a task of your own another name, which no task has yet; its models stay.
@@ -478,8 +485,10 @@ impl Store {
                 self.favorite.insert(to, model);
             }
         }
-        if let Some(about) = self.about.remove(old) {
-            self.about.insert(new.to_string(), about);
+        for map in [&mut self.about, &mut self.ranked] {
+            if let Some(text) = map.remove(old) {
+                map.insert(new.to_string(), text);
+            }
         }
         Ok(())
     }
@@ -540,6 +549,18 @@ impl Store {
     /// Empty text deletes it.
     pub fn set_about(&mut self, task: &str, text: &str) {
         set_text(&mut self.about, task, text);
+    }
+
+    /// The benchmark that ranks the task of your own, while the task columns list it: one Epoch
+    /// dropped ranks nothing, and the task is back to the models you gave it.
+    pub fn task_bench(&self, task: &str) -> Option<&'static str> {
+        let b = self.ranked.get(task)?;
+        crate::app::all_benches().iter().find(|x| **x == b).copied()
+    }
+
+    /// Rank the task of your own by `bench`, or by none.
+    pub fn set_task_bench(&mut self, task: &str, bench: Option<&str>) {
+        set_text(&mut self.ranked, task, bench.unwrap_or(""));
     }
 }
 
@@ -661,6 +682,14 @@ mod tests {
         old.set_about("bug-hunt", "");
         assert!(old.custom_tasks().is_empty());
         assert!(old.rename_task("debugging", "x").is_err(), "gone under its old name");
+        // Or by its benchmark, which a rename carries, a load keeps and a delete clears.
+        old.set_task_bench("bug-hunt", Some("FrontierCode"));
+        assert_eq!((old.custom_tasks(), old.tasks_for_agents()), (vec!["bug-hunt"], vec!["bug-hunt"]));
+        assert_eq!(old.rename_task("bug-hunt", "bugs"), Ok(()));
+        old.save().unwrap();
+        assert_eq!(Store::load_from(p.clone()).task_bench("bugs"), Some("FrontierCode"));
+        old.delete_task("bugs");
+        assert!(old.custom_tasks().is_empty() && old.ranked.is_empty());
         assert!(task_name(" ").is_err() && task_name("a:b").is_err());
         // Pins were dropped: they load as marks, once each, and are not written back.
         std::fs::write(&p, br#"{"pinned":["a","c"],"marked":["a","b"]}"#).unwrap();

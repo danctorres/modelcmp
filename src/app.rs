@@ -5,8 +5,8 @@ use crate::data::{Data, Model};
 use crate::fit::{TASKS, Task};
 use crate::store::{Bound, Store};
 use crate::view::{
-    self, LEVELS, NO_ACCESS, NO_SELECTED, OUT_OF_REACH, THEMES, TIERS, by_value, ctx, custom_line, hits, in_reach,
-    level_label, money, score, shown_via, signed, task_line, task_score, within,
+    self, LEVELS, NO_ACCESS, NO_SELECTED, OUT_OF_REACH, THEMES, TIERS, by_value, ctx, hits, in_reach, level_label,
+    money, score, shown_via, signed, task_score, within,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -72,6 +72,25 @@ fn benched(id: &str) -> Option<(&'static str, Vec<&'static str>)> {
         _ => t.benches.to_vec(),
     };
     Some((t.bench?, benches))
+}
+
+/// Every benchmark the task columns' dropdowns list, each column's own score first: what a
+/// task of your own can be ranked by (`Store::task_bench`).
+pub fn all_benches() -> &'static [&'static str] {
+    // Asked on every frame, so found once.
+    static ALL: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+        let of = |c| col_benches(c).map(|(own, more)| std::iter::once(own).chain(more));
+        TASK_COLS.into_iter().filter_map(of).flatten().collect()
+    });
+    &ALL
+}
+
+/// The entries of a benchmark list with their counts in a column of their own, as in the
+/// dropdown, each with its effect.
+fn counted(entries: Vec<(String, usize, Effect)>) -> Vec<(String, Effect)> {
+    let w = entries.iter().map(|(l, ..)| l.chars().count()).max().unwrap_or(0);
+    let nw = entries.iter().map(|(_, n, _)| n.to_string().len()).max().unwrap_or(0);
+    entries.into_iter().map(|(l, n, e)| (format!("{l:<w$}  {n:>nw$}"), e)).collect()
 }
 
 /// A benchmark's entry in a task column's dropdown: its name and the source that runs it.
@@ -206,7 +225,7 @@ pub fn on_price(i: usize) -> bool {
 /// scores and Arena's ratings whole.
 pub fn show(i: usize, bench: Option<&str>) -> fn(f64) -> String {
     match col_task(i).and_then(crate::fit::task) {
-        Some(t) if crate::view::tenths(t, bench) => signed,
+        Some(t) if crate::view::tenths(view::Ranking { task: Some(t), bench }) => signed,
         Some(_) => |v| score(Some(v)),
         None => COLS[i].show,
     }
@@ -372,7 +391,7 @@ pub fn col_value(m: &Model, at: usize, store: &Store) -> Option<f64> {
 /// its cell shows it (`view::line_rounded`), so a model shown at 64 meets a minimum of 64.
 pub fn meets(at: usize, bench: Option<&str>, v: f64, lo: f64, hi: f64) -> bool {
     let v = match col_task(at).and_then(crate::fit::task) {
-        Some(t) => crate::view::line_rounded(t, bench, v),
+        Some(t) => crate::view::line_rounded(view::Ranking { task: Some(t), bench }, v),
         None => v,
     };
     v >= lo && v <= hi
@@ -1127,6 +1146,9 @@ pub enum Effect {
     /// The benchmark of the task column at cursor index `.0`, or none for its task's score; the
     /// `B` chooser's items, applied by `App` itself.
     Bench(usize, Option<&'static str>),
+    /// The benchmark that ranks the task of your own, or none for the models you give it alone;
+    /// the items of `d` on its name in recommend, applied by `App` itself.
+    TaskBench(String, Option<&'static str>),
     /// The slot's favorite, or none for the model recommended there; the `d` list's items,
     /// applied by `App` itself.
     Pick(String, Option<String>),
@@ -1398,7 +1420,7 @@ pub fn got(e: &Effect) -> Option<&str> {
 }
 
 /// A task's line as (index into `Data::models`, score), and the models on it only for being
-/// favorites (`view::task_line`).
+/// favorites (`view::line`).
 type Front = (Vec<(usize, f64)>, Vec<usize>);
 
 pub struct App {
@@ -1452,10 +1474,10 @@ pub struct App {
     pub typos: bool,
     /// Indices into `data.models`, in display order.
     pub rows: Vec<usize>,
-    /// Per task of `TASKS`. Set by `rebuild`, as each is a pass over every model and recommend
-    /// draws them all.
-    fronts: Vec<Front>,
-    /// Per task of `TASKS`, the best model your machine runs, on `all` one it can download too
+    /// Per task, the built-in ones and then your own with a benchmark, by name. Set by `rebuild`,
+    /// as each is a pass over every model and recommend draws them all.
+    fronts: Vec<(String, Front)>,
+    /// Per task of `fronts`, the best model your machine runs, on `all` one it can download too
     /// (`view::local_best`), as (index into `data.models`, score). Set by `rebuild`, which a
     /// size that comes on `all` runs again (`sized`).
     locals: Vec<Option<(usize, f64)>>,
@@ -1799,7 +1821,7 @@ impl App {
             Input::Choose { items, .. } => {
                 let what = match items.first().map(|i| &i.1) {
                     Some(Effect::Fav(..)) => "task",
-                    Some(Effect::Bench(..)) => "benchmark",
+                    Some(Effect::Bench(..) | Effect::TaskBench(..)) => "benchmark",
                     _ => "column",
                 };
                 (items.iter().map(|(_, e)| self.ticked(e)).collect(), what)
@@ -1840,6 +1862,7 @@ impl App {
             Effect::Fav(k, t) => (0..BOXES).any(|c| self.store.favorite(&box_slot(t, c)) == Some(k)),
             Effect::Col(c) => !hidden(*c),
             Effect::Bench(c, b) => self.col_bench(*c) == *b,
+            Effect::TaskBench(t, b) => self.store.task_bench(t) == *b,
             _ => false,
         }
     }
@@ -1883,34 +1906,20 @@ impl App {
 
     /// `tier_picks`, and the tiers the best model your machine runs took (`view::with_local`).
     pub fn tier_picks_took(&self, i: usize) -> (view::Picks<'_>, [bool; TIERS.len()]) {
-        let (name, front, off) = match TASKS.get(i) {
-            Some(t) => (t.name, self.task_frontier(t), self.off(t)),
-            // A task of your own has no ranking: its models are on its line only as favorites.
-            None => {
-                let Some(&name) = self.store.custom_tasks().get(i - TASKS.len()) else {
-                    return ([None; TIERS.len()], [false; TIERS.len()]);
-                };
-                let (front, off) = view::custom_front(&self.custom_line(name));
-                (name, front, off)
-            }
+        let Some(name) = TASKS.get(i).map(|t| t.name).or_else(|| self.custom_task(i)) else {
+            return ([None; TIERS.len()], [false; TIERS.len()]);
         };
+        let (front, off) = self.line(name);
         let picks = view::tier_picks(&front, &off, &self.store, name);
-        // A task of your own has no ranking for it to beat.
-        match TASKS.get(i) {
-            Some(t) => view::with_local(picks, self.local_best(t), &self.store, name),
-            None => (picks, [false; TIERS.len()]),
-        }
+        view::with_local(picks, self.local_best(name), &self.store, name)
     }
 
-    /// The keys of the favorites on task `t`'s line only for being favorites.
-    fn off(&self, t: &Task) -> Vec<&str> {
-        self.cached(t).map_or(vec![], |f| f.1.iter().map(|&i| self.data.models[i].key.as_str()).collect())
-    }
-
-    /// The best model for `t` your machine runs, on `all` one it can download too
-    /// (`view::local_best`), excluded ones aside. As of the last `rebuild`.
-    pub fn local_best(&self, t: &Task) -> Option<(&Model, f64)> {
-        let (i, s) = (*self.locals.get(TASKS.iter().position(|x| x.name == t.name)?)?)?;
+    /// The best model for the task named `name` your machine runs, on `all` one it can download
+    /// too (`view::local_best`), excluded ones aside. As of the last `rebuild`: none for a task
+    /// of your own with no benchmark, which has nothing to rank it by.
+    pub fn local_best(&self, name: &str) -> Option<(&Model, f64)> {
+        let at = self.fronts.iter().position(|(t, _)| t == name)?;
+        let (i, s) = (*self.locals.get(at)?)?;
         Some((&self.data.models[i], s))
     }
 
@@ -1921,11 +1930,13 @@ impl App {
         let pool: Vec<usize> =
             pool.iter().copied().filter(|&i| !self.excluded(&self.data.models[i], self.downloads_count())).collect();
         let room = view::room(&self.store).filter(|_| self.downloads_count());
-        self.locals = TASKS
+        self.locals = self
+            .fronts
             .iter()
-            .map(|t| {
+            .map(|(name, _)| {
                 let ms = pool.iter().map(|&i| &self.data.models[i]);
-                let (m, s) = view::local_best(ms, t, &self.store, |m| self.size(m), room)?;
+                let (m, s) =
+                    view::local_best(ms, view::ranking(&self.store, name), &self.store, |m| self.size(m), room)?;
                 Some((pool.iter().copied().find(|&i| std::ptr::eq(&self.data.models[i], m))?, s))
             })
             .collect();
@@ -1944,7 +1955,12 @@ impl App {
 
     /// The task of your own under recommend's cursor.
     pub fn custom_at(&self) -> Option<&str> {
-        self.store.custom_tasks().get(self.task_cur.checked_sub(TASKS.len())?).copied()
+        self.custom_task(self.task_cur)
+    }
+
+    /// The task of your own on recommend's row `i`, after the built-in tasks.
+    fn custom_task(&self, i: usize) -> Option<&str> {
+        self.store.custom_tasks().get(i.checked_sub(TASKS.len())?).copied()
     }
 
     /// How many tasks recommend lists: the built-in ones and your own.
@@ -1985,11 +2001,20 @@ impl App {
         }
     }
 
-    /// The line of a task of your own in recommend: the models you gave it and its tiers that
-    /// are ones to use, cheapest first.
-    pub fn custom_line(&self, task: &str) -> Vec<&Model> {
+    /// The line of the task named `name` in recommend (`view::line`), with the keys on it only
+    /// for being favorites: as of the last `rebuild` for a built-in task or one of your own with
+    /// a benchmark, else the models you gave the task that are ones to use, cheapest first, found
+    /// on the spot as they are few.
+    pub fn line(&self, name: &str) -> (Vec<(&Model, f64)>, Vec<&str>) {
+        if let Some(f) = self.cached(name) {
+            let line = f.0.iter().map(|&(i, s)| (&self.data.models[i], s)).collect();
+            return (line, f.1.iter().map(|&i| self.data.models[i].key.as_str()).collect());
+        }
         // Its few favorites first: `usable` prices each model it is asked of.
-        custom_line(self.data.models.iter(), &self.store, task).into_iter().filter(|m| self.usable(m)).collect()
+        let (mut line, mut off) = view::line(std::iter::empty(), self.data.models.iter(), &self.store, name);
+        line.retain(|(m, _)| self.usable(m));
+        off.retain(|k| line.iter().any(|(m, _)| m.key == *k));
+        (line, off)
     }
 
     /// Rows of the visual range, in order.
@@ -2426,12 +2451,16 @@ impl App {
         };
         // Once for every task, as it is slow to find.
         let usable: Vec<bool> = self.data.models.iter().map(|m| self.usable(m)).collect();
-        self.fronts = TASKS.iter().map(|t| self.front(t, pool, &usable)).collect();
+        // The built-in tasks, then your own with a benchmark: one without has no line to find,
+        // only its few favorites (`line`).
+        let ranked = self.store.custom_tasks().into_iter().filter(|t| self.store.task_bench(t).is_some());
+        let names: Vec<String> = TASKS.iter().map(|t| t.name).chain(ranked).map(String::from).collect();
+        self.fronts = names.into_iter().map(|t| (self.front(&t, pool, &usable), t)).map(|(f, t)| (t, f)).collect();
         self.set_locals(pool);
         // `F` and `E` keep theirs off the line too: one out of reach or excluded is on none.
         if let Some(t) = self.task.filter(|_| !matches!(self.only, Some(FAV | EXCLUDED))) {
             // The same line the recommend panel and `list --task` show.
-            let front = &self.fronts[TASKS.iter().position(|x| x.name == t.name).unwrap_or(0)].0;
+            let front = self.cached(t.name).map_or(&[][..], |f| &f.0[..]);
             rows.retain(|i| front.iter().any(|(k, _)| k == i));
         }
         self.sort_rows(rows);
@@ -2576,25 +2605,15 @@ impl App {
         if self.task.is_some() {
             return self.refuse("a task is in use, so the task columns show its score, c clears the task");
         }
-        // Each column's dropdown entries, with how many models each scored, as `d` lists them.
-        let mut entries = vec![];
-        for c in TASK_COLS.into_iter().filter(|&c| !hidden(c) && only.is_none_or(|o| o == c)) {
-            let Some((_, more)) = col_benches(c) else { continue };
-            let names = std::iter::once(None).chain(more.into_iter().map(Some));
-            for ((label, n), b) in self.menu_items(c).0.into_iter().zip(names) {
-                entries.push((format!("{label} · {}", base_col_name(c)), n, Effect::Bench(c, b)));
-            }
-        }
+        let cols = TASK_COLS.into_iter().filter(|&c| !hidden(c) && only.is_none_or(|o| o == c));
+        let entries = self.bench_entries(cols, Effect::Bench);
         if entries.is_empty() {
             return self.refuse(match only {
                 Some(c) => format!("{} is hidden, | shows it", base_col_name(c)),
                 None => "no task column is shown, | shows them".into(),
             });
         }
-        // The counts in a column of their own, as in the dropdown.
-        let w = entries.iter().map(|(l, ..)| l.chars().count()).max().unwrap_or(0);
-        let nw = entries.iter().map(|(_, n, _)| n.to_string().len()).max().unwrap_or(0);
-        let items: Vec<_> = entries.into_iter().map(|(l, n, e)| (format!("{l:<w$}  {n:>nw$}"), e)).collect();
+        let items = counted(entries);
         let col = only.unwrap_or(self.col);
         let shown = Effect::Bench(col, self.col_bench(col));
         let sel = items.iter().position(|(_, e)| *e == shown).unwrap_or(0);
@@ -2646,20 +2665,23 @@ impl App {
     /// favorite whatever the filters, excluded ones left out: cheapest first, the best model last.
     /// As of the last `rebuild`.
     pub fn task_frontier(&self, t: &Task) -> Vec<(&Model, f64)> {
-        self.cached(t).map(|f| f.0.iter().map(|&(i, s)| (&self.data.models[i], s)).collect()).unwrap_or_default()
+        self.line(t.name).0
     }
 
-    fn cached(&self, t: &Task) -> Option<&Front> {
-        self.fronts.get(TASKS.iter().position(|x| x.name == t.name)?)
+    /// The line of the task named `name` as `rebuild` found it: a built-in task's, or one of
+    /// your own with a benchmark.
+    fn cached(&self, name: &str) -> Option<&Front> {
+        self.fronts.iter().find(|(t, _)| t == name).map(|(_, f)| f)
     }
 
-    /// `task_frontier` and the favorites on it only for being favorites, computed from `shown`,
-    /// the models the filters let through, and `usable`, of each model whether it is `usable`.
-    fn front(&self, t: &Task, shown: &[usize], usable: &[bool]) -> Front {
+    /// `task_frontier` of the task named `t`, built in or your own, and the favorites on it only
+    /// for being favorites, computed from `shown`, the models the filters let through, and
+    /// `usable`, of each model whether it is `usable`.
+    fn front(&self, t: &str, shown: &[usize], usable: &[bool]) -> Front {
         // Ranked only when the filters show them, so a hidden favorite drops no shown model.
         let shown = shown.iter().filter(|&&i| usable[i]).map(|&i| &self.data.models[i]);
         let pool = self.data.models.iter().zip(usable).filter(|p| *p.1).map(|p| p.0);
-        let (line, off) = task_line(shown, pool, &self.store, t);
+        let (line, off) = view::line(shown, pool, &self.store, t);
         let at = |m: &Model| self.data.models.iter().position(|x| std::ptr::eq(x, m)).unwrap_or(0);
         let off = line.iter().filter(|(m, _)| off.contains(&m.key.as_str())).map(|&(m, _)| at(m)).collect();
         (line.into_iter().map(|(m, s)| (at(m), s)).collect(), off)
@@ -2949,7 +2971,7 @@ impl App {
 
     /// Whether `key`, a favorite of the task, is on its line only for being a favorite.
     pub fn favorite_unrecommended(&self, t: &Task, key: &str) -> bool {
-        self.cached(t).is_some_and(|f| f.1.iter().any(|&i| self.data.models[i].key == key))
+        self.cached(t.name).is_some_and(|f| f.1.iter().any(|&i| self.data.models[i].key == key))
     }
 
     /// The task `f` and the ★ mark refer to: the one under the cursor in recommend, else the
@@ -3359,7 +3381,7 @@ impl App {
     /// asking first. Recommend's cursor stays on the task it was on.
     fn save_task(&mut self, was: &str, name: &str, about: &str) -> Result<Option<String>, (bool, String)> {
         let name = crate::store::task_name(name).map_err(|e| (false, e))?;
-        if about.trim().is_empty() && !self.store.tasks_with_models().contains(&was) {
+        if about.trim().is_empty() && !self.store.tasks_for_agents().contains(&was) {
             let d = self.key_of('D');
             return Err((
                 true,
@@ -4318,15 +4340,65 @@ impl App {
         self.name_col(i).filter(|&c| self.menu(c) && !hidden(c))
     }
 
+    /// Whether task `i`'s name has a ▾, `d` listing the benchmarks that can rank it, and whether
+    /// one is picked there: its column's (`name_menu`) for a built-in task, its own for a task of
+    /// your own.
+    pub fn name_marked(&self, i: usize) -> Option<bool> {
+        match self.custom_task(i) {
+            Some(t) => Some(self.store.task_bench(t).is_some()),
+            None => self.name_menu(i).map(|c| self.col_bench(c).is_some()),
+        }
+    }
+
     /// `d` in recommend, or a click on a ▾ there: on a task's name the benchmarks of its column,
-    /// which rank it, on a tier's harness `H`'s list, else the models of the tier under the cursor.
+    /// which rank it, or those a task of your own can be ranked by, on a tier's harness `H`'s
+    /// list, else the models of the tier under the cursor.
     fn recommend_menu(&mut self) {
         let on_name = self.task_sel == 0 && self.among.is_none();
+        if let Some(t) = self.own_name().map(String::from) {
+            return self.ask_task_benches(&t);
+        }
         match self.name_col(self.task_cur).filter(|_| on_name) {
             Some(c) => self.ask_benches(Some(c)),
             None if !on_name && self.rec_cell() == HARNESS_CELL => self.ask_tier_via(),
             None => self.ask_pick(),
         }
+    }
+
+    /// The entries of a benchmark list, `B`'s or a task of your own's: for each column of `cols`
+    /// its own score, then its dropdown's benchmarks, each named with its source and column and
+    /// counted as the dropdown has them, with the effect `pick` makes of the column and the
+    /// benchmark, none for the column's own score.
+    fn bench_entries(
+        &self,
+        cols: impl Iterator<Item = usize>,
+        pick: impl Fn(usize, Option<&'static str>) -> Effect,
+    ) -> Vec<(String, usize, Effect)> {
+        let mut entries = vec![];
+        for c in cols {
+            let Some((_, more)) = col_benches(c) else { continue };
+            let names = std::iter::once(None).chain(more.into_iter().map(Some));
+            for ((label, n), b) in self.menu_items(c).0.into_iter().zip(names) {
+                entries.push((format!("{label} · {}", base_col_name(c)), n, pick(c, b)));
+            }
+        }
+        entries
+    }
+
+    /// `d` on the name of the task of your own `task` in recommend: the benchmarks that can
+    /// rank it, as `B` lists them, after `none`, the models you give it alone, with how many of
+    /// them are shown. The cursor on the one it has.
+    fn ask_task_benches(&mut self, task: &str) {
+        let yours = |m: &Model| crate::store::task_slots(task).any(|s| self.store.favorite(&s) == Some(m.key.as_str()));
+        let given = self.filtered(usize::MAX).filter(|(_, m)| yours(m)).count();
+        let none = ("none · the models you give it".to_string(), given, Effect::TaskBench(task.into(), None));
+        // A column's own score is a benchmark to the task, which has no score of its own.
+        let pick = |c, b: Option<&'static str>| Effect::TaskBench(task.into(), b.or_else(|| Some(col_benches(c)?.0)));
+        let entries = std::iter::once(none).chain(self.bench_entries(TASK_COLS.into_iter(), pick)).collect();
+        let items = counted(entries);
+        let has = self.store.task_bench(task);
+        let sel = items.iter().position(|(_, e)| matches!(e, Effect::TaskBench(_, b) if *b == has)).unwrap_or(0);
+        self.input = Input::choose("ranked by?", Kind::Bench, items, sel);
     }
 
     /// `d` on a tier in recommend, its ▾: the models it can take, to make one its favorite, best first
@@ -4342,15 +4414,15 @@ impl App {
         };
         let (slot, x) = (box_slot(task, c), TIERS[c].0);
         let fav = self.store.favorite(&slot);
-        let t = self.cur_task();
-        let bench = t.and_then(|t| task_bench(&self.store, t));
+        // What ranks the task: a task of your own with no benchmark has no score.
+        let r = view::ranking(&self.store, task);
         let only = self.only.filter(|&o| o < FAV);
         let shown = self.filtered_as(usize::MAX, only, false).map(|e| e.1);
         let has = self.data.models.iter().filter(|m| fav == Some(m.key.as_str()));
         let mut ms: Vec<_> = shown
             .filter(|m| self.usable(m) && view::fits(&self.store, x, m) && fav != Some(m.key.as_str()))
             .chain(has)
-            .map(|m| (m, t.and_then(|t| view::line_score(m, t, bench))))
+            .map(|m| (m, view::line_score(m, r)))
             .collect();
         ms.sort_by(|a, b| {
             view::by_value(a.1, b.1, true)
@@ -4358,10 +4430,12 @@ impl App {
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
         // A line's name, then its price and score, apart to line them up as recommend's boxes do.
-        // A task of your own has no score.
-        let parts = |m: &Model, s: f64| (view::price(m), t.map_or(String::new(), |t| view::line_shown(t, bench, s)));
-        // What the tier picks with no favorite, as the grid does; a task of your own has nothing to pick.
-        let first = match t.map(|t| self.recommended(t, x).0) {
+        let score = |s| if r.ranks() { view::line_shown(r, s) } else { String::new() };
+        let parts = |m: &Model, s: f64| (view::price(m), score(s));
+        // What the tier picks with no favorite, as the grid does; a task of your own with no
+        // benchmark has nothing to pick.
+        let rec = r.ranks().then(|| self.recommended(task, x).0);
+        let first = match rec {
             Some(Some((m, s))) => (format!("recommended: {}", m.name), Some(parts(m, s))),
             Some(None) => ("recommended: none".to_string(), None),
             None => ("none".to_string(), None),
@@ -4395,8 +4469,9 @@ impl App {
 
     /// What `tier` of `t` picks with no favorite, as the grid would, and whether the best model
     /// your machine runs took it.
-    pub fn recommended(&self, t: &Task, tier: &str) -> (Option<(&Model, f64)>, bool) {
-        view::recommended(&self.task_frontier(t), &self.off(t), self.store.tier_cap(tier), self.local_best(t))
+    pub fn recommended(&self, task: &str, tier: &str) -> (Option<(&Model, f64)>, bool) {
+        let (front, off) = self.line(task);
+        view::recommended(&front, &off, self.store.tier_cap(tier), self.local_best(task))
     }
 
     /// Tier `c`'s cap written on its line, from the one it has, the cursor on it.
@@ -4847,9 +4922,15 @@ impl App {
             KeyCode::Char('P') => self.ask_harness(),
             KeyCode::Enter if self.view == View::Recommend && !row => {
                 let Some(t) = self.cur_task() else {
-                    // A task of your own has no line to rank: the table, on its cheapest model.
-                    let line = self.custom_at().map_or(vec![], |t| self.custom_line(t));
-                    let first = line.first().map(|m| (m.key.clone(), m.name.clone()));
+                    // A task of your own keeps no line in the table: it goes to the cheapest model
+                    // of its line, with a benchmark one it recommends, not a cheap favorite on the
+                    // line only for being one.
+                    let first = self.custom_at().and_then(|t| {
+                        let (line, off) = self.line(t);
+                        let ranked = view::ranking(&self.store, t).ranks();
+                        let (m, _) = line.into_iter().find(|(m, _)| !ranked || !off.contains(&m.key.as_str()))?;
+                        Some((m.key.clone(), m.name.clone()))
+                    });
                     let key = first.as_ref().map(|(k, _)| k.clone());
                     // With no model to go to, recommend stays on the task, where d on a tier gives it
                     // one. A built-in task picked before would keep the table to its line, as esc undoes.
@@ -4858,15 +4939,19 @@ impl App {
                         self.rebuild();
                     }
                     let row = key.and_then(|k| self.rows.iter().position(|&i| self.data.models[i].key == k));
-                    let said = self.custom_at().map(|task| match (&first, row) {
-                        (Some((_, m)), Some(_)) => Ok(format!("{m}, your model for {task}")),
-                        (Some((_, m)), None) => {
-                            Err(format!("{m}, your model for {task}, is hidden by a filter, c clears the filters"))
+                    let said = self.custom_at().map(|task| {
+                        let yours =
+                            if self.store.task_bench(task).is_some() { "the cheapest pick" } else { "your model" };
+                        match (&first, row) {
+                            (Some((_, m)), Some(_)) => Ok(format!("{m}, {yours} for {task}")),
+                            (Some((_, m)), None) => {
+                                Err(format!("{m}, {yours} for {task}, is hidden by a filter, c clears the filters"))
+                            }
+                            _ if crate::store::task_slots(task).all(|s| self.store.favorite(&s).is_none()) => {
+                                Err(format!("{task} has no model yet, press d on a tier to choose one"))
+                            }
+                            (None, _) => Err(format!("{task} has no model you can use")),
                         }
-                        _ if crate::store::task_slots(task).all(|s| self.store.favorite(&s).is_none()) => {
-                            Err(format!("{task} has no model yet, press d on a tier to choose one"))
-                        }
-                        (None, _) => Err(format!("{task} has no model you can use")),
                     });
                     if first.is_some() {
                         self.view = View::Table;
@@ -5246,8 +5331,8 @@ impl App {
                             Effect::Pick(_, Some(key)) | Effect::Fav(key, _) => key.clone(),
                             // `recommended:` names the tier's pick with no favorite.
                             Effect::Pick(..) => {
-                                let (_, tier) = self.tier_at()?;
-                                let picked = self.cur_task().and_then(|t| self.recommended(t, TIERS[tier].0).0);
+                                let (task, tier) = self.tier_at()?;
+                                let picked = self.recommended(task, TIERS[tier].0).0;
                                 let Some((m, _)) = picked else {
                                     self.refuse("this tier recommends no model");
                                     return None;
@@ -5364,8 +5449,7 @@ impl App {
                             Effect::Pick(slot, key) => {
                                 let had = self.store.favorite(&slot).map(String::from);
                                 // The model the tier has once picked: this one, or with none the recommended one.
-                                let tier = self.tier_at().map(|(_, c)| TIERS[c].0);
-                                let top = self.cur_task().zip(tier).and_then(|(t, x)| self.recommended(t, x).0);
+                                let top = self.tier_at().and_then(|(task, c)| self.recommended(task, TIERS[c].0).0);
                                 let to = key.clone().or(top.map(|(m, _)| m.key.clone()));
                                 let saved = match (key, had) {
                                     (Some(k), had) if had.as_ref() != Some(&k) => self.fav(&k, &slot),
@@ -5403,6 +5487,17 @@ impl App {
                                 self.rebuild();
                                 let shows = self.col_bench(c).map_or("its task's score".into(), bench_label);
                                 self.report(Ok(format!("{} shows {shows}", base_col_name(c))));
+                            }
+                            // Picked again, the benchmark is cleared, as a column's dropdown does.
+                            Effect::TaskBench(task, b) => {
+                                let b = b.filter(|_| self.store.task_bench(&task) != b);
+                                self.store.set_task_bench(&task, b);
+                                self.rebuild();
+                                let by = b.map_or("the models you give it alone".into(), |b| {
+                                    format!("ranked by {}", bench_label(b))
+                                });
+                                self.report(Ok(format!("{task}: {by}")));
+                                return Some(Effect::Save);
                             }
                             Effect::Harness(h) => {
                                 self.store.harness = h.unwrap_or("").to_string();
@@ -7800,7 +7895,7 @@ mod tests {
         a.rebuild();
         assert_eq!(front(&a), ["opus5", "gpt55"]);
         let (m, s) = a.task_frontier(fit::task("coding").unwrap())[0];
-        let shown = crate::view::line_shown(fit::task("coding").unwrap(), None, s);
+        let shown = crate::view::line_shown(crate::view::ranking(&a.store, "coding"), s);
         assert!(crate::view::priced(m, &shown, false, true).ends_with("· -"));
         assert_eq!(
             crate::view::pick([(m, s)].iter(), f64::INFINITY).map(|e| e.0.key.as_str()),
@@ -8397,6 +8492,40 @@ mod tests {
         assert!(a.input == Input::None && a.status.starts_with("a task is in use"), "{}", a.status);
     }
 
+    /// `d` on the name of a task of your own lists the benchmarks that can rank it: picked, its
+    /// tiers choose on merit as a built-in task's, your favorite still first.
+    #[test]
+    fn d_on_a_task_of_your_own_ranks_it_by_a_benchmark() {
+        let mut a = app();
+        a.store.set_about("debugging", "finding and fixing a bug");
+        a.rebuild();
+        (a.view, a.task_cur, a.task_sel) = (View::Recommend, TASKS.len(), 0);
+        assert_eq!(a.name_marked(TASKS.len()), Some(false), "a ▾, nothing picked");
+        press(&mut a, "d");
+        let Input::Choose { kind: Kind::Bench, items, .. } = &a.input else { panic!("{:?}", a.input) };
+        assert!(matches!(&items[0].1, Effect::TaskBench(t, None) if t == "debugging"), "none first");
+        assert!(a.ticked(&items[0].1), "and ticked");
+        let at = items.iter().position(|(_, e)| matches!(e, Effect::TaskBench(_, Some("FrontierCode")))).unwrap();
+        assert!(items[at].0.starts_with("FrontierCode · Epoch AI · Coding"), "{}", items[at].0);
+        if let Input::Choose { list, .. } = &mut a.input {
+            list.sel = at;
+        }
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
+        assert_eq!((a.store.task_bench("debugging"), a.name_marked(TASKS.len())), (Some("FrontierCode"), Some(true)));
+        let keys = |a: &App| a.tier_picks(TASKS.len()).map(|p| p.map(|(m, _)| m.key.clone()));
+        let merit = [None, Some("mini".into()), Some("mini".into()), Some("gpt55".into())];
+        assert_eq!(keys(&a), merit, "on merit, as coding's");
+        a.store.set_favorite("debugging:high", "opus5");
+        a.rebuild();
+        assert_eq!(keys(&a)[3].as_deref(), Some("opus5"), "your favorite first");
+        assert_eq!(a.recommended("debugging", "high").0.map(|(m, _)| m.key.as_str()), Some("gpt55"), "over the pick");
+        // Picked again, the benchmark is cleared, as in a column's dropdown: back to your models alone.
+        press(&mut a, "d");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save), "the list opens on the one it has");
+        assert_eq!((a.store.task_bench("debugging"), keys(&a)), (None, [None, None, None, Some("opus5".into())]));
+        assert!(a.recommended("debugging", "high").0.is_none(), "nothing ranks it");
+    }
+
     #[test]
     fn d_in_recommend_picks_a_tiers_model() {
         let mut a = app();
@@ -8416,7 +8545,7 @@ mod tests {
         let Effect::Pick(_, Some(key)) = &items.last().unwrap().1 else { panic!() };
         let key = key.clone();
         assert_ne!(Some(&key), was.as_ref(), "the worst is not the pick");
-        let top = a.recommended(a.cur_task().unwrap(), "high").0.map(|(m, _)| m.name.clone());
+        let top = a.recommended(a.cur_task().unwrap().name, "high").0.map(|(m, _)| m.name.clone());
         assert_eq!(press(&mut a, "y"), top.map(Effect::Copy), "y on recommended copies that model's name");
         let worst = a.data.models.iter().find(|m| m.key == key).unwrap().name.clone();
         assert_eq!(press(&mut a, "Gy"), Some(Effect::Copy(worst)), "y in the dropdown copies its model's name");

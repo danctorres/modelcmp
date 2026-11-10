@@ -678,6 +678,7 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
                         | Effect::Harness(_)
                         | Effect::Col(_)
                         | Effect::Bench(..)
+                        | Effect::TaskBench(..)
                         | Effect::Pick(..)
                         | Effect::Press(_),
                     )
@@ -1286,8 +1287,12 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             let enter = match (app.task_sel, app.custom_at()) {
                 (1.., _) if cell == NAME_CELL => vec!["enter price cap", "d dropdown"],
                 (1.., _) => vec!["d dropdown"],
-                (_, Some(_)) if cell == MODEL_CELL => vec!["enter edit", "D delete"],
-                (_, Some(_)) => vec!["enter your model", "T edit", "D delete"],
+                (_, Some(_)) if cell == MODEL_CELL => vec!["enter edit", "d dropdown", "D delete"],
+                (_, Some(t)) => {
+                    let enter =
+                        if app.store.task_bench(t).is_some() { "enter cheapest pick" } else { "enter your model" };
+                    vec![enter, "d dropdown", "T edit", "D delete"]
+                }
                 _ if app.name_menu(app.task_cur).is_some() => vec!["enter best per price", "d dropdown"],
                 _ => vec!["enter best per price"],
             };
@@ -3722,7 +3727,7 @@ fn pick_colors(app: &App, items: &[(String, Effect)]) -> Vec<Color> {
     let by_key: HashMap<&str, &Model> = app.data.models.iter().map(|m| (m.key.as_str(), m)).collect();
     let picked = |slot: &str| {
         let (task, c) = slot_box(slot);
-        fit::task(task).and_then(|t| app.recommended(t, TIERS[c].0).0).map(|p| p.0)
+        app.recommended(task, TIERS[c].0).0.map(|p| p.0)
     };
     (items.iter())
         .map(|(_, e)| {
@@ -4043,7 +4048,7 @@ fn recommend(
     // the models, the prices, the scores and the harnesses, each as wide as its widest, and the
     // models' narrowed to what the others leave, where a name wraps in it.
     let wide = |s: &[Span]| s.iter().map(Span::width).sum::<usize>();
-    let mark_w = |i: usize| if app.name_col(i).is_some() { Span::raw(MENU).width() } else { 0 };
+    let mark_w = |i: usize| if app.name_col(i).is_some() || i >= TASKS.len() { Span::raw(MENU).width() } else { 0 };
     let names_w = tasks.iter().enumerate().map(|(i, t)| Span::raw(t.0).width() + mark_w(i)).max().unwrap_or(0).min(20);
     let labels_w = (0..TIERS.len()).map(|c| 3 + Span::raw(tier_label(c, true).as_str()).width()).max().unwrap_or(0);
     let w = names_w.max(labels_w).max("task".len());
@@ -4109,21 +4114,23 @@ fn recommend(
                 let name = Span::styled(name, fg(task_color(t.0)).add_modifier(BOLD));
                 let mut spans = lit_span(name, &app.overlay_query);
                 // Its ▾ as a header's: yellow while a benchmark is picked in it, else a tier's.
-                if let Some(c) = app.name_menu(i) {
-                    let style = match app.col_bench(c) {
-                        Some(_) => fg(Color::Yellow),
-                        None => menu_style(on),
-                    };
+                if let Some(picked) = app.name_marked(i) {
+                    let style = if picked { fg(Color::Yellow) } else { menu_style(on) };
                     spans.push(Span::styled(MENU, style));
                     // A click on it opens the dropdown, ahead of the name's own spot.
                     let at = 2 + name_w;
                     spots.push(Spot { lines: y..y + 1, x: at..at + 1, at: Stop::Menu(i, 0) });
                 }
                 // When to use it, and what ranks it where that is not its own score, a benchmark
-                // picked in its column or what a task with none goes by, where the models start.
+                // picked in its column or for a task of your own, or what a task with none goes
+                // by, where the models start.
                 let first = pad(cursor(on && cell == NAME_CELL, spans), model_x - 1);
                 let mut about: Vec<Line> = words(t.1);
-                if let Some(r) = TASKS.get(i).and_then(|t| app.task_bench(t).or(t.ranked)) {
+                let ranked = match TASKS.get(i) {
+                    Some(t) => app.task_bench(t).or(t.ranked),
+                    None => app.store.task_bench(t.0),
+                };
+                if let Some(r) = ranked {
                     // `ranked by` and what stay together on a line.
                     about.extend([Line::from("·"), Line::from(format!("ranked by {r}"))]);
                 }
@@ -4260,8 +4267,8 @@ fn recommend(
         cur.filter(|c| c.0 < tasks.len() && edit.is_none()).and_then(|(i, s)| Some((i, s.checked_sub(1)?)))
     {
         let fav = picks[i][c].filter(|(m, _)| crate::view::fav_pick(&app.store, tasks[i].0, TIERS[c].0, m));
-        if let (Some((f, _)), Some(task)) = (fav, TASKS.get(i)) {
-            let (rec, local) = app.recommended(task, TIERS[c].0);
+        if let Some((f, _)) = fav {
+            let (rec, local) = app.recommended(tasks[i].0, TIERS[c].0);
             if let Some((m, s)) = rec.filter(|(m, _)| m.key != f.key) {
                 let head = Span::styled("  recommended: ", fg(MUTED));
                 let indent = head.width();
@@ -4346,11 +4353,13 @@ fn entry(
     local: bool,
     boxed: bool,
 ) -> Vec<Span<'static>> {
-    let built_in = fit::task(task);
+    // A task of your own ranked by a benchmark has scores as a built-in one; one unranked has none.
+    let r = crate::view::ranking(&app.store, task);
+    let ranked = r.ranks();
     let Some((m, s)) = pick else {
         let none = if boxed {
             "-"
-        } else if built_in.is_some() {
+        } else if ranked {
             "no model"
         } else {
             "no favorite"
@@ -4359,15 +4368,15 @@ fn entry(
     };
     let fav = crate::view::fav_pick(&app.store, task, TIERS[col].0, m);
     let price = pick_color(app, m, local);
-    let score = built_in.map_or("-".into(), |t| crate::view::line_shown(t, app.task_bench(t), s));
-    let (cost, score) = match built_in {
+    let score = crate::view::line_shown(r, s);
+    let (cost, score) = if local {
         // On `all`, a download that fits is free here too, once `x` fetches it.
-        Some(_) if local => {
-            let at = app.size(m).filter(|_| !m.here()).map_or("here".into(), |b| format!("↓ {}", crate::data::gb(b)));
-            (format!(" free {at} "), score)
-        }
-        Some(_) => (format!(" {} ", crate::view::price(m)), score),
-        None => (format!(" {}", crate::view::price(m)), String::new()),
+        let at = app.size(m).filter(|_| !m.here()).map_or("here".into(), |b| format!("↓ {}", crate::data::gb(b)));
+        (format!(" free {at} "), score)
+    } else if ranked {
+        (format!(" {} ", crate::view::price(m)), score)
+    } else {
+        (format!(" {}", crate::view::price(m)), String::new())
     };
     let mut spans = Vec::with_capacity(6);
     if fav {
@@ -7771,11 +7780,12 @@ mod tests {
         (a.view, a.task_cur, a.rec_col) = (View::Recommend, TASKS.len(), NAME_CELL);
         let lines = recommend(&a, 80, &mut vec![]).0;
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        let own = text.iter().position(|l| l.starts_with("▌debugging▐")).unwrap();
+        // Its ▾ as a built-in task's, for the benchmarks that can rank it.
+        let own = text.iter().position(|l| l.starts_with("▌debugging ▾▐")).unwrap();
         // `l` puts the cursor on what it is about, and leaves the name.
         a.rec_col = MODEL_CELL;
         let about = recommend(&a, 80, &mut vec![]).0[own].to_string();
-        assert!(about.starts_with(" debugging ") && about.ends_with("▌finding and fixing a bug▐"), "{about}");
+        assert!(about.starts_with(" debugging ▾ ") && about.ends_with("▌finding and fixing a bug▐"), "{about}");
         a.rec_col = NAME_CELL;
         assert_eq!(
             (lines[own].spans[1].style.fg, text[own + 5].as_str(), text[own + 6].trim()),
@@ -7810,7 +7820,7 @@ mod tests {
         let (lines, _, _, at) = recommend(&a, 80, &mut vec![]);
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         let about_at = text[own + 3].chars().position(|c| c == '★');
-        assert_eq!((text[own].as_str(), at), (" debugging   bugs", Some((own, 17))), "where it shows: {about_at:?}");
+        assert_eq!((text[own].as_str(), at), (" debugging    bugs", Some((own, 18))), "where it shows: {about_at:?}");
         assert_eq!(text[own].find("bugs"), about_at, "what it is about where the models are");
         assert!(text[own + 3].contains("opus"), "{}", text[own + 3]);
         assert!(text.iter().any(|l| l.starts_with("enter saves both")), "and under the list what enter does");
@@ -7833,11 +7843,37 @@ mod tests {
         assert_eq!(words(&text[own + 2]), ["low", "≤$2", "★", "flash", "▾", "$0.10"]);
     }
 
+    /// A task of your own ranked by a benchmark reads as a built-in task: `ranked by` after what
+    /// it is about, a yellow ▾ on its name, and each tier's pick with its score.
+    #[test]
+    fn a_task_of_your_own_ranked_by_a_benchmark_shows_its_scores() {
+        let mut a = app();
+        a.store.set_about("debugging", "finding and fixing a bug");
+        a.store.set_task_bench("debugging", Some("ECI"));
+        a.rebuild();
+        a.view = View::Recommend;
+        let lines = recommend(&a, 80, &mut vec![]).0;
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        let own = text.iter().position(|l| l.starts_with(" debugging ▾")).unwrap_or_else(|| panic!("{text:#?}"));
+        assert!(text[own].ends_with("finding and fixing a bug · ranked by ECI"), "{}", text[own]);
+        let yellow = |s: &Span| s.content.contains('▾') && s.style.fg == Some(Color::Yellow);
+        assert!(lines[own].spans.iter().any(yellow), "a benchmark picked: yellow, as a header's");
+        assert_eq!(words(&text[own + 2]), ["low", "≤$2", "flash", "▾", "$0.10", "120"], "picked on merit, scored");
+        assert_eq!(words(&text[own + 3]), ["mid", "≤$5", "opus", "▾", "$5.0", "150"]);
+        // Under a favorite that is not the tier's pick, what it would recommend, as for a built-in task.
+        a.store.set_favorite("debugging:mid", "flash");
+        a.rebuild();
+        (a.task_cur, a.task_sel) = (TASKS.len(), 3);
+        let text: Vec<String> = recommend(&a, 80, &mut vec![]).0.iter().map(ToString::to_string).collect();
+        assert!(text[own + 3].contains("★ flash"), "{}", text[own + 3]);
+        assert!(text.iter().any(|l| l.starts_with("  recommended:") && l.contains("opus")), "{text:#?}");
+    }
+
     #[test]
     fn a_wide_task_name_keeps_its_tiers_in_their_columns() {
         let mut a = app();
-        // 13 characters in 26 cells, more than the 20 the names' column takes: cut, its ▾s are
-        // drawn where a click opens their dropdowns, at the end of a model's name.
+        // 13 characters in 26 cells, more than the 20 the names' column takes with its ▾: cut, its
+        // ▾s are drawn where a click opens their dropdowns, at the end of a model's name.
         a.store.set_about("コードレビューと修正の作業", "reviewing code");
         a.store.toggle_favorite("コードレビューと修正の作業:high", "opus");
         a.view = View::Recommend;
@@ -7851,7 +7887,7 @@ mod tests {
             .collect();
         assert!(off.is_empty(), "{}", off.join("\n"));
         let lines = recommend(&a, 200, &mut vec![]).0;
-        assert!(lines.iter().any(|l| l.to_string().contains(" コードレビューと修… ")), "cut where it says so");
+        assert!(lines.iter().any(|l| l.to_string().contains(" コードレビューと… ▾ ")), "cut where it says so");
     }
 
     #[test]

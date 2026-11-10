@@ -116,7 +116,7 @@ recommended for it, but you can still make it your favorite.
 Each task has four tiers, `free`, `low`, `mid` and `high`. `free` gets the best free model, `low`
 the best up to $2 per 1M tokens, `mid` the best up to $5 and `high` the best at any price. A
 favorite you set for a tier beats its pick when it costs no more than the cap. Your own tasks show
-up last in recommend.
+up last in recommend, ranked by a benchmark you pick or made of your favorites alone.
 
 ## For agents
 
