@@ -495,6 +495,8 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
     // The last press on a cell, which a second one makes a double click (`double`), and the
     // screen row of the last press on a table row, which a drag extends from (`dragged`).
     let (mut click, mut press) = (None, None);
+    // The scroll bar a press is on, which a drag then goes along wherever the pointer strays.
+    let mut grab = None;
     loop {
         // Before the draw, so one that ended under the intro is in the first frame.
         let done = rx.as_ref().and_then(|r| match r.0.try_recv() {
@@ -592,15 +594,26 @@ fn event_loop(app: &mut App, terminal: &mut Term, mut rx: Option<Refresh>) -> Re
                 Event::Mouse(e) => {
                     // A click goes by the screen it lands on: keys before it in this batch and an
                     // agent's change of the marks are drawn first. A drag only extends the
-                    // table's range, which goes by the rows, not the screen.
-                    if matches!(e.kind, MouseEventKind::Down(_)) {
+                    // table's range, which goes by the rows, not the screen, unless it is along
+                    // a scroll bar, whose cells say how far to go from where the cursor was drawn.
+                    let down = matches!(e.kind, MouseEventKind::Down(_));
+                    let on_bar = grab.filter(|_| matches!(e.kind, MouseEventKind::Drag(_)));
+                    if down || on_bar.is_some() {
                         dirty |= relock(&mut held, app);
                         if dirty {
                             paint(terminal, app)?;
                             dirty = false;
                         }
                     }
+                    let e = on_bar.map_or(e, |bar| along(&app.more, bar, e));
                     let m = hit(app, Rect::new(0, 0, size.width, size.height), e);
+                    if down {
+                        grab = match m {
+                            Some(Mouse::Page(_)) => Some((e.column, e.row, true)),
+                            Some(Mouse::Across(_)) => Some((e.column, e.row, false)),
+                            _ => None,
+                        };
+                    }
                     match dragged(&mut press, e, m) {
                         Some(m) => match double(&mut click, m, Instant::now()) {
                             Some(m) => Some(Err(m)),
@@ -1073,6 +1086,21 @@ fn harness_at(app: &App, n: usize, x: u16) -> Option<usize> {
         end += short(h).len() as u16 + 1;
         (start..end - 1).contains(&x)
     })
+}
+
+/// A drag that began on the scroll bar at `x`, `y`, the rows' if `down`, as if the pointer were
+/// still on it: on its column or line, and no further than its track's ends in `more`. So a
+/// drag that strays off the bar, or past an end of it, still moves it, as in an editor.
+fn along(more: &[(u16, u16, Mouse)], (x, y, down): (u16, u16, bool), mut e: MouseEvent) -> MouseEvent {
+    let track = more.iter().filter_map(|&(mx, my, m)| match m {
+        Mouse::Page(_) if down && mx == x => Some(my),
+        Mouse::Across(_) if !down && my == y => Some(mx),
+        _ => None,
+    });
+    if let (Some(lo), Some(hi)) = (track.clone().min(), track.max()) {
+        (e.column, e.row) = if down { (x, e.row.clamp(lo, hi)) } else { (e.column.clamp(lo, hi), y) };
+    }
+    e
 }
 
 /// `m`, what the mouse event `e` landed on, unless it is a drag that selects nothing: one not
@@ -3037,7 +3065,9 @@ fn scrollbar(
                 (true, false) => Some((to, THUMB)),
                 _ => None,
             };
-            set(at, glyph, (by != 0).then(|| click(TRACK + kind, by)));
+            // Every cell of the track, the cursor's too, which goes nowhere: a drag is held to
+            // the track's ends by them (`along`).
+            set(at, glyph, Some(click(TRACK + kind, by)));
         }
     }
     // The one with more to go to last, where a single cell has both.
@@ -7586,7 +7616,7 @@ mod tests {
         vbar_on(&mut buf, 0, 0, (1, 5, 20), Some(1), &[1, 2, 3, 11, 12, 18]);
         let by: Vec<_> = more_at(&buf).into_iter().map(|(_, y, m)| (y, m)).collect();
         let up = (0, Mouse::Scroll(-1));
-        assert_eq!(by, [up, (2, Mouse::Page(2)), (3, Mouse::Page(5)), (4, Mouse::Scroll(1))]);
+        assert_eq!(by, [up, (1, Mouse::Page(0)), (2, Mouse::Page(2)), (3, Mouse::Page(5)), (4, Mouse::Scroll(1))]);
         let bar = |cells: u16, at: Scrolled| {
             let buf = draw(cells, at, None);
             let live =
@@ -7629,6 +7659,17 @@ mod tests {
         a.mouse(dragged(&mut press, at(drag, 9), m).expect("a drag along it"));
         assert_eq!(a.table.selected(), Some((n - 1) / 2), "and its middle the middle one");
         show(&mut a);
+        // A second click on the same cell of the columns' bar stays where the first went.
+        let cell = a.more.iter().find(|(.., m)| matches!(m, Mouse::Across(n) if *n > 0)).copied().expect("its track");
+        let click = MouseEvent { column: cell.0, row: cell.1, ..at(down, 0) };
+        a.mouse(hit(&a, area, click).unwrap());
+        let col = a.col;
+        show(&mut a);
+        a.mouse(hit(&a, area, click).unwrap());
+        assert_eq!(a.col, col, "nowhere further");
+        // A drag that strays off the bar, or past its end, is still along it.
+        let stray = MouseEvent { column: 30, ..at(drag, 15) };
+        assert_eq!(along(&a.more, (79, 9, true), stray), at(drag, 12), "held to the track's last cell");
         // A drag that began on a row selects, and one on the bar from there is none.
         let row = MouseEvent { column: 20, ..at(down, 6) };
         dragged(&mut press, row, hit(&a, area, row));

@@ -4014,6 +4014,9 @@ impl App {
             }
         }
         let m = match m {
+            // The cell of a scroll bar the cursor is at already: nowhere to go, where a count of
+            // none would be one step.
+            Mouse::Page(0) | Mouse::Across(0) => return None,
             Mouse::Page(n) => Mouse::Scroll(n),
             Mouse::Across(n) => Mouse::Cols(n),
             m => m,
