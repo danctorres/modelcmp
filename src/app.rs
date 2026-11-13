@@ -1189,11 +1189,13 @@ pub enum Mouse {
     Extend(usize),
     /// Horizontal wheel: columns to move the cursor, negative is left.
     Cols(isize),
-    /// Click on a `▲` `▼`: rows to move, a page each way, as `PgUp` `PgDn`. Under a prompt it is
-    /// a click, which leaves it, where the wheel is still.
+    /// Click on a scroll bar's `▲` `▼`, rows to move, a page each way, as `PgUp` `PgDn`, or on its
+    /// track, as many as take the cursor there. Under a prompt it is a click, which leaves it,
+    /// where the wheel is still.
     Page(isize),
     /// Click on a `‹` `›` in compare or recommend: compare's columns to move, a screen of them
-    /// each way, or one of recommend's models.
+    /// each way, or one of recommend's models. Or on the track of a columns' bar, the table's
+    /// too: as many columns as take the cursor there.
     Across(isize),
     /// Click on the table's `‹` `›`: the `hscroll` and cursor column to page to, as `layout` worked
     /// them out.

@@ -798,23 +798,20 @@ fn paint(terminal: &mut Term, app: &mut App) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Every `‹` `›` `▲` `▼` drawn in `buf` as `MORE`, which nothing else is, and the way it
-/// points, which a click on it moves a screen (`hit`), for a phone or a mouse with no sideways
-/// wheel.
-/// Found on the screen, as compare's are in its lines' spans and land where those do.
+/// Every cell of a scroll bar in `buf` that a click does something on (`click`), and what: an
+/// arrow moves a screen its way (`hit`), for a phone or a mouse with no sideways wheel, and a
+/// cell of the track goes as far as it says, on a click or a drag along it.
 fn more_at(buf: &Buffer) -> Vec<(u16, u16, Mouse)> {
     (buf.content.iter().enumerate())
         .filter_map(|(i, cell)| {
-            if (Some(cell.fg), Some(cell.bg)) != (MORE.fg, MORE.bg) || !cell.modifier.contains(BOLD) {
-                return None;
-            }
+            let Color::Rgb(kind @ ARROW..=0xa3, hi, lo) = cell.underline_color else { return None };
+            let by = (isize::from(hi) << 8 | isize::from(lo)) - 0x8000;
             let (x, y) = buf.pos_of(i);
-            let m = match cell.symbol() {
-                "▲" => Mouse::Scroll(-1),
-                "▼" => Mouse::Scroll(1),
-                "‹" => Mouse::Cols(-1),
-                "›" => Mouse::Cols(1),
-                _ => return None,
+            let m = match kind {
+                ARROW => Mouse::Scroll(by),
+                0xa1 => Mouse::Cols(by),
+                TRACK => Mouse::Page(by),
+                _ => Mouse::Across(by),
             };
             Some((x, y, m))
         })
@@ -872,7 +869,10 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // Under the tabs' two lines and the frame's top border.
     let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
     let l = layout(inner.width, app);
-    let more = app.more.iter().find(|&&(x, y, _)| plain && (x, y) == (m.column, m.row)).map(|&(.., a)| match a {
+    // A drag goes along a bar's track, and not over one behind the open panel.
+    let drag = m.kind == MouseEventKind::Drag(MouseButton::Left) && app.panel.is_none_or(|r| r.contains(pos));
+    let on_bar = |a: Mouse| plain || drag && matches!(a, Mouse::Page(_) | Mouse::Across(_));
+    let more = app.more.iter().find(|&&(x, y, a)| on_bar(a) && (x, y) == (m.column, m.row)).map(|&(.., a)| match a {
         Mouse::Scroll(d) => Mouse::Page(d * app.page.max(1) as isize),
         // The table pages: `›` to the first column cut off, which then starts the view, `‹` to the
         // one before the view, which then ends it, `hscroll` 0 letting `layout` bring in all it can.
@@ -906,7 +906,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     };
     if let Some((rect, top, len)) = list {
         if extend {
-            return None;
+            return more.filter(|_| rect.contains(pos));
         }
         // A key in the status bar presses it, as the table's hints do.
         if plain
@@ -946,14 +946,18 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // Not while something is typed or a key is waited for, which would take the key as text.
     let idle = plain && app.input == Input::None;
     // The frame's ⚠ opens the issues, as `!` does, over a panel too.
-    if idle && m.row == area.bottom() - 2 && app.issues_at.as_ref().is_some_and(|r| r.contains(&m.column)) {
+    if idle
+        && more.is_none()
+        && m.row == area.bottom() - 2
+        && app.issues_at.as_ref().is_some_and(|r| r.contains(&m.column))
+    {
         return Some(Mouse::Key(KeyCode::Char('!')));
     }
     // The version opens modelcmp's GitHub page, as `O` does, or upgrades to the newer one
     // it names, as `U` does. Not under a panel drawn over it.
     let (row, cells) = version_at(app, area);
     let covered = app.panel.is_some_and(|r| r.contains(pos));
-    if idle && !covered && m.row == row && cells.contains(&m.column) {
+    if idle && !covered && more.is_none() && m.row == row && cells.contains(&m.column) {
         let key = if app.data.update().is_some() { 'U' } else { 'O' };
         return Some(Mouse::Key(KeyCode::Char(key)));
     }
@@ -1076,13 +1080,20 @@ fn harness_at(app: &App, n: usize, x: u16) -> Option<usize> {
 /// slips a cell sideways is a click. `press` is the screen row of the last press on a table row,
 /// until the pointer leaves it; from then on the drag extends to any row, that one too.
 fn dragged(press: &mut Option<u16>, e: MouseEvent, m: Option<Mouse>) -> Option<Mouse> {
+    /// A press on a scroll bar, which is on no row.
+    const ON_BAR: u16 = u16::MAX - 1;
+    let bar = matches!(m, Some(Mouse::Page(_) | Mouse::Across(_)));
     match e.kind {
         MouseEventKind::Down(_) => {
             let row = matches!(
                 m,
                 Some(Mouse::Row(_) | Mouse::Cell(..) | Mouse::Harness(..) | Mouse::Pick(_) | Mouse::Extend(_))
             );
-            *press = row.then_some(e.row);
+            *press = if bar { Some(ON_BAR) } else { row.then_some(e.row) };
+        }
+        // A drag begun on a scroll bar goes along it and selects nothing, and no other does.
+        MouseEventKind::Drag(_) if *press == Some(ON_BAR) || bar => {
+            return m.filter(|_| *press == Some(ON_BAR) && bar);
         }
         MouseEventKind::Drag(_) => {
             if press.is_none_or(|row| row == e.row) {
@@ -1614,8 +1625,8 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
     span.map_or((0, 0), |(lo, hi)| (lo.min(frame.width), hi.min(frame.width)))
 }
 
-/// The cursor's fill, on a row, a column of compare or a name in recommend, between two bars of
-/// the accent that say where it is (`cursor_ends`, `cursor`). Drawn as the accent, which tells it
+/// The cursor's fill, on a row, a column of compare or a name in recommend, after a bar of the
+/// accent on a border (`cursor_ends`) or between two of them off one (`cursor`). Drawn as the accent, which tells it
 /// from a marked row's, and painted as a faint grey (`fill`): a hue on a row says something of
 /// it, as a marked row's blue does, and the accent's is a developer's and a price level's too.
 const CURSOR: Color = ACCENT;
@@ -1625,9 +1636,11 @@ const FILL: Style = Style::new().bg(CURSOR);
 const COLUMN: Color = Color::LightMagenta;
 /// The bars at the cursor's two ends.
 const EDGE: Style = Style::new().fg(ACCENT).bg(CURSOR).add_modifier(BOLD);
-/// The `‹` `›` `▲` `▼` for what is scrolled off: a solid cell, as a pill, found at a glance. Yellow, as the
-/// notices in the status bar: the accent is the headers' and the cursor's, and is lost among them.
-const MORE: Style = Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(BOLD);
+/// The cursor's cell in a scroll bar's thumb, and an arrow with more its way: the text's colour,
+/// which the grey track is not. No hue, the accent being the cursor's and the headers'.
+const AT: Style = Style::new().fg(Color::Reset).add_modifier(BOLD);
+/// A scroll bar's thumb, on the border that is its track.
+const THUMB: Style = Style::new().fg(Color::Reset);
 /// The share of the mark colour in a marked row's fill with the terminal's own colours, in
 /// percent, the rest being its background: faint, as the row's colours are read on it. A theme
 /// has its own (`Palette::wash`).
@@ -1653,6 +1666,9 @@ const TERM_MARK: u32 = 0x5c9cff;
 fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>, slots: Option<&[u32; 16]>) {
     let bg = palette.map(|p| Color::from_u32(p.bg));
     for cell in &mut buf.content {
+        // A scroll bar's cell says what a click on it does in an underline's colour (`click`),
+        // which is not for the terminal.
+        cell.underline_color = Color::Reset;
         // A pill behind a box (`Modifier::DIM`) fades as the rest does, which faint does to no
         // background: its fill half mixed into the background, else, with no colours to mix,
         // its colour as text.
@@ -2019,22 +2035,26 @@ fn draw(app: &mut App, f: &mut Frame) {
             x = start + room.saturating_sub(about.chars().count()) / 2;
         }
         put(buf, body.x + x as u16, body.y, about, end.saturating_sub(x), fg(MUTED));
-        let (right, above, below, typing) = table_of(buf, inner, app, cols);
+        let across = cols.bar;
+        let typing = table_of(buf, inner, app, cols).3;
         note_at = typing;
         // Where the note being written is drawn, which the details' panel draws next.
         app.note_shown = typing.map(|n| n.0);
-        if right && inner.height > 0 {
-            // Columns cut off on the right: `l` scrolls to them.
-            put(buf, body.right() - 1, inner.y, "›", 1, MORE);
-        }
         if inner.height > 1 {
             // The rule under the header runs into the frame.
             put(buf, body.x, inner.y + 1, "├", 1, fg(MUTED));
             put(buf, body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
         }
-        if inner.height > head {
-            vmarks(buf, body.x, inner.y + head, inner.bottom() - 1, above, below);
-        }
+        // The frame has the bars: the rows' on its right border, and on its bottom one that of
+        // the columns right of Model, between the version and the refresh state. Where those
+        // leave it no room it still has its two arrows and a thumb, over them.
+        let rows = usize::from(inner.height.saturating_sub(head));
+        let at = (app.table.offset(), rows, app.rows.len());
+        vbar(buf, body.right() - 1, inner.y + head, at, app.table.selected());
+        let lo = body.x + 2 + if below { version.width() as u16 } else { 0 };
+        let end = body.right().saturating_sub(1);
+        let hi = end.saturating_sub(Line::from(state.as_str()).width() as u16 + 2).max(body.x + 5).min(end);
+        hbar(buf, body.bottom() - 1, lo.min(hi.saturating_sub(4)).max(body.x + 1)..hi, across.0, across.1);
     }
     let buf = f.buffer_mut();
     // Help and the issues show over the panel they were opened from, as every box over what is
@@ -2088,7 +2108,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         let ends = (head, lines.len() - rows - head, 0..0);
         // The cells the entry being written was drawn in: what the screen has.
         let room = edit_room(within);
-        let (_, above, below) = overlay(buf, within, title, lines, &mut scroll, ends);
+        let (text, at) = overlay(buf, within, title, lines, &mut scroll, ends);
         *top = usize::from(scroll);
         // On the bottom border, as a dropdown says it, so it shows however the list scrolls.
         if none {
@@ -2113,8 +2133,7 @@ fn draw(app: &mut App, f: &mut Frame) {
                 let (_, before) = edit_line(e, Span::raw(edit_prefix(e)), Style::new(), room, 0);
                 cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
             }
-            let inner = rect.inner(Margin::new(1, 1));
-            vmarks(buf, rect.x, inner.y, inner.bottom() - 1, above, below);
+            vbar(buf, rect.right() - 1, text.y, at, Some(*sel + head));
         }
     }
     if let Some(at) = cursor {
@@ -2129,6 +2148,10 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
     let mut cursor = None;
     // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
     let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
+    // Where compare is in its columns, for their bar.
+    let mut across = None;
+    // The lines the keys' cursor stops at, for a click on their bar.
+    let mut stops = vec![];
     // The line of a panel's search `n` `N` are on, which has the cursor.
     let mut hit_line = None;
     // The text cursor, on the header of a tier whose cap is written in recommend, or on the
@@ -2147,6 +2170,7 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
                 _ => list_top(app.scroll as usize, at, shown),
             } as u16;
             hit_line = Some(at);
+            stops.clone_from(&rows);
             spots.extend(rows.iter().enumerate().map(|(i, &l)| Spot {
                 lines: l..l + 1,
                 x: 0..usize::MAX,
@@ -2237,6 +2261,7 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
                 &mut spots,
             );
             (app.compare_col, app.compare_x, app.compare_shown) = (c.col, c.first, c.shown);
+            across = Some(((c.first, c.shown, c.of), c.col));
             if searched {
                 app.hit = (n.rem_euclid(c.hits.max(1) as isize), false);
                 if jump {
@@ -2284,7 +2309,12 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
             }
         }
         let under = pinned(lines.len(), body.height.saturating_sub(2) as usize, &pin);
-        let (text, above, below) = overlay(buf, body, &title, lines, &mut app.scroll, (0, 0, pin.clone()));
+        let (text, at) = overlay(buf, body, &title, lines, &mut app.scroll, (0, 0, pin.clone()));
+        // Compare's columns, on the bottom border left of where the lines are.
+        if let Some((across, col)) = across {
+            let footer = if at.2 > at.1 { position(at.0, at.1, at.2).chars().count() as u16 } else { 0 };
+            hbar(buf, text.bottom(), text.x..text.right().saturating_sub(footer), across, Some(col));
+        }
         if let Some((l, x)) = text_at {
             // A line pinned under the list is drawn after the lines shown.
             let y = match l.checked_sub(pin.start) {
@@ -2303,7 +2333,10 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
         if let Some(y) = hit_line.and_then(|l| l.checked_sub(app.scroll as usize)).filter(|&y| y < text.height as usize)
         {
             cursor_ends(buf, text.x - 2, text.right() + 1, text.y + y as u16);
-            vmarks(buf, text.x - 2, text.y, text.bottom() - 1, above, below);
+            // The keys and compare have a cursor a click on the bar moves. A search's match in
+            // details or the issues is none: the bar there moves the view.
+            let cur = hit_line.filter(|_| matches!(app.view, View::Help | View::Compare));
+            vbar_on(buf, text.right() + 1, text.y, at, cur, &stops);
         }
         // Where each spot landed on screen, scrolled and cut to the box, for a click to find it.
         let top = app.scroll as usize;
@@ -2339,8 +2372,11 @@ struct Layout {
     notes: Option<(u16, u16)>,
     /// The first column right of Model shown (0 is Dev, the last Notes), for `App::hscroll`.
     first: usize,
-    /// Columns cut off on the right; `‹` after Model and `›` on the frame say where to scroll.
+    /// Columns cut off on the right, which the frame's bar says.
     more: bool,
+    /// Where the view is in the columns right of Model, those not left out: the frame's bar.
+    /// And the cursor's column among them, if it is on one.
+    bar: (Scrolled, Option<usize>),
     /// The cursor index a click on `›` pages to: the first column right of the view or cut short,
     /// or the one after it when it starts the view.
     next: Option<usize>,
@@ -2417,8 +2453,8 @@ fn layout(width: u16, app: &App) -> Layout {
     // when scrolled, parting it from Model. Dev and Released, in Model's group, have neither.
     let starts = group_starts();
     let sep = |k: usize| u16::from(starts.contains(&(k + 1)));
-    // Model is not cut to make room for every column: those right of it scroll, and `›` says
-    // so. Only for one, the widest of Dev and the numbers, so a long name never leaves the
+    // Model is not cut to make room for every column: those right of it scroll, and the
+    // frame's bar says so. Only for one, the widest of Dev and the numbers, so a long name never leaves the
     // table with none.
     let keep = ws[..=COLS.len()].iter().max().map_or(0, |w| w + GAP + 1);
     let name_w = longest.min(width.saturating_sub(name_x + GAP + keep)).max(NAME_MIN);
@@ -2452,7 +2488,7 @@ fn layout(width: u16, app: &App) -> Layout {
     // The cut column, or the one after it when it already starts the view, as a cursor index.
     let page = |k: usize| if k > first { Some(k + 1) } else { (k + 1..ws.len()).find(|&j| ws[j] > 0).map(|j| j + 1) };
     let mut next = None;
-    let (mut started, mut dev_w) = (false, 0);
+    let (mut started, mut dev_w, mut whole) = (false, 0, 0);
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
         let part = if started { sep(k) == 1 } else { k > lead };
         x += u16::from(part);
@@ -2466,6 +2502,7 @@ fn layout(width: u16, app: &App) -> Layout {
             break;
         }
         more = w < ws[k];
+        whole += usize::from(!more);
         if more {
             next = next.or_else(|| page(k));
         }
@@ -2479,7 +2516,9 @@ fn layout(width: u16, app: &App) -> Layout {
         }
         x += w + GAP;
     }
-    Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, next, seps }
+    let shown = |ws: &[u16]| ws.iter().filter(|&&w| w > 0).count();
+    let bar = ((shown(&ws[..first]), whole, shown(&ws)), app.col.checked_sub(1).map(|c| shown(&ws[..c])));
+    Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, next, seps, bar }
 }
 
 /// Lines of the table above its first row: the header, the rule and, with access to no model,
@@ -2502,20 +2541,16 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     if area.height == 0 {
         return (false, false, false, None);
     }
-    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, next, seps } = cols;
+    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, next, seps, bar } = cols;
     app.hscroll = first;
     let arrow = |i: usize| match i == app.sort_col {
         true if app.descending => "▼",
         true => "▲",
         false => "",
     };
-    // The column under the cursor: its header reversed, its cells on a faint fill (`COLUMN`)
-    // and a thick rule under it, as VisiData shows its current column; the values keep their
-    // colours.
-    let header = |i: usize| {
-        let style = fg(ACCENT).add_modifier(BOLD);
-        if i == app.col { style.add_modifier(Modifier::REVERSED) } else { style }
-    };
+    // The column under the cursor has its cells on a faint fill (`COLUMN`), the values keeping
+    // their colours, and its header as every other, which is not to stand out.
+    let header = |_: usize| fg(ACCENT).add_modifier(BOLD);
     // The marks: the checkbox, then the ☆, then the ✗ box.
     let num_w = (name_x - 7) as usize;
     let (box_x, star_x) = (area.x + num_w as u16 + 1, area.x + num_w as u16 + 3);
@@ -2527,10 +2562,6 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     put(buf, area.x, y, format!("{:>num_w$}", "#"), num_w, fg(MUTED));
     put(buf, name_x, y, format!("{:<nw$}", format!("Model{}", arrow(0))), nw, header(0));
     put(buf, dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
-    if (0..first).any(|k| !hidden(k + 1)) && name_x + name_w < area.right() {
-        // Columns scrolled off to the left, Dev the first.
-        put(buf, name_x + name_w, y, "‹", 1, MORE);
-    }
     for &(i, x, w) in &cols {
         let (name, mark) = col_head(app, i + 2);
         let text = format!("{}{name}{mark}{}", arrow(i + 2), if app.menu(i + 2) { " ▾" } else { "" });
@@ -2575,9 +2606,6 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
         put(buf, area.x, y + 1, "─".repeat(area.width as usize), area.width as usize, fg(MUTED));
         for &x in &seps {
             put(buf, area.x + x, y + 1, "┼", 1, fg(MUTED));
-        }
-        if let Some((x, w)) = cur {
-            put(buf, x, y + 1, "━".repeat(w as usize), w as usize, fg(ACCENT));
         }
     }
 
@@ -2767,7 +2795,7 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     let bench: Vec<String> = bench.into_iter().map(crate::app::bench_label).collect();
     let not = if let Input::Menu { col, .. } = &app.input { app.left_out(*col) } else { vec![] };
     if let Input::Menu { col, items, list } = &mut app.input {
-        let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, next, seps };
+        let l = Layout { name_x: name_x - area.x, name_w, dev_w, cols, via, notes, first, more, next, seps, bar };
         let picked = match *col {
             1 => &app.store.dev_pick,
             VIA => &app.store.via_pick,
@@ -2888,17 +2916,20 @@ fn dropdown(
         }
         put(buf, x, y, format!("{n:>n_w$}"), n_w, fg(MUTED));
     }
-    vmarks(buf, rect.x, inner.y, inner.bottom() - 1, top > 0, top + shown < len);
+    vbar(buf, rect.right() - 1, inner.y, (top, shown, len), Some(sel));
 }
 
-/// The cursor on row `y`: its fill from the column `left` to `right`, and its two bars at those,
-/// the borders of the frame or the box, which the bars take the place of.
+/// The cursor on row `y`: its fill from the column `left` up to `right`, and its bar at `left`,
+/// the border of the frame or the box, which the bar takes the place of. The border at `right`
+/// is left to the scroll bar.
 fn cursor_ends(buf: &mut Buffer, left: u16, right: u16, y: u16) {
-    restyle(buf, Rect::new(left, y, right - left + 1, 1), FILL);
-    for (x, bar) in [(left, "▌"), (right, "▐")] {
-        if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_symbol(bar).set_style(EDGE);
-        }
+    restyle(buf, Rect::new(left, y, right - left, 1), FILL);
+    if let Some(cell) = buf.cell_mut((left, y)) {
+        cell.set_symbol("▌").set_style(EDGE);
+    }
+    // A table row is filled through the frame before this.
+    if let Some(cell) = buf.cell_mut((right, y)) {
+        cell.bg = Color::Reset;
     }
 }
 
@@ -2912,18 +2943,129 @@ fn cursor(on: bool, spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     [Span::styled("▌", EDGE)].into_iter().chain(fill).chain([Span::styled("▐", EDGE)]).collect()
 }
 
-/// `▲` and `▼` on the left border column `x`, at the first and last content row, for rows
-/// scrolled off above or below. Every scrolling list uses these, as `‹` `›` mark columns.
-fn vmarks(buf: &mut Buffer, x: u16, top: u16, bottom: u16, above: bool, below: bool) {
-    let mut put = |y: u16, glyph: &str| {
-        put(buf, x, y, glyph, 1, MORE);
+/// Where a view is in what it scrolls over: the first row or column shown, how many show, and
+/// of how many.
+type Scrolled = (usize, usize, usize);
+
+/// What a click on a cell of a scroll bar does, kept in the cell for `more_at` to find, so a
+/// box drawn over the bar takes its clicks with its cells: the colour of an underline no cell
+/// has, off again before the screen is painted (`recolor`). `kind` is `ARROW` or `TRACK`, plus
+/// one for the columns' bar, and `by` how far to go.
+fn click(kind: u8, by: isize) -> Color {
+    let v = (by.clamp(-0x8000, 0x7fff) + 0x8000) as u16;
+    Color::Rgb(kind, (v >> 8) as u8, v as u8)
+}
+const ARROW: u8 = 0xa0;
+const TRACK: u8 = 0xa2;
+
+/// A scroll bar on the `cells` of a border, its track, where not everything shows, as an
+/// editor's: an arrow at each end, in the text's colour where there is more that way, which a
+/// click on it pages to, and grey where there is not, and between them a thumb as long as the
+/// share that shows, three cells at least down a border, and as far along as the view is. Every
+/// box that scrolls has these. The row or column `cur` the cursor is on is a block on the thumb:
+/// it moves along the thumb with the cursor, and the thumb moves on once it is at its end. A click on the track, or a drag along it, takes the cursor there, or the view where
+/// there is no cursor (`more_at`).
+/// Where the cursor stops at some lines only, as on the keys', `stops` are those lines, and a
+/// click moves it by as many stops as take it to the line clicked.
+fn scrollbar(
+    buf: &mut Buffer,
+    cells: &[(u16, u16)],
+    across: bool,
+    (top, shown, n): Scrolled,
+    cur: Option<usize>,
+    stops: &[usize],
+) {
+    let (Some(&first), Some(&last)) = (cells.first(), cells.last()) else { return };
+    if shown >= n {
+        return;
+    }
+    // The thumb is a heavy line on the border's light one, its ends half a cell where it starts
+    // or stops mid cell, so it moves by half cells, and the cursor's cell a block on it.
+    let [back, on, whole, from, to] =
+        if across { ["‹", "›", "━", "╺", "╸"] } else { ["▲", "▼", "┃", "╻", "╹"] };
+    let kind = u8::from(across);
+    let mut set = |(x, y): (u16, u16), glyph: Option<(&str, Style)>, to: Option<Color>| {
+        let Some(cell) = buf.cell_mut((x, y)) else { return };
+        // The border is the bar's, grey under the thumb in a box too: a row's fill stops before it.
+        cell.set_style(fg(MUTED).bg(Color::Reset).remove_modifier(BOLD));
+        if let Some((glyph, style)) = glyph {
+            cell.set_symbol(glyph).set_style(style);
+        }
+        cell.underline_color = to.unwrap_or(Color::Reset);
     };
-    if above {
-        put(top, "▲");
+    let track = &cells[1..cells.len().max(2) - 1];
+    if !track.is_empty() {
+        // In half cells.
+        let halves = 2 * track.len();
+        let least = if across { 2 } else { 6 };
+        let len = (shown * halves).div_ceil(n).clamp(least.min(halves), halves);
+        // At an end of the track only when the view is at that end.
+        let (room, steps) = (halves - len, n - shown);
+        let start = (top.min(steps) * room + steps / 2) / steps;
+        let start = if room > 1 { start.clamp(usize::from(top > 0), room - usize::from(top < steps)) } else { start };
+        let thumb = start..start + len;
+        // In the thumb while the cursor is in view, as far along it as along the view.
+        let mark = cur.map(|c| match c.checked_sub(top) {
+            Some(k) if k < shown => {
+                // From the thumb's first cell, on the first row or column in view, to its last.
+                let (lo, hi) = (start / 2, (start + len - 1) / 2);
+                lo + (k * (hi - lo) + (shown - 1) / 2) / (shown - 1).max(1)
+            }
+            _ => (c * track.len() / n).min(track.len() - 1),
+        });
+        for (i, &at) in track.iter().enumerate() {
+            let part = (thumb.contains(&(2 * i)), thumb.contains(&(2 * i + 1)));
+            // Where a click here goes: the cursor as far down the list as the cell is down the
+            // track, or with no cursor the view, the thumb's middle on the cell.
+            let by = match cur {
+                Some(_) if Some(i) == mark => 0,
+                Some(c) => {
+                    let to = i * (n - 1) / (track.len() - 1).max(1);
+                    // The last stop at or before a line, the first for a line above them all.
+                    let stop = |l: usize| stops.partition_point(|&s| s <= l).saturating_sub(1) as isize;
+                    if stops.is_empty() { to as isize - c as isize } else { stop(to) - stop(c) }
+                }
+                None if part != (false, false) || room == 0 => 0,
+                None => {
+                    (((2 * i + 1).saturating_sub(len / 2).min(room) * steps + room / 2) / room) as isize - top as isize
+                }
+            };
+            let glyph = match part {
+                _ if Some(i) == mark => Some(("█", AT)),
+                (true, true) => Some((whole, THUMB)),
+                (false, true) => Some((from, THUMB)),
+                (true, false) => Some((to, THUMB)),
+                _ => None,
+            };
+            set(at, glyph, (by != 0).then(|| click(TRACK + kind, by)));
+        }
     }
-    if below {
-        put(bottom, "▼");
+    // The one with more to go to last, where a single cell has both.
+    for live in [false, true] {
+        for (at, glyph, more, by) in [(first, back, top > 0, -1), (last, on, top + shown < n, 1)] {
+            if more == live {
+                let style = if live { AT } else { fg(MUTED) };
+                set(at, Some((glyph, style)), live.then(|| click(ARROW + kind, by)));
+            }
+        }
     }
+}
+
+/// The rows' bar, on the right border column `x` from row `y` down the rows that show.
+fn vbar(buf: &mut Buffer, x: u16, y: u16, at: Scrolled, cur: Option<usize>) {
+    vbar_on(buf, x, y, at, cur, &[]);
+}
+
+/// `vbar` where the cursor stops at the lines `stops` only (`scrollbar`).
+fn vbar_on(buf: &mut Buffer, x: u16, y: u16, at: Scrolled, cur: Option<usize>, stops: &[usize]) {
+    let cells: Vec<_> = (y..y.saturating_add(at.1 as u16)).map(|y| (x, y)).collect();
+    scrollbar(buf, &cells, false, at, cur, stops);
+}
+
+/// The columns' bar, on the cells `xs` of the bottom border `y`.
+fn hbar(buf: &mut Buffer, y: u16, xs: Range<u16>, at: Scrolled, cur: Option<usize>) {
+    let cells: Vec<_> = xs.map(|x| (x, y)).collect();
+    scrollbar(buf, &cells, true, at, cur, &[]);
 }
 
 /// A solid label like a bar module; returns the column after it.
@@ -3876,7 +4018,7 @@ struct Spot {
 /// frame and what is dimmed behind it, showing `lines` from `scroll` on, which is clamped to the
 /// content: the accent is left to the table's headers and the cursor. The lines `pin`, which say
 /// what the cursor is on, stay at the bottom of a box too short for every line (`pinned`). Returns
-/// where the lines went, and whether some are scrolled off above and below. The rest of `area` is
+/// where the lines went, and where the view is in them, which its bar says (`vbar`). The rest of `area` is
 /// dimmed.
 fn overlay(
     buf: &mut Buffer,
@@ -3885,7 +4027,7 @@ fn overlay(
     mut lines: Vec<Line<'static>>,
     scroll: &mut u16,
     (head, tail, pin): (usize, usize, Lines),
-) -> (Rect, bool, bool) {
+) -> (Rect, Scrolled) {
     let rect = overlay_rect(area, title, &lines);
     let h = rect.height;
     let rows = h.saturating_sub(2) as usize;
@@ -3910,15 +4052,12 @@ fn overlay(
     restyle(buf, area, Style::new().add_modifier(Modifier::DIM));
     clear(buf, rect);
     block.render(rect, buf);
-    let (above, below) = (*scroll > 0, *scroll as usize + shown < lines.len());
+    let at = (top, shown, lines.len());
     for (line, y) in lines.into_iter().skip(top).take(shown).chain(pin).zip(text.y..text.bottom()) {
         put_line(buf, &line, Rect { y, height: 1, ..text });
     }
-    // A box of one line, under the tabs on a screen of four, has no text to mark.
-    if text.height > 0 {
-        vmarks(buf, rect.x, text.y, text.y + shown as u16 - 1, above, below);
-    }
-    (text, above, below)
+    vbar(buf, rect.right() - 1, text.y, at, None);
+    (text, at)
 }
 
 /// Where a box scrolled to `top` is among its `n` lines or entries, for its bottom border.
@@ -4643,9 +4782,11 @@ struct Compared {
     lines: Vec<Line<'static>>,
     /// The column under the cursor, for `App::compare_col`.
     col: usize,
-    /// The first column shown, for `App::compare_x`, and how many show, a screen for `‹` `›`.
+    /// The first column shown, for `App::compare_x`, how many show, a screen for `‹` `›`, and of
+    /// how many, for the panel's bar.
     first: usize,
     shown: usize,
+    of: usize,
     /// How many labels the search finds.
     hits: usize,
     /// The line of the model under the cursor.
@@ -4749,20 +4890,15 @@ fn compare(
     // one before by a `│` in its gap, a cell wider, as in the table.
     let starts = |c: usize, f: usize| c == f || cols[c].section != cols[c - 1].section;
     let gap = |c: usize, f: usize| 2 + usize::from(starts(c, f));
-    // How many columns from `f` on fit beside the names, always at least one. The `‹` goes in the
-    // gap before the first, the `›` after the last takes a cell, but only when there are more.
-    let count = |f: usize, reserve: usize| {
-        let mut room = avail.saturating_sub(name_w + reserve);
+    // How many columns from `f` on fit beside the names, always at least one.
+    let fits = |f: usize| {
+        let mut room = avail.saturating_sub(name_w);
         let ok = |&(c, w): &(usize, &usize)| {
             let fit = room >= w + gap(c, f);
             room = room.saturating_sub(w + gap(c, f));
             fit
         };
         widths.iter().enumerate().skip(f.min(m)).take_while(ok).count().max(1)
-    };
-    let fits = |f: usize| {
-        let all = count(f, 0);
-        if f + all >= m { all } else { count(f, 1) }
     };
     // Found in the label as it reads, after the arrow.
     let found_in = |c: usize| {
@@ -4791,7 +4927,6 @@ fn compare(
     }
     // The labels, their last lines on the header's last, as the values under them: right
     // aligned, Via's left.
-    let edge = MORE;
     let left = |c: usize| searched[c] == "Via";
     let h = heads.iter().map(Vec::len).max().unwrap_or(1);
     let head_top = out.len();
@@ -4800,9 +4935,7 @@ fn compare(
         let name = if last { names.label.as_str() } else { "" };
         let mut spans = vec![Span::styled(format!("{name:<name_w$}"), fg(KEY))];
         for c in vis.clone() {
-            if last && c == first && first > 0 {
-                spans.extend([Span::styled("‹", edge), Span::styled(SEP, fg(MUTED)), Span::raw(" ")]);
-            } else if starts(c, first) {
+            if starts(c, first) {
                 spans.extend([Span::raw(" "), Span::styled(SEP, fg(MUTED)), Span::raw(" ")]);
             } else {
                 spans.push(Span::raw("  "));
@@ -4825,9 +4958,6 @@ fn compare(
             let text = format!("{}{piece}{}", " ".repeat(before), " ".repeat(after));
             spans.extend(lit_at(Line::styled(text, fg(KEY)), &lit).spans);
         }
-        if last && first + shown < m {
-            spans.push(Span::styled("›", edge));
-        }
         out.push(Line::from(spans));
     }
     // Each label, from the gap before it, sorts by its column on a click.
@@ -4844,8 +4974,7 @@ fn compare(
     let mut rule = vec![Span::styled("─".repeat(name_w), fg(MUTED))];
     for c in vis.clone() {
         rule.push(Span::styled(if starts(c, first) { "─┼─" } else { "──" }, fg(MUTED)));
-        let (line, style) = if c == col { ("━", fg(ACCENT)) } else { ("─", fg(MUTED)) };
-        rule.push(Span::styled(line.repeat(widths[c]), style));
+        rule.push(Span::styled("─".repeat(widths[c]), fg(MUTED)));
     }
     rule.push(Span::styled("─".repeat(width.saturating_sub(x)), fg(MUTED)));
     out.push(Line::from(rule));
@@ -4890,7 +5019,7 @@ fn compare(
         spots.push(Spot { lines: out.len()..out.len() + 1, x: 0..usize::MAX, at: Stop::Compare(i) });
         out.push(Line::from(spans));
     }
-    Compared { lines: out, col, first, shown, hits: hits.len(), at: top + sel }
+    Compared { lines: out, col, first, shown, of: m, hits: hits.len(), at: top + sel }
 }
 
 /// The verdict as a small table: question, winner in green, margin dimmed.
@@ -5509,7 +5638,8 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         a.more = more_at(term.backend().buffer());
-        let &(column, row, _) = a.more.iter().find(|&&(x, ..)| x == 0).expect("a ▼ on the left border");
+        let down = a.more.iter().find(|&&(x, _, m)| x == 79 && m == Mouse::Scroll(1));
+        let &(column, row, _) = down.expect("a ▼ on the right border");
         let e =
             MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
         let before = a.table.selected().unwrap_or(0);
@@ -5691,7 +5821,7 @@ mod tests {
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭──────────────────╮"), "{}", lines[1]);
         assert_eq!(buf[(dev as u16, 1)].fg, Color::Reset, "its border in the text's colour, as every box's");
-        assert_eq!(&words(&lines[2])[5..10], ["▌", "✓", "all", "2", "▐"], "all is ticked, and has no ✗ box");
+        assert_eq!(&words(&lines[2])[5..10], ["▌", "✓", "all", "2", "│"], "all is ticked, and has no ✗ box");
         assert_eq!(cell(&lines[2], "all"), cell(&lines[3], "anthropic"), "the names line up all the same");
         assert_eq!(&words(&lines[3])[5..10], ["│", "☐", "·", "anthropic", "1"]);
         let ex = dev as u16 + 4;
@@ -6409,7 +6539,7 @@ mod tests {
         let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(
             words(&lines[0]),
-            ["#", "Model", "‹│", "Ctx", "│", "▼ECI", "▾"],
+            ["#", "Model", "│", "Ctx", "│", "▼ECI", "▾"],
             "the cursor starts on the index, and Dev scrolls off"
         );
         assert!(layout(46, &a).more, "columns cut off on the right");
@@ -6454,7 +6584,7 @@ mod tests {
         // Moving past the right edge scrolls the columns right of Model, Dev too; Model stays.
         a.col = NCOLS - 1;
         let (_, lines) = render(&mut a, 46, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "‹│", "Via", "▾", "Notes"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "│", "Via", "▾", "Notes"]);
         // A column wider than the room right of Model is cut, not dropped.
         a.store.set_note("opus", &"x".repeat(40));
         for w in 44..80 {
@@ -6464,12 +6594,12 @@ mod tests {
         a.store.set_note("opus", "");
         a.col = VIA;
         let (_, lines) = render(&mut a, 47, 4);
-        assert_eq!(words(&lines[0]), ["#", "Model", "‹│", "Via", "▾", "Notes"]);
+        assert_eq!(words(&lines[0]), ["#", "Model", "│", "Via", "▾", "Notes"]);
         for _ in 0..2 {
             a.key(KeyCode::Char('h').into());
         }
         let (_, lines) = render(&mut a, 51, 4);
-        let shown = ["‹│", "Agentic", "▾", "│", "Tok/s", "│", "Vi"];
+        let shown = ["│", "Agentic", "▾", "│", "Tok/s", "│", "Vi"];
         assert_eq!(words(&lines[0])[2..], shown, "scrolls back only as far as needed");
         a.key(KeyCode::Char('l').into());
         let (_, lines) = render(&mut a, 51, 4);
@@ -6486,7 +6616,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_column_is_faint_with_a_thick_rule() {
+    fn selected_column_is_faint_with_no_accent() {
         let mut a = app();
         a.col = ECI;
         let area = Rect::new(0, 0, 200, 4);
@@ -6495,9 +6625,9 @@ mod tests {
         let l = layout(200, &a);
         let &(_, x, w) = l.cols.iter().find(|&&(i, ..)| i + 2 == ECI).unwrap();
         let &(_, px, _) = l.cols.iter().find(|&&(i, ..)| i + 2 == PRICE).unwrap();
-        assert_eq!(buf[(x, 1)].symbol(), "━", "a thick rule under the cursor's column");
-        assert_eq!(buf[(x + w - 1, 1)].symbol(), "━");
-        assert_eq!(buf[(px, 1)].symbol(), "─", "a thin one elsewhere");
+        assert_eq!((buf[(x, 1)].symbol(), buf[(px, 1)].symbol()), ("─", "─"), "the rule is the same under it");
+        let head = &buf[(x + w - 1, 0)];
+        assert_eq!((head.fg, head.bg), (ACCENT, Color::Reset), "its header as every other");
         assert_eq!(buf[(x + w - 1, 3)].bg, COLUMN, "its cells are filled");
         assert_eq!(buf[(px + 1, 3)].bg, Color::Reset, "other columns are not");
         let drawn = buf.clone();
@@ -6700,11 +6830,10 @@ mod tests {
                 compare(&ms, (false, &|_| None, &Store::default()), at, (avail, None), query, |_| false, &mut spots);
             (c, spots)
         };
-        let head = |c: &Compared| c.lines[c.at - 3].to_string();
         let (full, spots) = draw(0, 200, "", None);
         assert_eq!((full.first, full.lines.len()), (0, full.at + 1), "everything fits, flash's row last");
         assert!(full.lines[full.at].to_string().starts_with("flash"), "the cursor's row");
-        assert!(!full.lines.iter().any(|l| l.to_string().contains(['‹', '›'])), "no scroll marks when all fit");
+        assert_eq!(full.shown, full.of, "all fit, so the panel has no bar");
         assert_eq!(
             spots
                 .iter()
@@ -6716,22 +6845,19 @@ mod tests {
         let label = spots.iter().find(|s| s.at == Stop::CompareCol(0)).unwrap();
         assert_eq!(label.lines.end, full.at - 2, "a column's label, over the rule, is its spot");
         let rule = &full.lines[full.at - 2];
-        assert!(
-            rule.to_string().starts_with("──────┼─━━━"),
-            "a rule under the header, heavy under the cursor's column: {rule}"
-        );
+        assert!(rule.to_string().starts_with("──────┼────"), "a rule under the header: {rule}");
         let crossed = |l: &Line| l.to_string().chars().filter(|&c| c == '│' || c == '┼').count();
         assert!(full.lines[full.at - 2..].iter().all(|l| crossed(l) > 1), "group lines run down the panel");
         let (cut, _) = draw(0, 40, "", None);
-        assert!(cut.shown < full.shown && head(&cut).ends_with('›') && !head(&cut).contains('‹'), "{}", head(&cut));
+        assert!(cut.shown < full.shown && (cut.first, cut.of) == (0, full.shown), "the bar is told where the view is");
         assert!(cut.lines.iter().any(|l| l.to_string().starts_with(&format!("columns 1-{} of", cut.shown))));
         let (moved, _) = draw(cut.shown, 40, "", None);
-        assert!(moved.first > 0 && head(&moved).contains('‹'), "the view follows the cursor, ‹ marks columns off");
+        assert!(moved.first > 0, "the view follows the cursor");
         assert_eq!(moved.col, cut.shown);
         let size = |c: &Compared| (c.lines.len(), c.lines.iter().map(Line::width).max());
         assert_eq!(size(&moved), size(&cut), "the panel keeps its size as it scrolls");
         let (end, _) = draw(usize::MAX, 40, "", None);
-        assert!(!head(&end).ends_with('›') && end.first + end.shown == full.shown, "no further than the last");
+        assert_eq!(end.first + end.shown, full.shown, "no further than the last");
         let (found, _) = draw(0, 40, "eci", Some(0));
         assert_eq!(found.hits, 1);
         assert!(found.first > 0 && found.col > 0, "a match moves the cursor to its column");
@@ -6904,8 +7030,7 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 9)).unwrap();
         let mut a = app();
         a.key(KeyCode::Char('t').into());
-        // Mid-list the cursor is on the last row shown, where the ▼ is: it shows in place of the
-        // left bar, on the cursor's fill, as in the table.
+        // Mid-list the cursor is on the last row shown, where the bar's ▼ is, on the right border.
         for _ in 0..8 {
             a.key(KeyCode::Char('j').into());
         }
@@ -6913,8 +7038,8 @@ mod tests {
         let buf = term.backend().buffer();
         let text: String = (0..9).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(text.contains(&format!(" of {} ", THEMES.len())), "the hint is not one of the themes counted: {text}");
-        let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.bg == Color::Yellow);
-        assert_eq!(below.map(|c| c.fg), Some(Color::Black), "themes below the cursor");
+        let below = buf.content.iter().find(|c| c.symbol() == "▼" && c.underline_color != Color::Reset);
+        assert_eq!(below.map(|c| c.fg), Some(Color::Reset), "themes below the cursor");
         let tabs: String = (0..2).flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol())).collect();
         assert!(tabs.contains("mine") && !tabs.contains('╮'), "a list too tall leaves the tabs in view: {tabs}");
         for _ in 9..THEMES.len() {
@@ -6932,7 +7057,7 @@ mod tests {
         let buf = term.backend().buffer();
         let row = |y: u16| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>();
         assert!(row(0).contains('╭') && row(0).contains('╮'), "{}", row(0));
-        assert!(row(1).contains(THEMES[THEMES.len() - 1].0) && row(1).contains('▐'), "{}", row(1));
+        assert!(row(1).contains(THEMES[THEMES.len() - 1].0) && row(1).contains('▌'), "{}", row(1));
     }
 
     #[test]
@@ -7080,14 +7205,18 @@ mod tests {
             term.backend().buffer()[(x, y)].bg == CURSOR
         };
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([on(&term, 0, 5), on(&term, 50, 5), on(&term, 99, 5), on(&term, 0, 6)], [true, true, true, false]);
+        assert_eq!([on(&term, 0, 5), on(&term, 50, 5), on(&term, 98, 5), on(&term, 0, 6)], [true, true, true, false]);
         let buf = term.backend().buffer();
-        assert_eq!((buf[(0, 5)].symbol(), buf[(99, 5)].symbol()), ("▌", "▐"), "the border is its two bars");
+        assert_eq!(
+            (buf[(0, 5)].symbol(), buf[(99, 5)].symbol()),
+            ("▌", "│"),
+            "its bar on the left border, the right the scroll bar's"
+        );
         assert_eq!((buf[(0, 5)].fg, buf[(0, 6)].symbol()), (ACCENT, "│"));
         a.key(KeyCode::Char('v').into());
         a.key(KeyCode::Char('j').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([on(&term, 0, 5), on(&term, 99, 6)], [true, true], "the visual range too");
+        assert_eq!([on(&term, 0, 5), on(&term, 98, 6)], [true, true], "the visual range too");
         a.key(KeyCode::Esc.into());
         a.key(KeyCode::Char('t').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
@@ -7194,12 +7323,12 @@ mod tests {
         let type_in = |a: &mut App, keys: &str| keys.chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
         type_in(&mut a, "/5.0");
         a.key(KeyCode::Enter.into());
-        // The scroll, the status and the line with the box's cursor bar, the right one as `▲`
-        // goes over the left, the table's being on the frame's edge.
+        // The scroll, the status and the line with the box's cursor bar, the left one as the bar's
+        // `▲` goes over the right, the table's being on the frame's edge.
         let mut at = |a: &mut App| {
             term.draw(|f| draw(a, f)).unwrap();
             let buf = term.backend().buffer();
-            let y = (0..12).find(|&y| (1..119).any(|x| buf[(x, y)].symbol() == "▐"));
+            let y = (0..12).find(|&y| (1..119).any(|x| buf[(x, y)].symbol() == "▌"));
             (a.scroll, a.status.clone(), y.map(|y| text(buf)[y as usize].clone()))
         };
         let (scroll, status, on) = at(&mut a);
@@ -7322,7 +7451,7 @@ mod tests {
                 (a.view, a.term_bg) = (view, term_bg);
                 a.task_cur = 3;
                 term.draw(|f| draw(&mut a, f)).unwrap();
-                // What `recolor` and `vmarks` tell a cell by: a colour behind text that is not
+                // What `recolor` tells a cell by: a colour behind text that is not
                 // black is the cursor's fill or a selected row's, and nothing else.
                 let odd = term
                     .backend()
@@ -7376,7 +7505,8 @@ mod tests {
         assert!(tabs.trim_end().ends_with(version) && tabs.contains("│ theme t"), "right of the tabs: {tabs}");
         assert!(bottom.starts_with("╰──") && !bottom.contains("modelcmp"), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
-        // The right border marks columns off to the right, the left one rows below, then above.
+        // The bottom border's bar says columns are off to the right, the right one's rows below,
+        // then above.
         let mut data = std::mem::take(&mut a.data);
         for i in 0..6 {
             data.models.push(model(&format!("m{i}"), "openai", Some(100.0), 0.5));
@@ -7386,17 +7516,24 @@ mod tests {
         let edge = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
             term.backend().buffer()[(x, y)].symbol().to_string()
         };
-        let marks = [edge(&term, 100, 3), edge(&term, 0, 4), edge(&term, 100, 4), edge(&term, 0, 5), edge(&term, 0, 7)];
-        assert_eq!(marks, ["›", "├", "┤", "▌", "▼"], "the rule joins the frame, the cursor's bar is on it");
+        let live = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
+            term.backend().buffer()[(x, y)].modifier.contains(BOLD)
+        };
+        let marks =
+            [edge(&term, 0, 4), edge(&term, 100, 4), edge(&term, 0, 5), edge(&term, 100, 5), edge(&term, 100, 7)];
+        assert_eq!(marks, ["├", "┤", "▌", "▲", "▼"], "the rule joins the frame, the cursor's bar is on it");
+        assert_eq!((live(&term, 100, 5), live(&term, 100, 7)), (false, true), "rows below only");
+        let across = (1..100).find(|&x| edge(&term, x, 8) == "›").expect("a › on the bottom border");
+        assert!(live(&term, across, 8), "columns off to the right");
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([edge(&term, 0, 5), edge(&term, 0, 7)], ["▲", "▌"]);
-        assert_eq!(term.backend().buffer()[(0, 5)].bg, Color::Yellow);
-        // On a marked row's fill the ▲ keeps its own.
+        assert_eq!([edge(&term, 100, 5), edge(&term, 0, 7)], ["▲", "▌"]);
+        assert!(live(&term, 100, 5) && !live(&term, 100, 7), "rows above only");
+        // On a marked row the ▲ is the bar's, off the row's fill.
         a.store.marked = a.data.models.iter().map(|m| m.key.clone()).collect();
         term.draw(|f| draw(&mut a, f)).unwrap();
-        let top = &term.backend().buffer()[(0, 5)];
-        assert_eq!((top.symbol(), top.fg, top.bg), ("▲", Color::Black, Color::Yellow));
+        let top = &term.backend().buffer()[(100, 5)];
+        assert_eq!((top.symbol(), top.fg, top.bg), ("▲", Color::Reset, Color::Reset));
         a.store.marked.clear();
         // A tall overlay stops above the status bar, which shows its keys.
         a.key(KeyCode::Char('?').into());
@@ -7429,6 +7566,80 @@ mod tests {
     }
 
     #[test]
+    fn a_scroll_bar_says_where_the_view_is() {
+        let draw = |cells: u16, at: Scrolled, cur: Option<usize>| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, cells, 1));
+            hbar(&mut buf, 0, 0..cells, at, cur);
+            buf
+        };
+        // The cursor's cell is the text's colour: it moves along the thumb, which moves on at its end.
+        let mark = |at: Scrolled, cur: usize| {
+            let buf = draw(12, at, Some(cur));
+            (1..11).filter(|&x| buf[(x, 0)].modifier.contains(BOLD)).collect::<Vec<_>>()
+        };
+        assert_eq!([mark((0, 5, 10), 0), mark((0, 5, 10), 4), mark((5, 5, 10), 9)], [[1], [5], [10]]);
+        assert_eq!([mark((0, 3, 5), 0), mark((0, 3, 5), 2)], [[1], [6]], "from one end of the thumb to the other");
+        assert_eq!(mark((0, 5, 10), 9), [10], "out of view, where it is in the whole");
+        // Where the cursor stops at some lines only, a click moves it by stops: from the first
+        // of six to the third, the last at or before line 9, and to the last.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 5));
+        vbar_on(&mut buf, 0, 0, (1, 5, 20), Some(1), &[1, 2, 3, 11, 12, 18]);
+        let by: Vec<_> = more_at(&buf).into_iter().map(|(_, y, m)| (y, m)).collect();
+        let up = (0, Mouse::Scroll(-1));
+        assert_eq!(by, [up, (2, Mouse::Page(2)), (3, Mouse::Page(5)), (4, Mouse::Scroll(1))]);
+        let bar = |cells: u16, at: Scrolled| {
+            let buf = draw(cells, at, None);
+            let live =
+                (0..cells).filter(|&x| buf[(x, 0)].modifier.contains(BOLD)).map(|x| buf[(x, 0)].symbol().to_string());
+            ((0..cells).map(|x| buf[(x, 0)].symbol()).collect::<String>(), live.collect::<String>())
+        };
+        assert_eq!(bar(12, (0, 5, 5)), (" ".repeat(12), String::new()), "none where everything shows");
+        assert_eq!(bar(12, (0, 5, 10)), ("‹━━━━━     ›".into(), "›".into()), "half shows, from the start");
+        assert_eq!(bar(12, (5, 5, 10)), ("‹     ━━━━━›".into(), "‹".into()), "to the end");
+        assert_eq!(bar(12, (1, 5, 10)), ("‹ ━━━━━    ›".into(), "‹›".into()), "off the start once scrolled");
+        assert_eq!(bar(12, (1, 10, 20)), ("‹╺━━━━╸    ›".into(), "‹›".into()), "by half a cell");
+        assert_eq!(bar(12, (500, 10, 1000)), ("‹    ╺╸    ›".into(), "‹›".into()), "never without a thumb");
+        assert_eq!(bar(2, (3, 1, 9)), ("‹›".into(), "‹›".into()), "two cells have the arrows");
+        assert_eq!(bar(1, (0, 1, 9)), ("›".into(), "›".into()), "and one the way there is more");
+        assert_eq!(bar(1, (8, 1, 9)), ("‹".into(), "‹".into()));
+    }
+
+    #[test]
+    fn a_scroll_bar_takes_clicks_and_drags() {
+        let mut a = app();
+        let mut data = std::mem::take(&mut a.data);
+        data.models.extend((0..40).map(|i| model(&format!("m{i}"), "x", Some(i as f64), 1.0)));
+        a.set_data(data);
+        let area = Rect::new(0, 0, 80, 16);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+        let mut show = |a: &mut App| {
+            term.draw(|f| draw(a, f)).unwrap();
+            a.more = more_at(term.backend().buffer());
+        };
+        show(&mut a);
+        let at = |kind, row| MouseEvent { kind, column: 79, row, modifiers: KeyModifiers::NONE };
+        let (down, drag) = (MouseEventKind::Down(MouseButton::Left), MouseEventKind::Drag(MouseButton::Left));
+        // The rows are on lines 5 to 13: the arrows on the first and last, the track between.
+        let (n, mut press) = (a.rows.len(), None);
+        let m = hit(&a, area, at(down, 12));
+        a.mouse(dragged(&mut press, at(down, 12), m).expect("a click on the track"));
+        assert_eq!(a.table.selected(), Some(n - 1), "the track's last cell is the last row");
+        show(&mut a);
+        let m = hit(&a, area, at(drag, 9));
+        a.mouse(dragged(&mut press, at(drag, 9), m).expect("a drag along it"));
+        assert_eq!(a.table.selected(), Some((n - 1) / 2), "and its middle the middle one");
+        show(&mut a);
+        // A drag that began on a row selects, and one on the bar from there is none.
+        let row = MouseEvent { column: 20, ..at(down, 6) };
+        dragged(&mut press, row, hit(&a, area, row));
+        assert_eq!(dragged(&mut press, at(drag, 12), hit(&a, area, at(drag, 12))), None);
+        // What the bar keeps in its cells is off before the terminal has them.
+        let mut buf = term.backend().buffer().clone();
+        recolor(&mut buf, None, None, None);
+        assert!(more_at(&buf).is_empty());
+    }
+
+    #[test]
     fn overlays_fit_and_scroll() {
         let area = Rect::new(0, 0, 30, 6);
         let mut buf = Buffer::empty(area);
@@ -7437,10 +7648,13 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(0, 0)].fg, Color::Reset, "a box's border is in the text's colour, unlike the grey table frame");
         assert_eq!(scroll as usize, help(&app()).0.len() - 4, "scroll is clamped to the content");
-        assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("▲", "│"), "at the end: lines above only");
+        let ends =
+            |buf: &Buffer| [1, 4].map(|y| (buf[(29, y)].symbol().to_string(), buf[(29, y)].modifier.contains(BOLD)));
+        assert_eq!(ends(&buf), [("▲".into(), true), ("▼".into(), false)], "at the end: lines above only");
+        assert_eq!((buf[(29, 2)].symbol(), buf[(29, 3)].symbol()), ("┃", "┃"), "a track of two cells is all thumb");
         scroll = 0;
         overlay(&mut buf, area, "keys", help(&app()).0, &mut scroll, (0, 0, 0..0));
-        assert_eq!((buf[(0, 1)].symbol(), buf[(0, 4)].symbol()), ("│", "▼"), "at the top: lines below only");
+        assert_eq!(ends(&buf), [("▲".into(), false), ("▼".into(), true)], "at the top: lines below only");
         // A grid's heading is no row: the border counts the rows under it, 20 here in a box of 4 lines.
         let grid = |scroll: &mut u16| {
             let mut buf = Buffer::empty(area);
