@@ -413,6 +413,8 @@ pub fn base_col_about(col: usize) -> String {
     }
 }
 
+pub const REPO: &str = "https://github.com/danctorres/modelcmp";
+
 /// The keys, in groups, each with what it does, the keys it names between backticks. A row
 /// whose key is one letter or sign is that key's action, which enter in `?` moves to another
 /// key, and the rest keep theirs.
@@ -428,6 +430,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("r", "refresh data now (auto at a day's first start, and after 24h)"),
             ("!", "list warnings from the last refresh, or click the ⚠"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
+            ("O", "open modelcmp's GitHub page, or click the version's ↗"),
         ],
     ),
     (
@@ -699,7 +702,7 @@ pub enum Input {
     /// A choice of what to do, `list.sel` under the cursor: `x` on a model several harnesses
     /// have launches one, `o` opens one of the model's pages. Each item is its label and effect.
     Choose {
-        title: &'static str,
+        title: String,
         kind: Kind,
         items: Vec<(String, Effect)>,
         list: List,
@@ -934,8 +937,8 @@ impl List {
 
 impl Input {
     /// A choice list with the cursor on `sel` and nothing searched yet.
-    fn choose(title: &'static str, kind: Kind, items: Vec<(String, Effect)>, sel: usize) -> Self {
-        Self::Choose { title, kind, items, list: List::at(sel) }
+    fn choose(title: impl Into<String>, kind: Kind, items: Vec<(String, Effect)>, sel: usize) -> Self {
+        Self::Choose { title: title.into(), kind, items, list: List::at(sel) }
     }
 }
 
@@ -3106,13 +3109,15 @@ impl App {
             .collect();
         let has = |e: &Effect| matches!(e, Effect::Via(_, h, _) if h.as_deref() == self.store.runs_on(key));
         let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
-        Some(Input::choose("run this model on which harness?", kind, items, sel))
+        Some(Input::choose(format!("run {} on which harness?", m.name), kind, items, sel))
     }
 
     /// `f`'s grid for the model `key`, opened on the box of `slot`: where `f` starts, and where
     /// `H`'s list came from.
     fn fav_at(&mut self, key: &str, slot: &str) {
-        self.input = Input::choose("favorite for which tasks?", Kind::Fav, vec![], 0);
+        // Named after the model, as every list of one model's is.
+        let name = self.data.models.iter().find(|m| m.key == key).map_or("", |m| &m.name);
+        self.input = Input::choose(format!("{name}: favorite for which tasks?"), Kind::Fav, vec![], 0);
         self.relist(key, slot, None);
     }
 
@@ -4706,6 +4711,7 @@ impl App {
             KeyCode::Char('U') => {
                 self.status = concat!("no newer version: this is modelcmp v", env!("CARGO_PKG_VERSION")).into();
             }
+            KeyCode::Char('O') => return Some(Effect::Open(REPO.into())),
             KeyCode::Esc => {
                 if self.overlay_search() && !self.overlay_query.is_empty() {
                     self.overlay_query.clear();
@@ -4835,7 +4841,8 @@ impl App {
                     let none = m.url().err().unwrap_or_default();
                     self.refuse(none);
                 } else {
-                    self.input = Input::choose("open on which site?", Kind::Open, items, 0);
+                    let title = format!("open {} on which site?", m.name);
+                    self.input = Input::choose(title, Kind::Open, items, 0);
                 }
             }
             // A list even of one, as `o`'s.
@@ -4870,7 +4877,8 @@ impl App {
                     let runs = harness_cmd(&self.store, capped.as_ref().unwrap_or(m), &[], &self.data.harness);
                     let on = |e: &Effect| matches!((e, &runs), (Effect::Launch(c), Some(r)) if c[0] == r[0]);
                     let sel = items.iter().position(|(_, e)| on(e)).unwrap_or(0);
-                    self.input = Input::choose("open in which harness?", Kind::Launch, items, sel);
+                    let title = format!("open {} in which harness?", m.name);
+                    self.input = Input::choose(title, Kind::Launch, items, sel);
                     let (key, repo) = ask?;
                     self.downloads.insert(key.clone(), Download::Awaited);
                     return Some(Effect::Size(key, repo));
@@ -8189,9 +8197,11 @@ mod tests {
         assert_eq!(a.status, "this tier has no model", "free");
         // Any model a tier shows has a harness, a favorite or not.
         a.task_sel = TIERS.len();
-        let key = a.current().map(|m| m.key.clone()).unwrap();
+        let (key, name) = a.current().map(|m| (m.key.clone(), m.name.clone())).unwrap();
         press(&mut a, "H");
         assert!(matches!(&a.input, Input::Choose { kind: Kind::Via, items, .. } if items.len() == 3));
+        let Input::Choose { title, .. } = &a.input else { panic!() };
+        assert_eq!(title, &format!("run {name} on which harness?"), "the list names its model");
         code(&mut a, KeyCode::Esc);
         assert!(a.input == Input::None && a.view == View::Recommend, "esc: back on recommend");
         press(&mut a, "Hj");
@@ -9580,6 +9590,7 @@ mod tests {
         press(&mut a, "U");
         a.set_data(Data::default());
         assert_eq!(a.input, Input::None, "a refresh that lost the release takes the question back");
+        assert_eq!(press(&mut a, "O"), Some(Effect::Open(REPO.into())), "O opens the GitHub page");
     }
 
     #[test]

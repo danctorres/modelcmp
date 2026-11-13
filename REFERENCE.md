@@ -476,12 +476,11 @@ The TUI's bottom border always shows the refresh state, one of these:
 - `⟳ refreshing 7/9, waiting for opencode`: how many downloads and harnesses have answered, and
   the last one or two still awaited.
 - `refresh failed` in red, with the age of the data still shown.
-- `⚠ refresh had issues` in yellow, until a refresh has none.
+- `⚠ refresh had issues: ! lists them` in yellow, until a refresh has none.
 - The data age alone, red once it is past 24h. The status bar then says it too, as `data 25h old`
   in red, with the hint `r refresh`.
 
-`!` or a click on the `⚠` lists the issues, and the status bar hints `! issues` while there are
-any. The status bar itself says only what a key or a refresh you started did.
+`!` or a click on the `⚠` lists the issues. The status bar itself says only what a key or a refresh you started did.
 
 When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no
 file for it, a warning names the benchmark, in `!` and at every command. The first start or

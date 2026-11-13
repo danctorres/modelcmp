@@ -10,8 +10,8 @@
 use crate::app::{
     App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HARNESS_CELL, HELP, HELP_TAB, Input, Kind, List,
     MARKED, MINE, MODEL_CELL, Mouse, NAME_CELL, NCOLS, NEW_TASK, NO_PREFERENCE, NOTES, PREFERRED, PRICE, RECOMMEND,
-    Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys, box_slot, found, got, group_starts, help_rows,
-    hidden, on_price, runs_on, shown, slot_box,
+    REPO, Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys, box_slot, found, got, group_starts,
+    help_rows, hidden, on_price, runs_on, shown, slot_box,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -152,8 +152,6 @@ type Term = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
 fn buffered<W: std::io::Write>(out: W) -> CrosstermBackend<BufWriter<W>> {
     CrosstermBackend::new(BufWriter::with_capacity(1 << 17, out))
 }
-
-const REPO: &str = "https://github.com/danctorres/modelcmp";
 
 /// The commands that upgrade the binary at `exe` to release `new`, by what installed it: Homebrew
 /// keeps it in its Cellar, cargo in its `bin`. None for one put there by hand.
@@ -742,6 +740,30 @@ fn off(
     std::thread::spawn(move || drop(tx.send(f())));
 }
 
+/// The version, right of the tabs, or the newer one that is out and the key that upgrades to it.
+fn version(app: &App) -> String {
+    match app.data.update() {
+        Some(new) => format!(" modelcmp v{new} available: {} upgrades ", app.key_of('U')),
+        None => concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ↗ ").into(),
+    }
+}
+
+/// What ends the version where a click on it opens modelcmp's GitHub page.
+const LINK: &str = "↗ ";
+
+/// Where the version is, its line and its cells: at the right end of the tabs' line where the
+/// tabs leave it room, else first on the frame's bottom border.
+fn version_at(app: &App, area: Rect) -> (u16, Range<u16>) {
+    let w = version(app).chars().count() as u16;
+    let tabs = tab_ends(app).last().unwrap_or(0) as u16;
+    if tabs + 2 + w <= area.width {
+        (area.y + 1, area.right() - w..area.right())
+    } else {
+        // Cut at the frame's corner, as it is drawn.
+        (area.bottom() - 2, area.x + 1..(area.x + 1 + w).min(area.right().saturating_sub(1)))
+    }
+}
+
 /// Opens each page in the browser, one at a time so the tabs open in the list's order. A
 /// browser is only asked to: what it does with a page is not known here.
 /// ponytail: a fixed pause, not a wait on the browser, which xdg-open can hold until it closes.
@@ -921,9 +943,19 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             && matches!(&app.input, Input::Menu { col: 1 | PRICE | VIA, items, .. } if k != 0 && k < items.len());
         return (k < len).then_some(if ex { Mouse::Exclude(k) } else { Mouse::Item(k) });
     }
+    // Not while something is typed or a key is waited for, which would take the key as text.
+    let idle = plain && app.input == Input::None;
     // The frame's ⚠ opens the issues, as `!` does, over a panel too.
-    if plain && m.row == area.bottom() - 2 && app.issues_at.as_ref().is_some_and(|r| r.contains(&m.column)) {
+    if idle && m.row == area.bottom() - 2 && app.issues_at.as_ref().is_some_and(|r| r.contains(&m.column)) {
         return Some(Mouse::Key(KeyCode::Char('!')));
+    }
+    // The version opens modelcmp's GitHub page, as `O` does, or upgrades to the newer one
+    // it names, as `U` does. Not under a panel drawn over it.
+    let (row, cells) = version_at(app, area);
+    let covered = app.panel.is_some_and(|r| r.contains(pos));
+    if idle && !covered && m.row == row && cells.contains(&m.column) {
+        let key = if app.data.update().is_some() { 'U' } else { 'O' };
+        return Some(Mouse::Key(KeyCode::Char(key)));
     }
     // A click outside the open panel closes it, as one outside a list does, unless it is on a
     // hint or a tab.
@@ -1189,6 +1221,7 @@ fn actions(keys: &str) -> Vec<&'static str> {
 /// the view's own keys, the model's actions, then the way back. Narrow terminals
 /// drop them from the front, so the actions outlast the view's keys and `esc` goes last, `q quit`
 /// and `? help` first, as `K` lists them (`fit_keys`).
+/// `o open` and `y copy name` are `K`'s alone to show (`K_ONLY`).
 /// A toggle names what pressing it does; `A a S F E R C t ?` are on their tabs above the frame, and
 /// one cut off a terminal `width` wide is here instead; the rest of the keys are in `?`. `s` acts
 /// on the column picked with `← →`.
@@ -1239,9 +1272,6 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             }
             if stale(app) {
                 view.push("r refresh");
-            }
-            if app.data.warning.is_some() {
-                view.push("! issues");
             }
             let mut back = vec![];
             // Where esc goes back from, as in the overlays.
@@ -1386,17 +1416,23 @@ const ALL_KEYS: &str = "K all keys";
 /// as `K`'s list has them.
 const CUT_FIRST: [&str; 2] = ["q quit", "? help"];
 
+/// The hints of what is seldom done, which no bar shows where `K` lists them.
+const K_ONLY: [&str; 2] = ["o open", "y copy name"];
+
 /// What of `keys` fits `room` cells: whole keys dropped from the front, the way back the last to
 /// go. With `all`, where `K` lists them (`App::lists_keys`), `CUT_FIRST` go first and any cut off
 /// leave `K all keys` after the rest, the last of all to go, where it fits. However narrow, the
 /// last key stays, which may not fit.
 fn fit_keys(keys: &[&str], room: usize, all: bool) -> Vec<String> {
     let width = |k: &[&str]| Span::raw(k.join("  ")).width();
-    if width(keys) <= room {
-        return keys.iter().map(|k| k.to_string()).collect();
+    // `K_ONLY` leave `K all keys` after the rest, as keys cut off do.
+    let shown: Vec<&str> =
+        if all { keys.iter().copied().filter(|k| !K_ONLY.contains(k)).collect() } else { keys.to_vec() };
+    let whole = [&shown[..], if shown.len() < keys.len() { &[ALL_KEYS] } else { &[] }].concat();
+    if width(&whole) <= room {
+        return whole.into_iter().map(String::from).collect();
     }
-    let kept: Vec<&str> =
-        if all { keys.iter().copied().filter(|k| !CUT_FIRST.contains(k)).collect() } else { keys.to_vec() };
+    let kept: Vec<&str> = shown.into_iter().filter(|k| !all || !CUT_FIRST.contains(k)).collect();
     let keys = kept.strip_suffix(&[SEP]).unwrap_or(&kept);
     let tail: &[&str] = if all && width(&[ALL_KEYS]) <= room { &[ALL_KEYS] } else { &[] };
     let from = (0..keys.len())
@@ -1901,14 +1937,16 @@ fn draw(app: &mut App, f: &mut Frame) {
     {
         // The refresh state is always in view: under way, failed, or how old the data is.
         let age = format!("{} ", data_age(&app.data));
-        let version = match app.data.update() {
-            Some(new) => Line::from(format!(" modelcmp v{new} available: {} upgrades ", app.key_of('U')))
-                .style(fg(Color::Yellow)),
-            None => Line::from(concat!(" modelcmp v", env!("CARGO_PKG_VERSION"), " ")).style(fg(MUTED)),
+        // The ↗ in the keys' colour says a click opens the page.
+        let version = match version(app).strip_suffix(LINK) {
+            Some(v) => Line::from(vec![Span::styled(v.to_string(), fg(MUTED)), Span::styled(LINK, fg(KEY))]),
+            None => Line::from(version(app)).style(fg(Color::Yellow)),
         };
-        let source = " models.dev + Epoch AI + Arena · ";
+        // On the tabs' line where they leave it room, else on the bottom border.
+        let (version_y, version_x) = version_at(app, area);
+        let below = version_y != area.y + 1;
         // Where the count and what it waits for would run over the version, the count goes alone.
-        let room = usize::from(body.width).saturating_sub(2 + version.width() + source.chars().count());
+        let room = usize::from(body.width).saturating_sub(3 + if below { version.width() } else { 0 });
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
         let (state, color) = match (app.refreshing, app.refresh_failed, stale(app)) {
             (true, ..) if refreshing(&app.progress).chars().count() > room => {
@@ -1918,37 +1956,48 @@ fn draw(app: &mut App, f: &mut Frame) {
             (_, true, _) => (format!("refresh failed · {age}"), BAD),
             // Until a refresh without any: `!` lists them.
             (_, _, old) if app.data.warning.is_some() => {
-                (format!("⚠ refresh had issues · {age}"), if old { BAD } else { Color::Yellow })
+                // Without the key where naming it would run over the version.
+                let named = format!("⚠ refresh had issues: {} lists them · {age}", app.key_of('!'));
+                let fits = named.chars().count() <= room;
+                (
+                    if fits { named } else { format!("⚠ refresh had issues · {age}") },
+                    if old { BAD } else { Color::Yellow },
+                )
             }
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
         };
-        // A state still too long would run over the version: the source goes.
-        let named = state.chars().count() <= room;
         // Last on the bottom border, before its corner.
         let end = body.right().saturating_sub(1);
         app.issues_at =
             state.starts_with('⚠').then(|| end.saturating_sub(Line::from(state.as_str()).width() as u16)..end);
-        // Via by the download's size alone says so, as its order is not the column's text.
-        let size = if app.by_size() { " size" } else { "" };
-        let sort = format!(" {} by {}{size} ", if app.descending { "▼" } else { "▲" }, app.col_name(app.sort_col));
+        // The sort is on its column's header. The border says it only where the header cannot: a
+        // column scrolled out of view, and Via by the download's size alone, whose order is not
+        // the column's text.
+        let cols = layout(body.width.saturating_sub(2), app);
+        let arrow = if app.descending { "▼" } else { "▲" };
+        let sort = match (app.by_size(), cols.shows(app.sort_col)) {
+            (true, _) => format!(" {arrow} by {} size ", app.col_name(app.sort_col)),
+            (_, false) => format!(" {arrow} by {} ", app.col_name(app.sort_col)),
+            _ => String::new(),
+        };
         let sort_w = sort.chars().count();
-        let frame = Block::bordered()
+        let mut frame = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(fg(MUTED))
             .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
-            .title_bottom(version)
-            .title_bottom(
-                Line::from_iter(
-                    named.then(|| Span::styled(source, fg(MUTED))).into_iter().chain([Span::styled(state, fg(color))]),
-                )
-                .right_aligned(),
-            );
+            .title_bottom(Line::from(format!(" {state}")).style(fg(color)).right_aligned());
+        if below {
+            frame = frame.title_bottom(version.clone());
+        }
         let inner = frame.inner(body);
         let head = head(app);
         app.page = inner.height.saturating_sub(head);
         let buf = f.buffer_mut();
         frame.render(body, buf);
+        if !below {
+            buf.set_line(version_x.start, version_y, &version, version_x.len() as u16);
+        }
         // What the column under the cursor means, centred and cut to clear the sort on either
         // side; where that would run under the tabs that are on, centred on the wider side of them.
         let (lo, hi) = tabs(buf, body, sort_w as u16, app);
@@ -1966,7 +2015,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             x = start + room.saturating_sub(about.chars().count()) / 2;
         }
         put(buf, body.x + x as u16, body.y, about, end.saturating_sub(x), fg(MUTED));
-        let (right, above, below, typing) = table(buf, inner, app);
+        let (right, above, below, typing) = table_of(buf, inner, app, cols);
         note_at = typing;
         // Where the note being written is drawn, which the details' panel draws next.
         app.note_shown = typing.map(|n| n.0);
@@ -2303,6 +2352,19 @@ fn col_head(app: &App, col: usize) -> (&'static str, &'static str) {
     (base_col_name(col), if app.col_bench(col).is_some() { "*" } else { "" })
 }
 
+impl Layout {
+    /// Whether the column at cursor index `col` has its header in view, wide enough for its sort
+    /// arrow: Model always, Via and Notes where they are not cut short.
+    fn shows(&self, col: usize) -> bool {
+        match col {
+            0 => true,
+            1 => self.dev_w > 0,
+            VIA | NOTES => (if col == VIA { self.via } else { self.notes }).is_some_and(|(_, w)| w >= 6),
+            c => self.cols.iter().any(|&(i, ..)| i + 2 == c),
+        }
+    }
+}
+
 fn layout(width: u16, app: &App) -> Layout {
     let ms = &app.data.models;
     // Headers need room for the sort arrow, and a dropdown's for its " ▾".
@@ -2425,11 +2487,18 @@ fn head(app: &App) -> u16 {
 /// Header plus as many rows as fit in `area`, scrolled so the selection stays in view. Says
 /// whether columns are cut off on the right and rows above and below, for the caller's border,
 /// and, of a note written in its cell, the cell and the text cursor.
+#[cfg(test)]
 fn table(buf: &mut Buffer, area: Rect, app: &mut App) -> (bool, bool, bool, Option<NoteCell>) {
+    let cols = layout(area.width, app);
+    table_of(buf, area, app, cols)
+}
+
+/// `table` with the columns `layout` gave for `area`'s width.
+fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool, bool, bool, Option<NoteCell>) {
     if area.height == 0 {
         return (false, false, false, None);
     }
-    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, next, seps } = layout(area.width, app);
+    let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, next, seps } = cols;
     app.hscroll = first;
     let arrow = |i: usize| match i == app.sort_col {
         true if app.descending => "▼",
@@ -5366,6 +5435,11 @@ mod tests {
         a.store.via_pick = vec![crate::app::DOWNLOAD.into()];
         a.rebuild();
         assert!(top(&mut a).contains(" ▲ by Via size "), "{}", top(&mut a));
+        // Dev scrolled out of view has no header to say its sort on.
+        let mut cols = layout(200, &a);
+        assert!(cols.shows(1));
+        cols.dev_w = 0;
+        assert!(!cols.shows(1));
     }
 
     #[test]
@@ -5547,7 +5621,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  o open  y copy name  space select  f fav  e exclude  i note  │  q quit"
+                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  q quit  K all keys"
             ),
             "{}",
             lines[5]
@@ -5843,11 +5917,13 @@ mod tests {
         a.mouse(Mouse::Item(close));
         assert_eq!(a.input, Input::None, "and esc close closes it");
 
-        // With room for every hint, no `K all keys`, and `K` still lists them.
+        // With room for every hint, `o open` and `y copy name` are still `K`'s alone to list.
         assert!(click(&mut a, 220, "q quit").is_some());
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(220, h)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert!(!text(term.backend().buffer())[h as usize - 1].contains("all keys"));
+        let bar = &text(term.backend().buffer())[h as usize - 1];
+        assert!(bar.ends_with("i note  │  q quit  K all keys") && !bar.contains("o open"), "{bar}");
+        assert!(bar_hints(&a, 220).iter().any(|h| h == "o open"), "K lists it");
         assert_eq!(a.key(KeyCode::Char('K').into()), Some(Effect::Keys));
 
         // A screen too short for every row: they scroll with the cursor, `▼` saying more are below,
@@ -6170,20 +6246,18 @@ mod tests {
         let at = |y: usize, pat: &str| (lines[y][..lines[y].find(pat).unwrap()].chars().count() as u16, y as u16);
         let star = |m: &str| buf[at(lines.iter().position(|l| l.contains(m)).unwrap(), "★")].fg;
         assert_eq!(star("opus"), STAR, "no task picked: a gold ★ that says favorite for some task");
-        // Every header is one colour, as the source's name on the bottom border.
+        // Every header is one colour.
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 10)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let (wide, rows) = (term.backend().buffer(), text(term.backend().buffer()));
-        // The first cell of `pat`: a header's, or on the bottom border, where models.dev is.
+        // The first cell of `pat`, a header's.
         let cell = |pat: &str| {
-            let on = if pat == "Epoch AI" { "models.dev" } else { "Released" };
-            let y = rows.iter().position(|l| l.contains(on)).unwrap();
+            let y = rows.iter().position(|l| l.contains("Released")).unwrap();
             wide[(rows[y][..rows[y].find(pat).unwrap()].chars().count() as u16, y as u16)].fg
         };
         for pat in ["Price", "ECI", "Coding", "Agentic"] {
             assert_eq!(cell(pat), ACCENT, "{pat}");
         }
-        assert_eq!(cell("Epoch AI"), MUTED, "the source is the border's grey, as models.dev beside it");
         assert_eq!(buf[at(4, "★")].fg, task_color("agentic"), "and in the status bar");
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         let name_x = at(opus, "opus").0;
@@ -6708,7 +6782,7 @@ mod tests {
         assert!(last.contains("screenshots, UI mockups") && !last.contains("from:"), "{last}");
         // f's keys fit the status bar of a terminal 80 columns wide, with a task of your own too.
         let items = vec![("debugging".to_string(), Effect::Fav("k".into(), "debugging".into()))];
-        a.input = Input::Choose { title: "", kind: Kind::Fav, items, list: List::default() };
+        a.input = Input::Choose { title: String::new(), kind: Kind::Fav, items, list: List::default() };
         let keys = prompt_keys(&a, mode(&a).0.chars().count() as u16 + 3, "/", 80).map(|k| k.0);
         assert!(keys.as_ref().is_some_and(|k| k.contains("T edit")), "{keys:?}");
     }
@@ -6723,20 +6797,23 @@ mod tests {
             let buf = term.backend().buffer();
             (0..120).map(|x| buf[(x, 6)].symbol()).collect::<String>()
         };
-        assert!(border(&mut a).contains("· ⟳ refreshing ╯"), "before the first count");
+        assert!(border(&mut a).contains("─ ⟳ refreshing ╯"), "before the first count");
         a.progress = "7/9, waiting for opencode".into();
-        assert!(border(&mut a).contains("· ⟳ refreshing 7/9, waiting for opencode ╯"));
+        assert!(border(&mut a).contains("─ ⟳ refreshing 7/9, waiting for opencode ╯"));
         // Too long for the border with the version in it, the count goes alone.
-        a.progress = format!("7/9, waiting for {}", "artificialanalysis.ai, epoch.ai, and a very long name of a site");
+        a.progress = format!(
+            "7/9, waiting for {}",
+            "artificialanalysis.ai, epoch.ai, and a very long name of a site that no border has room for"
+        );
         let line = border(&mut a);
-        assert!(line.contains(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{line}");
-        assert!(line.contains("· ⟳ refreshing 7/9 ╯"), "{line}");
+        assert!(line.contains(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ↗ ─")), "{line}");
+        assert!(line.contains("─ ⟳ refreshing 7/9 ╯"), "{line}");
         // Done with a warning, the frame keeps saying so, as the next start does from the cache.
         a.refreshed(
             Ok(Data { warning: Some("copilot did not list its models".into()), ..Data::default() }),
             (vec![], vec![]),
         );
-        assert!(border(&mut a).contains("⚠ refresh had issues ·"), "after the status is cleared too");
+        assert!(border(&mut a).contains("⚠ refresh had issues: ! lists them ·"), "after the status is cleared too");
         a.refreshed(Ok(Data::default()), (vec![], vec![]));
         assert!(!border(&mut a).contains("⚠ refresh"), "until a refresh without any");
     }
@@ -6765,6 +6842,20 @@ mod tests {
         };
         let got = hit(&a, Rect::new(0, 0, w, h), click);
         assert_eq!(got, Some(Mouse::Key(KeyCode::Char('!'))));
+        // The version, right of the tabs on a screen wide enough and else on the bottom border.
+        for w in [w, 200] {
+            let area = Rect::new(0, 0, w, h);
+            let (row, cells) = version_at(&a, area);
+            assert_eq!(row, if w == 200 { 1 } else { h - 2 }, "{w} wide");
+            let on_version = hit(&a, area, MouseEvent { column: cells.start + 2, row, ..click });
+            assert_eq!(on_version, Some(Mouse::Key(KeyCode::Char('O'))), "the version opens the GitHub page");
+            // A search being typed takes no `O` from a click on it, nor a `!` from one on the ⚠.
+            a.key(KeyCode::Char('/').into());
+            for at in [MouseEvent { column: cells.start + 2, row, ..click }, click] {
+                assert!(!matches!(hit(&a, area, at), Some(Mouse::Key(_))), "{w} wide");
+            }
+            a.key(KeyCode::Esc.into());
+        }
         a.mouse(got.unwrap());
         assert_eq!(a.view, View::Issues);
         let lines = screen(&mut a);
@@ -6775,7 +6866,7 @@ mod tests {
     }
 
     #[test]
-    fn tabs_leave_the_sort_and_the_column_s_description_in_view() {
+    fn tabs_leave_the_column_s_description_in_view() {
         let mut a = app();
         let key = a.data.models[0].key.clone();
         a.store.toggle_excluded(&key);
@@ -6788,20 +6879,19 @@ mod tests {
             let buf = term.backend().buffer();
             (0..20).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
         };
-        // ✗'s tab, on, opens the border left of the sort at 70 columns and is over the sort at 60.
-        for (w, left) in [
-            (60, "╭─────────── ECI: Epoch AI's overall index, d f…─"),
-            (70, "╭ ECI: Epoch AI's overall index, d for other ben…╯"),
-        ] {
+        // ✗'s tab, on, opens the border up to its corner at 60 columns and short of it at 70. The
+        // sort is on its header alone.
+        for (w, right) in [(60, "ben…╯         ╮"), (70, "ben…╯              ╰────╮")] {
             let lines = rows(&mut a, w);
-            assert!(lines[2].starts_with(left) && lines[2].ends_with(" ▼ by ECI ╮"), "{}", lines[2]);
+            let left = "╭ ECI: Epoch AI's overall index, d for other ";
+            assert!(lines[2].starts_with(left) && lines[2].ends_with(right), "{}", lines[2]);
             assert!(lines[19].contains("✗ excluded"), "E left S: {}", lines[19]);
         }
         // ✓'s, further left, leaves the wider side on its right.
         a.key(KeyCode::Char('S').into());
         let top = &rows(&mut a, 100)[2];
         assert!(
-            top.contains("╯              ╰ ECI: Epoch AI's overall index, d for other benchmarks "),
+            top.contains("╯              ╰───── ECI: Epoch AI's overall index, d for other benchmarks ─────╮"),
             "right of it: {top}"
         );
         // A panel's tab stands on the frame, closed, and a cut one is a hint there too.
@@ -7263,7 +7353,7 @@ mod tests {
             "{tabs}"
         );
         let top = row(&term, 2);
-        assert!(top.ends_with("─ ▼ by ECI ╮"), "{top}");
+        assert!(top.ends_with("──╮") && !top.contains(" by ECI"), "the sort is on its header alone: {top}");
         assert!(top.starts_with("╭╯        ╰───"), "{top}");
         let (l, r) = top.split_once(" ECI: Epoch AI's overall index, d for other benchmarks ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
@@ -7278,8 +7368,16 @@ mod tests {
         a.view = View::Table;
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(bottom.contains("models.dev + Epoch AI + Arena · data "), "{bottom}");
-        assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ─")), "{bottom}");
+        assert!(bottom.contains("─ data ") && !bottom.contains("models.dev"), "{bottom}");
+        // The tabs leave the version no room on their line: it is on the bottom border.
+        assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ↗ ─")), "{bottom}");
+        let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 10)).unwrap();
+        wide.draw(|f| draw(&mut a, f)).unwrap();
+        let lines = text(wide.backend().buffer());
+        let (tabs, bottom) = (&lines[1], &lines[8]);
+        let version = concat!("    modelcmp v", env!("CARGO_PKG_VERSION"), " ↗");
+        assert!(tabs.trim_end().ends_with(version) && tabs.contains("│ help ?"), "right of the tabs: {tabs}");
+        assert!(bottom.starts_with("╰──") && !bottom.contains("modelcmp"), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
         // The right border marks columns off to the right, the left one rows below, then above.
         let mut data = std::mem::take(&mut a.data);
@@ -7522,7 +7620,7 @@ mod tests {
         let mut b = app();
         let edit = Some(Edit { what: task("", false), text: "y".into(), cur: 0, err: None });
         b.input = Input::Choose {
-            title: "",
+            title: String::new(),
             kind: Kind::Fav,
             items: vec![("coding".into(), Effect::Fav("k".into(), "coding".into()))],
             list: List { edit, ..Default::default() },
