@@ -8,10 +8,10 @@
 //! marked row's fill and the cursor's.
 
 use crate::app::{
-    App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HARNESS_CELL, HELP, HELP_TAB, Input, Kind, List,
-    MARKED, MINE, MODEL_CELL, Mouse, NAME_CELL, NCOLS, NEW_TASK, NO_PREFERENCE, NOTES, PREFERRED, PRICE, RECOMMEND,
-    REPO, Stop, TABS, VIA, View, What, base_col_name, bindable, bound_keys, box_slot, found, got, group_starts,
-    help_rows, hidden, on_price, runs_on, shown, slot_box,
+    App, BOXES, COLS, Download, ECI, EXCLUDED, Edit, Effect, FAV, HARNESS_CELL, HELP, Input, Kind, List, MARKED, MINE,
+    MODEL_CELL, Mouse, NAME_CELL, NCOLS, NEW_TASK, NOTES, PREFERRED, PRICE, RECOMMEND, REPO, Stop, TABS, VIA, View,
+    What, base_col_name, bindable, bound_keys, box_slot, found, got, group_starts, help_rows, hidden, on_price,
+    runs_on, shown, slot_box,
 };
 use crate::data::{self, Data, Model};
 use crate::fit::{self, TASKS};
@@ -1219,10 +1219,10 @@ fn actions(keys: &str) -> Vec<&'static str> {
 
 /// Key reminders in the status bar, in groups every view keeps in the same order: moving,
 /// the view's own keys, the model's actions, then the way back. Narrow terminals
-/// drop them from the front, so the actions outlast the view's keys and `esc` goes last, `q quit`
-/// and `? help` first, as `K` lists them (`fit_keys`).
+/// drop them from the front, so the actions outlast the view's keys and `? help` goes last, `q quit`
+/// first, as `K` lists it (`fit_keys`).
 /// `o open` and `y copy name` are `K`'s alone to show (`K_ONLY`).
-/// A toggle names what pressing it does; `A a S F E R C t ?` are on their tabs above the frame, and
+/// A toggle names what pressing it does; `A a S F E R C t` are on their tabs above the frame, and
 /// one cut off a terminal `width` wide is here instead; the rest of the keys are in `?`. `s` acts
 /// on the column picked with `← →`.
 fn hints(app: &App, width: u16) -> Vec<&'static str> {
@@ -1342,9 +1342,9 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
-    // drops last. Off the table only the panels', whose keys work there. `? help` goes after
-    // the way back.
-    if written_in_place(app) {
+    // drops last. Off the table only the panels', whose keys work there. `? help`, on no tab,
+    // goes after the way back.
+    if written_in_place(app) || matches!(app.input, Input::Bind { .. }) {
         return groups.join(&SEP);
     }
     let (mut cut, last) = (vec![], groups.len() - 1);
@@ -1355,8 +1355,11 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             && !app.tab_on(i)
             && !groups.iter().any(|g| g.contains(&hint))
         {
-            if i == HELP_TAB { groups[last].push(hint) } else { cut.push(hint) }
+            cut.push(hint);
         }
+    }
+    if app.view != View::Help {
+        groups[last].push("? help");
     }
     if !cut.is_empty() {
         groups.insert(last, cut);
@@ -1413,9 +1416,9 @@ fn hint_key(hint: &str) -> Option<KeyCode> {
 /// The hint of `K`, which lists every key of the status bar.
 const ALL_KEYS: &str = "K all keys";
 
-/// The hints a bar too narrow for every key cuts first, wherever they are: not worth the room,
-/// as `K`'s list has them.
-const CUT_FIRST: [&str; 2] = ["q quit", "? help"];
+/// The hint a bar too narrow for every key cuts first, wherever it is: not worth the room,
+/// as `K`'s list has it.
+const CUT_FIRST: [&str; 1] = ["q quit"];
 
 /// The hints of what is seldom done, which no bar shows where `K` lists them.
 const K_ONLY: [&str; 2] = ["o open", "y copy name"];
@@ -4014,9 +4017,6 @@ fn to_hit(app: &mut App, hits: &[usize]) -> Option<usize> {
     at
 }
 
-/// What recommend leaves out.
-const UNRATED: &str = "only models with a score are recommended.";
-
 /// A list per task, the built-in ones and then your own: its name and when to use it, then a
 /// line per tier with the model it picks, as `--tier` does, its price, score and harness, in
 /// columns under one header, wrapped to `width`. Where each name and model is goes to `spots`,
@@ -4058,12 +4058,11 @@ fn recommend(
     }
     // Your preferred harness (`P`), for the models with none of their own, a dropdown: its ▾
     // grey but on the cursor's, as a tier's, and a click on it or the name opens it.
-    // P's entry for none whole when it fits, else its first word.
+    // `none` for P's first entry, which the list spells out.
     let on = app.among == Some(PREFERRED);
     let x = "preferred harness:".len();
-    let fits = x + NO_PREFERENCE.chars().count() + MENU.chars().count() + 2 <= text;
     let name = match app.store.harness.as_str() {
-        "" => Span::raw(if fits { NO_PREFERENCE } else { "none" }),
+        "" => Span::raw("none"),
         h => Span::styled(h.to_string(), fg(via_color(&app.store.via_not, h))),
     };
     let menu = Span::styled(MENU, if on { Style::new() } else { fg(MUTED) });
@@ -4071,9 +4070,6 @@ fn recommend(
     v.push(Line::from([label("preferred harness:"), cursor(on, vec![name, menu])].concat()));
     // The lines the cursor is on above the tiers, kept in view.
     let among = v.len();
-    let warn: Vec<Line> = words(UNRATED);
-    let warning = vec![Span::styled("warning: ", fg(Color::Yellow))];
-    v.extend(wrapped(warning, warn, &space, text).into_iter().map(|l| l.style(fg(MUTED))));
     v.push(Line::default());
     let own = app.store.custom_tasks();
     // What you wrote about a task of your own is when to use it.
@@ -5622,7 +5618,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  q quit  K all keys"
+                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  q quit  ? help  K all keys"
             ),
             "{}",
             lines[5]
@@ -5879,14 +5875,14 @@ mod tests {
         assert_eq!(a.mouse(key_q), Some(Effect::Quit));
 
         // Too narrow for every hint: `K all keys` on the right lists them all, one a line, and a pick
-        // presses its key. The room is for keys worth showing: `q quit` and `? help` go first.
+        // presses its key. The room is for keys worth showing: `q quit` goes first, `? help` stays.
         let mut a = app();
         assert_eq!(click(&mut a, w, "K all keys"), Some(Mouse::Key(KeyCode::Char('K'))));
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bar = text(term.backend().buffer())[h as usize - 1].trim_end().to_string();
-        assert!(bar.ends_with("space select  f fav  e exclude  i note  │  t theme  K all keys"), "{bar}");
-        assert!(!bar.contains("q quit") && !bar.contains("? help"), "{bar}");
+        assert!(bar.ends_with("i note  │  t theme  │  ? help  K all keys"), "{bar}");
+        assert!(!bar.contains("q quit"), "{bar}");
         assert_eq!(a.mouse(Mouse::Key(KeyCode::Char('K'))), Some(Effect::Keys));
         open_keys(&mut a, w);
         let Input::Choose { kind: Kind::Keys, items, .. } = &a.input else { panic!("{:?}", a.input) };
@@ -5923,7 +5919,7 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(220, h)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bar = &text(term.backend().buffer())[h as usize - 1];
-        assert!(bar.ends_with("i note  │  q quit  K all keys") && !bar.contains("o open"), "{bar}");
+        assert!(bar.ends_with("i note  │  q quit  ? help  K all keys") && !bar.contains("o open"), "{bar}");
         assert!(bar_hints(&a, 220).iter().any(|h| h == "o open"), "K lists it");
         assert_eq!(a.key(KeyCode::Char('K').into()), Some(Effect::Keys));
 
@@ -6076,11 +6072,11 @@ mod tests {
         assert_eq!(fit_keys(&keys, 12, true), ["K all keys"], "K the last to go");
         assert_eq!(fit_keys(&keys, 9, true), ["esc close"], "too narrow for K: the last key");
         assert_eq!(fit_keys(&keys, 19, true), keys, "every key fits: no K");
-        // Cut, the bar is for keys worth showing: `q quit` and `? help` go first, as K's list has
-        // them, and no `│` is left hanging. Without K they stay, the last to go.
+        // Cut, the bar is for keys worth showing: `q quit` goes first, as K's list has it, and no
+        // `│` is left hanging. `? help` stays, and without K both do, the last to go.
         let keys = ["/ search", SEP, "q quit", "? help"];
         assert_eq!(fit_keys(&keys, 27, true), keys, "every key fits");
-        assert_eq!(fit_keys(&keys, 26, true), ["/ search", "K all keys"]);
+        assert_eq!(fit_keys(&keys, 26, true), ["? help", "K all keys"]);
         assert_eq!(fit_keys(&keys, 26, false), ["q quit", "? help"]);
     }
 
@@ -6123,17 +6119,17 @@ mod tests {
             row: y + 2,
             modifiers: KeyModifiers::NONE,
         };
-        // " │ mine m │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t │ help ?  ": a tab, the edge left
+        // " │ mine m │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t  ": a tab, the edge left
         // of it too, and nothing right of the last one.
         assert_eq!(
-            [9, 10, 18, 64, 78, 90, 100, 109].map(|x| hit(&a, area, MouseEvent { row: x % 2, ..click(x, 0) })),
-            [Some(0), Some(1), Some(2), Some(5), Some(6), Some(7), Some(8), None].map(|i| i.map(Mouse::Tab))
+            [9, 10, 18, 64, 78, 90, 100].map(|x| hit(&a, area, MouseEvent { row: x % 2, ..click(x, 0) })),
+            [Some(0), Some(1), Some(2), Some(5), Some(6), Some(7), None].map(|i| i.map(Mouse::Tab))
         );
-        // Cut off a narrow terminal, a tab is a hint in the status bar instead, help's the last.
+        // Cut off a narrow terminal, a tab is a hint in the status bar instead. The help, on no
+        // tab, is always there, the last.
         let cut = |w| hints(&a, w).into_iter().filter(|h| TABS.iter().any(|t| t.2 == *h)).collect::<Vec<_>>();
-        assert_eq!((cut(110), cut(109), cut(101)), (vec![], vec!["? help"], vec!["? help"]));
-        assert_eq!((cut(100), cut(78)), (vec!["t theme", "? help"], vec!["R recommend", "t theme", "? help"]));
-        assert_eq!(hints(&a, 79).last(), Some(&"? help"));
+        assert_eq!((cut(101), cut(100), cut(78)), (vec![], vec!["t theme"], vec!["R recommend", "t theme"]));
+        assert_eq!(hints(&a, 200).last(), Some(&"? help"));
         // Over the open theme list a click on a tab is that tab, and elsewhere outside the list.
         a.key(KeyCode::Char('t').into());
         assert_eq!(
@@ -6453,7 +6449,7 @@ mod tests {
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 3), &mut a), (true, true, false, None), "then above");
         let mut buf = Buffer::empty(Rect::new(0, 0, 46, 9));
         assert_eq!(table(&mut buf, Rect::new(0, 0, 46, 9), &mut a), (true, false, false, None), "all rows fit");
-        assert!(lines[3].ends_with("t theme  K all keys"), "{}", lines[3]);
+        assert!(lines[3].ends_with("? help  K all keys"), "{}", lines[3]);
         assert!(!lines[3].contains("space select"), "hints that do not fit are dropped whole");
         // Moving past the right edge scrolls the columns right of Model, Dev too; Model stays.
         a.col = NCOLS - 1;
@@ -6776,7 +6772,7 @@ mod tests {
         let last = screen(&mut a, "RG");
         assert!(last.contains("+ new task: "), "{last}");
         let first = screen(&mut a, "gg");
-        assert!(first.contains("only models with a score"), "{first}");
+        assert!(first.contains("preferred harness: none"), "{first}");
         let top = screen(&mut a, "jjj");
         assert!(top.contains("overall") && top.contains("a tiebreaker"), "{top}");
         let last = screen(&mut a, "Gk");
@@ -6790,13 +6786,13 @@ mod tests {
 
     #[test]
     fn frame_counts_the_steps_of_a_refresh() {
-        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 8)).unwrap();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
         let mut a = app();
         a.refreshing = true;
         let mut border = |a: &mut App| {
             term.draw(|f| draw(a, f)).unwrap();
             let buf = term.backend().buffer();
-            (0..120).map(|x| buf[(x, 6)].symbol()).collect::<String>()
+            (0..100).map(|x| buf[(x, 6)].symbol()).collect::<String>()
         };
         assert!(border(&mut a).contains("─ ⟳ refreshing ╯"), "before the first count");
         a.progress = "7/9, waiting for opencode".into();
@@ -6821,7 +6817,7 @@ mod tests {
 
     #[test]
     fn issues_open_on_a_key_and_on_a_click_of_the_frames_mark() {
-        let (w, h) = (120, 12);
+        let (w, h) = (100, 12);
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         let mut a = app();
         let mut screen = |a: &mut App| {
@@ -7377,7 +7373,7 @@ mod tests {
         let lines = text(wide.backend().buffer());
         let (tabs, bottom) = (&lines[1], &lines[8]);
         let version = concat!("    modelcmp v", env!("CARGO_PKG_VERSION"), " ↗");
-        assert!(tabs.trim_end().ends_with(version) && tabs.contains("│ help ?"), "right of the tabs: {tabs}");
+        assert!(tabs.trim_end().ends_with(version) && tabs.contains("│ theme t"), "right of the tabs: {tabs}");
         assert!(bottom.starts_with("╰──") && !bottom.contains("modelcmp"), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
         // The right border marks columns off to the right, the left one rows below, then above.
@@ -7711,11 +7707,8 @@ mod tests {
             "the models it ranks come first, the dot on the ones in use"
         );
         let gap = text.iter().position(String::is_empty).unwrap();
-        let warn = text.iter().position(|l| l.starts_with("warning: ")).unwrap();
         // Then your preferred harness, P's, a dropdown, its name in its colour as in Via.
-        assert_eq!(text[1], "preferred harness: none ▾ ", "P's entry for none cut to its first word");
-        let wide = recommend(&a, 80, &mut vec![]).0;
-        assert_eq!(wide[1].to_string(), "preferred harness: none (each model on its developer's default harness) ▾ ");
+        assert_eq!(text[1], "preferred harness: none ▾ ", "P's entry for none by its first word");
         assert!(hints(&a, 400).contains(&"P preferred harness"), "and P says how to change it");
         a.store.harness = "pi".into();
         let mut spots = vec![];
@@ -7740,10 +7733,7 @@ mod tests {
         assert_eq!((a.among, a.task_cur, a.task_sel), (None, 0, 0), "then the first task's name");
         a.store.harness.clear();
         (a.among, a.task_cur) = (was.0, was.1);
-        assert_eq!(warn, 2, "the warning under your preferred harness: {:?}", &text[..warn]);
-        // Then what it leaves out.
-        let said = text[warn..gap].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
-        assert_eq!(said, format!("warning: {UNRATED}"));
+        assert_eq!(gap, 2, "then the tasks: {:?}", &text[..gap]);
         let head = gap + 1;
         assert_eq!(
             text[head].split_whitespace().collect::<Vec<_>>(),

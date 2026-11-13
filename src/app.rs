@@ -582,8 +582,8 @@ pub const NO_PREFERENCE: &str = "none (each model on its developer's default har
 
 /// The tabs above the table, each with its name, its key and its hint in the status bar while
 /// it is cut off: mine, all, the selected, favorite and excluded only, then the panels,
-/// recommend and compare, the theme list and the help.
-pub const TABS: [(&str, char, &str); 9] = [
+/// recommend and compare, and the theme list. The help is no tab: `? help` is in the status bar.
+pub const TABS: [(&str, char, &str); 8] = [
     ("mine", 'm', "m mine"),
     ("all", 'a', "a all"),
     ("✓ selected", 'S', "S selected only"),
@@ -592,7 +592,6 @@ pub const TABS: [(&str, char, &str); 9] = [
     ("recommend", 'R', "R recommend"),
     ("compare", 'C', "C compare"),
     ("theme", 't', "t theme"),
-    ("help", '?', "? help"),
 ];
 /// Where each tab is in `TABS`; the panels' are from recommend's on.
 pub const MINE: usize = 0;
@@ -603,7 +602,6 @@ pub const EXCLUDED: usize = 4;
 pub const RECOMMEND: usize = 5;
 const COMPARE: usize = 6;
 const THEME: usize = 7;
-pub const HELP_TAB: usize = 8;
 /// `App::among` on recommend's preferred harness line, under its `from` line, past every tab.
 pub const PREFERRED: usize = usize::MAX;
 /// The columns of recommend's cursor along a line (`App::rec_col`): a task's name or a tier's
@@ -2144,7 +2142,6 @@ impl App {
             (Input::Choose { kind: Kind::Theme, .. }, _) => Some(THEME),
             (_, View::Recommend) => Some(RECOMMEND),
             (_, View::Compare) => Some(COMPARE),
-            (_, View::Help) => Some(HELP_TAB),
             _ => None,
         };
         match i {
@@ -2182,10 +2179,6 @@ impl App {
             let effect = self.table_key(key, 1);
             if let Some(held) = held {
                 (self.visual, self.picked) = held;
-            }
-            // Help's tab goes back to the panel it was opened from, as `?` does.
-            if let (View::Help, Some(back)) = (&self.view, &mut self.help_back) {
-                back.0 = view;
             }
             return effect;
         }
@@ -5815,9 +5808,9 @@ mod tests {
         press(&mut a, "?");
         code(&mut a, KeyCode::Esc);
         assert_eq!(a.view, View::Recommend, "and so does esc");
-        a.mouse(Mouse::Tab(HELP_TAB));
+        press(&mut a, "?");
         a.mouse(Mouse::Close);
-        assert_eq!(a.view, View::Recommend, "and from help's tab, a click outside");
+        assert_eq!(a.view, View::Recommend, "and a click outside");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "?");
         code(&mut a, KeyCode::Esc);
@@ -5858,12 +5851,12 @@ mod tests {
         code(&mut a, KeyCode::Tab);
         assert!(matches!(a.input, Input::Choose { kind: Kind::Theme, .. }) && on(&a) == [7], "then the theme list");
         code(&mut a, KeyCode::Tab);
-        assert_eq!((on(&a), &a.view, &a.input), (vec![8], &View::Help, &Input::None), "which tab leaves for help");
+        assert_eq!((on(&a), &a.view, &a.input), (vec![0], &View::Table, &Input::None), "the last, back to mine");
+        press(&mut a, "?");
+        assert_eq!((on(&a), &a.view), (vec![0], &View::Help), "the help is no tab, the table's stays on");
         a.mouse(Mouse::Tab(5));
         assert_eq!((on(&a), &a.view), (vec![5], &View::Recommend), "a click on a tab leaves help for it");
-        a.mouse(Mouse::Tab(8));
-        code(&mut a, KeyCode::Tab);
-        assert_eq!((on(&a), &a.view), (vec![0], &View::Table), "past help, the last, back to mine");
+        code(&mut a, KeyCode::Esc);
         a.mouse(Mouse::Tab(5));
         a.mouse(Mouse::Tab(5));
         assert_eq!(a.view, View::Recommend, "a click on recommend opens it, and again leaves it open");
@@ -5874,8 +5867,7 @@ mod tests {
         assert_eq!((on(&a), &a.view), (vec![6], &View::Compare), "compare's tab opens it, as C does");
         a.mouse(Mouse::Tab(0));
         code(&mut a, KeyCode::BackTab);
-        code(&mut a, KeyCode::BackTab);
-        assert_eq!(on(&a), [7], "shift+tab goes back from mine to help, then the theme list");
+        assert_eq!(on(&a), [7], "shift+tab goes back from mine to the theme list");
         code(&mut a, KeyCode::BackTab);
         assert_eq!(on(&a), [5], "with one model selected, shift+tab goes past compare");
         code(&mut a, KeyCode::BackTab);
