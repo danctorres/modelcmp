@@ -936,8 +936,8 @@ pub struct Data {
     /// The day Arena published each of `ARENA_BOARDS` that `Model::arena_more` has, by name.
     #[serde(default)]
     pub arena_dates: BTreeMap<String, String>,
-    /// huggingface.co did not send the leaderboard and no kept scores stood in: the Agentic column
-    /// is empty, and the cache is stale after `RETRY`.
+    /// huggingface.co did not send one of Arena's leaderboards, kept from the last refresh or
+    /// empty: the cache is stale after `RETRY`.
     #[serde(default)]
     pub arena_missed: bool,
     /// The task benchmarks Epoch sent no scores of, as when its index names no file for one:
@@ -1682,17 +1682,21 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
     // Only Agentic hangs on it: without it, the scores of the last refresh are kept,
     // and none show once Arena has published no leaderboard for `ARENA_MAX_AGE`.
     let [arena, more @ ..] = late.all(steps);
+    // What went wrong, " (http status: 501)", without the address: nothing for an answer that came.
+    let why = |r: &Result<Vec<u8>, String>| {
+        r.as_ref().err().and_then(|e| e.split_once(": ")).map(|e| format!(" ({})", e.1)).unwrap_or_default()
+    };
+    let failed = why(&arena);
     let ranked = Arena::parse(&arena.unwrap_or_default());
-    let unranked = ranked.is_none().then_some("could not get Arena's agent leaderboard from huggingface.co");
+    let unranked =
+        ranked.is_none().then(|| format!("could not get Arena's agent leaderboard from huggingface.co{failed}"));
     let mut kept = Arena::cached(&cache, now()).unwrap_or_default();
     let mut kept_boards = std::mem::take(&mut kept.boards);
     let arena = ranked.or(Some(kept).filter(|k| !k.scores.is_empty())).unwrap_or_default();
+    data.arena_missed = unranked.is_some();
     let unranked = match (unranked, arena.current(now())) {
         (Some(e), true) => Some(format!("{e}, so its scores are kept from the last refresh")),
-        (Some(e), false) => {
-            data.arena_missed = true;
-            Some(format!("{e}, so the Agentic column is empty"))
-        }
+        (Some(e), false) => Some(format!("{e}, so the Agentic column is empty")),
         (None, false) => Some(format!(
             "Arena's agent leaderboard is from {}, too old to show, so the Agentic column is empty",
             arena.date
@@ -1716,8 +1720,20 @@ fn refresh_held(steps: &Steps, early: Option<impl FnOnce(Data)>) -> Result<Data,
     for (name, _, urls) in ARENA_BOARDS {
         let got;
         (got, pages) = pages.split_at(urls.len());
-        let board = Arena::board(got.iter().map(|r| r.as_deref().ok())).filter(|b| b.current(now()));
-        let Some(board) = board.or_else(|| kept_boards.remove(name)) else { continue };
+        let board = Arena::board(got.iter().map(|r| r.as_deref().ok()));
+        // One that came but is too old is not asked for again within the hour, nor warned of.
+        let came = board.is_some();
+        data.arena_missed |= !came;
+        let Some(board) = board.filter(|b| b.current(now())).or_else(|| kept_boards.remove(name)) else {
+            if came {
+                continue;
+            }
+            let failed = got.iter().map(why).find(|w| !w.is_empty()).unwrap_or_default();
+            uncut.push(format!(
+                "could not get Arena's {name} leaderboard from huggingface.co{failed}, so no model has a {name} rating"
+            ));
+            continue;
+        };
         let said =
             || format!("Arena's {name} leaderboard has more rows than were read: some models have no {name} rating");
         uncut.extend(board.cut.then(said));
