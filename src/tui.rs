@@ -1299,7 +1299,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         View::Compare => {
             vec![vec!["↓ ↑ model", "← → 0 $ column", "s sort"], search, actions("enter x H o y f e i"), BACK.to_vec()]
         }
-        // On a task's name, enter ranks by it; on a tier's model, it and the others act on the model.
+        // On a task's name, enter ranks by it; on a tier's model, it opens the dropdown and the
+        // others act on the model.
         // On the `from` line, the models it ranks.
         View::Recommend if matches!(app.input, Input::Task(_)) => vec![field_hints(&app.input).to_vec()],
         View::Recommend if matches!(app.input, Input::Cap { .. }) => vec![vec!["enter apply", "esc cancel"]],
@@ -1313,10 +1314,10 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["↓ ↑ move"], [&["enter new task"], &panel[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.current().is_none() => {
-            // A tier with no model has nothing for enter either, but on its cap.
+            // A tier with no model has its cap for enter, or the dropdown that gives it one.
             let enter = match (app.task_sel, app.custom_at()) {
                 (1.., _) if cell == NAME_CELL => vec!["enter price cap", "d dropdown"],
-                (1.., _) => vec!["d dropdown"],
+                (1.., _) => vec!["enter choose model", "d dropdown"],
                 (_, Some(_)) if cell == MODEL_CELL => vec!["enter edit", "d dropdown", "D delete"],
                 (_, Some(t)) => {
                     let enter =
@@ -1328,13 +1329,13 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             };
             vec![lines, [enter, panel].concat(), cap, BACK.to_vec()]
         }
-        // On a tier's cap or harness enter changes it, where it shows the details on its model.
+        // Enter changes what the cursor is on: a tier's cap, its model or its harness.
         View::Recommend => {
             let view = [&["d dropdown"], &panel[..]].concat();
             let model = match cell {
                 NAME_CELL => [vec!["enter price cap"], actions("x H o y space f e i")].concat(),
                 HARNESS_CELL => [vec!["enter model's harness"], actions("x o y space f e i")].concat(),
-                _ => actions("enter x H o y space f e i"),
+                _ => [vec!["enter choose model"], actions("x H o y space f e i")].concat(),
             };
             vec![lines, view, model, cap, BACK.to_vec()]
         }
@@ -6025,8 +6026,8 @@ mod tests {
         assert_ne!(a.store.is_marked("flash"), was, "a right click toggles its selection, as space does");
         a.mouse(Mouse::Open(Stop::Recommend(0, 2)));
         assert!(
-            matches!(a.view, View::Detail(Back::Recommend(_))) && a.current().unwrap().key == "flash",
-            "a double click on a model opens its details"
+            matches!(a.input, Input::Choose { .. }) && a.current().unwrap().key == "flash",
+            "a double click on a tier opens its dropdown, as enter does"
         );
         a.key(KeyCode::Esc.into());
         assert_eq!((&a.view, a.task_sel), (&View::Recommend, 2), "esc goes back to it");

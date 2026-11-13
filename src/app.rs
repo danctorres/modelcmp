@@ -624,7 +624,6 @@ enum Fail {
 pub enum Back {
     Table,
     Compare(u16),
-    Recommend(u16),
 }
 
 #[derive(PartialEq, Debug)]
@@ -1220,8 +1219,8 @@ pub enum Mouse {
     Key(KeyCode),
     /// Click on a stop in compare or recommend: move the cursor to it.
     Model(Stop),
-    /// Double click on it: do what `enter` does, open the model's details or rank the table by
-    /// the task.
+    /// Double click on it: do what `enter` does, open the model's details in compare, and in
+    /// recommend a tier's dropdown or rank the table by the task.
     Open(Stop),
     /// Right click on it: move the cursor to it and do what `space` does where it does anything.
     MarkModel(Stop),
@@ -4559,12 +4558,12 @@ impl App {
                 self.recommend_menu();
                 return None;
             }
-            // Along a tier's line enter writes its cap or opens its harness's list, and on what a task
-            // of your own is about it writes that, as a click there does. On a model it opens its
-            // details, as everywhere.
+            // Along a tier's line enter writes its cap or opens its model's dropdown or its harness's
+            // list, and on what a task of your own is about it writes that, as a click there does.
             (KeyCode::Enter, None) if self.view == View::Recommend && !self.on_new_task() => {
                 let act: Option<fn(&mut Self)> = match (self.task_sel, self.rec_cell()) {
                     (1.., NAME_CELL) => Some(Self::ask_cap),
+                    (1.., MODEL_CELL) => Some(Self::ask_pick),
                     (1.., HARNESS_CELL) => Some(Self::ask_tier_via),
                     (0, MODEL_CELL) => Some(Self::edit_task),
                     _ => None,
@@ -4718,9 +4717,6 @@ impl App {
                 } else if let View::Detail(Back::Compare(scroll)) = self.view {
                     (self.view, self.scroll) = (View::Compare, scroll);
                     (self.overlay_query, self.hit.0) = std::mem::take(&mut self.back_query);
-                } else if let View::Detail(Back::Recommend(scroll)) = self.view {
-                    (self.view, self.scroll) = (View::Recommend, scroll);
-                    (self.overlay_query, self.hit.0) = std::mem::take(&mut self.back_query);
                 } else if matches!(self.view, View::Help | View::Issues) {
                     self.close_help();
                 } else if !table {
@@ -4778,10 +4774,7 @@ impl App {
                 Some(task) => self.input = Input::DeleteTask(task.to_string()),
                 None => self.refuse("D deletes a task you added, put the cursor on its name"),
             },
-            // Enter on a task's name is below; on a tier with no model it has none to show either.
-            KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H') | KeyCode::Enter
-                if self.view == View::Recommend && !row && (code != KeyCode::Enter || self.task_sel > 0) =>
-            {
+            KeyCode::Char('e' | 'f' | 'i' | 'o' | 'x' | 'y' | 'Y' | 'H') if self.view == View::Recommend && !row => {
                 self.refuse(match (self.among, self.task_sel) {
                     (Some(_), _) => "no model under the cursor, j moves down to a task",
                     _ if self.on_new_task() => "no model under the cursor, enter or space adds a task",
@@ -5016,7 +5009,6 @@ impl App {
                 self.detail = self.current()?.key.clone();
                 self.view = View::Detail(match self.view {
                     View::Compare => Back::Compare(self.scroll),
-                    View::Recommend => Back::Recommend(self.scroll),
                     _ => Back::Table,
                 });
                 self.back_query = (std::mem::take(&mut self.overlay_query), self.hit.0);
@@ -8411,7 +8403,7 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         press(&mut a, "l");
         code(&mut a, KeyCode::Enter);
-        assert!(matches!(a.view, View::Detail(_)), "enter on the model shows its details, as everywhere");
+        assert!(matches!(a.input, Input::Choose { kind: Kind::Pick, .. }), "enter on the model opens its dropdown");
         code(&mut a, KeyCode::Esc);
         // The column stays as the cursor moves: high has no cap, so its model, and the next
         // task's name.
@@ -8723,7 +8715,7 @@ mod tests {
         assert_eq!((a.task_cur, a.task_sel), (1, TIERS.len()), "a list has nothing sideways");
         press(&mut a, "k");
         code(&mut a, KeyCode::Enter);
-        assert!(matches!(a.view, View::Detail(Back::Recommend(_))), "enter on a model opens its details");
+        assert!(matches!(a.input, Input::Choose { .. }), "enter on a model opens its dropdown: {:?}", a.input);
         code(&mut a, KeyCode::Esc);
         assert_eq!((&a.view, a.current().unwrap().key.as_str()), (&View::Recommend, "mini"), "esc goes back");
         press(&mut a, "j");
@@ -8751,7 +8743,8 @@ mod tests {
         assert!(a.current().is_none(), "a tier with no model left has none");
         assert!(press(&mut a, "o").is_none() && a.failed, "where the row keys say so");
         code(&mut a, KeyCode::Enter);
-        assert_eq!((&a.view, a.status.as_str()), (&View::Recommend, "this tier has no model"), "and enter too");
+        assert!(matches!(a.input, Input::Choose { .. }), "and enter opens the dropdown to give it one");
+        code(&mut a, KeyCode::Esc);
         press(&mut a, "RR");
         assert_eq!((a.among, a.task_sel), (Some(MINE), 0), "reopening starts on the from line");
     }

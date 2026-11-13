@@ -87,8 +87,8 @@ and `qq` quits.
 
 <p align="center"><i>The model recommended for each task and tier.</i></p>
 
-In recommend, `h` `l` move along a tier's line: `enter` changes its price cap or harness, and `d`
-its model. To add a task of your own, pick `+ new task` there or in the grid `f` opens on a model.
+In recommend, `h` `l` move along a tier's line, and `enter` changes its price cap, its model or
+its harness. To add a task of your own, pick `+ new task` there or in the grid `f` opens on a model.
 
 To get a local model, press `a` to list every model, then `x` on one and pick its
 `download and run` entry. Via shows how big each download is.
