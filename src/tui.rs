@@ -6445,7 +6445,8 @@ mod tests {
         let mut a = app();
         let mut data = std::mem::take(&mut a.data);
         // Yours lists no price; another provider's does.
-        let yours = Offer { provider: "g".into(), unpriced: true, available: true, ..Default::default() };
+        let via = vec!["opencode".into()];
+        let yours = Offer { provider: "g".into(), unpriced: true, available: true, via, ..Default::default() };
         data.models[1].offers.insert(0, yours);
         a.set_data(data);
         let (buf, lines) = render(&mut a, 200, 6);

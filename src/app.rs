@@ -1669,7 +1669,9 @@ impl App {
     }
 
     /// Replace the data and recompute everything derived from it.
-    pub fn set_data(&mut self, data: Data) {
+    pub fn set_data(&mut self, mut data: Data) {
+        // The price is the one paid on the harnesses Via keeps, as `--via` has it.
+        data.models.iter_mut().for_each(|m| view::reach_kept(m, &self.store));
         self.listed = data.models.iter().map(Model::listed).collect();
         self.any_available = data.any_available();
         // The rows index the old data: point them at the same models in the new, so `rebuild`
@@ -2863,12 +2865,17 @@ impl App {
     /// Takes back every entry of the Dev, Price and Via dropdowns left out or picked, and the
     /// bounds: what excludes models but `e`.
     fn clear_left_out(&mut self) {
+        let via = !self.store.via_pick.is_empty() || !self.store.via_not.is_empty();
         (self.store.dev_not, self.store.via_not, self.store.price_not) = (vec![], vec![], None);
         (self.store.dev_pick, self.store.via_pick, self.store.price_pick) = (vec![], vec![], None);
         self.bounds.clear();
         // The ones a pick waiting for the other source's data keeps in the store too.
         self.bounds_changed |= !self.store.bounds.is_empty();
         self.store.bounds.clear();
+        // The price was the one on Via's harnesses.
+        if via {
+            self.reprice();
+        }
     }
 
     /// Whether `E` shows model `i`: excluded with `e`, or one you could use that the filters
@@ -5242,7 +5249,12 @@ impl App {
                             };
                             self.status = format!("{did} {} entries", names.len());
                         }
-                        self.rebuild();
+                        // Via's harnesses set the price, Dev's entries do not, and it is slow to search.
+                        if col == VIA {
+                            self.reprice()
+                        } else {
+                            self.rebuild()
+                        }
                         // The picks and the entries left out, which the store keeps for the CLI.
                         return Some(Effect::Save);
                     }
@@ -6716,6 +6728,35 @@ mod tests {
         assert_eq!((a.store.price_not, keys(&a).len()), (Some(2), all - under.len()));
         press(&mut a, "c");
         assert_eq!((a.store.price_not, keys(&a).len()), (None, all), "c clears it");
+    }
+
+    /// The price is the cheapest on the harnesses Via keeps, as `--via` has it.
+    #[test]
+    fn a_via_pick_sets_the_price() {
+        let mut a = app();
+        let offer = |h: &str, price: f64| Offer {
+            provider: h.into(),
+            input: price,
+            output: price,
+            available: true,
+            via: vec![h.into()],
+            ..Default::default()
+        };
+        a.data.models[0].offers = vec![offer("opencode", 0.0), offer("codex", 10.0)];
+        a.reprice();
+        let cost = |a: &App| (a.data.models[0].cost(), a.val(0, PRICE));
+        assert_eq!(cost(&a), (Some(0.0), Some(0.0)), "no pick: the cheapest of all");
+        a.col = VIA;
+        // The entries: all, codex, opencode, claude.
+        press(&mut a, "dj ");
+        assert_eq!(cost(&a), (Some(10.0), Some(10.0)), "codex picked: what it charges");
+        press(&mut a, " ");
+        assert_eq!(cost(&a), (Some(0.0), Some(0.0)), "the pick dropped");
+        press(&mut a, "je");
+        assert_eq!(cost(&a), (Some(10.0), Some(10.0)), "opencode left out");
+        code(&mut a, KeyCode::Esc);
+        press(&mut a, "c");
+        assert_eq!(cost(&a), (Some(0.0), Some(0.0)), "c takes it back");
     }
 
     #[test]

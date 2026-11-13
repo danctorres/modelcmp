@@ -675,6 +675,21 @@ pub fn reach(m: &mut Model, harnesses: &[String]) -> bool {
     true
 }
 
+/// `reach` on the harnesses the TUI's Via dropdown keeps: the ones picked, else all but the ones
+/// left out, so the price is the cheapest among them. Every offer is first yours again where a
+/// harness lists it, as `Data::apply_available` left it, so a pick taken back gives the price back.
+pub fn reach_kept(m: &mut Model, store: &Store) {
+    for o in &mut m.offers {
+        o.available = !o.via.is_empty();
+    }
+    if !store.via_pick.is_empty() {
+        reach(m, &store.via_pick);
+    } else if !store.via_not.is_empty() {
+        let kept: Vec<String> = crate::data::vias().filter(|h| !left_out(store, h)).map(String::from).collect();
+        reach(m, &kept);
+    }
+}
+
 /// `m` on the harnesses alone whose own offer of it (`reach`) fits `tier`'s cap (`fits`), so a
 /// tier's pick starts where it costs what the tier allows: on opencode, which has it free, not
 /// on pi, which charges for it.

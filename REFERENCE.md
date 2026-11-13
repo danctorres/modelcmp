@@ -235,8 +235,9 @@ Price or Via dropdown, the entries picked in one, which hide the models of the o
 bound typed with `>` or `<`. `exclude --rm` on such a model says which filter hides it, as
 `Coding≥60`, and the commands that leave those models out name the filters on stderr. `--dev`,
 `--via`, `--min` and `--max` each replace their own: `--dev` the Dev pick, `--max price` the
-Price level and `--min coding` a `>` on Coding. `--via ollama` or `--via llama-cli` on a task
-keeps a model's local copy off the ranking, which picking them in the TUI's Via dropdown does not.
+Price level and `--min coding` a `>` on Coding. `--via`, and a harness picked or left out in the
+TUI's Via dropdown, price each model at the cheapest offer on the harnesses kept. With only `ollama`
+or `llama-cli` kept, a task keeps a model's local copy off the ranking.
 A bound or the Price level on a column hidden with `|` hides nothing and is kept for when the
 column is back.
 
