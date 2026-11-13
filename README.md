@@ -26,7 +26,7 @@
   another harness, or to a local one, say from `Opus 5.5` in `Claude Code` to `GLM-5.3` in `pi` or to
   `Qwen3.8 27B` in `ollama`.
 
-[![Stop picking AI models by hand](https://github.com/user-attachments/assets/e0c819a1-68c3-4ed1-9951-e6e319591d16)](https://www.youtube.com/watch?v=JN2O32m3spE)
+[![Stop picking AI models by hand](https://github.com/user-attachments/assets/e4dbc8b8-f1b7-4b9c-85af-2196eed4a782)](https://www.youtube.com/watch?v=JN2O32m3spE)
 
 <p align="center"><i>Watch: stop picking AI models by hand.</i></p>
 
