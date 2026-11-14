@@ -272,7 +272,7 @@ fn main() {
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             }
             if let Some(w) = &store.warning {
-                warn(w);
+                warn(w, &Default::default());
             }
             // The one model to use, chosen without the exclusions and favorites the file held:
             // a failure, as the warning is said once and a `$(...)` shows it to nobody.
@@ -284,7 +284,7 @@ fn main() {
                         .to_string(),
                 ))
             } else {
-                run(cmd, args.refresh)
+                run(cmd, args.refresh, &store.silenced)
             }
         }
     };
@@ -295,14 +295,15 @@ fn main() {
 }
 
 /// One line per warning: a refresh joins its warnings with `data::SEP`, which the TUI lists as bullets.
-fn warn(w: &str) {
+/// Not the ones in `silenced` (`z` in the TUI).
+fn warn(w: &str, silenced: &std::collections::BTreeSet<String>) {
     let (from, w) = w.strip_prefix(data::LAST_REFRESH).map_or(("", w), |w| (data::LAST_REFRESH, w));
-    for one in w.split(data::SEP) {
+    for one in w.split(data::SEP).filter(|&one| !silenced.contains(one)) {
         eprintln!("warning: {from}{one}");
     }
 }
 
-fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
+fn run(cmd: Cmd, force: bool, silenced: &std::collections::BTreeSet<String>) -> Result<(), Exit> {
     // These name no model: they neither wait for a download nor fail without one.
     let bare = match &cmd {
         // `--rm` takes every name as a model's.
@@ -321,7 +322,7 @@ fn run(cmd: Cmd, force: bool) -> Result<(), Exit> {
     } else {
         let (data, warn_of) = data::load(force)?;
         if let Some(w) = warn_of {
-            warn(&w);
+            warn(&w, silenced);
         }
         if !data.any_available() {
             eprintln!("note: {}", view::NO_ACCESS);

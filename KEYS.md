@@ -17,6 +17,7 @@ Movement follows vim, and the arrow keys, `PgUp`/`PgDn` and the mouse work as we
 | `qq` `^c` | quit. The first `q` asks, `^c` does not. Two clicks on `q quit` in the status bar quit too. It works from an open list too, unless you are typing in it, and any other key after the first `q` goes back to the list |
 | `r` | refresh data now |
 | `!` | lists what the last refresh warned about, as a harness installed but not logged in, one issue per line. While there are issues, the frame's bottom right says `⚠ ! issues`. `!` or `esc` closes the list. A click on the `⚠` opens the list too |
+| `z` | silences the issues `!` lists: the frame's `⚠` goes, the commands stop printing them as warnings, and `!` shows them in grey, with the key under them. An issue with another text still shows. `z` again brings them all back |
 | `UU` | upgrade modelcmp when the version says a newer one is available. The first `U` asks. It closes the TUI, runs `brew upgrade` on a Homebrew install or `cargo install` of the new release on a cargo one, and starts the new version. For a binary installed by hand it opens the release's page instead |
 | `O` | opens modelcmp's GitHub page in the browser. A click on the version, which ends in `↗`, does the same. The version is right of the tabs, and is not shown when they leave it no room, where `K`'s list has `O github` to click. A newer version that is out is still said there, first on the frame's bottom border, and a click on it upgrades as `U` does |
 

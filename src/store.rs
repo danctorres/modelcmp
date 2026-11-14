@@ -102,6 +102,10 @@ pub struct Store {
     /// The columns left out of the TUI's table with `|`, by `app::col_id`.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub hide: BTreeSet<String>,
+    /// The issues of a refresh silenced with `z` in the TUI, by their text: the frame's `⚠` and a
+    /// command's warnings leave them out, and one with another text is still said.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub silenced: BTreeSet<String>,
     /// The keys you bound in the TUI's `?`: each key the TUI has by default -> the
     /// one you gave its action. Only the changed ones.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -592,10 +596,10 @@ mod tests {
         // Each file's keys, and what is kept of them, a key and the one it is on in each pair.
         for (keys, kept) in [
             (r#"{"s": "o", "o": "s"}"#, "os so"),
-            (r#"{"s": "z", "j": "3", "z": "s", "k": " "}"#, "sz"),
+            (r#"{"s": "p", "j": "3", "p": "s", "k": " "}"#, "sp"),
             (r#"{"s": "o"}"#, ""),
-            (r#"{"s": "z", "o": "z"}"#, "sz"),
-            (r#"{"s": "z", "o": "z", "c": "s", "j": "Q"}"#, "cs jQ sz"),
+            (r#"{"s": "p", "o": "p"}"#, "sp"),
+            (r#"{"s": "p", "o": "p", "c": "s", "j": "Q"}"#, "cs jQ sp"),
         ] {
             std::fs::write(&p, format!(r#"{{"keys": {keys}}}"#)).unwrap();
             let kept = kept.split_whitespace().map(|w| (w.as_bytes()[0] as char, w.as_bytes()[1] as char));

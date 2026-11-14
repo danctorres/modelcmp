@@ -482,6 +482,9 @@ The TUI's bottom border always shows the refresh state, one of these:
 
 `!` or a click on the `⚠` lists the issues. The status bar itself says only what a key or a refresh you started did.
 
+`z` silences the issues listed, as a harness you never log in to: the `⚠` goes and the commands
+stop warning of them, until a refresh has an issue with another text. `z` again brings them back.
+
 When Epoch AI sends no scores for one of the benchmarks a task uses, as when its index names no
 file for it, a warning names the benchmark, in `!` and at every command. The first start or
 command an hour later downloads the data again.

@@ -419,6 +419,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("K", "all keys of the status bar in a list, `enter` presses one"),
             ("r", "refresh data now (auto at a day's first start, and after 24h)"),
             ("!", "list warnings from the last refresh, or click the ⚠"),
+            ("z", "silence those warnings until a new one, again brings them back"),
             ("U", "upgrade modelcmp when a newer version is out, asks first"),
             ("O", "open modelcmp's GitHub page, or click the version's ↗"),
         ],
@@ -3711,6 +3712,11 @@ impl App {
         self.data.warning.clone()
     }
 
+    /// Whether the last refresh warned of an issue that `z` has not silenced: the frame's `⚠`.
+    pub fn loud(&self) -> bool {
+        self.data.warning.as_ref().is_some_and(|w| w.split(crate::data::SEP).any(|i| !self.store.silenced.contains(i)))
+    }
+
     /// The key the action with the default key `d` is on.
     pub fn key_of(&self, d: char) -> char {
         self.store.keys.get(&d).copied().unwrap_or(d)
@@ -4731,6 +4737,23 @@ impl App {
                 let query = std::mem::take(&mut self.overlay_query);
                 self.issues_back = Some((view, self.scroll, query, self.hit.0));
                 self.scroll = 0;
+            }
+            // Every issue listed, by its text, so a new one still shows. Again brings them back.
+            KeyCode::Char('z') => {
+                let Some(issues) = self.issues() else {
+                    self.refuse("no issues to silence");
+                    return None;
+                };
+                let loud = self.loud();
+                if loud {
+                    self.store.silenced.extend(issues.split(crate::data::SEP).map(String::from));
+                } else {
+                    self.store.silenced.clear();
+                }
+                self.report(Ok(
+                    if loud { "issues silenced until a new one" } else { "issues no longer silenced" }.into()
+                ));
+                return Some(Effect::Save);
             }
             KeyCode::Char('?') if self.view == View::Help => self.close_help(),
             KeyCode::Char('?') => {
@@ -6258,14 +6281,14 @@ mod tests {
         press(&mut a, "/sort by");
         code(&mut a, KeyCode::Enter);
         code(&mut a, KeyCode::Enter);
-        press(&mut a, "z");
+        press(&mut a, "p");
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
-        assert_eq!((a.store.keys.clone(), &a.view), (BTreeMap::from([('s', 'z')]), &View::Table));
+        assert_eq!((a.store.keys.clone(), &a.view), (BTreeMap::from([('s', 'p')]), &View::Table));
         press(&mut a, "s");
         assert_eq!(a.descending, !was, "s is no key now");
-        press(&mut a, "z");
-        assert_eq!(a.descending, was, "z sorts");
+        press(&mut a, "p");
+        assert_eq!(a.descending, was, "p sorts");
     }
 
     #[test]

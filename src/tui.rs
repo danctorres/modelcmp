@@ -1335,7 +1335,10 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             vec![vec!["← → column"], view, actions("enter x H o y space f e i"), back]
         }
         View::Detail(_) => vec![vec!["↓ ↑ scroll"], search, actions("x H o y space f e i"), BACK.to_vec()],
-        View::Issues => vec![vec!["↓ ↑ scroll"], [&search[..], &["r refresh"]].concat(), BACK.to_vec()],
+        View::Issues => {
+            let silence = silence(app);
+            vec![vec!["↓ ↑ scroll"], [&search[..], &["r refresh"], silence.as_slice()].concat(), BACK.to_vec()]
+        }
         // `?` here closes help, which `esc back` already says.
         View::Help if matches!(app.input, Input::Bind { .. }) => vec![vec!["esc cancel"]],
         View::Help => {
@@ -1432,6 +1435,11 @@ fn split_hint(hint: &str) -> (&str, &str) {
         end += word.len() + 1;
     }
     hint.split_at(end.saturating_sub(1).min(hint.len()))
+}
+
+/// The hint of the key that silences the issues `!` lists, or brings them back. None with no issue.
+fn silence(app: &App) -> Option<&'static str> {
+    app.data.warning.as_ref().map(|_| if app.loud() { "z silence" } else { "z unsilence" })
 }
 
 /// A line of keys in a box, `hint`'s parts between ` · `: muted, with each
@@ -2036,7 +2044,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             (true, ..) => (refreshing(&app.progress), Color::Yellow),
             (_, true, _) => (format!("refresh failed · {age}"), BAD),
             // Until a refresh without any: `!` lists them. Short, as the columns' bar has the rest.
-            (_, _, old) if app.data.warning.is_some() => {
+            (_, _, old) if app.loud() => {
                 // Without the key where naming it would run over the version.
                 let named = format!("⚠ {} issues · {age}", app.key_of('!'));
                 let fits = named.chars().count() <= room;
@@ -2261,10 +2269,19 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
             let said = issues.as_deref().unwrap_or("none");
             let words = |w: &str| w.split(' ').map(|s| Line::from(s.to_string())).collect();
             let width = (area.width as usize).saturating_sub(4);
-            let lines =
-                said.split(data::SEP).flat_map(|w| wrapped(vec![Span::raw("• ")], words(w), &Span::raw(" "), width));
-            let (lines, hits) = lit_lines(lines.collect(), &app.overlay_query);
+            // A silenced one is grey.
+            let lines = said.split(data::SEP).flat_map(|w| {
+                let style = if app.store.silenced.contains(w) { fg(MUTED) } else { Style::default() };
+                wrapped(vec![Span::raw("• ")], words(w), &Span::raw(" "), width)
+                    .into_iter()
+                    .map(move |l| l.style(style))
+            });
+            let (mut lines, hits) = lit_lines(lines.collect(), &app.overlay_query);
             hit_line = to_hit(app, &hits);
+            // Under them, the key that silences them, as the status bar may have no room for it.
+            if let Some(hint) = silence(app) {
+                lines.extend([Line::default(), key_line(hint, &app.store.keys)]);
+            }
             Some(("issues".into(), lines))
         }
         View::Detail(_) => {
@@ -7078,6 +7095,19 @@ mod tests {
         let lines = screen(&mut a);
         assert!(lines.iter().any(|l| l.contains("• copilot did not list its models")), "one a line");
         assert!(lines.iter().any(|l| l.contains("• openrouter.ai did not list its models")));
+        assert!(lines.iter().any(|l| l.trim_matches(['│', ' ']) == "z silence"), "the list says how");
+        // `z` silences them: the frame's ⚠ goes, `!` still lists them, and a new one shows again.
+        a.key(KeyCode::Char('z').into());
+        assert!(!a.loud() && a.store.silenced.len() == 2 && a.view == View::Issues);
+        let lines = screen(&mut a);
+        assert!(
+            !lines.iter().any(|l| l.contains("⚠")) && lines.iter().any(|l| l.trim_matches(['│', ' ']) == "z unsilence")
+        );
+        a.data.warning = Some("copilot did not list its models · epoch.ai sent no scores".into());
+        assert!(a.loud() && screen(&mut a).iter().any(|l| l.contains("⚠")), "a new issue is said");
+        a.key(KeyCode::Char('z').into());
+        a.key(KeyCode::Char('z').into());
+        assert!(a.loud() && a.store.silenced.is_empty(), "again brings them back");
         bang(&mut a);
         assert_eq!(a.view, View::Table, "`!` closes it too");
     }
