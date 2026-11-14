@@ -1393,7 +1393,8 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     }
     let (mut cut, last) = (vec![], groups.len() - 1);
     for (i, (&(_, _, hint), end)) in TABS.iter().zip(tab_ends(app)).enumerate() {
-        if end >= usize::from(width)
+        // Cut where its name is: one whose name shows whole is on the row, and not here too.
+        if end > usize::from(width)
             && (app.view == View::Table || i >= RECOMMEND)
             && app.tab_has(i)
             && !app.tab_on(i)
@@ -3025,11 +3026,9 @@ fn scrollbar(
         return;
     }
     // The thumb is a heavy line on the border's light one, and the cursor's cell a block on it.
-    // Along the bottom its ends are half a cell where it starts or stops mid cell, so it moves by
-    // half cells. Down a border it moves by whole cells: half ends there, and the block over one,
-    // made it look longer and shorter as it went.
-    let [back, on, whole, from, to] =
-        if across { ["‹", "›", "━", "╺", "╸"] } else { ["▲", "▼", "┃", "╻", "╹"] };
+    // It moves by whole cells: with half a cell at an end, and the block over one, it looked
+    // longer and shorter as it went.
+    let [back, on, whole] = if across { ["‹", "›", "━"] } else { ["▲", "▼", "┃"] };
     let kind = u8::from(across);
     let mut set = |(x, y): (u16, u16), glyph: Option<(&str, Style)>, to: Option<Color>| {
         let Some(cell) = buf.cell_mut((x, y)) else { return };
@@ -3042,29 +3041,25 @@ fn scrollbar(
     };
     let track = &cells[1..cells.len().max(2) - 1];
     if !track.is_empty() {
-        // In half cells.
-        let halves = 2 * track.len();
-        let unit = if across { 1 } else { 2 };
-        let slots = halves / unit;
-        let least = if across { 2 } else { 3 };
+        let slots = track.len();
+        let least = if across { 1 } else { 3 };
         let len = (shown * slots).div_ceil(n).clamp(least.min(slots), slots);
         // At an end of the track only when the view is at that end.
         let (room, steps) = (slots - len, n - shown);
         let start = (top.min(steps) * room + steps / 2) / steps;
         let start = if room > 1 { start.clamp(usize::from(top > 0), room - usize::from(top < steps)) } else { start };
-        let (start, len, room) = (start * unit, len * unit, room * unit);
         let thumb = start..start + len;
         // In the thumb while the cursor is in view, as far along it as along the view.
         let mark = cur.map(|c| match c.checked_sub(top) {
             Some(k) if k < shown => {
                 // From the thumb's first cell, on the first row or column in view, to its last.
-                let (lo, hi) = (start / 2, (start + len - 1) / 2);
+                let (lo, hi) = (start, start + len - 1);
                 lo + (k * (hi - lo) + (shown - 1) / 2) / (shown - 1).max(1)
             }
             _ => (c * track.len() / n).min(track.len() - 1),
         });
         for (i, &at) in track.iter().enumerate() {
-            let part = (thumb.contains(&(2 * i)), thumb.contains(&(2 * i + 1)));
+            let part = thumb.contains(&i);
             // Where a click here goes: the cursor as far down the list as the cell is down the
             // track, or with no cursor the view, the thumb's middle on the cell.
             let by = match cur {
@@ -3075,17 +3070,17 @@ fn scrollbar(
                     let stop = |l: usize| stops.partition_point(|&s| s <= l).saturating_sub(1) as isize;
                     if stops.is_empty() { to as isize - c as isize } else { stop(to) - stop(c) }
                 }
-                None if part != (false, false) || room == 0 => 0,
+                None if part || room == 0 => 0,
+                // In half cells, the thumb's middle on the cell's.
                 None => {
-                    (((2 * i + 1).saturating_sub(len / 2).min(room) * steps + room / 2) / room) as isize - top as isize
+                    (((2 * i + 1).saturating_sub(len).min(2 * room) * steps + room) / (2 * room)) as isize
+                        - top as isize
                 }
             };
             let glyph = match part {
                 _ if Some(i) == mark => Some(("█", AT)),
-                (true, true) => Some((whole, THUMB)),
-                (false, true) => Some((from, THUMB)),
-                (true, false) => Some((to, THUMB)),
-                _ => None,
+                true => Some((whole, THUMB)),
+                false => None,
             };
             // Every cell of the track, the cursor's too, which goes nowhere: a drag is held to
             // the track's ends by them (`along`).
@@ -6063,8 +6058,8 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bar = text(term.backend().buffer())[h as usize - 1].trim_end().to_string();
-        assert!(bar.ends_with("i note  │  t theme  │  ? help  K all keys"), "{bar}");
-        assert!(!bar.contains("q quit"), "{bar}");
+        assert!(bar.ends_with("i note  │  ? help  K all keys"), "{bar}");
+        assert!(!bar.contains("q quit") && !bar.contains("t theme"), "theme's tab shows whole, so no hint: {bar}");
         assert_eq!(a.mouse(Mouse::Key(KeyCode::Char('K'))), Some(Effect::Keys));
         open_keys(&mut a, w);
         let Input::Choose { kind: Kind::Keys, items, .. } = &a.input else { panic!("{:?}", a.input) };
@@ -6310,7 +6305,7 @@ mod tests {
         // Cut off a narrow terminal, a tab is a hint in the status bar instead. The help, on no
         // tab, is always there, the last.
         let cut = |w| hints(&a, w).into_iter().filter(|h| TABS.iter().any(|t| t.2 == *h)).collect::<Vec<_>>();
-        assert_eq!((cut(101), cut(100), cut(78)), (vec![], vec!["t theme"], vec!["R recommend", "t theme"]));
+        assert_eq!((cut(100), cut(99), cut(77)), (vec![], vec!["t theme"], vec!["R recommend", "t theme"]));
         assert_eq!(hints(&a, 200).last(), Some(&"? help"));
         // Over the open theme list a click on a tab is that tab, and elsewhere outside the list.
         a.key(KeyCode::Char('t').into());
@@ -7668,8 +7663,8 @@ mod tests {
         assert_eq!(bar(12, (0, 5, 10)), ("‹━━━━━     ›".into(), "›".into()), "half shows, from the start");
         assert_eq!(bar(12, (5, 5, 10)), ("‹     ━━━━━›".into(), "‹".into()), "to the end");
         assert_eq!(bar(12, (1, 5, 10)), ("‹ ━━━━━    ›".into(), "‹›".into()), "off the start once scrolled");
-        assert_eq!(bar(12, (1, 10, 20)), ("‹╺━━━━╸    ›".into(), "‹›".into()), "by half a cell");
-        assert_eq!(bar(12, (500, 10, 1000)), ("‹    ╺╸    ›".into(), "‹›".into()), "never without a thumb");
+        assert_eq!(bar(12, (1, 10, 20)), ("‹ ━━━━━    ›".into(), "‹›".into()), "by whole cells, no half ends");
+        assert_eq!(bar(12, (500, 10, 1000)), ("‹     ━    ›".into(), "‹›".into()), "never without a thumb");
         assert_eq!(bar(2, (3, 1, 9)), ("‹›".into(), "‹›".into()), "two cells have the arrows");
         assert_eq!(bar(1, (0, 1, 9)), ("›".into(), "›".into()), "and one the way there is more");
         assert_eq!(bar(1, (8, 1, 9)), ("‹".into(), "‹".into()));
