@@ -5545,6 +5545,9 @@ impl App {
                     KeyCode::Char('|') if *kind == Kind::Cols => self.input = Input::None,
                     KeyCode::Char('B') if *kind == Kind::Bench => self.input = Input::None,
                     KeyCode::Char('P') if *kind == Kind::Harness => self.input = Input::None,
+                    KeyCode::Char('f') if *kind == Kind::Fav => self.input = Input::None,
+                    KeyCode::Char('o') if *kind == Kind::Open => self.input = Input::None,
+                    KeyCode::Char('x') if *kind == Kind::Launch => self.input = Input::None,
                     // And it is a tab, which tab leaves for the next.
                     KeyCode::Tab | KeyCode::BackTab if *kind == Kind::Theme => {
                         return self.step_tab(code == KeyCode::BackTab);

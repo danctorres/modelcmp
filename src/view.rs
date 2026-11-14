@@ -1368,7 +1368,7 @@ pub fn compare_rows(models: &[&Model], any: bool, get: Get, store: &Store) -> Ve
     // ECI as the table's column has it: the overall, or a benchmark picked there, marked `*`.
     let r = ranking(store, TASKS[0].name);
     let label = head("eci") + if r.bench.is_some() { "*" } else { "" };
-    let eci = |v| if r.bench.is_some() { line_shown(r, v) } else { format!("{v:.1}") };
+    let eci = |v| line_shown(r, v);
     let vals = models.iter().map(|m| line_score(m, r)).collect();
     rows.push(Row { section: "scores", ..row(&label, vals, eci, true) });
     for t in TASKS.iter().filter(|t| t.name != "overall" && !as_overall(models, t.name)) {
@@ -1752,7 +1752,7 @@ mod tests {
         let b = Model { context: 2, ..Default::default() };
         let cols = compare_cols(&[&a, &b], false, &|_| None, &Store::default()).1;
         let eci = cols.iter().find(|c| c.label == "ECI").expect("ECI stays with one value");
-        assert_eq!(eci.cells, ["150.0", "-"], "the model without shows -");
+        assert_eq!(eci.cells, ["150", "-"], "the model without shows -");
         let price = cols.iter().find(|c| c.label == "Price").expect("Price stays with no value");
         assert_eq!(price.cells, ["-", "-"], "neither has an offer");
         assert_eq!(cols.last().unwrap().label, "Via");
@@ -1780,7 +1780,7 @@ mod tests {
         assert_eq!(sized[6].1, "  size:       2.5 GB (GGUF copy on Hugging Face)", "under context, once known");
         assert_eq!(find("Ctx").ext, Some((200.0, 100.0)));
         assert_eq!(find("ECI").ext, None, "a single value is not a comparison");
-        assert_eq!(find("ECI").cells, vec!["150.0", "-"]);
+        assert_eq!(find("ECI").cells, vec!["150", "-"]);
         assert_eq!((find("Ctx").section, find("ECI").section), ("", "scores"));
         let same = compare_rows(&[&a, &a], false, &|_| None, &Store::default());
         assert_eq!(same.iter().find(|r| r.label == "Ctx").unwrap().ext, None, "equal values are not marked");

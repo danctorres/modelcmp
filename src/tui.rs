@@ -910,15 +910,21 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let list = match &app.input {
         // Scrolled as last drawn.
         Input::Menu { col, items, list } => {
-            menu_box(inner, menu_x(inner, &l, *col), *col, items).map(|(b, _)| (b, list.top, items.len()))
+            menu_box(inner, menu_x(inner, &l, *col), *col, items).map(|(b, _)| (b, list.top, items.len(), 0))
         }
         Input::Choose { title, items, list, .. } => {
             let (within, lines) = chooser(app, area)?;
-            Some((overlay_rect(within, title, &lines), list.top, items.len()))
+            let rect = overlay_rect(within, title, &lines);
+            // The lines f's grid keeps under its rows (`draw`) are nothing to click.
+            let grid = matches!(app.input, Input::Choose { kind: Kind::Fav, .. });
+            let tail = lines.len() - items.len() - usize::from(grid);
+            let pin = if grid { lines.len() - tail..lines.len() } else { 0..0 };
+            let under = pinned(lines.len(), usize::from(rect.height.saturating_sub(2)), &pin);
+            Some((rect, list.top, items.len(), under as u16))
         }
         _ => None,
     };
-    if let Some((rect, top, len)) = list {
+    if let Some((rect, top, len, under)) = list {
         if extend {
             return more.filter(|_| rect.contains(pos));
         }
@@ -937,6 +943,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         let inner = rect.inner(ratatui::layout::Margin::new(1, 1));
         if !inner.contains(pos) {
             return more;
+        }
+        if m.row >= inner.bottom() - under {
+            return None;
         }
         let k = top + (m.row - inner.y) as usize;
         // f's grid: a box is ticked, the name moves the cursor to its row, and the tiers' heading
@@ -1259,7 +1268,7 @@ fn actions(keys: &str) -> Vec<&'static str> {
 
 /// Key reminders in the status bar, in groups every view keeps in the same order: moving,
 /// the view's own keys, the model's actions, then the way back. Narrow terminals
-/// drop them from the front, so the actions outlast the view's keys and `? help` goes last, `q quit`
+/// drop them from the front, so the actions outlast the view's keys and `esc back` goes last, `q quit`
 /// first, as `K` lists it (`fit_keys`).
 /// `o open` and `y copy name` are `K`'s alone to show (`K_ONLY`).
 /// A toggle names what pressing it does; `A a S F E R C t` are on their tabs above the frame, and
@@ -1386,8 +1395,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
-    // drops last. Off the table only the panels', whose keys work there. `? help`, on no tab,
-    // goes after the way back.
+    // drops last. Off the table only the panels', whose keys work there.
     if written_in_place(app) || matches!(app.input, Input::Bind { .. }) {
         return groups.join(&SEP);
     }
@@ -1403,11 +1411,12 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             cut.push(hint);
         }
     }
-    if app.view != View::Help {
-        groups[last].push("? help");
-    }
     if !cut.is_empty() {
         groups.insert(last, cut);
+    }
+    // Ahead of the way back, which a narrow bar keeps the longest.
+    if app.view != View::Help {
+        groups.last_mut().unwrap().insert(0, "? help");
     }
     groups.join(&SEP)
 }
@@ -1623,7 +1632,10 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
     let panel = (RECOMMEND..TABS.len()).any(|i| app.tab_on(i));
     let (y, mut x, mut before, mut span) = (frame.y - 1, frame.x + 1, false, None::<(u16, u16)>);
     for i in 0..=TABS.len() {
-        let on = i < TABS.len() && app.tab_on(i);
+        // A panel's cut off has no frame, which would be drawn in part, a corner alone at 80
+        // columns: the panel's title says it is on.
+        let whole = |i| i < RECOMMEND || x + tab_width(app, i) as u16 + 1 < frame.right();
+        let on = i < TABS.len() && whole(i) && app.tab_on(i);
         let (top, side, down) = match (before, on) {
             // Between two that are off, the thin line a browser has there.
             (false, false) if i > 0 && i < TABS.len() => (" ", "│", "─"),
@@ -1639,7 +1651,7 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
             put(buf, x, y + 1, down, fg(MUTED));
         }
         let Some(&(name, key, _)) = TABS.get(i) else { break };
-        let (style, key_style) = match (on, app.tab_has(i)) {
+        let (style, key_style) = match (app.tab_on(i), app.tab_has(i)) {
             (true, _) => (TAB_ON, fg(KEY).add_modifier(BOLD)),
             (_, true) => (Style::new(), fg(KEY).add_modifier(BOLD)),
             _ => (fg(MUTED), fg(MUTED)),
@@ -1935,9 +1947,17 @@ fn plain(s: &str) -> bool {
 fn put_line(buf: &mut Buffer, line: &Line, area: Rect) {
     let at = area.intersection(buf.area);
     let width = line.width();
-    // Cut short, it is cut as ratatui cuts it.
+    // Cut short, it is cut as ratatui cuts it, and ends in a `…`, as the frame's description.
     if at.is_empty() || width == 0 || width > usize::from(at.width) {
-        return line.render(area, buf);
+        line.render(area, buf);
+        if !at.is_empty() && width > usize::from(at.width) {
+            // Not on the right half of a glyph of two cells.
+            // The cell after it is blanked, as no frame sends the one after such a glyph.
+            let wide = at.width > 1 && buf[(at.right() - 2, at.y)].cell_width() > 1;
+            buf[(at.right() - 1, at.y)].set_symbol(" ");
+            buf[(at.right() - 1 - u16::from(wide), at.y)].set_symbol("…").set_style(fg(MUTED));
+        }
+        return;
     }
     let at = Rect { height: 1, ..at };
     restyle(buf, at, line.style);
@@ -2149,9 +2169,14 @@ fn draw(app: &mut App, f: &mut Frame) {
         // line has.
         // ponytail: an entry more than a box's height from the end keeps it out of view; the
         // error on the line under the entry if it bites.
-        let from = if *sel + 1 >= rows || list.edit.is_some() { lines.len().saturating_sub(shown) } else { *top };
+        // What f's grid says of the cursor's box stays under the rows of a box too short for all.
+        let tail = lines.len() - rows - head;
+        let pin = if grid { lines.len() - tail..lines.len() } else { 0..0 };
+        let under = pinned(lines.len(), shown, &pin);
+        let (shown, len) = (shown - under, lines.len() - under);
+        let from = if *sel + 1 >= rows || list.edit.is_some() { len.saturating_sub(shown) } else { *top };
         let mut scroll = list_top(from, *sel + head, shown) as u16;
-        let ends = (head, lines.len() - rows - head, 0..0);
+        let ends = (head, if under > 0 { 0 } else { tail }, pin);
         // The cells the entry being written was drawn in: what the screen has.
         let room = edit_room(within);
         let (text, at) = overlay(buf, within, title, lines, &mut scroll, ends);
@@ -3646,8 +3671,8 @@ fn choose_keys(app: &App) -> Option<String> {
         (_, Kind::Fav) if items.iter().any(|(_, e)| matches!(e, Effect::Fav(_, t) if fit::task(t).is_none())) => {
             "← → tier  / search  space toggle  H model's harness  T edit"
         }
-        (_, Kind::Fav) => "↓ ↑ ← → move  / search  space enter toggle  H model's harness  esc close",
-        (_, Kind::Open) => "↓ ↑ move  / search  v range  space enter opens  esc close",
+        (_, Kind::Fav) => "↓ ↑ ← → move  / search  space enter toggle  H model's harness  esc f close",
+        (_, Kind::Open) => "↓ ↑ move  / search  v range  space enter opens  esc o close",
         (_, Kind::Cols) => "↓ ↑ move  / search  space enter toggle  esc | close",
         (_, Kind::Theme) => "↓ ↑ preview  / search  space enter saves  esc t close",
         (_, Kind::Pick) => "↓ ↑ move  / search  space enter picks  esc close",
@@ -3655,7 +3680,7 @@ fn choose_keys(app: &App) -> Option<String> {
         (_, Kind::PickedVia) => "↓ ↑ move  / search  space enter picks  esc skips",
         (_, Kind::Bench) => "↓ ↑ move  / search  space enter picks  esc B close",
         (_, Kind::Via) => "↓ ↑ move  / search  space enter picks  esc back",
-        (_, Kind::Launch) => "↓ ↑ move  / search  space enter opens  esc close",
+        (_, Kind::Launch) => "↓ ↑ move  / search  space enter opens  esc x close",
         (_, Kind::Keys) => "↓ ↑ move  / search  space enter presses  esc K close",
     };
     Some(if list.query.is_empty() { keys.into() } else { kept_hint(keys) })
@@ -4541,9 +4566,11 @@ fn recommend(
         under.push(Line::from(vec![Span::styled(format!("{t}: "), fg(MUTED)), Span::raw(what)]));
     }
     // A line whatever the cursor is on, so the panel keeps its height as it moves.
+    // Blank, they scroll with the rest: a short box has no rows to keep empty.
+    let said = !under.is_empty();
     under.resize(under.len().max(1), Line::default());
     v.extend(under);
-    let pin = pin..v.len();
+    let pin = if said { pin..v.len() } else { v.len()..v.len() };
     (v, block.or(Some(0..among)), pin, text_at)
 }
 
@@ -5795,7 +5822,7 @@ mod tests {
         assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  q quit  ? help  K all keys"
+                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  ? help  q quit  K all keys"
             ),
             "{}",
             lines[5]
@@ -6096,7 +6123,7 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(220, h)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bar = &text(term.backend().buffer())[h as usize - 1];
-        assert!(bar.ends_with("i note  │  q quit  ? help  K all keys") && !bar.contains("o open"), "{bar}");
+        assert!(bar.ends_with("i note  │  ? help  q quit  K all keys") && !bar.contains("o open"), "{bar}");
         assert!(bar_hints(&a, 220).iter().any(|h| h == "o open"), "K lists it");
         assert_eq!(a.key(KeyCode::Char('K').into()), Some(Effect::Keys));
 
@@ -6303,10 +6330,10 @@ mod tests {
             [Some(0), Some(1), Some(2), Some(5), Some(6), Some(7), None].map(|i| i.map(Mouse::Tab))
         );
         // Cut off a narrow terminal, a tab is a hint in the status bar instead. The help, on no
-        // tab, is always there, the last.
+        // tab, is always there, ahead of the way back.
         let cut = |w| hints(&a, w).into_iter().filter(|h| TABS.iter().any(|t| t.2 == *h)).collect::<Vec<_>>();
         assert_eq!((cut(100), cut(99), cut(77)), (vec![], vec!["t theme"], vec!["R recommend", "t theme"]));
-        assert_eq!(hints(&a, 200).last(), Some(&"? help"));
+        assert_eq!(hints(&a, 200).iter().rev().nth(1), Some(&"? help"));
         // Over the open theme list a click on a tab is that tab, and elsewhere outside the list.
         a.key(KeyCode::Char('t').into());
         assert_eq!(
@@ -7298,7 +7325,7 @@ mod tests {
         // Too narrow for them all, the first drop, esc the last to go.
         let (_, lines) = render(&mut a, 60, 10);
         assert!(
-            lines[9].trim_end().ends_with("esc close  K all keys") && !lines[9].contains("↓ ↑ move"),
+            lines[9].trim_end().ends_with("esc o close  K all keys") && !lines[9].contains("↓ ↑ move"),
             "{}",
             lines[9]
         );
@@ -7488,6 +7515,35 @@ mod tests {
         assert_eq!(status(&mut a), "column 1 of 1", "compare's columns, by their labels");
         type_in(&mut a, "/contxt");
         assert_eq!(status(&mut a), "no column matches contxt", "plain text, as every panel finds it");
+    }
+
+    #[test]
+    fn narrow_boxes_cut_clean() {
+        let mut a = app();
+        let rows = |a: &mut App, w: u16| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 12)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            text(term.backend().buffer())
+        };
+        // A panel's tab cut off leaves no corner of its frame over the table's.
+        a.key(KeyCode::Char('C').into());
+        let lines = rows(&mut a, 80);
+        assert!(!lines[0].contains('╭') && !lines[2].contains('┴'), "{lines:#?}");
+        a.key(KeyCode::Esc.into());
+        // A line too long for its box ends in a `…`.
+        a.key(KeyCode::Char('?').into());
+        assert!(rows(&mut a, 40)[4].trim_end().ends_with("… █"), "{:#?}", rows(&mut a, 40));
+        // `esc back` outlasts `? help` on a bar with room for one.
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Enter.into());
+        let bar = rows(&mut a, 50).pop().unwrap();
+        assert!(bar.contains("esc back") && !bar.contains("? help"), "{bar}");
+        a.key(KeyCode::Esc.into());
+        // The key that opens a list closes it.
+        a.key(KeyCode::Char('f').into());
+        assert!(matches!(a.input, Input::Choose { .. }), "f opens");
+        a.key(KeyCode::Char('f').into());
+        assert_eq!(a.input, Input::None, "f closes");
     }
 
     #[test]
