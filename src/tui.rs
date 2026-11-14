@@ -1511,8 +1511,8 @@ fn fit_keys(keys: &[&str], room: usize, all: bool) -> Vec<String> {
 
 /// The hints that fit a status bar `width` wide and the column the first starts at.
 fn hint_layout(app: &App, parts: &[Line], width: u16) -> (Vec<String>, u16) {
-    // The pill, a space, then each part and its " · ".
-    let left = mode(app).0.chars().count() + 3 + parts.iter().map(|p| p.width() + 3).sum::<usize>();
+    // The pill and a space, or a space alone, then each part and its " · ".
+    let left = usize::from(bar_start(app)) + parts.iter().map(|p| p.width() + 3).sum::<usize>();
     let hints = fit_keys(&hints(app, width), usize::from(width).saturating_sub(left + 1), app.lists_keys());
     let w = Span::raw(hints.join("  ")).width() as u16;
     (hints, width.saturating_sub(w))
@@ -1536,7 +1536,7 @@ fn bar_hints(app: &App, width: u16) -> Vec<String> {
 fn bar_layout(app: &App, width: u16) -> Vec<(u16, String)> {
     let (hints, mut x) = if in_prompt(app) {
         // After the prompt's text, which starts after the pill and a space.
-        let Some((hint, x)) = bar_keys(app, mode(app).0.chars().count() as u16 + 3, width) else { return vec![] };
+        let Some((hint, x)) = bar_keys(app, bar_start(app), width) else { return vec![] };
         (hint.split("  ").map(String::from).collect(), x)
     } else if app.input == Input::None || written_in_place(app) {
         hint_layout(app, &parts(app), width)
@@ -2702,6 +2702,10 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     if head > 2 && area.height > 2 {
         put(buf, name_x, y + 2, NO_ACCESS, room(name_x, u16::MAX), fg(Color::Yellow));
     }
+    // The status bar has no count to say 0: an empty table says it, as an empty list does.
+    if app.rows.is_empty() && area.height > head {
+        put(buf, name_x, y + head, "no match", room(name_x, u16::MAX), fg(MUTED));
+    }
     let height = usize::from(area.height.saturating_sub(head));
     let sel = app.table.selected().unwrap_or(0).min(app.rows.len().saturating_sub(1));
     // Keep the selection in view, and never leave rows blank below while some are hidden above.
@@ -3172,21 +3176,11 @@ fn pill(buf: &mut Buffer, x: u16, y: u16, text: &str, color: Color, max: u16) ->
     put(buf, x, y, format!(" {text} "), max as usize, fg(Color::Black).bg(color).add_modifier(BOLD)).0
 }
 
-/// The status bar's left side, joined with " · ": the model count, then what filters it.
+/// The status bar's left side, joined with " · ": what filters the models and what was last done.
+/// No count of them: the rows are numbered and the tab says which are shown.
 fn parts(app: &App) -> Vec<Line<'static>> {
-    let scope = match (app.all, app.any_available()) {
-        (false, true) => "available",
-        (false, false) => "all (none available)",
-        (true, _) => "all",
-    };
     let part = |s: String, c: Color| Line::styled(s, fg(c));
-    // Selected models show out of reach too, as `F` and `E` show theirs, so they are counted apart, as their Via says.
-    let out = app.rows.iter().filter(|&&r| !app.in_reach(&app.data.models[r])).count();
-    let count = match out {
-        0 => format!("{} {scope}", app.rows.len()),
-        _ => format!("{} {scope} + {out} {OUT_OF_REACH}", app.rows.len() - out),
-    };
-    let mut parts = vec![part(count, Color::Reset)];
+    let mut parts = vec![];
     if stale(app) {
         parts.push(part(data_age(&app.data), BAD));
     }
@@ -3245,47 +3239,33 @@ fn data_age(d: &Data) -> String {
     if d.fetched == 0 { "no data".into() } else { format!("data {} old", age(d.age())) }
 }
 
-/// The mode pill's label and colour.
-fn mode(app: &App) -> (&'static str, Color) {
-    match (&app.input, &app.view) {
-        (Input::Search { .. }, _) => ("SEARCH", Color::Blue),
-        (Input::Note { .. }, _) => ("NOTE", Color::Blue),
-        (Input::Bound { .. }, _) => ("BOUND", Color::Yellow),
-        (Input::Cap { .. }, _) => ("TIER", Color::Yellow),
-        (Input::Task(_), _) => ("TASK", Color::Yellow),
-        (Input::Menu { list, .. } | Input::Choose { list, .. }, _) if list.visual.is_some() => {
-            ("HIGHLIGHT", Color::Yellow)
-        }
-        (Input::Menu { .. }, _) => ("PICK", Color::Yellow),
-        (Input::Quit, _) => ("QUIT", Color::Red),
-        (Input::Upgrade, _) => ("UPGRADE", Color::Yellow),
-        (Input::Unfavorite, _) => ("UNFAVORITE", Color::Red),
-        (Input::Unexclude, _) => ("UNEXCLUDE", Color::Red),
-        (Input::DeleteTask(_), _) => ("DELETE", Color::Red),
-        (Input::Reset, _) => ("RESET", Color::Red),
-        (Input::Bind { .. }, _) => ("BIND", Color::Blue),
-        (Input::Choose { kind, .. }, _) => {
-            let name = match kind {
-                Kind::Launch => "LAUNCH",
-                Kind::Via | Kind::PickedVia | Kind::Harness => "HARNESS",
-                Kind::Fav => "FAV",
-                Kind::Theme => "THEME",
-                Kind::Cols => "COLUMNS",
-                Kind::Open => "OPEN",
-                Kind::Pick => "PICK",
-                Kind::Bench => "BENCH",
-                Kind::Keys => "KEYS",
-            };
-            (name, Color::Green)
-        }
-        (Input::None, View::Table) if app.selecting() => ("HIGHLIGHT", Color::Yellow),
-        (Input::None, View::Table) => ("NORMAL", Color::Magenta),
-        (Input::None, View::Help) => ("HELP", Color::Cyan),
-        (Input::None, View::Recommend) => ("RECOMMEND", Color::Cyan),
-        (Input::None, View::Detail(_)) => ("DETAIL", Color::Cyan),
-        (Input::None, View::Issues) => ("ISSUES", Color::Cyan),
-        (Input::None, View::Compare) => ("COMPARE", Color::Cyan),
-    }
+/// The pill's label and colour, where the keys mean something else than the screen says: text
+/// being typed, a highlighted range, a question. A panel has its tab and a list its title.
+fn mode(app: &App) -> Option<(&'static str, Color)> {
+    const TYPING: Color = Color::Blue;
+    Some(match &app.input {
+        Input::Search { .. } => ("SEARCH", TYPING),
+        Input::Menu { list, .. } | Input::Choose { list, .. } if list.typing => ("SEARCH", TYPING),
+        Input::Note { .. } => ("NOTE", TYPING),
+        Input::Bound { .. } => ("BOUND", TYPING),
+        Input::Cap { .. } => ("TIER", TYPING),
+        Input::Task(_) => ("TASK", TYPING),
+        Input::Bind { .. } => ("BIND", TYPING),
+        Input::Menu { list, .. } | Input::Choose { list, .. } if list.visual.is_some() => ("HIGHLIGHT", Color::Yellow),
+        Input::None if app.view == View::Table && app.selecting() => ("HIGHLIGHT", Color::Yellow),
+        Input::Upgrade => ("UPGRADE", Color::Yellow),
+        Input::Quit => ("QUIT", Color::Red),
+        Input::Unfavorite => ("UNFAVORITE", Color::Red),
+        Input::Unexclude => ("UNEXCLUDE", Color::Red),
+        Input::DeleteTask(_) => ("DELETE", Color::Red),
+        Input::Reset => ("RESET", Color::Red),
+        Input::Menu { .. } | Input::Choose { .. } | Input::None => return None,
+    })
+}
+
+/// The column the status bar's text starts at: after the pill and a space, else after a space.
+fn bar_start(app: &App) -> u16 {
+    mode(app).map_or(1, |(m, _)| m.chars().count() as u16 + 3)
 }
 
 /// Whether the note being written was drawn in its place, the table's Notes cell or the
@@ -3462,8 +3442,8 @@ fn put_keys(buf: &mut Buffer, app: &App, hint: &str, mut x: u16, y: u16) {
 /// Returns the cursor column while a search, note or bound is being typed.
 fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
     let width = area.width as usize;
-    let (mode, color) = mode(app);
-    let end = pill(buf, area.x, area.y, mode, color, area.width);
+    let mode = mode(app);
+    let end = mode.map_or(area.x, |(mode, color)| pill(buf, area.x, area.y, mode, color, area.width));
     let mut x = end + 1;
     if saying(app) {
         // The question is in a box in the middle of the screen. Under it `said`, and a list's
@@ -3535,7 +3515,9 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
         }
     }
     // The last hint stays however narrow the bar: where it ran over the pill, the pill wins.
-    if area.x + start < end {
+    if let Some((mode, color)) = mode
+        && area.x + start < end
+    {
         pill(buf, area.x, area.y, mode, color, area.width);
     }
     None
@@ -5227,6 +5209,18 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_table_says_no_match() {
+        let mut a = app();
+        assert!(!render(&mut a, 120, 6).1.concat().contains("no match"));
+        for c in "/zzz".chars() {
+            a.key(KeyCode::Char(c).into());
+        }
+        a.key(KeyCode::Enter.into());
+        let (_, lines) = render(&mut a, 120, 6);
+        assert!(lines[2].contains("no match") && lines[5].starts_with(" /zzz"), "{lines:?}");
+    }
+
+    #[test]
     fn old_data_says_so_in_the_status_bar() {
         let mut a = app();
         a.col = PRICE;
@@ -5234,7 +5228,7 @@ mod tests {
         assert!(!lines[3].contains(" old") && !lines[3].contains("r refresh"), "fresh: {}", lines[3]);
         a.data.fetched -= data::MAX_AGE.as_secs() + 3600;
         let (buf, lines) = render(&mut a, 200, 4);
-        assert!(lines[3].starts_with(" NORMAL  2 available · data 25h old"), "{}", lines[3]);
+        assert!(lines[3].starts_with(" data 25h old"), "{}", lines[3]);
         assert_eq!(buf[(cell(&lines[3], "data"), 3)].fg, BAD);
         assert!(
             lines[3].contains("% no cache  r refresh  │  enter details  x launch  H model's harness"),
@@ -5642,7 +5636,7 @@ mod tests {
         let (_, lines) = render(&mut a, 203, 5);
         let opus = lines.iter().position(|l| l.contains("opus")).unwrap();
         assert!(lines[opus].contains("not available"), "{lines:?}");
-        assert!(lines[4].starts_with(" NORMAL  1 available + 1 not available"), "{}", lines[4]);
+        assert!(lines[4].starts_with(" 2 selected"), "the bar has no count of the models: {}", lines[4]);
         // Its tab counts it, and a click past the count is still on the next tab.
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(181, 20)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
@@ -5779,7 +5773,7 @@ mod tests {
         a.set_data(data);
         let (buf, lines) = render(&mut a, 120, 6);
         assert!(lines[2].contains(NO_ACCESS) && buf[(cell(&lines[2], "no harness"), 2)].fg == Color::Yellow);
-        assert!(lines[3].contains("opus") && lines[5].starts_with(" NORMAL  2 all (none available)"), "{lines:?}");
+        assert!(lines[3].contains("opus") && !lines[5].contains("available"), "{lines:?}");
         a.key(KeyCode::Char('a').into());
         assert!(!a.all && a.status == NO_ACCESS, "and the key says so: {}", a.status);
         // The clicks on the rows start under it too; the tabs and the frame put them three lines further down.
@@ -5849,7 +5843,7 @@ mod tests {
         );
         assert_eq!(&words(&lines[2])[..11], ["1", "☐", "☆", "·", "opus", "anthropic", "-", "│", "5.0", "5.0", "5.0"]);
         assert_eq!(&words(&lines[3])[..11], ["2", "☐", "☆", "·", "flash", "google", "-", "│", "0.10", "0.10", "0.10"]);
-        assert!(lines[5].starts_with(" NORMAL  2 available"), "{}", lines[5]);
+        assert!(!lines[5].contains("available"), "no count of the models: {}", lines[5]);
         assert!(
             lines[5].ends_with(
                 "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  ? help  q quit  K all keys"
@@ -5955,7 +5949,7 @@ mod tests {
         assert_eq!(buf[(dev as u16 + 1, 2)].bg, CURSOR, "the cursor's fill, inside the border");
         assert_ne!(buf[(dev as u16, 2)].bg, CURSOR);
         assert_ne!(buf[(dev as u16 + 1, 3)].bg, CURSOR);
-        assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
+        assert!(lines[7].starts_with(" Dev ▾"), "{}", lines[7]);
         let (_, short) = render(&mut a, 170, 6);
         assert!(short.iter().any(|l| l.contains(" 1-2 of 3 ")), "a list scrolled says where it is: {short:?}");
         for c in "/anth".chars() {
@@ -5966,7 +5960,7 @@ mod tests {
         assert_eq!(&words(&lines[y])[5..10], ["│", "☐", "·", "anthropic", "1"]);
         assert_eq!(buf[(dev as u16 + 1, y as u16)].bg, CURSOR, "the cursor on the match");
         assert!(lines.iter().any(|l| l.contains("google")), "every entry stays");
-        assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
+        assert!(lines[7].starts_with(" SEARCH  Dev ▾ /anth"), "{}", lines[7]);
         a.key(KeyCode::Char('z').into());
         let (_, lines) = render(&mut a, 170, 8);
         assert!(lines.iter().any(|l| l.contains(" no match ")), "{lines:?}");
@@ -6987,7 +6981,7 @@ mod tests {
         a.key(KeyCode::Char('d').into());
         let (_, lines) = render(&mut a, 50, 7);
         let bar = lines.last().unwrap();
-        assert!(bar.contains("PICK") && bar.contains("Dev ▾"), "the prompt wins over its key hint: {bar}");
+        assert!(bar.contains("Dev ▾"), "the prompt wins over its key hint: {bar}");
         assert_eq!(scrolled(4, "abcdefgh", 8, 8), 5, "text past its room starts where the cursor still shows");
         assert_eq!(scrolled(4, "abc", 3, 8), 0, "and text that fits, at its start");
         // Recommend's warning has no cursor: it shows with the first task, and a task's name and
@@ -7011,7 +7005,7 @@ mod tests {
         // f's keys fit the status bar of a terminal 80 columns wide, with a task of your own too.
         let items = vec![("debugging".to_string(), Effect::Fav("k".into(), "debugging".into()))];
         a.input = Input::Choose { title: String::new(), kind: Kind::Fav, items, list: List::default() };
-        let keys = prompt_keys(&a, mode(&a).0.chars().count() as u16 + 3, "/", 80).map(|k| k.0);
+        let keys = prompt_keys(&a, bar_start(&a), "/", 80).map(|k| k.0);
         assert!(keys.as_ref().is_some_and(|k| k.contains("T edit")), "{keys:?}");
     }
 
@@ -7413,7 +7407,7 @@ mod tests {
         assert_eq!((x, y), before, "the box keeps its width");
         let on = |y| buf[(x + 1, y)].bg == CURSOR;
         assert_eq!([on(y + 1), on(y + 2)], [true, true], "both sites highlighted");
-        assert_eq!(mode(&a).0, "HIGHLIGHT");
+        assert_eq!(mode(&a).map(|m| m.0), Some("HIGHLIGHT"));
         // Under a search kept, esc cancels the range first, and the hint says so.
         a.key(KeyCode::Esc.into());
         keys(&mut a, "/epoch");
@@ -7578,7 +7572,7 @@ mod tests {
         // `esc back` outlasts `? help` on a bar with room for one.
         a.key(KeyCode::Esc.into());
         a.key(KeyCode::Enter.into());
-        let bar = rows(&mut a, 50).pop().unwrap();
+        let bar = rows(&mut a, 28).pop().unwrap();
         assert!(bar.contains("esc back") && !bar.contains("? help"), "{bar}");
         a.key(KeyCode::Esc.into());
         // The key that opens a list closes it.
@@ -7699,7 +7693,7 @@ mod tests {
         a.key(KeyCode::Char('?').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bar: String = (0..100).map(|x| edge(&term, x, 9)).collect();
-        assert!(bar.starts_with(" HELP "), "{bar}");
+        assert!(bar.contains("enter change key"), "{bar}");
     }
 
     #[test]
