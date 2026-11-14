@@ -2148,7 +2148,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             }
         }
         // The frame has the bars: the rows' on its right border, and on its bottom one that of
-        // the columns right of Model, between the version and the refresh state. Where those
+        // the columns, between the version and the refresh state. Where those
         // leave it no room it still has its two arrows and a thumb, over them.
         let rows = usize::from(inner.height.saturating_sub(head));
         let at = (app.table.offset(), rows, app.rows.len());
@@ -2156,7 +2156,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         let lo = body.x + 2 + if below { version.width() as u16 } else { 0 };
         let end = body.right();
         let hi = end.saturating_sub(Line::from(state.as_str()).width() as u16 + 2).max(body.x + 5).min(end);
-        hbar(buf, body.bottom() - 1, lo.min(hi.saturating_sub(4)).max(body.x + 1)..hi, across.0, across.1);
+        hbar(buf, body.bottom() - 1, lo.min(hi.saturating_sub(4)).max(body.x + 1)..hi, across.0, across.1, across.2);
     }
     let buf = f.buffer_mut();
     // Help and the issues show over the panel they were opened from, as every box over what is
@@ -2428,7 +2428,7 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
         // Compare's columns, on the bottom border left of where the lines are.
         if let Some((across, col)) = across {
             let footer = if at.2 > at.1 { position(at.0, at.1, at.2).chars().count() as u16 } else { 0 };
-            hbar(buf, text.bottom(), text.x..text.right().saturating_sub(footer), across, Some(col));
+            hbar(buf, text.bottom(), text.x..text.right().saturating_sub(footer), across, Some(col), across.1);
         }
         if let Some((l, x)) = text_at {
             // A line pinned under the list is drawn after the lines shown.
@@ -2489,9 +2489,10 @@ struct Layout {
     first: usize,
     /// Columns cut off on the right, which the frame's bar says.
     more: bool,
-    /// Where the view is in the columns right of Model, those not left out: the frame's bar.
-    /// And the cursor's column among them, if it is on one.
-    bar: (Scrolled, Option<usize>),
+    /// Where the view is in the columns, those not left out, Model the first and always in
+    /// view: the frame's bar. And the cursor's column among them.
+    /// And how many are whole in view, which the cursor's mark goes along the thumb by.
+    bar: (Scrolled, Option<usize>, usize),
     /// The cursor index a click on `▶` pages to: the first column right of the view or cut short,
     /// or the one after it when it starts the view.
     next: Option<usize>,
@@ -2575,30 +2576,25 @@ fn layout(width: u16, app: &App) -> Layout {
     let name_w = longest.min(NAME_MAX).min(width.saturating_sub(name_x + GAP + keep)).max(NAME_MIN);
     let mut x = name_x + name_w + GAP;
     let room = width.saturating_sub(x) + GAP;
-    let first = match app.col.checked_sub(1) {
-        Some(s) => {
-            // The leftmost first column that still shows column `s`. Each column brought in on
-            // the left costs its width and gap, and the one it displaces as first its `│`;
-            // hidden ones cost nothing and are never first.
-            let reach = |s: usize| {
-                let (mut lo, mut used) = (s, ws[s] + GAP);
-                for k in (0..s).rev().filter(|&k| ws[k] > 0) {
-                    let cost = ws[k] + GAP + sep(lo);
-                    // Plus the first's own `│`, unless it is the leftmost.
-                    if used + cost + u16::from(k > lead) > room {
-                        break;
-                    }
-                    (lo, used) = (k, used + cost);
-                }
-                lo
-            };
-            // Never scrolled further than it takes to show the last column, so a wider
-            // window brings back the columns on the left.
-            let last = ws.iter().rposition(|&w| w > 0).unwrap_or(s);
-            app.hscroll.clamp(reach(s), s).min(reach(last))
+    // The leftmost first column that still shows column `s`. Each column brought in on
+    // the left costs its width and gap, and the one it displaces as first its `│`;
+    // hidden ones cost nothing and are never first.
+    let reach = |s: usize| {
+        let (mut lo, mut used) = (s, ws[s] + GAP);
+        for k in (0..s).rev().filter(|&k| ws[k] > 0) {
+            let cost = ws[k] + GAP + sep(lo);
+            // Plus the first's own `│`, unless it is the leftmost.
+            if used + cost + u16::from(k > lead) > room {
+                break;
+            }
+            (lo, used) = (k, used + cost);
         }
-        None => 0,
+        lo
     };
+    // Never scrolled further than it takes to show the last column, so a wider
+    // window brings back the columns on the left.
+    let end = ws.iter().rposition(|&w| w > 0).map_or(0, reach);
+    let first = app.col.checked_sub(1).map_or(0, |s| app.hscroll.clamp(reach(s), s).min(end));
     let (mut cols, mut tail, mut more, mut seps) = (Vec::with_capacity(COLS.len()), [None; 2], false, vec![]);
     // The cut column, or the one after it when it already starts the view, as a cursor index.
     let page = |k: usize| if k > first { Some(k + 1) } else { (k + 1..ws.len()).find(|&j| ws[j] > 0).map(|j| j + 1) };
@@ -2632,7 +2628,12 @@ fn layout(width: u16, app: &App) -> Layout {
         x += w + GAP;
     }
     let shown = |ws: &[u16]| ws.iter().filter(|&&w| w > 0).count();
-    let bar = ((shown(&ws[..first]), whole, shown(&ws)), app.col.checked_sub(1).map(|c| shown(&ws[..c])));
+    // Model counts, always in view and first: the cursor on it has its mark too, at the bar's start.
+    let cur = app.col.checked_sub(1).map_or(0, |c| shown(&ws[..c]) + 1);
+    // As many in view as leave the view its furthest at the bar's end: counted as they show,
+    // wide and narrow, the thumb changed size as the view went.
+    let all = shown(&ws) + 1;
+    let bar = ((shown(&ws[..first]), all - shown(&ws[..end]), all), Some(cur), whole + 1);
     Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, next, seps, bar }
 }
 
@@ -3090,6 +3091,7 @@ fn scrollbar(
     (top, shown, n): Scrolled,
     cur: Option<usize>,
     stops: &[usize],
+    seen: usize,
 ) {
     if shown >= n {
         return;
@@ -3134,10 +3136,10 @@ fn scrollbar(
         let thumb = start..start + len;
         // In the thumb while the cursor is in view, as far along it as along the view.
         let mark = cur.map(|c| match c.checked_sub(top) {
-            Some(k) if k < shown => {
+            Some(k) if k < seen => {
                 // From the thumb's first cell, on the first row or column in view, to its last.
                 let (lo, hi) = (start, start + len - 1);
-                lo + (k * (hi - lo) + (shown - 1) / 2) / (shown - 1).max(1)
+                lo + (k * (hi - lo) + (seen - 1) / 2) / (seen - 1).max(1)
             }
             _ => (c * track.len() / n).min(track.len() - 1),
         });
@@ -3189,13 +3191,14 @@ fn vbar(buf: &mut Buffer, x: u16, y: u16, at: Scrolled, cur: Option<usize>) {
 /// `vbar` where the cursor stops at the lines `stops` only (`scrollbar`).
 fn vbar_on(buf: &mut Buffer, x: u16, y: u16, at: Scrolled, cur: Option<usize>, stops: &[usize]) {
     let cells: Vec<_> = (y..y.saturating_add(at.1 as u16)).map(|y| (x, y)).collect();
-    scrollbar(buf, &cells, false, at, cur, stops);
+    scrollbar(buf, &cells, false, at, cur, stops, at.1);
 }
 
 /// The columns' bar, on the cells `xs` of the bottom border `y`.
-fn hbar(buf: &mut Buffer, y: u16, xs: Range<u16>, at: Scrolled, cur: Option<usize>) {
+/// `seen` of them are in view, which is not `at`'s share where their widths differ.
+fn hbar(buf: &mut Buffer, y: u16, xs: Range<u16>, at: Scrolled, cur: Option<usize>, seen: usize) {
     let cells: Vec<_> = xs.map(|x| (x, y)).collect();
-    scrollbar(buf, &cells, true, at, cur, &[]);
+    scrollbar(buf, &cells, true, at, cur, &[], seen);
 }
 
 /// A solid label like a bar module; returns the column after it.
@@ -7721,6 +7724,21 @@ mod tests {
         assert_eq!((live(&term, 100, 5), live(&term, 100, 7)), (false, true), "rows below only");
         let across = (1..100).find(|&x| edge(&term, x, 8) == "▶").expect("a ▶ on the bottom border");
         assert!(live(&term, across, 8), "columns off to the right");
+        let back = (a.col, a.hscroll);
+        a.col = 0;
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        assert!((1..across).any(|x| edge(&term, x, 8) == "█"), "the cursor on Model has its mark on the bar");
+        // The thumb is as long wherever the view is, with wide columns in it or narrow ones.
+        let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
+        let mut lens = std::collections::BTreeSet::new();
+        for col in 0..=NOTES {
+            a.col = col;
+            small.draw(|f| draw(&mut a, f)).unwrap();
+            lens.insert((0..60).filter(|&x| ["━", "█"].contains(&edge(&small, x, 8).as_str())).count());
+        }
+        assert_eq!(lens.len(), 1, "{lens:?}");
+        (a.col, a.hscroll) = back;
+        term.draw(|f| draw(&mut a, f)).unwrap();
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
         assert_eq!([edge(&term, 100, 5), edge(&term, 0, 7)], ["▲", " "]);
@@ -7768,7 +7786,7 @@ mod tests {
     fn a_scroll_bar_says_where_the_view_is() {
         let draw = |cells: u16, at: Scrolled, cur: Option<usize>| {
             let mut buf = Buffer::empty(Rect::new(0, 0, cells, 1));
-            hbar(&mut buf, 0, 0..cells, at, cur);
+            hbar(&mut buf, 0, 0..cells, at, cur, at.1);
             buf
         };
         // The cursor's cell is the text's colour: it moves along the thumb, which moves on at its end.
