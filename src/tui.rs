@@ -2061,7 +2061,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         // column scrolled out of view, and Via by the download's size alone, whose order is not
         // the column's text.
         let cols = layout(body.width.saturating_sub(2), app);
-        let arrow = if app.descending { "▼" } else { "▲" };
+        let arrow = if app.descending { "↓" } else { "↑" };
         let sort = match (app.by_size(), cols.shows(app.sort_col)) {
             (true, _) => format!(" {arrow} by {} size ", app.col_name(app.sort_col)),
             (_, false) => format!(" {arrow} by {} ", app.col_name(app.sort_col)),
@@ -2633,8 +2633,9 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     let Layout { name_x, name_w, dev_w, cols, via, notes, first, more, next, seps, bar } = cols;
     app.hscroll = first;
     let arrow = |i: usize| match i == app.sort_col {
-        true if app.descending => "▼",
-        true => "▲",
+        // Arrows, not the triangles a dropdown's ▾ and the scroll bars have.
+        true if app.descending => "↓",
+        true => "↑",
         false => "",
     };
     // The column under the cursor is on a faint fill (`COLUMN`), its header and the rule too,
@@ -4928,9 +4929,9 @@ fn compare(
     let arrow = |label: &str| match sort {
         Some((l, desc)) if l == label => {
             if desc {
-                "▼"
+                "↓"
             } else {
-                "▲"
+                "↑"
             }
         }
         _ => "",
@@ -5655,10 +5656,10 @@ mod tests {
         };
         (a.sort_col, a.descending) = (VIA, false);
         a.rebuild();
-        assert!(top(&mut a).contains(" ▲ by Via "), "{}", top(&mut a));
+        assert!(top(&mut a).contains(" ↑ by Via "), "{}", top(&mut a));
         a.store.via_pick = vec![crate::app::DOWNLOAD.into()];
         a.rebuild();
-        assert!(top(&mut a).contains(" ▲ by Via size "), "{}", top(&mut a));
+        assert!(top(&mut a).contains(" ↑ by Via size "), "{}", top(&mut a));
         // Dev scrolled out of view has no header to say its sort on.
         let mut cols = layout(200, &a);
         assert!(cols.shows(1));
@@ -5828,7 +5829,7 @@ mod tests {
         let mut a = app();
         let (buf, lines) = render(&mut a, 229, 6);
         let header =
-            "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ▼ECI ▾ Coding ▾ Agentic ▾ │ Tok/s │ Via ▾ Notes";
+            "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ↓ECI ▾ Coding ▾ Agentic ▾ │ Tok/s │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);
@@ -6637,7 +6638,7 @@ mod tests {
         let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(
             words(&lines[0]),
-            ["#", "Model", "│", "Ctx", "│", "▼ECI", "▾"],
+            ["#", "Model", "│", "Ctx", "│", "↓ECI", "▾"],
             "the cursor starts on the index, and Dev scrolls off"
         );
         assert!(layout(46, &a).more, "columns cut off on the right");
@@ -6904,7 +6905,7 @@ mod tests {
         term.draw(|f| draw(&mut a, f)).unwrap();
         let lines = text(term.backend().buffer());
         let screen = lines.join("\n");
-        assert!(screen.contains("▲Price"), "{screen}");
+        assert!(screen.contains("↑Price"), "{screen}");
         // Drawn in that order, as clicks find them.
         let row = |i| a.spots.iter().find(|s| s.1 == Stop::Compare(i)).map(|s| &lines[usize::from(s.0.y)]);
         assert!(row(0).is_some_and(|l| l.contains("flash")) && row(1).is_some_and(|l| l.contains("opus")), "{screen}");
