@@ -1051,7 +1051,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
             // A cell opens what it shows, on a double click (`double`): Via the harness under
             // the pointer, and Notes the note to write.
             match col_at(&l, x) {
-                Some((VIA, vx, _)) => harness_at(app, n, x - vx).map_or(Mouse::Row(n), |j| Mouse::Harness(n, j)),
+                Some((VIA, vx, _)) => harness_at(app, n, x - vx).map_or(Mouse::At(n, VIA), |j| Mouse::Harness(n, j)),
                 Some((col, ..)) => Mouse::Cell(n, col),
                 _ => Mouse::Row(n),
             }
@@ -1125,7 +1125,14 @@ fn dragged(press: &mut Option<u16>, e: MouseEvent, m: Option<Mouse>) -> Option<M
         MouseEventKind::Down(_) => {
             let row = matches!(
                 m,
-                Some(Mouse::Row(_) | Mouse::Cell(..) | Mouse::Harness(..) | Mouse::Pick(_) | Mouse::Extend(_))
+                Some(
+                    Mouse::Row(_)
+                        | Mouse::At(..)
+                        | Mouse::Cell(..)
+                        | Mouse::Harness(..)
+                        | Mouse::Pick(_)
+                        | Mouse::Extend(_)
+                )
             );
             *press = if bar { Some(ON_BAR) } else { row.then_some(e.row) };
         }
@@ -1160,7 +1167,8 @@ fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Option<
         return None;
     }
     let single = match m {
-        Mouse::Cell(n, _) | Mouse::Harness(n, _) => Mouse::Row(n),
+        Mouse::Cell(n, c) => Mouse::At(n, c),
+        Mouse::Harness(n, _) => Mouse::At(n, VIA),
         Mouse::Open(s) => Mouse::Model(s),
         // A key's hint presses once on a double click: the first press puts a question's confirm
         // or `K`'s `esc` under the second, which a click out of habit must not press.
@@ -1241,6 +1249,9 @@ fn copy(text: &str) -> bool {
 /// Blank columns between two table columns.
 const GAP: u16 = 2;
 const NAME_MIN: u16 = 16;
+/// A longer name is cut with `…`, whole in the details: one fine-tune's 65 characters do not
+/// widen Model for every row.
+const NAME_MAX: u16 = 47;
 /// Between two groups of hints in the status bar, drawn muted.
 const SEP: &str = "│";
 /// Every box in recommend has it, two cells wide, muted but on the cursor's: `d` opens its dropdown.
@@ -1285,9 +1296,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         Some(_) => vec!["< price cap"],
         None => vec![],
     };
-    // Recommend's cursor moves along a line with more than one cell.
-    let lines =
-        if app.rec_cells().len() > 1 { vec!["↓ ↑ move", "← → 0 $ column"] } else { vec!["↓ ↑ move"] };
+    // No hint for the arrows that only move the cursor: the cursor and the scroll bars show it.
     // Recommend's search, then `P`, as recommend shows your preferred harness.
     let panel = [&search[..], &["P preferred harness"]].concat();
     let groups: Vec<Vec<&'static str>> = match app.view {
@@ -1332,28 +1341,24 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 back.push("esc back");
             }
             back.push("q quit");
-            vec![vec!["← → column"], view, actions("enter x H o y space f e i"), back]
+            vec![view, actions("enter x H o y space f e i"), back]
         }
-        View::Detail(_) => vec![vec!["↓ ↑ scroll"], search, actions("x H o y space f e i"), BACK.to_vec()],
+        View::Detail(_) => vec![search, actions("x H o y space f e i"), BACK.to_vec()],
         View::Issues => {
             let silence = silence(app);
-            vec![vec!["↓ ↑ scroll"], [&search[..], &["r refresh"], silence.as_slice()].concat(), BACK.to_vec()]
+            vec![[&search[..], &["r refresh"], silence.as_slice()].concat(), BACK.to_vec()]
         }
         // `?` here closes help, which `esc back` already says.
         View::Help if matches!(app.input, Input::Bind { .. }) => vec![vec!["esc cancel"]],
         View::Help => {
-            // Offered on a row whose key changes, and on `↺`, which puts every key back.
+            // Offered on a row whose key changes. `Z` puts every key back from any row.
             let row = help_rows().nth(app.help_sel).map_or("", |r| r.0);
-            let enter: &[&str] = match row {
-                "↺" => &["enter reset keys"],
-                _ if bindable(row).is_some() => &["enter change key"],
-                _ => &[],
-            };
-            vec![vec!["↓ ↑ move"], [enter, &search[..]].concat(), vec!["esc back", "q quit"]]
+            let enter: &[&str] = if bindable(row).is_some() { &["enter change key"] } else { &[] };
+            vec![[enter, &["Z reset keys"], &search[..]].concat(), vec!["esc back", "q quit"]]
         }
         View::Compare if app.marked_shown < 2 => vec![BACK.to_vec()],
         View::Compare => {
-            vec![vec!["↓ ↑ model", "← → 0 $ column", "s sort"], search, actions("enter x H o y f e i"), BACK.to_vec()]
+            vec![vec!["s sort"], search, actions("enter x H o y f e i"), BACK.to_vec()]
         }
         // On a task's name, enter ranks by it; on a tier's model, it opens the dropdown and the
         // others act on the model.
@@ -1361,13 +1366,13 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
         View::Recommend if matches!(app.input, Input::Task(_)) => vec![field_hints(&app.input).to_vec()],
         View::Recommend if matches!(app.input, Input::Cap { .. }) => vec![vec!["enter apply", "esc cancel"]],
         View::Recommend if app.among == Some(PREFERRED) => {
-            vec![vec!["↓ ↑ move"], [&["d dropdown"], &panel[..]].concat(), BACK.to_vec()]
+            vec![[&["d dropdown"], &panel[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.among.is_some() => {
-            vec![vec!["↓ ↑ move", "← → 0 $ which models"], [&["enter pick"], &panel[..]].concat(), BACK.to_vec()]
+            vec![vec!["← → 0 $ which models"], [&["enter pick"], &panel[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.on_new_task() => {
-            vec![vec!["↓ ↑ move"], [&["enter new task"], &panel[..]].concat(), BACK.to_vec()]
+            vec![[&["enter new task"], &panel[..]].concat(), BACK.to_vec()]
         }
         View::Recommend if app.current().is_none() => {
             // A tier with no model has its cap for enter, or the dropdown that gives it one.
@@ -1383,7 +1388,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 _ if app.name_menu(app.task_cur).is_some() => vec!["enter best per price", "d dropdown"],
                 _ => vec!["enter best per price"],
             };
-            vec![lines, [enter, panel].concat(), cap, BACK.to_vec()]
+            vec![[enter, panel].concat(), cap, BACK.to_vec()]
         }
         // Enter changes what the cursor is on: a tier's cap, its model or its harness.
         View::Recommend => {
@@ -1393,7 +1398,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
                 HARNESS_CELL => [vec!["enter model's harness"], actions("x o y space f e i")].concat(),
                 _ => [vec!["enter choose model"], actions("x H o y space f e i")].concat(),
             };
-            vec![lines, view, model, cap, BACK.to_vec()]
+            vec![view, model, cap, BACK.to_vec()]
         }
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
@@ -2155,7 +2160,7 @@ fn draw(app: &mut App, f: &mut Frame) {
     if let Some(at) = text {
         cursor = at;
     }
-    // `q`, `U`, `D`, `X` and `↺` ask first: the same box, confirmed by the same key again, each
+    // `q`, `U`, `D`, `X` and `Z` ask first: the same box, confirmed by the same key again, each
     // as it is bound now.
     if let Some((hint, title)) = question(app) {
         let lines = vec![ask_line(&bound_keys(split_hint(hint).0, &app.store.keys))];
@@ -2546,7 +2551,7 @@ fn layout(width: u16, app: &App) -> Layout {
     // frame's bar says so. Only for one, the widest of Dev and the numbers, so a long name never leaves the
     // table with none.
     let keep = ws[..=COLS.len()].iter().max().map_or(0, |w| w + GAP + 1);
-    let name_w = longest.min(width.saturating_sub(name_x + GAP + keep)).max(NAME_MIN);
+    let name_w = longest.min(NAME_MAX).min(width.saturating_sub(name_x + GAP + keep)).max(NAME_MIN);
     let mut x = name_x + name_w + GAP;
     let room = width.saturating_sub(x) + GAP;
     let first = match app.col.checked_sub(1) {
@@ -2654,7 +2659,7 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     put(buf, dev_x, y, format!("{:<dw$}", format!("Dev{} ▾", arrow(1))), dw, header(1));
     for &(i, x, w) in &cols {
         let (name, mark) = col_head(app, i + 2);
-        let text = format!("{}{name}{mark}{}", arrow(i + 2), if app.menu(i + 2) { " ▾" } else { "" });
+        let text = format!("{name}{mark}{}{}", arrow(i + 2), if app.menu(i + 2) { " ▾" } else { "" });
         put(buf, area.x + x, y, format!("{text:>w$}", w = w as usize), w as usize, header(i + 2));
     }
     if let Some((x, w)) = via {
@@ -3306,7 +3311,7 @@ fn open_keys(app: &mut App, width: u16) {
     app.list_keys(keys);
 }
 
-/// What `q`, `U`, `D`, `X` and `↺` ask: the hint of the key that confirms, in its default key,
+/// What `q`, `U`, `D`, `X` and `Z` ask: the hint of the key that confirms, in its default key,
 /// and the question.
 fn question(app: &App) -> Option<(&'static str, String)> {
     Some(match &app.input {
@@ -3314,7 +3319,7 @@ fn question(app: &App) -> Option<(&'static str, String)> {
         Input::Upgrade => ("U upgrade", format!("upgrade to v{}?", app.data.update()?)),
         Input::Unfavorite => ("D unfavorite all", "unfavorite every model?".into()),
         Input::DeleteTask(t) => ("D delete", format!("delete {t}?")),
-        Input::Reset => ("enter reset keys", "put every key back to its default?".into()),
+        Input::Reset => ("Z reset keys", "put every key back to its default?".into()),
         Input::Unexclude if app.filters_exclude() => {
             ("X unexclude all", "unexclude every model, hidden ones included?".into())
         }
@@ -3418,9 +3423,9 @@ fn prompt_hint(app: &App) -> Option<String> {
             let keys = match *col {
                 _ if list.typing => "↓ ↑ match  enter apply  esc cancel",
                 _ if list.visual.is_some() => "↓ ↑ extend  space enter toggle  e leave out  esc cancel",
-                1 | VIA => "↓ ↑ move  / search  v range  space enter toggle  e leave out  esc close",
-                PRICE => "↓ ↑ move  / search  space enter toggle  e leave out  esc close",
-                _ => "↓ ↑ move  / search  space enter toggle  esc close",
+                1 | VIA => "/ search  v range  space enter toggle  e leave out  esc close",
+                PRICE => "/ search  space enter toggle  e leave out  esc close",
+                _ => "/ search  space enter toggle  esc close",
             };
             // Not under a range, which esc cancels first and whose keys have no search.
             if list.query.is_empty() || list.typing || list.visual.is_some() { keys.into() } else { kept_hint(keys) }
@@ -3679,19 +3684,19 @@ fn choose_keys(app: &App) -> Option<String> {
         // `T` is said once there is a task of your own. `↓ ↑`, enter and esc work too, left
         // unsaid: with them the keys are wider than 80 columns hold.
         (_, Kind::Fav) if items.iter().any(|(_, e)| matches!(e, Effect::Fav(_, t) if fit::task(t).is_none())) => {
-            "← → tier  / search  space toggle  H model's harness  T edit"
+            "/ search  space toggle  H model's harness  T edit"
         }
-        (_, Kind::Fav) => "↓ ↑ ← → move  / search  space enter toggle  H model's harness  esc f close",
-        (_, Kind::Open) => "↓ ↑ move  / search  v range  space enter opens  esc o close",
-        (_, Kind::Cols) => "↓ ↑ move  / search  space enter toggle  esc | close",
+        (_, Kind::Fav) => "/ search  space enter toggle  H model's harness  esc f close",
+        (_, Kind::Open) => "/ search  v range  space enter opens  esc o close",
+        (_, Kind::Cols) => "/ search  space enter toggle  esc | close",
         (_, Kind::Theme) => "↓ ↑ preview  / search  space enter saves  esc t close",
-        (_, Kind::Pick) => "↓ ↑ move  / search  space enter picks  esc close",
-        (_, Kind::Harness) => "↓ ↑ move  / search  space enter picks  esc P close",
-        (_, Kind::PickedVia) => "↓ ↑ move  / search  space enter picks  esc skips",
-        (_, Kind::Bench) => "↓ ↑ move  / search  space enter picks  esc B close",
-        (_, Kind::Via) => "↓ ↑ move  / search  space enter picks  esc back",
-        (_, Kind::Launch) => "↓ ↑ move  / search  space enter opens  esc x close",
-        (_, Kind::Keys) => "↓ ↑ move  / search  space enter presses  esc K close",
+        (_, Kind::Pick) => "/ search  space enter picks  esc close",
+        (_, Kind::Harness) => "/ search  space enter picks  esc P close",
+        (_, Kind::PickedVia) => "/ search  space enter picks  esc skips",
+        (_, Kind::Bench) => "/ search  space enter picks  esc B close",
+        (_, Kind::Via) => "/ search  space enter picks  esc back",
+        (_, Kind::Launch) => "/ search  space enter opens  esc x close",
+        (_, Kind::Keys) => "/ search  space enter presses  esc K close",
     };
     Some(if list.query.is_empty() { keys.into() } else { kept_hint(keys) })
 }
@@ -4170,7 +4175,7 @@ pub fn help(app: &App) -> (Vec<Line<'static>>, Vec<usize>) {
                 _ => None,
             };
             let key = if waiting.is_some() { "…".to_string() } else { shown(k) };
-            let style = if d.is_some() || k == "↺" { fg(KEY).add_modifier(BOLD) } else { fg(MUTED) };
+            let style = if d.is_some() { fg(KEY).add_modifier(BOLD) } else { fg(MUTED) };
             let mut spans = vec![Span::styled(format!("{key:<key_w$}  "), style)];
             // Between backticks the keys it names, in the keys' colour.
             for (i, part) in what.split('`').enumerate() {
@@ -4925,7 +4930,7 @@ fn compare(
         models = order.into_iter().map(|i| marked[i]).collect();
     }
     let models = models.as_slice();
-    // The sort's arrow before its label, as on the table's header.
+    // The sort's arrow after its label, as on the table's header.
     let arrow = |label: &str| match sort {
         Some((l, desc)) if l == label => {
             if desc {
@@ -4938,7 +4943,7 @@ fn compare(
     };
     let searched: Vec<String> = cols.iter().map(|c| c.label.clone()).collect();
     for c in &mut cols {
-        c.label = format!("{}{}", arrow(&c.label), c.label);
+        c.label = format!("{}{}", c.label, arrow(&c.label));
     }
     let muted: Vec<bool> = models.iter().map(|m| muted(m)).collect();
     let (n, m) = (models.len(), cols.len());
@@ -5006,8 +5011,7 @@ fn compare(
     out.extend(verdict_lines(models, store, avail));
     out.push(Line::default());
     if shown < m {
-        // The arrows keep their keys.
-        out.push(key_line(&format!("columns {}-{} of {m} · ← → move", first + 1, first + shown), &BTreeMap::new()));
+        out.push(key_line(&format!("columns {}-{} of {m}", first + 1, first + shown), &BTreeMap::new()));
     }
     // The labels, their last lines on the header's last, as the values under them: right
     // aligned, Via's left.
@@ -5265,7 +5269,7 @@ mod tests {
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         };
         assert_eq!(hit(&a, area, click(x + 13)), Some(Mouse::Harness(0, 4)), "cx is codex");
-        assert_eq!(hit(&a, area, click(x + 12)), Some(Mouse::Row(0)), "the gap before it is none");
+        assert_eq!(hit(&a, area, click(x + 12)), Some(Mouse::At(0, VIA)), "the gap before it is none");
         // A search by the harness's name underlines its short one, whole.
         a.query = "codex".into();
         let (buf, _) = render(&mut a, 215, 5);
@@ -5829,7 +5833,7 @@ mod tests {
         let mut a = app();
         let (buf, lines) = render(&mut a, 229, 6);
         let header =
-            "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ↓ECI ▾ Coding ▾ Agentic ▾ │ Tok/s │ Via ▾ Notes";
+            "# Model Dev ▾ Released │ Price ▾ $in $cache $out Ctx │ ECI↓ ▾ Coding ▾ Agentic ▾ │ Tok/s │ Via ▾ Notes";
         assert_eq!(words(&lines[0]), words(header));
         // A rule under the header, crossing the lines between the groups of columns.
         assert!(lines[1].starts_with('─') && lines[1].matches('┼').count() == 4, "{}", lines[1]);
@@ -5847,7 +5851,7 @@ mod tests {
         assert!(!lines[5].contains("available"), "no count of the models: {}", lines[5]);
         assert!(
             lines[5].ends_with(
-                "← → column  │  | columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  ? help  q quit  K all keys"
+                "| columns  / filter  s sort  d dropdown  │  enter details  x launch  H model's harness  space select  f fav  e exclude  i note  │  ? help  q quit  K all keys"
             ),
             "{}",
             lines[5]
@@ -6176,7 +6180,11 @@ mod tests {
         let Input::Choose { items, .. } = &a.input else { panic!() };
         let last = items.last().unwrap().0.clone();
         assert!(screen(&mut a).iter().any(|l| l.contains(&last)), "the last key scrolled into view");
-        // A hint of several keys says so, as a click on it in the bar presses none.
+        // A hint of several keys says so, as a click on it in the bar presses none: a range's
+        // `↓ ↑ G extend`, the first of its bar.
+        a.key(KeyCode::Esc.into());
+        a.key(KeyCode::Char('v').into());
+        open_keys(&mut a, w);
         a.key(KeyCode::Char('g').into());
         a.key(KeyCode::Char('g').into());
         a.key(KeyCode::Enter.into());
@@ -6268,18 +6276,26 @@ mod tests {
     #[test]
     fn a_cell_takes_a_double_click() {
         let (t, ms) = (Instant::now(), Duration::from_millis);
-        let (cell, row) = (Mouse::Cell(3, PRICE), Mouse::Row(3));
+        let (cell, row) = (Mouse::Cell(3, PRICE), Mouse::At(3, PRICE));
         let mut last = None;
-        assert_eq!(double(&mut last, cell, t), Some(row), "one press highlights the row");
+        assert_eq!(double(&mut last, cell, t), Some(row), "one press takes the cursor to its row and column");
         assert_eq!(double(&mut last, cell, t + ms(200)), Some(cell), "a second on the cell opens it");
         assert_eq!(double(&mut last, cell, t + ms(300)), Some(row), "a third starts over");
         assert_eq!(double(&mut last, cell, t + ms(800)), Some(row), "too slow: two clicks");
-        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(900)), Some(row), "another cell: a click");
+        assert_eq!(
+            double(&mut last, Mouse::Harness(3, 0), t + ms(900)),
+            Some(Mouse::At(3, VIA)),
+            "another cell: a click"
+        );
         assert_eq!(double(&mut last, Mouse::Extend(4), t + ms(950)), Some(Mouse::Extend(4)), "a drag is itself");
         let (open, model) = (Mouse::Open(Stop::Compare(1)), Mouse::Model(Stop::Compare(1)));
         assert_eq!(double(&mut last, open, t + ms(1000)), Some(model), "a model: a click moves");
         assert_eq!(double(&mut last, open, t + ms(1100)), Some(open), "and a double click opens");
-        assert_eq!(double(&mut last, Mouse::Harness(3, 0), t + ms(999)), Some(row), "and breaks the pair");
+        assert_eq!(
+            double(&mut last, Mouse::Harness(3, 0), t + ms(999)),
+            Some(Mouse::At(3, VIA)),
+            "and breaks the pair"
+        );
         // A hint presses once on a double click, as the second would land on what the first opened.
         let (d, k, esc) = (Mouse::Key(KeyCode::Char('D')), Mouse::Key(KeyCode::Char('K')), Mouse::Key(KeyCode::Esc));
         assert_eq!(double(&mut last, d, t + ms(2000)), Some(d), "a hint presses its key");
@@ -6398,7 +6414,7 @@ mod tests {
         let (k, via) = lines.iter().enumerate().find_map(|(k, l)| Some((k, l.rfind("│ oc")? + "│ ".len()))).unwrap();
         let (x, y) = (lines[k][..via].chars().count() as u16 + 1, k as u16 + 1);
         assert_eq!(hit(&a, area, click(x + 1, y)), Some(Mouse::Harness(k - 2, 0)), "a harness in Via");
-        assert_eq!(hit(&a, area, click(x + 2, y)), Some(Mouse::Row(k - 2)), "past its name: the row");
+        assert_eq!(hit(&a, area, click(x + 2, y)), Some(Mouse::At(k - 2, VIA)), "past its name: the row and Via");
         assert_eq!(hit(&a, area, ctrl(x, y)), Some(Mouse::Pick(k - 2)), "ctrl click still picks");
         assert_eq!(hit(&a, area, click(col("Coding"), 4)), Some(Mouse::Cell(1, 9)), "a benchmark score");
         assert_eq!(hit(&a, area, click(col("Price"), 4)), Some(Mouse::Cell(1, PRICE)), "a price");
@@ -6623,6 +6639,10 @@ mod tests {
         data.models.push(model(&"n".repeat(47), "openai", Some(100.0), 0.5));
         a.set_data(data);
         assert_eq!(layout(200, &a).name_w, 47, "whole where there is room");
+        let mut data = std::mem::take(&mut a.data);
+        data.models.push(model(&"n".repeat(65), "openai", Some(100.0), 0.5));
+        a.set_data(data);
+        assert_eq!(layout(200, &a).name_w, NAME_MAX, "one longer still is cut, not the column widened");
         for col in 2..NCOLS {
             a.col = col;
             for w in 60..200 {
@@ -6638,7 +6658,7 @@ mod tests {
         let (_, lines) = render(&mut a, 46, 4);
         assert_eq!(
             words(&lines[0]),
-            ["#", "Model", "│", "Ctx", "│", "↓ECI", "▾"],
+            ["#", "Model", "│", "Ctx", "│", "ECI↓", "▾"],
             "the cursor starts on the index, and Dev scrolls off"
         );
         assert!(layout(46, &a).more, "columns cut off on the right");
@@ -6905,7 +6925,7 @@ mod tests {
         term.draw(|f| draw(&mut a, f)).unwrap();
         let lines = text(term.backend().buffer());
         let screen = lines.join("\n");
-        assert!(screen.contains("↑Price"), "{screen}");
+        assert!(screen.contains("Price↑"), "{screen}");
         // Drawn in that order, as clicks find them.
         let row = |i| a.spots.iter().find(|s| s.1 == Stop::Compare(i)).map(|s| &lines[usize::from(s.0.y)]);
         assert!(row(0).is_some_and(|l| l.contains("flash")) && row(1).is_some_and(|l| l.contains("opus")), "{screen}");
@@ -7361,9 +7381,9 @@ mod tests {
         a.data.models[m].openrouter = Some("x/y".into());
         a.key(KeyCode::Char('o').into());
         // Too narrow for them all, the first drop, esc the last to go.
-        let (_, lines) = render(&mut a, 60, 10);
+        let (_, lines) = render(&mut a, 50, 10);
         assert!(
-            lines[9].trim_end().ends_with("esc o close  K all keys") && !lines[9].contains("↓ ↑ move"),
+            lines[9].trim_end().ends_with("esc o close  K all keys") && !lines[9].contains("/ search"),
             "{}",
             lines[9]
         );
@@ -8373,7 +8393,7 @@ mod tests {
     fn a_kept_search_keeps_the_list_keys() {
         let theme = "↓ ↑ preview  / search  space enter saves  esc t close";
         assert_eq!(kept_hint(theme), "↓ ↑ preview  n N match  space enter saves  esc clear");
-        let dev = "↓ ↑ move  / search  v range  space enter toggle  e leave out  esc close";
-        assert_eq!(kept_hint(dev), "↓ ↑ move  n N match  v range  space enter toggle  e leave out  esc clear");
+        let dev = "/ search  v range  space enter toggle  e leave out  esc close";
+        assert_eq!(kept_hint(dev), "n N match  v range  space enter toggle  e leave out  esc clear");
     }
 }

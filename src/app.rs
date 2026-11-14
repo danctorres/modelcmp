@@ -413,7 +413,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "General",
         &[
             ("?", "this list of keys, `enter` on one sets a new key for it, `/` finds one"),
-            ("↺", "`enter` here puts every key back to its default"),
+            ("Z", "in `?`, put every key back to its default, asks first"),
             ("esc", "back: close the panel, then drop the highlight, filter, `S` `F` `E`, task"),
             ("q", "quit, asks first"),
             ("K", "all keys of the status bar in a list, `enter` presses one"),
@@ -679,7 +679,7 @@ pub enum Input {
     Unexclude,
     /// `D` on a task of your own in recommend asks before deleting it.
     DeleteTask(String),
-    /// `enter` on `↺` in `?` asks before putting every key back.
+    /// `Z` in `?` asks before putting every key back.
     Reset,
     /// Enter on a key in `?` waits for its new key, pressed on its row; `wrong` once one that
     /// cannot be was.
@@ -1155,9 +1155,12 @@ pub enum Effect {
 pub enum Mouse {
     /// Wheel: rows to move, negative is up.
     Scroll(isize),
-    /// Click on row `n` of the table (an index into `rows`): highlight it. On a task's name in
+    /// Click on row `n` of the table (an index into `rows`), on its number: highlight it. On a task's name in
     /// `f`'s grid: the cursor to its row, ticking nothing.
     Row(usize),
+    /// A press on a cell of row `.0`: the cursor goes to the row and to column `.1`, as a press
+    /// on a header takes it to the column.
+    At(usize, usize),
     /// Click on box `col` of row `n` of `f`'s grid: tick it, as space there does.
     Tick(usize, usize),
     /// Double click on the cell of row `n` in the column at cursor index `col`: the name or the
@@ -3765,14 +3768,12 @@ impl App {
         (self.hit.1, *self.back()) = (jump, Some(back));
     }
 
-    /// Enter on the row of `?` under the cursor: a key waits for its new one, `↺` puts every key
-    /// back, and one that keeps its key says so.
+    /// Enter on the row of `?` under the cursor: a key waits for its new one, and one that keeps
+    /// its key says so.
     fn help_enter(&mut self) -> Option<Effect> {
         let &(keys, _) = help_rows().nth(self.help_sel)?;
         if let Some(d) = bindable(keys) {
             self.input = Input::Bind { key: d, wrong: false };
-        } else if keys == "↺" {
-            self.input = Input::Reset;
         } else if keys.chars().count() == 1 {
             self.refuse(format!("{keys} is a symbol the table shows, not a key"));
         } else if keys.split(' ').any(|w| bindable(w.trim_end_matches(':')).is_some()) {
@@ -4169,6 +4170,11 @@ impl App {
             Mouse::Row(n) if n < self.rows.len() => {
                 self.deselect();
                 self.select(n);
+            }
+            Mouse::At(n, col) if n < self.rows.len() => {
+                self.deselect();
+                self.select(n);
+                self.col = col;
             }
             Mouse::Mark(n) if n < self.rows.len() => {
                 let inside = self.is_selected(n);
@@ -4702,6 +4708,10 @@ impl App {
             }
             KeyCode::Char('X') if table => self.input = Input::Unexclude,
             KeyCode::Char('c') if table => return self.clear_filters(),
+            KeyCode::Char('Z') if self.view == View::Help && self.store.keys.is_empty() => {
+                self.refuse("every key is its default: enter on one sets a new key for it");
+            }
+            KeyCode::Char('Z') if self.view == View::Help => self.input = Input::Reset,
             KeyCode::Char('q') => self.ask_quit(),
             KeyCode::Char('U') if self.data.update().is_some() => self.input = Input::Upgrade,
             KeyCode::Char('U') if self.data.latest.is_empty() => {
@@ -5602,7 +5612,7 @@ impl App {
             }
             Input::Reset => {
                 self.input = Input::None;
-                if code == KeyCode::Enter {
+                if code == KeyCode::Char('Z') {
                     self.store.keys.clear();
                     self.status = "every key is back to its default".into();
                     return Some(Effect::Save);
@@ -6278,13 +6288,15 @@ mod tests {
         code(&mut a, KeyCode::Enter);
         assert_eq!(a.status, "to change R: D, change each key on its own row");
         code(&mut a, KeyCode::Esc);
-        press(&mut a, "ggj");
-        assert_eq!((code(&mut a, KeyCode::Enter), &a.input), (None, &Input::Reset), "↺ asks first");
+        // Z puts every key back from any row of the list, once a second Z confirms it.
+        assert_eq!((code(&mut a, KeyCode::Char('Z')), &a.input), (None, &Input::Reset), "Z asks first");
         code(&mut a, KeyCode::Esc);
         assert!(!a.store.keys.is_empty(), "and esc keeps them");
-        code(&mut a, KeyCode::Enter);
-        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::Save));
-        assert!(a.store.keys.is_empty(), "↺ puts every key back");
+        code(&mut a, KeyCode::Char('Z'));
+        assert_eq!(code(&mut a, KeyCode::Char('Z')), Some(Effect::Save));
+        assert!(a.store.keys.is_empty(), "Z puts every key back");
+        code(&mut a, KeyCode::Char('Z'));
+        assert_eq!((&a.input, a.failed), (&Input::None, true), "with none changed it says so and asks nothing");
         // A key that is no action's frees the action's own.
         press(&mut a, "/sort by");
         code(&mut a, KeyCode::Enter);
@@ -9362,6 +9374,10 @@ mod tests {
         assert_eq!(a.selected(), 2);
         assert_eq!(a.mouse(Mouse::Row(2)), None);
         assert_eq!(a.view, View::Table, "a click only highlights, however often");
+        // A click on a cell takes the column's cursor too, as one on its header does.
+        assert_eq!((a.mouse(Mouse::At(0, PRICE)), a.selected(), a.col), (None, 0, PRICE));
+        a.mouse(Mouse::Row(2));
+        assert_eq!((a.selected(), a.col), (2, PRICE), "one on the row's number keeps the column");
         a.mouse(Mouse::Row(1));
         assert_eq!(a.mouse(Mouse::Cell(2, 0)), None);
         assert_eq!(
