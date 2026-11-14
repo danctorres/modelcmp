@@ -1531,7 +1531,7 @@ pub struct App {
     pub asked_at: Option<u16>,
     /// The box of the open panel as last drawn, for a click outside it to close it.
     pub panel: Option<ratatui::layout::Rect>,
-    /// The columns of the frame's `⚠ refresh had issues` as last drawn, which a click opens.
+    /// The columns of the frame's `⚠ issues` as last drawn, which a click opens.
     pub issues_at: Option<std::ops::Range<u16>>,
     /// Where the last frame drew the note being written in its place, its cell or its line, so
     /// the status bar does not and a click there leaves it be.

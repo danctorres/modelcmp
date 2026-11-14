@@ -765,16 +765,17 @@ fn version(app: &App) -> String {
 const LINK: &str = "↗ ";
 
 /// Where the version is, its line and its cells: at the right end of the tabs' line where the
-/// tabs leave it room, else first on the frame's bottom border.
-fn version_at(app: &App, area: Rect) -> (u16, Range<u16>) {
+/// tabs leave it room. Where they do not, the bottom border is the columns' bar's, and only a
+/// newer version that is out is said there, first on it.
+fn version_at(app: &App, area: Rect) -> Option<(u16, Range<u16>)> {
     let w = version(app).chars().count() as u16;
     let tabs = tab_ends(app).last().unwrap_or(0) as u16;
     if tabs + 2 + w <= area.width {
-        (area.y + 1, area.right() - w..area.right())
-    } else {
-        // Cut at the frame's corner, as it is drawn.
-        (area.bottom() - 2, area.x + 1..(area.x + 1 + w).min(area.right().saturating_sub(1)))
+        return Some((area.y + 1, area.right() - w..area.right()));
     }
+    // Cut at the frame's corner, as it is drawn.
+    let cells = area.x + 1..(area.x + 1 + w).min(area.right().saturating_sub(1));
+    app.data.update().is_some().then_some((area.bottom() - 2, cells))
 }
 
 /// Opens each page in the browser, one at a time so the tabs open in the list's order. A
@@ -968,9 +969,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     // The version opens modelcmp's GitHub page, as `O` does, or upgrades to the newer one
     // it names, as `U` does. Not under a panel drawn over it.
-    let (row, cells) = version_at(app, area);
     let covered = app.panel.is_some_and(|r| r.contains(pos));
-    if idle && !covered && more.is_none() && m.row == row && cells.contains(&m.column) {
+    let on_version = version_at(app, area).is_some_and(|(row, cells)| m.row == row && cells.contains(&m.column));
+    if idle && !covered && more.is_none() && on_version {
         let key = if app.data.update().is_some() { 'U' } else { 'O' };
         return Some(Mouse::Key(KeyCode::Char(key)));
     }
@@ -1312,6 +1313,10 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
             if stale(app) {
                 view.push("r refresh");
             }
+            // The version a click opens the GitHub page from is not shown: `K` has its key.
+            if version_at(app, Rect::new(0, 0, width, 4)).is_none() {
+                view.push(GITHUB);
+            }
             let mut back = vec![];
             // Where esc goes back from, as in the overlays.
             if !app.query.is_empty() || app.only.is_some() || app.task.is_some() {
@@ -1460,7 +1465,9 @@ const ALL_KEYS: &str = "K all keys";
 const CUT_FIRST: [&str; 1] = ["q quit"];
 
 /// The hints of what is seldom done, which no bar shows where `K` lists them.
-const K_ONLY: [&str; 2] = ["o open", "y copy name"];
+const K_ONLY: [&str; 3] = ["o open", "y copy name", GITHUB];
+/// The hint of `O`, where the version a click opens the page from has no room to show.
+const GITHUB: &str = "O github";
 
 /// What of `keys` fits `room` cells: whole keys dropped from the front, the way back the last to
 /// go. With `all`, where `K` lists them (`App::lists_keys`), `CUT_FIRST` go first and any cut off
@@ -1585,7 +1592,8 @@ fn tab_plus(app: &App, i: usize) -> String {
     if i == MINE && app.marked_out > 0 { format!(" +{}", app.marked_out) } else { String::new() }
 }
 
-/// The cells tab `i` takes: its left edge, then its name and its key with a space around each.
+/// The cells tab `i` takes: its left edge, then its key and its name with a space around each,
+/// the key first, as in the status bar's hints.
 fn tab_width(app: &App, i: usize) -> usize {
     TABS[i].0.chars().count() + tab_plus(app, i).len() + 5
 }
@@ -1637,9 +1645,11 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
         };
         // The `+N` in the colour of the ✓ its models have.
         let (plus, len) = (tab_plus(app, i), name.chars().count() as u16);
-        put(buf, x + 1, y, &format!(" {name} "), style);
-        put(buf, x + 2 + len, y, &format!("{plus} "), fg(MARK).add_modifier(BOLD));
-        put(buf, x + 3 + len + plus.len() as u16, y, &format!("{} ", app.key_of(key)), key_style);
+        let k = app.key_of(key).to_string();
+        let at = x + 3 + k.chars().count() as u16;
+        put(buf, x + 1, y, &format!(" {k} "), key_style);
+        put(buf, at, y, name, style);
+        put(buf, at + len, y, &format!("{plus} "), fg(MARK).add_modifier(BOLD));
         let w = tab_width(app, i) as u16;
         if on {
             put(buf, x + 1, y - 1, &"─".repeat(usize::from(w - 1)), fg(MUTED));
@@ -1991,8 +2001,8 @@ fn draw(app: &mut App, f: &mut Frame) {
             None => Line::from(version(app)).style(fg(Color::Yellow)),
         };
         // On the tabs' line where they leave it room, else on the bottom border.
-        let (version_y, version_x) = version_at(app, area);
-        let below = version_y != area.y + 1;
+        let at = version_at(app, area);
+        let below = at.as_ref().is_some_and(|(y, _)| *y != area.y + 1);
         // Where the count and what it waits for would run over the version, the count goes alone.
         let room = usize::from(body.width).saturating_sub(3 + if below { version.width() } else { 0 });
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
@@ -2002,15 +2012,12 @@ fn draw(app: &mut App, f: &mut Frame) {
             }
             (true, ..) => (refreshing(&app.progress), Color::Yellow),
             (_, true, _) => (format!("refresh failed · {age}"), BAD),
-            // Until a refresh without any: `!` lists them.
+            // Until a refresh without any: `!` lists them. Short, as the columns' bar has the rest.
             (_, _, old) if app.data.warning.is_some() => {
                 // Without the key where naming it would run over the version.
-                let named = format!("⚠ refresh had issues: {} lists them · {age}", app.key_of('!'));
+                let named = format!("⚠ {} issues · {age}", app.key_of('!'));
                 let fits = named.chars().count() <= room;
-                (
-                    if fits { named } else { format!("⚠ refresh had issues · {age}") },
-                    if old { BAD } else { Color::Yellow },
-                )
+                (if fits { named } else { format!("⚠ issues · {age}") }, if old { BAD } else { Color::Yellow })
             }
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
@@ -2030,11 +2037,21 @@ fn draw(app: &mut App, f: &mut Frame) {
             _ => String::new(),
         };
         let sort_w = sort.chars().count();
+        // The key that lists the issues is in the keys' colour, before its word, as a hint's.
+        let lead = format!("⚠ {} ", app.key_of('!'));
+        let notice = match state.strip_prefix(&lead) {
+            Some(rest) => Line::from(vec![
+                Span::styled(" ⚠ ", fg(color)),
+                Span::styled(app.key_of('!').to_string(), fg(KEY).add_modifier(BOLD)),
+                Span::styled(format!(" {rest}"), fg(color)),
+            ]),
+            None => Line::from(format!(" {state}")).style(fg(color)),
+        };
         let mut frame = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(fg(MUTED))
             .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
-            .title_bottom(Line::from(format!(" {state}")).style(fg(color)).right_aligned());
+            .title_bottom(notice.right_aligned());
         if below {
             frame = frame.title_bottom(version.clone());
         }
@@ -2043,8 +2060,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         app.page = inner.height.saturating_sub(head);
         let buf = f.buffer_mut();
         frame.render(body, buf);
-        if !below {
-            buf.set_line(version_x.start, version_y, &version, version_x.len() as u16);
+        if let Some((y, x)) = at.filter(|_| !below) {
+            buf.set_line(x.start, y, &version, x.len() as u16);
         }
         // What the column under the cursor means, centred and cut to clear the sort on either
         // side; where that would run under the tabs that are on, centred on the wider side of them.
@@ -5573,7 +5590,7 @@ mod tests {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(181, 20)).unwrap();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let tabs = &text(term.backend().buffer())[1];
-        assert!(tabs.contains(" mine +1 m "), "{tabs}");
+        assert!(tabs.contains(" m mine +1 "), "{tabs}");
         assert_eq!(tab_ends(&a).next(), Some(13));
     }
 
@@ -6279,7 +6296,7 @@ mod tests {
             row: y + 2,
             modifiers: KeyModifiers::NONE,
         };
-        // " │ mine m │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t  ": a tab, the edge left
+        // " │ m mine │ a all │ S ✓ selected │ F ★ favorites │ E ✗ excluded │ R recommend │ C compare │ t theme  ": a tab, the edge left
         // of it too, and nothing right of the last one.
         assert_eq!(
             [9, 10, 18, 64, 78, 90, 100].map(|x| hit(&a, area, MouseEvent { row: x % 2, ..click(x, 0) })),
@@ -6953,22 +6970,22 @@ mod tests {
         assert!(border(&mut a).contains("─ ⟳ refreshing ╯"), "before the first count");
         a.progress = "7/9, waiting for opencode".into();
         assert!(border(&mut a).contains("─ ⟳ refreshing 7/9, waiting for opencode ╯"));
-        // Too long for the border with the version in it, the count goes alone.
+        // Too long for the border, the count goes alone. The version is not on it.
         a.progress = format!(
             "7/9, waiting for {}",
             "artificialanalysis.ai, epoch.ai, and a very long name of a site that no border has room for"
         );
         let line = border(&mut a);
-        assert!(line.contains(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ↗ ─")), "{line}");
+        assert!(line.starts_with("╰─") && !line.contains("modelcmp"), "{line}");
         assert!(line.contains("─ ⟳ refreshing 7/9 ╯"), "{line}");
         // Done with a warning, the frame keeps saying so, as the next start does from the cache.
         a.refreshed(
             Ok(Data { warning: Some("copilot did not list its models".into()), ..Data::default() }),
             (vec![], vec![]),
         );
-        assert!(border(&mut a).contains("⚠ refresh had issues: ! lists them ·"), "after the status is cleared too");
+        assert!(border(&mut a).contains("─ ⚠ ! issues ·"), "after the status is cleared too");
         a.refreshed(Ok(Data::default()), (vec![], vec![]));
-        assert!(!border(&mut a).contains("⚠ refresh"), "until a refresh without any");
+        assert!(!border(&mut a).contains("⚠ issues"), "until a refresh without any");
     }
 
     #[test]
@@ -6995,13 +7012,19 @@ mod tests {
         };
         let got = hit(&a, Rect::new(0, 0, w, h), click);
         assert_eq!(got, Some(Mouse::Key(KeyCode::Char('!'))));
-        // The version, right of the tabs on a screen wide enough and else on the bottom border.
-        for w in [w, 200] {
+        // The version, right of the tabs on a screen wide enough. On one that is not, the bottom
+        // border says only a newer one that is out, which a click upgrades to.
+        assert_eq!(version_at(&a, Rect::new(0, 0, w, h)), None, "the bottom border is the bar's");
+        // `K`'s list then has the key that opens the page, for a mouse alone.
+        assert!(hints(&a, w).contains(&GITHUB) && !hints(&a, 200).contains(&GITHUB));
+        for (w, new) in [(w, true), (200, false)] {
             let area = Rect::new(0, 0, w, h);
-            let (row, cells) = version_at(&a, area);
+            a.data.latest = if new { "999.0.0".into() } else { String::new() };
+            let (row, cells) = version_at(&a, area).unwrap();
             assert_eq!(row, if w == 200 { 1 } else { h - 2 }, "{w} wide");
             let on_version = hit(&a, area, MouseEvent { column: cells.start + 2, row, ..click });
-            assert_eq!(on_version, Some(Mouse::Key(KeyCode::Char('O'))), "the version opens the GitHub page");
+            let key = if new { 'U' } else { 'O' };
+            assert_eq!(on_version, Some(Mouse::Key(KeyCode::Char(key))), "upgrades, or opens the GitHub page");
             // A search being typed takes no `O` from a click on it, nor a `!` from one on the ⚠.
             a.key(KeyCode::Char('/').into());
             for at in [MouseEvent { column: cells.start + 2, row, ..click }, click] {
@@ -7504,7 +7527,7 @@ mod tests {
         let tabs = row(&term, 1);
         assert!(
             tabs.starts_with(
-                " │ mine m │ all a │ ✓ selected S │ ★ favorites F │ ✗ excluded E │ recommend R │ compare C │ theme t"
+                " │ m mine │ a all │ S ✓ selected │ F ★ favorites │ E ✗ excluded │ R recommend │ C compare │ t theme"
             ),
             "{tabs}"
         );
@@ -7525,14 +7548,20 @@ mod tests {
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
         assert!(bottom.contains("─ data ") && !bottom.contains("models.dev"), "{bottom}");
-        // The tabs leave the version no room on their line: it is on the bottom border.
-        assert!(bottom.starts_with(concat!("╰ modelcmp v", env!("CARGO_PKG_VERSION"), " ↗ ─")), "{bottom}");
+        // The tabs leave the version no room on their line: it is not shown, the bottom border
+        // being the columns' bar's, unless a newer one is out.
+        assert!(bottom.starts_with("╰─") && !bottom.contains("modelcmp"), "{bottom}");
+        a.data.latest = "999.0.0".into();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let newer: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
+        assert!(newer.starts_with("╰ modelcmp v999.0.0 available: U upgrades ─"), "{newer}");
+        a.data.latest.clear();
         let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 10)).unwrap();
         wide.draw(|f| draw(&mut a, f)).unwrap();
         let lines = text(wide.backend().buffer());
         let (tabs, bottom) = (&lines[1], &lines[8]);
         let version = concat!("    modelcmp v", env!("CARGO_PKG_VERSION"), " ↗");
-        assert!(tabs.trim_end().ends_with(version) && tabs.contains("│ theme t"), "right of the tabs: {tabs}");
+        assert!(tabs.trim_end().ends_with(version) && tabs.contains("│ t theme"), "right of the tabs: {tabs}");
         assert!(bottom.starts_with("╰──") && !bottom.contains("modelcmp"), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
         // The bottom border's bar says columns are off to the right, the right one's rows below,

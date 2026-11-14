@@ -476,7 +476,7 @@ The TUI's bottom border always shows the refresh state, one of these:
 - `⟳ refreshing 7/9, waiting for opencode`: how many downloads and harnesses have answered, and
   the last one or two still awaited.
 - `refresh failed` in red, with the age of the data still shown.
-- `⚠ refresh had issues: ! lists them` in yellow, until a refresh has none.
+- `⚠ ! issues` in yellow, its key in the keys' colour, until a refresh has none: the last refresh had issues, and `!` lists them.
 - The data age alone, red once it is past 24h. The status bar then says it too, as `data 25h old`
   in red, with the hint `r refresh`.
 
