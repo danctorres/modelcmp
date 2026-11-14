@@ -2179,12 +2179,20 @@ impl App {
             self.view = view;
             return effect;
         }
+        // Only a real move between mine and all can show that the other has the same models.
+        let moved = i < MARKED && self.only.is_none() && self.all != (i == ALL);
+        let was = moved.then(|| self.rows.clone());
         // With access to none `a` stays off, as its key leaves it: all is every model already.
         if i < MARKED {
             self.all = i == ALL && !self.no_access();
         }
         self.only = (i >= MARKED).then_some(i);
         self.rebuild();
+        // A harness picked in Via keeps its models alone, all of them yours: say why nothing moved.
+        if was.is_some_and(|w| w == self.rows) && !self.store.via_pick.is_empty() {
+            let picked = self.store.via_pick.join(", ");
+            self.status = format!("mine and all show the same models while Via picks {picked}, c clears it");
+        }
         None
     }
 
@@ -6783,6 +6791,12 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.store.via_pick.as_slice(), keys(&a)), (&["claude".to_string()][..], vec!["opus5"]));
+        press(&mut a, "a");
+        assert!(a.status.contains("same models while Via picks claude"), "all says why it shows no more: {}", a.status);
+        a.status.clear();
+        press(&mut a, "a");
+        assert!(a.status.is_empty(), "a on all moved nowhere, so it says nothing: {}", a.status);
+        press(&mut a, "m");
         press(&mut a, "c");
         assert_eq!((a.store.via_pick.len(), keys(&a).len()), (0, 3));
         // `e` leaves a harness out: only the models no other harness has go.
