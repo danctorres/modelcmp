@@ -6,7 +6,7 @@ the basics, [KEYS.md](KEYS.md) every TUI key, and `modelcmp --help` (or `modelcm
 
 ## Columns
 
-One row per model. In the TUI, move the column cursor and the top border says what the column
+One row per model. In the TUI, move the column cursor and the line over the header says what the column
 means. Green and red mark the best and worst value in a column, here and in compare.
 
 | Column | What it is |
@@ -471,7 +471,7 @@ resets your selected models, favorites, exclusions, notes and settings.
 
 ## Data age
 
-The TUI's bottom border always shows the refresh state, one of these:
+The row under the table always shows the refresh state, one of these:
 
 - `⟳ refreshing 7/9, waiting for opencode`: how many downloads and harnesses have answered, and
   the last one or two still awaited.

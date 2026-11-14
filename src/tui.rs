@@ -1631,9 +1631,9 @@ fn tab_ends(app: &App) -> impl Iterator<Item = usize> {
 }
 
 /// The tabs on the two lines above `frame`, as a browser's: one that is on is inside a frame of
-/// its own, whose sides run down into `frame`, its top border open under it; a thin line parts
+/// its own, whose sides run down into `frame`'s top line, open under it; a thin line parts
 /// two that are off. A panel's, the panel a box of
-/// its own over `frame`, stands on the border, closed. One with nothing to show is muted. The
+/// its own over `frame`, stands on the line, closed. One with nothing to show is muted. The
 /// sort, `sort_w` cells at the border's right end, stays. Returns the cells of the frame's top
 /// border under the tab that is on, cut to the frame.
 fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
@@ -2058,8 +2058,9 @@ fn draw(app: &mut App, f: &mut Frame) {
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
         };
-        // Last on the bottom border, before its corner.
-        let end = body.right().saturating_sub(1);
+        // Last on the bottom row, against the screen's edge: no corner follows it, nor a space.
+        let state = state.trim_end().to_string();
+        let end = body.right();
         app.issues_at =
             state.starts_with('⚠').then(|| end.saturating_sub(Line::from(state.as_str()).width() as u16)..end);
         // The sort is on its column's header. The border says it only where the header cannot: a
@@ -2083,11 +2084,25 @@ fn draw(app: &mut App, f: &mut Frame) {
             ]),
             None => Line::from(format!(" {state}")).style(fg(color)),
         };
+        // The table's header is in a box, closed at its ends: the line along its top, which parts
+        // it from the tabs, and the rule under it. The rows have no sides, and under them a line
+        // for what is written there, or with columns out of view their bar alone, which is one.
+        let under = if cols.bar.0.1 < cols.bar.0.2 { " " } else { "─" };
+        // On a screen with no line for the header the box has no corners to turn down into it.
+        let (left, right) = if body.height > 2 { ("╭", "╮") } else { ("─", "─") };
+        let top = ratatui::symbols::border::Set {
+            top_left: left,
+            top_right: right,
+            horizontal_top: "─",
+            bottom_left: under,
+            bottom_right: under,
+            horizontal_bottom: under,
+            ..ratatui::symbols::border::EMPTY
+        };
         let mut frame = Block::bordered()
-            .border_type(BorderType::Rounded)
+            .border_set(top)
             .border_style(fg(MUTED))
-            .title_top(Line::from(sort).style(fg(MUTED)).right_aligned())
-            .title_bottom(notice.right_aligned());
+            .title_top(Line::from(sort).style(fg(MUTED)).right_aligned());
         if below {
             frame = frame.title_bottom(version.clone());
         }
@@ -2096,6 +2111,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         app.page = inner.height.saturating_sub(head);
         let buf = f.buffer_mut();
         frame.render(body, buf);
+        let w = (notice.width() as u16).min(body.width);
+        buf.set_line(body.right() - w, body.bottom() - 1, &notice, w);
         if let Some((y, x)) = at.filter(|_| !below) {
             buf.set_line(x.start, y, &version, x.len() as u16);
         }
@@ -2121,10 +2138,14 @@ fn draw(app: &mut App, f: &mut Frame) {
         note_at = typing;
         // Where the note being written is drawn, which the details' panel draws next.
         app.note_shown = typing.map(|n| n.0);
-        if inner.height > 1 {
-            // The rule under the header runs into the frame.
-            put(buf, body.x, inner.y + 1, "├", 1, fg(MUTED));
-            put(buf, body.right() - 1, inner.y + 1, "┤", 1, fg(MUTED));
+        // The header's box closes at its two ends, and the rule under it is its foot: each
+        // where the screen has a line for it.
+        for (x, foot) in [(body.x, "╰"), (body.right() - 1, "╯")] {
+            for (y, glyph) in [(inner.y, "│"), (inner.y + 1, foot)] {
+                if y < inner.bottom() {
+                    put(buf, x, y, glyph, 1, fg(MUTED));
+                }
+            }
         }
         // The frame has the bars: the rows' on its right border, and on its bottom one that of
         // the columns right of Model, between the version and the refresh state. Where those
@@ -2133,7 +2154,7 @@ fn draw(app: &mut App, f: &mut Frame) {
         let at = (app.table.offset(), rows, app.rows.len());
         vbar(buf, body.right() - 1, inner.y + head, at, app.table.selected());
         let lo = body.x + 2 + if below { version.width() as u16 } else { 0 };
-        let end = body.right().saturating_sub(1);
+        let end = body.right();
         let hi = end.saturating_sub(Line::from(state.as_str()).width() as u16 + 2).max(body.x + 5).min(end);
         hbar(buf, body.bottom() - 1, lo.min(hi.saturating_sub(4)).max(body.x + 1)..hi, across.0, across.1);
     }
@@ -6167,7 +6188,9 @@ mod tests {
             text(term.backend().buffer())
         };
         let lines = screen(&mut a);
-        assert!(lines.iter().any(|l| l.starts_with("▼") || l.contains("│▼") || l.contains("▼ ")), "{lines:#?}");
+        // On the list's own right border, under its corner: the table's bar has a `▼` too.
+        let corner = lines.iter().find(|l| l.contains("all keys")).and_then(|l| l.chars().position(|c| c == '╮'));
+        assert!(corner.is_some_and(|x| lines.iter().any(|l| l.chars().nth(x) == Some('▼'))), "{lines:#?}");
         let border = lines.iter().rposition(|l| l.contains('╰')).unwrap() as u16;
         let e = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -7040,23 +7063,24 @@ mod tests {
             let buf = term.backend().buffer();
             (0..100).map(|x| buf[(x, 6)].symbol()).collect::<String>()
         };
-        assert!(border(&mut a).contains("─ ⟳ refreshing ╯"), "before the first count");
+        assert!(border(&mut a).ends_with(" ⟳ refreshing"), "before the first count, against the edge");
         a.progress = "7/9, waiting for opencode".into();
-        assert!(border(&mut a).contains("─ ⟳ refreshing 7/9, waiting for opencode ╯"));
+        assert!(border(&mut a).ends_with(" ⟳ refreshing 7/9, waiting for opencode"));
         // Too long for the border, the count goes alone. The version is not on it.
         a.progress = format!(
             "7/9, waiting for {}",
             "artificialanalysis.ai, epoch.ai, and a very long name of a site that no border has room for"
         );
         let line = border(&mut a);
-        assert!(line.starts_with("╰─") && !line.contains("modelcmp"), "{line}");
-        assert!(line.contains("─ ⟳ refreshing 7/9 ╯"), "{line}");
+        // Columns are out of view, so their bar is the line there.
+        assert!(!line.contains('─') && !line.contains("modelcmp"), "{line}");
+        assert!(line.ends_with(" ⟳ refreshing 7/9"), "{line}");
         // Done with a warning, the frame keeps saying so, as the next start does from the cache.
         a.refreshed(
             Ok(Data { warning: Some("copilot did not list its models".into()), ..Data::default() }),
             (vec![], vec![]),
         );
-        assert!(border(&mut a).contains("─ ⚠ ! issues ·"), "after the status is cleared too");
+        assert!(border(&mut a).contains("  ⚠ ! issues ·"), "after the status is cleared too");
         a.refreshed(Ok(Data::default()), (vec![], vec![]));
         assert!(!border(&mut a).contains("⚠ issues"), "until a refresh without any");
     }
@@ -7141,8 +7165,8 @@ mod tests {
             let buf = term.backend().buffer();
             (0..20).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
         };
-        // ✗'s tab, on, opens the border up to its corner at 60 columns and short of it at 70. The
-        // sort is on its header alone.
+        // ✗'s tab, on, opens the line up to its corner at 60 columns and short of it at 70. The sort is on
+        // its header alone.
         for (w, right) in [(60, "╯         ╮"), (70, "╯              ╰────╮")] {
             let lines = rows(&mut a, w);
             let about = " ECI: Epoch AI's overall index ";
@@ -7156,7 +7180,7 @@ mod tests {
             top.contains("╯              ╰ ECI: Epoch AI's overall index ──────────────────────────────────╮"),
             "right of it: {top}"
         );
-        // A panel's tab stands on the frame, closed, and a cut one is a hint there too.
+        // A panel's tab stands on the line, closed, and a cut one is a hint there too.
         a.key(KeyCode::Char('C').into());
         let top = &rows(&mut a, 120)[2];
         assert!(top.contains("┴───────────┴") && !top.contains('╯'), "{top}");
@@ -7347,7 +7371,7 @@ mod tests {
         assert_eq!([on(&term, 1, 5), on(&term, 50, 5), on(&term, 98, 5), on(&term, 1, 6)], [true, true, true, false]);
         assert_eq!([on(&term, 0, 5), on(&term, 99, 5)], [false, false], "the borders are not the cursor's");
         let buf = term.backend().buffer();
-        assert_eq!((buf[(0, 5)].symbol(), buf[(99, 5)].symbol()), ("│", "│"), "and have no bar");
+        assert_eq!((buf[(0, 5)].symbol(), buf[(99, 5)].symbol()), (" ", " "), "and have no bar, nor a line");
         // Its number is in the text's colour, the other rows' grey.
         let num = |y| (1..9).map(|x| &buf[(x, y)]).find(|c| c.symbol() != " ").unwrap().fg;
         assert_eq!((num(5), num(6)), (Color::Reset, MUTED));
@@ -7645,8 +7669,8 @@ mod tests {
             "{tabs}"
         );
         let top = row(&term, 2);
-        assert!(top.ends_with("──╮") && !top.contains(" by ECI"), "the sort is on its header alone: {top}");
-        assert!(top.starts_with("╭╯        ╰───"), "{top}");
+        assert!(!top.contains(" by ECI"), "the sort is on its header alone: {top}");
+        assert!(top.starts_with("╭╯        ╰───") && top.ends_with("──╮"), "the header's box, closed: {top}");
         let (l, r) = top.split_once(" ECI: Epoch AI's overall index ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         // Recommend's tab is the one on over its panel.
@@ -7660,14 +7684,14 @@ mod tests {
         a.view = View::Table;
         term.draw(|f| draw(&mut a, f)).unwrap();
         let bottom: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(bottom.contains("─ data ") && !bottom.contains("models.dev"), "{bottom}");
+        assert!(bottom.contains("  data ") && !bottom.contains("models.dev"), "{bottom}");
         // The tabs leave the version no room on their line: it is not shown, the bottom border
         // being the columns' bar's, unless a newer one is out.
-        assert!(bottom.starts_with("╰─") && !bottom.contains("modelcmp"), "{bottom}");
+        assert!(bottom.starts_with("   ◀ ") && !bottom.contains("modelcmp"), "{bottom}");
         a.data.latest = "999.0.0".into();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let newer: String = (0..101).map(|x| term.backend().buffer()[(x, 8)].symbol()).collect();
-        assert!(newer.starts_with("╰ modelcmp v999.0.0 available: U upgrades ─"), "{newer}");
+        assert!(newer.starts_with("  modelcmp v999.0.0 available: U upgrades  "), "{newer}");
         a.data.latest.clear();
         let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 10)).unwrap();
         wide.draw(|f| draw(&mut a, f)).unwrap();
@@ -7675,7 +7699,7 @@ mod tests {
         let (tabs, bottom) = (&lines[1], &lines[8]);
         let version = concat!("    modelcmp v", env!("CARGO_PKG_VERSION"), " ↗");
         assert!(tabs.trim_end().ends_with(version) && tabs.contains("│ t theme"), "right of the tabs: {tabs}");
-        assert!(bottom.starts_with("╰──") && !bottom.contains("modelcmp"), "{bottom}");
+        assert!(bottom.starts_with("───") && !bottom.contains("modelcmp"), "{bottom}");
         assert_eq!(a.page, 3, "10 lines minus the tabs, status bar, two borders, the header and its rule");
         // The bottom border's bar says columns are off to the right, the right one's rows below,
         // then above.
@@ -7693,13 +7717,13 @@ mod tests {
         };
         let marks =
             [edge(&term, 0, 4), edge(&term, 100, 4), edge(&term, 0, 5), edge(&term, 100, 5), edge(&term, 100, 7)];
-        assert_eq!(marks, ["├", "┤", "│", "▲", "▼"], "the rule joins the frame, the cursor leaves it be");
+        assert_eq!(marks, ["╰", "╯", " ", "▲", "▼"], "the header's box closes, no line down the rows' sides");
         assert_eq!((live(&term, 100, 5), live(&term, 100, 7)), (false, true), "rows below only");
         let across = (1..100).find(|&x| edge(&term, x, 8) == "▶").expect("a ▶ on the bottom border");
         assert!(live(&term, across, 8), "columns off to the right");
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([edge(&term, 100, 5), edge(&term, 0, 7)], ["▲", "│"]);
+        assert_eq!([edge(&term, 100, 5), edge(&term, 0, 7)], ["▲", " "]);
         assert!(live(&term, 100, 5) && !live(&term, 100, 7), "rows above only");
         // On a marked row the ▲ is the bar's, off the row's fill.
         a.store.marked = a.data.models.iter().map(|m| m.key.clone()).collect();
