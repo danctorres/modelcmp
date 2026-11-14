@@ -5265,12 +5265,12 @@ mod tests {
         assert_eq!(m.price().unwrap().provider, "c", "the dearer list price is cheaper once cached");
         assert!(
             crate::app::base_col_about(crate::app::PRICE)
-                .contains(&format!("{:.0}% of the input cached", crate::data::cached() * 100.0))
+                .contains(&format!("{:.0}% cached", crate::data::cached() * 100.0))
         );
         // A one-off prompt caches nothing: the cheaper list price wins again.
         set_cached(0.0);
         assert_eq!(m.price().unwrap().provider, "p");
-        assert!(crate::app::base_col_about(crate::app::PRICE).contains(" 0% of the input cached"));
+        assert!(crate::app::base_col_about(crate::app::PRICE).contains(" 0% cached"));
         set_cached(2.0);
         assert_eq!(crate::data::cached(), 1.0, "clamped");
         // A price nobody lists is unknown, not free: yours still names the id, but costs nothing known.

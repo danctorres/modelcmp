@@ -162,7 +162,7 @@ pub const COLS: [Col; 10] = [
         lower_better: true,
         price: true,
         show: money,
-        ..col("Price", "price", "USD per 1M tokens, 3:1 input:output", |m| m.cost())
+        ..col("Price", "price", "USD per 1M tokens, blended", |m| m.cost())
     },
     Col {
         lower_better: true,
@@ -193,18 +193,9 @@ pub const COLS: [Col; 10] = [
         ..col("Ctx", "ctx", "context window, in tokens", |m| positive(m.context as f64 / 1000.0))
     },
     col("ECI", "eci", "Epoch AI's overall index", |m| task_score(m, "overall")),
-    col("Coding", "coding", "FrontierCode score, % of maintainers' coding tasks solved well enough to merge", |m| {
-        task_score(m, "coding")
-    }),
-    col("Agentic", "agentic", "Arena's agent score, net improvement in real agent sessions, %", |m| {
-        task_score(m, "agentic")
-    }),
-    Col {
-        show: |v| format!("{v:.0}"),
-        ..col("Tok/s", "tps", "output tokens per second in OpenRouter's GPQA runs, thinking included (median)", |m| {
-            m.tps
-        })
-    },
+    col("Coding", "coding", "FrontierCode, % of coding tasks solved", |m| task_score(m, "coding")),
+    col("Agentic", "agentic", "Arena's agent score, %", |m| task_score(m, "agentic")),
+    Col { show: |v| format!("{v:.0}"), ..col("Tok/s", "tps", "output tokens per second, median", |m| m.tps) },
 ];
 
 /// The task the column `COLS[c]` scores, when it scores one: ECI is overall's.
@@ -404,11 +395,10 @@ pub fn base_col_about(col: usize) -> String {
         1 => "company that trained the model".into(),
         VIA => "harnesses listing it (↓ can be downloaded, grey if too big for your memory)".into(),
         NOTES => "your own note on the model".into(),
-        PRICE => format!(
-            "{}, {:.0}% of the input cached, ~ = list price where your providers list none",
-            COLS[PRICE - TEXT].about,
-            crate::data::cached() * 100.0
-        ),
+        // The share cached is said, as `%` changes it.
+        PRICE => {
+            format!("{}, {:.0}% cached, ~ = list price", COLS[PRICE - TEXT].about, crate::data::cached() * 100.0)
+        }
         _ => numeric(col).map_or("", Col::about).to_string(),
     }
 }
@@ -1193,11 +1183,11 @@ pub enum Mouse {
     /// track, as many as take the cursor there. Under a prompt it is a click, which leaves it,
     /// where the wheel is still.
     Page(isize),
-    /// Click on a `‹` `›` in compare or recommend: compare's columns to move, a screen of them
+    /// Click on a `◀` `▶` in compare or recommend: compare's columns to move, a screen of them
     /// each way, or one of recommend's models. Or on the track of a columns' bar, the table's
     /// too: as many columns as take the cursor there.
     Across(isize),
-    /// Click on the table's `‹` `›`: the `hscroll` and cursor column to page to, as `layout` worked
+    /// Click on the table's `◀` `▶`: the `hscroll` and cursor column to page to, as `layout` worked
     /// them out.
     ToCol(usize, usize),
     /// Click on the # header: the first row, as `gg` goes.
@@ -1518,11 +1508,11 @@ pub struct App {
     pub compare_sort: Option<(String, bool)>,
     /// First column the compare view shows, set by the renderer so the cursor's stays in view.
     pub compare_x: usize,
-    /// How many columns the compare view shows, a screen for a click on `‹` `›`.
+    /// How many columns the compare view shows, a screen for a click on `◀` `▶`.
     pub compare_shown: usize,
     /// Where the renderer drew each model of the compare or recommend overlay, and the click on it.
     pub spots: Vec<(ratatui::layout::Rect, Stop)>,
-    /// Where the last draw put each `‹` `›` `▲` `▼`, and the scroll a click on it does.
+    /// Where the last draw put each `◀` `▶` `▲` `▼`, and the scroll a click on it does.
     pub more: Vec<(u16, u16, Mouse)>,
     /// What `K` listed the keys over, which picking a key or esc goes back to.
     keys_from: Input,
@@ -1771,7 +1761,7 @@ impl App {
 
     /// What the column at cursor index `col` means.
     pub fn col_about(&self, col: usize) -> String {
-        let about = match self.col_bench(col) {
+        match self.col_bench(col) {
             Some(b) if arena_board(b) => {
                 format!("{} rating from people's votes, higher is better, measured by arena.ai", b.to_lowercase())
             }
@@ -1780,9 +1770,7 @@ impl App {
             }
             Some(_) => "Epoch AI, score on this benchmark alone, 0-100".into(),
             None => base_col_about(col),
-        };
-        // The ▾ says there is a dropdown, not that a task's swaps the benchmark.
-        if TASK_COLS.contains(&col) && self.menu(col) { format!("{about}, d for other benchmarks") } else { about }
+        }
     }
 
     /// Recompute everything that depends on `data::cached()`: the column values.
@@ -5965,7 +5953,7 @@ mod tests {
         assert_eq!(a.val(gpt, PRICE), Some(3.5875));
         press(&mut a, "%");
         assert_eq!((a.val(gpt, PRICE), sel(&a)), (Some(10.0), was), "full input price, the cursor stays");
-        assert!(base_col_about(PRICE).contains(" 0% of the input cached") && a.status.contains("one-off"));
+        assert!(base_col_about(PRICE).contains(" 0% cached") && a.status.contains("one-off"));
         press(&mut a, "%");
         assert_eq!(a.val(gpt, PRICE), Some(3.5875), "again: back to an agent's 90%");
         // Started with --cache 50, % goes back to 50, not 90.
@@ -7489,7 +7477,7 @@ mod tests {
         assert!(COLS.iter().all(|c| !c.about().is_empty()));
         let about = |id| base_col_about(TEXT + COLS.iter().position(|c| c.id == id).unwrap());
         // No word on a blank cell.
-        assert_eq!(about("coding"), "FrontierCode score, % of maintainers' coding tasks solved well enough to merge");
+        assert_eq!(about("coding"), "FrontierCode, % of coding tasks solved");
         assert_eq!(about("eci"), "Epoch AI's overall index");
     }
 

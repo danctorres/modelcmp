@@ -28,7 +28,7 @@ use ratatui::crossterm::event::{
     KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui::layout::{Alignment, Margin, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
@@ -832,7 +832,7 @@ fn more_at(buf: &Buffer) -> Vec<(u16, u16, Mouse)> {
         .collect()
 }
 
-/// How many columns compare shows: what a click on its `‹` `›` moves, so the view moves by a
+/// How many columns compare shows: what a click on its `◀` `▶` moves, so the view moves by a
 /// screen. One model in recommend.
 fn across(app: &App) -> isize {
     if app.view == View::Compare { app.compare_shown.max(1) as isize } else { 1 }
@@ -888,7 +888,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let on_bar = |a: Mouse| plain || drag && matches!(a, Mouse::Page(_) | Mouse::Across(_));
     let more = app.more.iter().find(|&&(x, y, a)| on_bar(a) && (x, y) == (m.column, m.row)).map(|&(.., a)| match a {
         Mouse::Scroll(d) => Mouse::Page(d * app.page.max(1) as isize),
-        // The table pages: `›` to the first column cut off, which then starts the view, `‹` to the
+        // The table pages: `▶` to the first column cut off, which then starts the view, `◀` to the
         // one before the view, which then ends it, `hscroll` 0 letting `layout` bring in all it can.
         Mouse::Cols(d) if app.view == View::Table => {
             let to = if d > 0 {
@@ -1676,8 +1676,8 @@ fn tabs(buf: &mut Buffer, frame: Rect, sort_w: u16, app: &App) -> (u16, u16) {
     span.map_or((0, 0), |(lo, hi)| (lo.min(frame.width), hi.min(frame.width)))
 }
 
-/// The cursor's fill, on a row, a column of compare or a name in recommend, after a bar of the
-/// accent on a border (`cursor_ends`) or between two of them off one (`cursor`). Drawn as the accent, which tells it
+/// The cursor's fill, on a row, a column of compare or a name in recommend: between the borders
+/// of a frame or a box (`cursor_ends`), or between two bars of the accent off one (`cursor`). Drawn as the accent, which tells it
 /// from a marked row's, and painted as a faint grey (`fill`): a hue on a row says something of
 /// it, as a marked row's blue does, and the accent's is a developer's and a price level's too.
 const CURSOR: Color = ACCENT;
@@ -1740,10 +1740,12 @@ fn recolor(buf: &mut Buffer, palette: Option<&Palette>, term_bg: Option<u32>, sl
                 (cell.fg, cell.bg) = (cell.bg, Color::Reset);
             }
         }
-        // Nor a faint column: its cells are bold there.
+        // Nor a faint column: its cells are bold there, but for the rule under its header.
         if palette.is_none() && term_bg.is_none() && cell.bg == COLUMN {
             cell.bg = Color::Reset;
-            cell.modifier.insert(BOLD);
+            if !matches!(cell.symbol(), "─" | "┼") {
+                cell.modifier.insert(BOLD);
+            }
         }
         // The terminal's own colours with its background unknown have no faint fill: the cursor
         // is a reverse-video bar there, its two ends part of it and colours off it so it reads
@@ -2186,8 +2188,7 @@ fn draw(app: &mut App, f: &mut Frame) {
             put(buf, rect.x + 2, rect.bottom() - 1, " no match ", usize::from(rect.width / 2), fg(MUTED));
         }
         if rows > 0 {
-            // The cursor runs through the box's border, as in the table, and the marks go over
-            // its bar, as there.
+            // The cursor fills the row between the box's borders, as in the table.
             let y = (rect.y + 1 + (*sel + head) as u16 - scroll).min(rect.bottom() - 1);
             if !grid || list.edit.is_some() {
                 cursor_ends(buf, rect.x, rect.right() - 1, y);
@@ -2400,7 +2401,7 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
                 cursor = cursor.flatten().map(Some);
             }
         }
-        // The cursor runs through the box's border, as in a list, and the marks go over its bar.
+        // The cursor fills the line between the box's borders, as in a list.
         if let Some(y) = hit_line.and_then(|l| l.checked_sub(app.scroll as usize)).filter(|&y| y < text.height as usize)
         {
             cursor_ends(buf, text.x - 2, text.right() + 1, text.y + y as u16);
@@ -2448,7 +2449,7 @@ struct Layout {
     /// Where the view is in the columns right of Model, those not left out: the frame's bar.
     /// And the cursor's column among them, if it is on one.
     bar: (Scrolled, Option<usize>),
-    /// The cursor index a click on `›` pages to: the first column right of the view or cut short,
+    /// The cursor index a click on `▶` pages to: the first column right of the view or cut short,
     /// or the one after it when it starts the view.
     next: Option<usize>,
     /// Where a `│` parts two groups of columns (`GROUPS`): after Model when scrolled, and before
@@ -2619,8 +2620,8 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
         true => "▲",
         false => "",
     };
-    // The column under the cursor has its cells on a faint fill (`COLUMN`), the values keeping
-    // their colours, and its header as every other, which is not to stand out.
+    // The column under the cursor is on a faint fill (`COLUMN`), its header and the rule too,
+    // the header and the values keeping their colours.
     let header = |_: usize| fg(ACCENT).add_modifier(BOLD);
     // The marks: the checkbox, then the ☆, then the ✗ box.
     let num_w = (name_x - 7) as usize;
@@ -2698,15 +2699,15 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     for (k, &r) in app.rows.iter().enumerate().skip(top).take(height) {
         let y = area.y + head + (k - top) as u16;
         let m = &app.data.models[r];
-        // The cursor, or the visual range, is a faint fill through the frame's border, which
-        // becomes its two bars; the row keeps its colours on it.
+        // The cursor, or the visual range, is a faint fill between the frame's borders; the row
+        // keeps its colours on it.
         let on = k == sel || app.is_selected(k);
         // A model excluded or out of reach has its row muted: the text and the developer, harness,
         // price level, best and worst colours go grey, while the ✓, ★ and ✗ keep theirs. The
         // extremes are those of the other rows (`App::ext`), so a column does not lose them.
         let (excluded, reach) = (app.store.is_excluded(&m.key), app.accessible(m));
         let dim = excluded || !reach;
-        // A marked row off the cursor is filled through the border too, in the mark's colour.
+        // A marked row off the cursor is filled between the borders too, in the mark's colour.
         // The fill is faint (`WASH`), so the row keeps its colours on it. The terminal's own 16
         // have no faint one, so with them it takes a terminal that told its background; else
         // the fill is solid like a pill, with colours off it, a muted row's grey included, and
@@ -2723,11 +2724,12 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
         let tint = |c: Color| if solid { base } else { fg(c) };
         let text = if dim { tint(MUTED) } else { base };
         let soft = |c: Color| if dim { text } else { tint(c) };
-        restyle(buf, Rect { y, height: 1, ..area }.outer(Margin::new(1, 0)).intersection(buf.area), base);
+        restyle(buf, Rect { y, height: 1, ..area }, base);
         if on && area.x > 0 {
             cursor_ends(buf, area.x - 1, area.right(), y);
         }
-        put(buf, area.x, y, format!("{:>num_w$}", k + 1), num_w, tint(MUTED));
+        // The cursor's row has its number in the text's colour, the others' being grey.
+        put(buf, area.x, y, format!("{:>num_w$}", k + 1), num_w, if k == sel { base } else { tint(MUTED) });
         // Off, a mark is its own glyph in grey, as the ☆ is the ★'s, so it says what a click on
         // it does. Where colours are off (the reverse-video cursor, a solid fill) a grey one
         // would read as on, so there off is a shape of its own.
@@ -2853,13 +2855,16 @@ fn table_of(buf: &mut Buffer, area: Rect, app: &mut App, cols: Layout) -> (bool,
     }
     if let Some((x, w)) = cur {
         let drawn = app.rows.len().saturating_sub(top).min(height) as u16;
-        // The cursor's column is a fainter fill than its row (`COLUMN`), on the rows with none of
-        // their own, so the row stays the one read and a marked row its blue.
-        cells(buf, Rect::new(x, area.y + head, w, drawn).intersection(area), |c| {
-            if c.bg == Color::Reset {
-                c.bg = COLUMN;
-            }
-        });
+        // The cursor's column is a fainter fill than its row (`COLUMN`), from its header down, on
+        // the rows with none of their own, so the row stays the one read and a marked row its blue.
+        // Not the line under the rule that says no model is in reach, which is no column's.
+        for rows in [Rect::new(x, area.y, w, head.min(2)), Rect::new(x, area.y + head, w, drawn)] {
+            cells(buf, rows.intersection(area), |c| {
+                if c.bg == Color::Reset {
+                    c.bg = COLUMN;
+                }
+            });
+        }
     }
     let level = app.price_level().map(|l| vec![level_label(l)]).unwrap_or_default();
     let bench = if let Input::Menu { col, .. } = &app.input { app.col_bench(*col) } else { None };
@@ -2990,18 +2995,10 @@ fn dropdown(
     vbar(buf, rect.right() - 1, inner.y, (top, shown, len), Some(sel));
 }
 
-/// The cursor on row `y`: its fill from the column `left` up to `right`, and its bar at `left`,
-/// the border of the frame or the box, which the bar takes the place of. The border at `right`
-/// is left to the scroll bar.
+/// The cursor on row `y`: its fill between the columns `left` and `right`, the borders of the
+/// frame or the box, which stay as they are, the one at `right` being the scroll bar's.
 fn cursor_ends(buf: &mut Buffer, left: u16, right: u16, y: u16) {
-    restyle(buf, Rect::new(left, y, right - left, 1), FILL);
-    if let Some(cell) = buf.cell_mut((left, y)) {
-        cell.set_symbol("▌").set_style(EDGE);
-    }
-    // A table row is filled through the frame before this.
-    if let Some(cell) = buf.cell_mut((right, y)) {
-        cell.bg = Color::Reset;
-    }
+    restyle(buf, Rect::new(left + 1, y, right.saturating_sub(left + 1), 1), FILL);
 }
 
 /// `spans` with a cell at each end: under the cursor those are its bars and the spans are on its
@@ -3046,14 +3043,27 @@ fn scrollbar(
     cur: Option<usize>,
     stops: &[usize],
 ) {
-    let (Some(&first), Some(&last)) = (cells.first(), cells.last()) else { return };
     if shown >= n {
         return;
     }
+    // Along a border an arrow has a blank cell on each side, where there is room, as the lines
+    // of a screen part the ones down a border from what is above and below them.
+    let pad = across && cells.len() >= 9;
+    let cells = if pad {
+        for i in [0, 2, cells.len() - 3, cells.len() - 1] {
+            if let Some(cell) = buf.cell_mut(cells[i]) {
+                cell.set_symbol(" ");
+            }
+        }
+        &cells[1..cells.len() - 1]
+    } else {
+        cells
+    };
+    let (Some(&first), Some(&last)) = (cells.first(), cells.last()) else { return };
     // The thumb is a heavy line on the border's light one, and the cursor's cell a block on it.
     // It moves by whole cells: with half a cell at an end, and the block over one, it looked
     // longer and shorter as it went.
-    let [back, on, whole] = if across { ["‹", "›", "━"] } else { ["▲", "▼", "┃"] };
+    let [back, on, whole] = if across { ["◀", "▶", "━"] } else { ["▲", "▼", "┃"] };
     let kind = u8::from(across);
     let mut set = |(x, y): (u16, u16), glyph: Option<(&str, Style)>, to: Option<Color>| {
         let Some(cell) = buf.cell_mut((x, y)) else { return };
@@ -3064,7 +3074,7 @@ fn scrollbar(
         }
         cell.underline_color = to.unwrap_or(Color::Reset);
     };
-    let track = &cells[1..cells.len().max(2) - 1];
+    let track = if pad { &cells[2..cells.len() - 2] } else { &cells[1..cells.len().max(2) - 1] };
     if !track.is_empty() {
         let slots = track.len();
         let least = if across { 1 } else { 3 };
@@ -4856,7 +4866,7 @@ struct Compared {
     lines: Vec<Line<'static>>,
     /// The column under the cursor, for `App::compare_col`.
     col: usize,
-    /// The first column shown, for `App::compare_x`, how many show, a screen for `‹` `›`, and of
+    /// The first column shown, for `App::compare_x`, how many show, a screen for `◀` `▶`, and of
     /// how many, for the panel's bar.
     first: usize,
     shown: usize,
@@ -5015,7 +5025,8 @@ fn compare(
                 spans.push(Span::raw("  "));
             }
             let Some((at, piece)) = (j + heads[c].len()).checked_sub(h).map(|k| &heads[c][k]) else {
-                spans.push(Span::raw(" ".repeat(widths[c])));
+                let blank = if c == col { Style::new().bg(COLUMN) } else { Style::new() };
+                spans.push(Span::styled(" ".repeat(widths[c]), blank));
                 continue;
             };
             let (len, w) = (piece.chars().count(), widths[c]);
@@ -5030,7 +5041,9 @@ fn compare(
                 })
                 .collect();
             let text = format!("{}{piece}{}", " ".repeat(before), " ".repeat(after));
-            spans.extend(lit_at(Line::styled(text, fg(KEY)), &lit).spans);
+            // The cursor's column is filled from its header down, as in the table.
+            let style = if c == col { fg(KEY).bg(COLUMN) } else { fg(KEY) };
+            spans.extend(lit_at(Line::styled(text, style), &lit).spans);
         }
         out.push(Line::from(spans));
     }
@@ -5041,14 +5054,14 @@ fn compare(
         spots.push(Spot { lines: head_top..out.len(), x: x + g - 1..x + g + widths[c], at: Stop::CompareCol(c) });
         x += widths[c] + g;
     }
-    // The rule under the header, heavy under the cursor's column and crossing the group lines,
+    // The rule under the header, filled under the cursor's column and crossing the group lines,
     // as in the table. With columns off screen the panel takes the whole width, so it keeps its
     // size as it scrolls.
     let width = if shown < m { avail } else { x };
     let mut rule = vec![Span::styled("─".repeat(name_w), fg(MUTED))];
     for c in vis.clone() {
         rule.push(Span::styled(if starts(c, first) { "─┼─" } else { "──" }, fg(MUTED)));
-        rule.push(Span::styled("─".repeat(widths[c]), fg(MUTED)));
+        rule.push(Span::styled("─".repeat(widths[c]), if c == col { fg(MUTED).bg(COLUMN) } else { fg(MUTED) }));
     }
     rule.push(Span::styled("─".repeat(width.saturating_sub(x)), fg(MUTED)));
     out.push(Line::from(rule));
@@ -5547,7 +5560,7 @@ mod tests {
         let deselect = |a: &App| ["u deselect all", "V highlight"].iter().all(|h| hints(a, 200).contains(h));
         assert!(deselect(&a) && !deselect(&app()), "u and V are hints while a model is selected");
         let filled = |y: u16| (0..120).all(|x| buf[(x, y)].bg == MARK && buf[(x, y)].fg == Color::Black);
-        assert!(filled(flash), "the row is filled through the border, black on the mark colour");
+        assert!(filled(flash), "the row is filled from end to end, black on the mark colour");
         assert!((0..120).all(|x| buf[(x, opus)].bg != MARK), "and only that row");
         assert!(buf[(cell(&lines[flash as usize], "flash"), flash)].modifier.contains(BOLD));
         // Out of reach and not marked: the row is muted, but for what says the same on every row.
@@ -5644,7 +5657,7 @@ mod tests {
 
     #[test]
     fn a_click_on_the_more_marker_pages_past_a_column_cut_short_at_the_start() {
-        // A narrow screen and a wide Via: Via starts the view cut short, and `›` still goes on to
+        // A narrow screen and a wide Via: Via starts the view cut short, and `▶` still goes on to
         // Notes rather than to Via again.
         let mut a = app();
         a.data.models[0].via = crate::data::vias().map(String::from).collect();
@@ -5654,7 +5667,7 @@ mod tests {
         a.more = more_at(term.backend().buffer());
         let l = layout(42, &a);
         assert_eq!((l.first, l.next), (VIA - 1, Some(NOTES)), "Via starts the view, cut short");
-        let &(column, row, _) = a.more.iter().find(|(.., m)| *m == Mouse::Cols(1)).expect("a ›");
+        let &(column, row, _) = a.more.iter().find(|(.., m)| *m == Mouse::Cols(1)).expect("a ▶");
         let e =
             MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
         a.mouse(hit(&a, Rect::new(0, 0, 44, 12), e).unwrap());
@@ -5664,8 +5677,8 @@ mod tests {
 
     #[test]
     fn a_click_on_a_more_marker_scrolls_that_way() {
-        // A phone's terminal sends taps and no sideways wheel: the `›` pages the columns, the
-        // first one cut off starting the view, and `‹` back, the one before it ending the view.
+        // A phone's terminal sends taps and no sideways wheel: the `▶` pages the columns, the
+        // first one cut off starting the view, and `◀` back, the one before it ending the view.
         let mut a = app();
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
         let area = Rect::new(0, 0, 60, 12);
@@ -5854,11 +5867,9 @@ mod tests {
         a.col = ECI + 1;
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 6 && lines[5].contains("d dropdown"), "{lines:?}");
-        assert!(a.col_about(a.col).ends_with("to merge, d for other benchmarks"), "what its dropdown is for");
         a.task = fit::task("agentic");
         let (_, lines) = render(&mut a, 206, 6);
         assert!(lines[0].matches('▾').count() == 3 && !lines[5].contains("d dropdown"), "{lines:?}");
-        assert!(a.col_about(a.col).ends_with("to merge"), "no dropdown, no hint");
         // An entry left out or picked turns its header's ▾ yellow, and that one alone.
         let yellow = |a: &mut App| {
             let (buf, lines) = render(a, 206, 6);
@@ -5895,7 +5906,7 @@ mod tests {
         let from = |l: &str| l.chars().skip(dev).collect::<String>();
         assert!(from(&lines[1]).starts_with("╭──────────────────╮"), "{}", lines[1]);
         assert_eq!(buf[(dev as u16, 1)].fg, Color::Reset, "its border in the text's colour, as every box's");
-        assert_eq!(&words(&lines[2])[5..10], ["▌", "✓", "all", "2", "│"], "all is ticked, and has no ✗ box");
+        assert_eq!(&words(&lines[2])[5..10], ["│", "✓", "all", "2", "│"], "all is ticked, and has no ✗ box");
         assert_eq!(cell(&lines[2], "all"), cell(&lines[3], "anthropic"), "the names line up all the same");
         assert_eq!(&words(&lines[3])[5..10], ["│", "☐", "·", "anthropic", "1"]);
         let ex = dev as u16 + 4;
@@ -5924,17 +5935,19 @@ mod tests {
         assert_eq!([2, 4].map(|x| grey[(dev as u16 + x, 3)].symbol()), ["✓", "✗"]);
         assert_eq!([2, 4].map(|x| grey[(dev as u16 + x, 3)].fg), [MUTED, MUTED]);
         a.term_bg = None;
-        assert_eq!(buf[(dev as u16, 2)].bg, CURSOR, "the cursor runs through the border");
-        assert_ne!(buf[(dev as u16, 3)].bg, CURSOR);
+        assert_eq!(buf[(dev as u16 + 1, 2)].bg, CURSOR, "the cursor's fill, inside the border");
+        assert_ne!(buf[(dev as u16, 2)].bg, CURSOR);
+        assert_ne!(buf[(dev as u16 + 1, 3)].bg, CURSOR);
         assert!(lines[7].starts_with(" PICK  Dev ▾"), "{}", lines[7]);
         let (_, short) = render(&mut a, 170, 6);
         assert!(short.iter().any(|l| l.contains(" 1-2 of 3 ")), "a list scrolled says where it is: {short:?}");
         for c in "/anth".chars() {
             a.key(KeyCode::Char(c).into());
         }
-        let (_, lines) = render(&mut a, 170, 8);
-        let anth = lines.iter().find(|l| l.contains("anthropic")).unwrap();
-        assert_eq!(&words(anth)[5..10], ["▌", "☐", "·", "anthropic", "1"], "the cursor on the match");
+        let (buf, lines) = render(&mut a, 170, 8);
+        let y = lines.iter().position(|l| l.contains("anthropic")).unwrap();
+        assert_eq!(&words(&lines[y])[5..10], ["│", "☐", "·", "anthropic", "1"]);
+        assert_eq!(buf[(dev as u16 + 1, y as u16)].bg, CURSOR, "the cursor on the match");
         assert!(lines.iter().any(|l| l.contains("google")), "every entry stays");
         assert!(lines[7].starts_with(" PICK  Dev ▾ /anth"), "{}", lines[7]);
         a.key(KeyCode::Char('z').into());
@@ -6701,7 +6714,7 @@ mod tests {
         let &(_, px, _) = l.cols.iter().find(|&&(i, ..)| i + 2 == PRICE).unwrap();
         assert_eq!((buf[(x, 1)].symbol(), buf[(px, 1)].symbol()), ("─", "─"), "the rule is the same under it");
         let head = &buf[(x + w - 1, 0)];
-        assert_eq!((head.fg, head.bg), (ACCENT, Color::Reset), "its header as every other");
+        assert_eq!((head.fg, head.bg), (ACCENT, COLUMN), "its header is filled too, in its own colour");
         assert_eq!(buf[(x + w - 1, 3)].bg, COLUMN, "its cells are filled");
         assert_eq!(buf[(px + 1, 3)].bg, Color::Reset, "other columns are not");
         let drawn = buf.clone();
@@ -6713,6 +6726,7 @@ mod tests {
         let cell = &buf[(x + w - 1, 3)];
         assert!(cell.bg == Color::Reset && cell.modifier.contains(BOLD), "bold with no faint fill to have");
         assert!(!buf[(px + 1, 3)].modifier.contains(BOLD), "other columns are not");
+        assert!(!buf[(x, 1)].modifier.contains(BOLD), "nor the rule under its header");
     }
 
     #[test]
@@ -6806,7 +6820,7 @@ mod tests {
         // The cursor's column is filled in each model's row, as in the table, and not over it.
         let filled = |l: &Line| l.spans.iter().any(|s| s.style.bg == Some(COLUMN) && !s.content.trim().is_empty());
         assert!(lines[lines.len() - 3..].iter().all(filled), "{lines:#?}");
-        assert!(!lines[..lines.len() - 3].iter().any(filled), "not the header");
+        assert!(lines[..lines.len() - 3].iter().any(filled), "and its header");
         // A harness left out in Via is grey, as in the table.
         let m = Model { name: "m".into(), via: vec!["codex".into(), "pi".into()], ..Default::default() };
         let mut store = Store::default();
@@ -7084,17 +7098,17 @@ mod tests {
         };
         // ✗'s tab, on, opens the border up to its corner at 60 columns and short of it at 70. The
         // sort is on its header alone.
-        for (w, right) in [(60, "ben…╯         ╮"), (70, "ben…╯              ╰────╮")] {
+        for (w, right) in [(60, "╯         ╮"), (70, "╯              ╰────╮")] {
             let lines = rows(&mut a, w);
-            let left = "╭ ECI: Epoch AI's overall index, d for other ";
-            assert!(lines[2].starts_with(left) && lines[2].ends_with(right), "{}", lines[2]);
+            let about = " ECI: Epoch AI's overall index ";
+            assert!(lines[2].contains(about) && lines[2].ends_with(right), "{}", lines[2]);
             assert!(lines[19].contains("✗ excluded"), "E left S: {}", lines[19]);
         }
-        // ✓'s, further left, leaves the wider side on its right.
+        // ✓'s, further left, is clear of the description, which stays centred on the frame.
         a.key(KeyCode::Char('S').into());
         let top = &rows(&mut a, 100)[2];
         assert!(
-            top.contains("╯              ╰───── ECI: Epoch AI's overall index, d for other benchmarks ─────╮"),
+            top.contains("╯              ╰ ECI: Epoch AI's overall index ──────────────────────────────────╮"),
             "right of it: {top}"
         );
         // A panel's tab stands on the frame, closed, and a cut one is a hint there too.
@@ -7137,7 +7151,7 @@ mod tests {
         let buf = term.backend().buffer();
         let row = |y: u16| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>();
         assert!(row(0).contains('╭') && row(0).contains('╮'), "{}", row(0));
-        assert!(row(1).contains(THEMES[THEMES.len() - 1].0) && row(1).contains('▌'), "{}", row(1));
+        assert!(row(1).contains(THEMES[THEMES.len() - 1].0) && (0..60).any(|x| buf[(x, 1)].bg == CURSOR), "{}", row(1));
     }
 
     #[test]
@@ -7278,25 +7292,24 @@ mod tests {
     }
 
     #[test]
-    fn cursor_runs_through_the_frame() {
+    fn cursor_fills_between_the_borders() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 10)).unwrap();
         let mut a = app();
         let on = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, x: u16, y: u16| {
             term.backend().buffer()[(x, y)].bg == CURSOR
         };
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([on(&term, 0, 5), on(&term, 50, 5), on(&term, 98, 5), on(&term, 0, 6)], [true, true, true, false]);
+        assert_eq!([on(&term, 1, 5), on(&term, 50, 5), on(&term, 98, 5), on(&term, 1, 6)], [true, true, true, false]);
+        assert_eq!([on(&term, 0, 5), on(&term, 99, 5)], [false, false], "the borders are not the cursor's");
         let buf = term.backend().buffer();
-        assert_eq!(
-            (buf[(0, 5)].symbol(), buf[(99, 5)].symbol()),
-            ("▌", "│"),
-            "its bar on the left border, the right the scroll bar's"
-        );
-        assert_eq!((buf[(0, 5)].fg, buf[(0, 6)].symbol()), (ACCENT, "│"));
+        assert_eq!((buf[(0, 5)].symbol(), buf[(99, 5)].symbol()), ("│", "│"), "and have no bar");
+        // Its number is in the text's colour, the other rows' grey.
+        let num = |y| (1..9).map(|x| &buf[(x, y)]).find(|c| c.symbol() != " ").unwrap().fg;
+        assert_eq!((num(5), num(6)), (Color::Reset, MUTED));
         a.key(KeyCode::Char('v').into());
         a.key(KeyCode::Char('j').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([on(&term, 0, 5), on(&term, 98, 6)], [true, true], "the visual range too");
+        assert_eq!([on(&term, 1, 5), on(&term, 98, 6)], [true, true], "the visual range too");
         a.key(KeyCode::Esc.into());
         a.key(KeyCode::Char('t').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
@@ -7304,15 +7317,15 @@ mod tests {
         // The overlay's top-left corner, under the tabs and right of the frame's; the cursor is
         // on the row under it, the first entry.
         let (x, y) = (2..10).flat_map(|y| (2..100).map(move |x| (x, y))).find(|&p| buf[p].symbol() == "╭").unwrap();
-        assert!(on(&term, x, y + 1) && buf[(x, y + 1)].symbol() == "▌", "and the choice list's");
+        assert!(on(&term, x + 1, y + 1) && buf[(x, y + 1)].symbol() == "│", "and the choice list's");
         // With the terminal's own colours and its background unknown, a reverse-video bar with
-        // colours off it; a pill in the accent stays one.
+        // colours off it, between the borders too; a pill in the accent stays one.
         let mut buf = buf.clone();
         buf[(x + 1, y)].set_fg(Color::Black).set_bg(ACCENT);
         recolor(&mut buf, None, None, None);
         let (end, text) = (&buf[(x, y + 1)], &buf[(x + 2, y + 1)]);
-        assert_eq!((end.symbol(), end.fg, end.bg), (" ", Color::Reset, Color::Reset));
-        assert!(end.modifier.contains(Modifier::REVERSED) && text.modifier.contains(Modifier::REVERSED));
+        assert_eq!((end.symbol(), end.fg, end.bg), ("│", Color::Reset, Color::Reset));
+        assert!(!end.modifier.contains(Modifier::REVERSED) && text.modifier.contains(Modifier::REVERSED));
         assert_eq!((text.fg, text.bg, buf[(x + 1, y)].bg), (Color::Reset, Color::Reset, ACCENT));
     }
 
@@ -7368,7 +7381,7 @@ mod tests {
         keys(&mut a, "vj");
         let (buf, (x, y), _) = drawn(&mut a);
         assert_eq!((x, y), before, "the box keeps its width");
-        let on = |y| buf[(x, y)].bg == CURSOR;
+        let on = |y| buf[(x + 1, y)].bg == CURSOR;
         assert_eq!([on(y + 1), on(y + 2)], [true, true], "both sites highlighted");
         assert_eq!(mode(&a).0, "HIGHLIGHT");
         // Under a search kept, esc cancels the range first, and the hint says so.
@@ -7392,9 +7405,7 @@ mod tests {
         term.draw(|f| draw(&mut a, f)).unwrap();
         let buf = term.backend().buffer();
         // But for the status bar, whose hints add `n N match`.
-        // And for the cursor's bars, on the line `n` is on.
-        let plain = |l: &[String]| l.iter().map(|l| l.replace(['▌', '▐'], "│")).collect::<Vec<_>>();
-        assert_eq!(plain(&text(buf)[..59]), plain(&all[..59]), "every line still shows");
+        assert_eq!(text(buf)[..59], all[..59], "every line still shows");
         assert!(buf.content.iter().any(|c| c.fg == MATCH && c.modifier.contains(Modifier::UNDERLINED)), "{all:#?}");
 
         // Too short for every line: a search scrolls to its first match and `n` to the next.
@@ -7403,12 +7414,13 @@ mod tests {
         let type_in = |a: &mut App, keys: &str| keys.chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
         type_in(&mut a, "/5.0");
         a.key(KeyCode::Enter.into());
-        // The scroll, the status and the line with the box's cursor bar, the left one as the bar's
-        // `▲` goes over the right, the table's being on the frame's edge.
+        // The scroll, the status and the line with the box's cursor, whose fill is not dimmed as
+        // the table's behind the box is.
         let mut at = |a: &mut App| {
             term.draw(|f| draw(a, f)).unwrap();
             let buf = term.backend().buffer();
-            let y = (0..12).find(|&y| (1..119).any(|x| buf[(x, y)].symbol() == "▌"));
+            let lit = |x, y| buf[(x, y)].bg == CURSOR && !buf[(x, y)].modifier.contains(Modifier::DIM);
+            let y = (0..12).find(|&y| (1..119).any(|x| lit(x, y)));
             (a.scroll, a.status.clone(), y.map(|y| text(buf)[y as usize].clone()))
         };
         let (scroll, status, on) = at(&mut a);
@@ -7561,13 +7573,13 @@ mod tests {
                 a.task_cur = 3;
                 term.draw(|f| draw(&mut a, f)).unwrap();
                 // What `recolor` tells a cell by: a colour behind text that is not
-                // black is the cursor's fill or a selected row's, and nothing else.
+                // black is the cursor's fill, its column's or a selected row's, and nothing else.
                 let odd = term
                     .backend()
                     .buffer()
                     .content
                     .iter()
-                    .find(|c| c.fg != Color::Black && ![Color::Reset, CURSOR, MARK].contains(&c.bg));
+                    .find(|c| c.fg != Color::Black && ![Color::Reset, CURSOR, COLUMN, MARK].contains(&c.bg));
                 assert_eq!(odd, None, "{:?} at {w}x{h}", a.view);
             }
         }
@@ -7590,7 +7602,7 @@ mod tests {
         let top = row(&term, 2);
         assert!(top.ends_with("──╮") && !top.contains(" by ECI"), "the sort is on its header alone: {top}");
         assert!(top.starts_with("╭╯        ╰───"), "{top}");
-        let (l, r) = top.split_once(" ECI: Epoch AI's overall index, d for other benchmarks ").unwrap();
+        let (l, r) = top.split_once(" ECI: Epoch AI's overall index ").unwrap();
         assert!(l.chars().count().abs_diff(r.chars().count()) <= 1, "centred: {top}");
         // Recommend's tab is the one on over its panel.
         a.view = View::Recommend;
@@ -7636,19 +7648,22 @@ mod tests {
         };
         let marks =
             [edge(&term, 0, 4), edge(&term, 100, 4), edge(&term, 0, 5), edge(&term, 100, 5), edge(&term, 100, 7)];
-        assert_eq!(marks, ["├", "┤", "▌", "▲", "▼"], "the rule joins the frame, the cursor's bar is on it");
+        assert_eq!(marks, ["├", "┤", "│", "▲", "▼"], "the rule joins the frame, the cursor leaves it be");
         assert_eq!((live(&term, 100, 5), live(&term, 100, 7)), (false, true), "rows below only");
-        let across = (1..100).find(|&x| edge(&term, x, 8) == "›").expect("a › on the bottom border");
+        let across = (1..100).find(|&x| edge(&term, x, 8) == "▶").expect("a ▶ on the bottom border");
         assert!(live(&term, across, 8), "columns off to the right");
         a.key(KeyCode::Char('G').into());
         term.draw(|f| draw(&mut a, f)).unwrap();
-        assert_eq!([edge(&term, 100, 5), edge(&term, 0, 7)], ["▲", "▌"]);
+        assert_eq!([edge(&term, 100, 5), edge(&term, 0, 7)], ["▲", "│"]);
         assert!(live(&term, 100, 5) && !live(&term, 100, 7), "rows above only");
         // On a marked row the ▲ is the bar's, off the row's fill.
         a.store.marked = a.data.models.iter().map(|m| m.key.clone()).collect();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let top = &term.backend().buffer()[(100, 5)];
         assert_eq!((top.symbol(), top.fg, top.bg), ("▲", Color::Reset, Color::Reset));
+        // And its fill is between the borders, as the cursor's: none on the left one either.
+        let buf = term.backend().buffer();
+        assert_eq!([buf[(0, 6)].bg, buf[(1, 6)].bg, buf[(100, 6)].bg], [Color::Reset, MARK, Color::Reset]);
         a.store.marked.clear();
         // A tall overlay stops above the status bar, which shows its keys.
         a.key(KeyCode::Char('?').into());
@@ -7689,8 +7704,9 @@ mod tests {
         };
         // The cursor's cell is the text's colour: it moves along the thumb, which moves on at its end.
         let mark = |at: Scrolled, cur: usize| {
-            let buf = draw(12, at, Some(cur));
-            (1..11).filter(|&x| buf[(x, 0)].modifier.contains(BOLD)).collect::<Vec<_>>()
+            // Ten cells of track, after an arrow with a blank cell on each side of it.
+            let buf = draw(16, at, Some(cur));
+            (1..11).filter(|&x| buf[(x + 2, 0)].modifier.contains(BOLD)).collect::<Vec<_>>()
         };
         assert_eq!([mark((0, 5, 10), 0), mark((0, 5, 10), 4), mark((5, 5, 10), 9)], [[1], [5], [10]]);
         assert_eq!([mark((0, 3, 5), 0), mark((0, 3, 5), 2)], [[1], [6]], "from one end of the thumb to the other");
@@ -7715,15 +7731,16 @@ mod tests {
                 (0..cells).filter(|&x| buf[(x, 0)].modifier.contains(BOLD)).map(|x| buf[(x, 0)].symbol().to_string());
             ((0..cells).map(|x| buf[(x, 0)].symbol()).collect::<String>(), live.collect::<String>())
         };
-        assert_eq!(bar(12, (0, 5, 5)), (" ".repeat(12), String::new()), "none where everything shows");
-        assert_eq!(bar(12, (0, 5, 10)), ("‹━━━━━     ›".into(), "›".into()), "half shows, from the start");
-        assert_eq!(bar(12, (5, 5, 10)), ("‹     ━━━━━›".into(), "‹".into()), "to the end");
-        assert_eq!(bar(12, (1, 5, 10)), ("‹ ━━━━━    ›".into(), "‹›".into()), "off the start once scrolled");
-        assert_eq!(bar(12, (1, 10, 20)), ("‹ ━━━━━    ›".into(), "‹›".into()), "by whole cells, no half ends");
-        assert_eq!(bar(12, (500, 10, 1000)), ("‹     ━    ›".into(), "‹›".into()), "never without a thumb");
-        assert_eq!(bar(2, (3, 1, 9)), ("‹›".into(), "‹›".into()), "two cells have the arrows");
-        assert_eq!(bar(1, (0, 1, 9)), ("›".into(), "›".into()), "and one the way there is more");
-        assert_eq!(bar(1, (8, 1, 9)), ("‹".into(), "‹".into()));
+        assert_eq!(bar(16, (0, 5, 5)), (" ".repeat(16), String::new()), "none where everything shows");
+        assert_eq!(bar(16, (0, 5, 10)), (" ◀ ━━━━━      ▶ ".into(), "▶".into()), "half shows, from the start");
+        assert_eq!(bar(16, (5, 5, 10)), (" ◀      ━━━━━ ▶ ".into(), "◀".into()), "to the end");
+        assert_eq!(bar(16, (1, 5, 10)), (" ◀  ━━━━━     ▶ ".into(), "◀▶".into()), "off the start once scrolled");
+        assert_eq!(bar(16, (1, 10, 20)), (" ◀  ━━━━━     ▶ ".into(), "◀▶".into()), "by whole cells, no half ends");
+        assert_eq!(bar(16, (500, 10, 1000)), (" ◀      ━     ▶ ".into(), "◀▶".into()), "never without a thumb");
+        assert_eq!(bar(2, (3, 1, 9)), ("◀▶".into(), "◀▶".into()), "two cells have the arrows");
+        assert_eq!(bar(8, (1, 5, 10)).0, "◀ ━━━  ▶", "too short for the blank cells, it goes without");
+        assert_eq!(bar(1, (0, 1, 9)), ("▶".into(), "▶".into()), "and one the way there is more");
+        assert_eq!(bar(1, (8, 1, 9)), ("◀".into(), "◀".into()));
     }
 
     #[test]
