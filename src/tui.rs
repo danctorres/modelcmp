@@ -3024,8 +3024,10 @@ fn scrollbar(
     if shown >= n {
         return;
     }
-    // The thumb is a heavy line on the border's light one, its ends half a cell where it starts
-    // or stops mid cell, so it moves by half cells, and the cursor's cell a block on it.
+    // The thumb is a heavy line on the border's light one, and the cursor's cell a block on it.
+    // Along the bottom its ends are half a cell where it starts or stops mid cell, so it moves by
+    // half cells. Down a border it moves by whole cells: half ends there, and the block over one,
+    // made it look longer and shorter as it went.
     let [back, on, whole, from, to] =
         if across { ["‹", "›", "━", "╺", "╸"] } else { ["▲", "▼", "┃", "╻", "╹"] };
     let kind = u8::from(across);
@@ -3042,12 +3044,15 @@ fn scrollbar(
     if !track.is_empty() {
         // In half cells.
         let halves = 2 * track.len();
-        let least = if across { 2 } else { 6 };
-        let len = (shown * halves).div_ceil(n).clamp(least.min(halves), halves);
+        let unit = if across { 1 } else { 2 };
+        let slots = halves / unit;
+        let least = if across { 2 } else { 3 };
+        let len = (shown * slots).div_ceil(n).clamp(least.min(slots), slots);
         // At an end of the track only when the view is at that end.
-        let (room, steps) = (halves - len, n - shown);
+        let (room, steps) = (slots - len, n - shown);
         let start = (top.min(steps) * room + steps / 2) / steps;
         let start = if room > 1 { start.clamp(usize::from(top > 0), room - usize::from(top < steps)) } else { start };
+        let (start, len, room) = (start * unit, len * unit, room * unit);
         let thumb = start..start + len;
         // In the thumb while the cursor is in view, as far along it as along the view.
         let mark = cur.map(|c| match c.checked_sub(top) {
@@ -7646,6 +7651,13 @@ mod tests {
         let by: Vec<_> = more_at(&buf).into_iter().map(|(_, y, m)| (y, m)).collect();
         let up = (0, Mouse::Scroll(-1));
         assert_eq!(by, [up, (1, Mouse::Page(0)), (2, Mouse::Page(2)), (3, Mouse::Page(5)), (4, Mouse::Scroll(1))]);
+        // Down a border the thumb is as long wherever it is, cursor on it or not: whole cells only.
+        for (top, cur) in (0..=80).flat_map(|top| [(top, None), (top, Some(top)), (top, Some(top + 19))]) {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 1, 20));
+            vbar(&mut buf, 0, 0, (top, 20, 100), cur);
+            let thumb: String = (1..19).map(|y| buf[(0, y)].symbol()).collect();
+            assert_eq!(thumb.replace('█', "┃").trim(), "┃┃┃┃", "at {top}, cursor {cur:?}: {thumb:?}");
+        }
         let bar = |cells: u16, at: Scrolled| {
             let buf = draw(cells, at, None);
             let live =
