@@ -2491,7 +2491,7 @@ struct Layout {
     more: bool,
     /// Where the view is in the columns, those not left out, Model the first and always in
     /// view: the frame's bar. And the cursor's column among them.
-    /// And how many are whole in view, which the cursor's mark goes along the thumb by.
+    /// And how many are in view, whole or cut short, which the cursor's mark goes along the thumb by.
     bar: (Scrolled, Option<usize>, usize),
     /// The cursor index a click on `▶` pages to: the first column right of the view or cut short,
     /// or the one after it when it starts the view.
@@ -2599,7 +2599,7 @@ fn layout(width: u16, app: &App) -> Layout {
     // The cut column, or the one after it when it already starts the view, as a cursor index.
     let page = |k: usize| if k > first { Some(k + 1) } else { (k + 1..ws.len()).find(|&j| ws[j] > 0).map(|j| j + 1) };
     let mut next = None;
-    let (mut started, mut dev_w, mut whole) = (false, 0, 0);
+    let (mut started, mut dev_w, mut seen) = (false, 0, 0);
     for (k, &w) in ws.iter().enumerate().skip(first).filter(|(_, w)| **w > 0) {
         let part = if started { sep(k) == 1 } else { k > lead };
         x += u16::from(part);
@@ -2613,7 +2613,8 @@ fn layout(width: u16, app: &App) -> Layout {
             break;
         }
         more = w < ws[k];
-        whole += usize::from(!more);
+        // One cut short is in view too: the cursor on it is at the thumb's end, not out of it.
+        seen += 1;
         if more {
             next = next.or_else(|| page(k));
         }
@@ -2633,7 +2634,7 @@ fn layout(width: u16, app: &App) -> Layout {
     // As many in view as leave the view its furthest at the bar's end: counted as they show,
     // wide and narrow, the thumb changed size as the view went.
     let all = shown(&ws) + 1;
-    let bar = ((shown(&ws[..first]), all - shown(&ws[..end]), all), Some(cur), whole + 1);
+    let bar = ((shown(&ws[..first]), all - shown(&ws[..end]), all), Some(cur), seen + 1);
     Layout { name_x, name_w, dev_w, cols, via: tail[0], notes: tail[1], first, more, next, seps, bar }
 }
 
@@ -7729,14 +7730,19 @@ mod tests {
         term.draw(|f| draw(&mut a, f)).unwrap();
         assert!((1..across).any(|x| edge(&term, x, 8) == "█"), "the cursor on Model has its mark on the bar");
         // The thumb is as long wherever the view is, with wide columns in it or narrow ones.
-        let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
-        let mut lens = std::collections::BTreeSet::new();
-        for col in 0..=NOTES {
-            a.col = col;
-            small.draw(|f| draw(&mut a, f)).unwrap();
-            lens.insert((0..60).filter(|&x| ["━", "█"].contains(&edge(&small, x, 8).as_str())).count());
+        for w in [60, 40] {
+            let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 10)).unwrap();
+            let mut lens = std::collections::BTreeSet::new();
+            for col in 0..=NOTES {
+                a.col = col;
+                small.draw(|f| draw(&mut a, f)).unwrap();
+                lens.insert((0..w).filter(|&x| ["━", "█"].contains(&edge(&small, x, 8).as_str())).count());
+                // On the last column the mark is at the thumb's end.
+                let mark = (0..w).find(|&x| edge(&small, x, 8) == "█").expect("the cursor's mark");
+                assert!(col < NOTES || edge(&small, mark + 1, 8) != "━", "column {col} at {w}");
+            }
+            assert_eq!(lens.len(), 1, "{lens:?} at {w}");
         }
-        assert_eq!(lens.len(), 1, "{lens:?}");
         (a.col, a.hscroll) = back;
         term.draw(|f| draw(&mut a, f)).unwrap();
         a.key(KeyCode::Char('G').into());
