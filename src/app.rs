@@ -2421,6 +2421,9 @@ impl App {
         // A task of your own is gone with its model, from under recommend's cursor too, which
         // is then on `+ new task`.
         self.task_cur = self.task_cur.min(self.task_count());
+        if self.on_new_task() {
+            self.task_sel = 0;
+        }
         // A task an agent added while one is being written leaves the cursor on the text, and
         // one it renamed or deleted ends the writing.
         match self.edit_row() {
@@ -2602,7 +2605,9 @@ impl App {
     fn ask_benches(&mut self, only: Option<usize>) {
         // A task's line is drawn from its score, so its columns show that.
         if self.task.is_some() {
-            return self.refuse("a task is in use, so the task columns show its score, c clears the task");
+            let c = self.key_of('c');
+            return self
+                .refuse(format!("a task is in use, so the task columns show its score, {c} in the table clears it"));
         }
         let cols = TASK_COLS.into_iter().filter(|&c| !hidden(c) && only.is_none_or(|o| o == c));
         let entries = self.bench_entries(cols, Effect::Bench);
@@ -3399,6 +3404,8 @@ impl App {
             let on = self.custom_at().map(|t| if t == was { name.clone() } else { t.to_string() });
             self.store.rename_task(was, &name).map_err(|e| (false, e))?;
             self.back_on(on);
+            // Its line is kept by name.
+            self.rebuild_in_place();
         }
         let before = self.store.about(&name).map(String::from);
         self.store.set_about(&name, about);
@@ -3596,7 +3603,8 @@ impl App {
     fn open_menu(&mut self) {
         // A task's line is drawn from its score, so its columns show that.
         if self.task.is_some() && TASK_COLS.contains(&self.col) {
-            return self.refuse("a task is in use, so this column shows its score, c clears the task");
+            let c = self.key_of('c');
+            return self.refuse(format!("a task is in use, so this column shows its score, {c} clears the task"));
         }
         let (items, picked) = self.menu_items(self.col);
         self.input = Input::Menu { col: self.col, items, list: List::at(picked.map_or(0, |i| i + 1)) };
@@ -3900,6 +3908,10 @@ impl App {
         if self.input != Input::None && !list {
             return self.input_key(k.code, k.modifiers);
         }
+        // Alt with a letter is no key: it would run the action the letter had before you moved it.
+        if k.modifiers.contains(KeyModifiers::ALT) && matches!(k.code, KeyCode::Char(_)) {
+            return None;
+        }
         self.status.clear();
         self.failed = false;
         let mut count = std::mem::take(&mut self.count);
@@ -3942,13 +3954,26 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.go_to(usize::MAX),
             // ^e is not `e`: only the keys above take ctrl.
             KeyCode::Char(_) if ctrl => {}
-            // `h l` move along the boxes of a row of f's grid that can be ticked, stopping at its ends.
+            // `0 _ $` go to the first and the last box of a row of f's grid that can be ticked.
+            KeyCode::Char(c @ ('0' | '_' | '$')) if self.choosing_favs() => {
+                let open = self.fav_open();
+                let to = if c == '$' { open.iter().rposition(|&o| o) } else { open.iter().position(|&o| o) };
+                if let (Some(to), Input::Choose { list, .. }) = (to, &mut self.input) {
+                    list.col = to;
+                }
+            }
+            // `h l` move along the boxes of a row of f's grid that can be ticked, and round from
+            // its ends, as along recommend's line.
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right if self.choosing_favs() => {
                 let back = matches!(k.code, KeyCode::Char('h') | KeyCode::Left);
                 let open = self.fav_open();
                 if let Input::Choose { list, .. } = &mut self.input {
-                    let ahead: Vec<usize> =
-                        if back { (0..list.col).rev().collect() } else { (list.col + 1..BOXES).collect() };
+                    let col = list.col;
+                    let ahead: Vec<usize> = if back {
+                        (0..col).rev().chain((col + 1..BOXES).rev()).collect()
+                    } else {
+                        (col + 1..BOXES).chain(0..col).collect()
+                    };
                     if let Some(&c) = ahead.iter().filter(|&&c| open[c]).take(n.unsigned_abs()).last() {
                         list.col = c;
                     }
@@ -4531,16 +4556,16 @@ impl App {
         let across = self.view == View::Recommend;
         // On recommend's `from` line the cursor runs over the tabs, and enter picks one.
         let among = self.among.filter(|_| self.view == View::Recommend);
+        // Recommend, compare and a model's details: a tab's key leaves each for the tab.
+        let panel = matches!(self.view, View::Recommend | View::Compare | View::Detail(_));
         match (code, among) {
             // With access to none `a` and `m` say so and stay, as in the table.
-            (KeyCode::Char('a' | 'm'), _) if self.view == View::Recommend && self.no_access() => {
+            (KeyCode::Char('a' | 'm'), _) if panel && self.no_access() => {
                 self.refuse(NO_ACCESS);
                 return None;
             }
-            // A tab's key leaves recommend for it, as a click on it does, theme's too.
-            (KeyCode::Char(c), _)
-                if self.view == View::Recommend && TABS[..RECOMMEND].iter().chain([&TABS[THEME]]).any(|t| t.1 == c) =>
-            {
+            // A tab's key leaves a panel for it, as a click on it does, theme's too.
+            (KeyCode::Char(c), _) if panel && TABS[..RECOMMEND].iter().chain([&TABS[THEME]]).any(|t| t.1 == c) => {
                 return self.set_tab(TABS.iter().position(|t| t.1 == c).unwrap_or(MINE));
             }
             (KeyCode::Char('<'), _) if self.view == View::Recommend => {
@@ -4750,6 +4775,9 @@ impl App {
                 self.refuse("no issues to list");
             }
             KeyCode::Char('!') if self.view == View::Issues => self.close_help(),
+            // Help opened over the issues goes back to them, and so the other way round, as each
+            // keeps one panel under it.
+            KeyCode::Char('!') if self.view == View::Help && self.issues_back.is_some() => self.close_help(),
             KeyCode::Char('!') => {
                 let view = std::mem::replace(&mut self.view, View::Issues);
                 let query = std::mem::take(&mut self.overlay_query);
@@ -4774,6 +4802,7 @@ impl App {
                 return Some(Effect::Save);
             }
             KeyCode::Char('?') if self.view == View::Help => self.close_help(),
+            KeyCode::Char('?') if self.view == View::Issues && self.help_back.is_some() => self.close_help(),
             KeyCode::Char('?') => {
                 let view = std::mem::replace(&mut self.view, View::Help);
                 let query = std::mem::take(&mut self.overlay_query);
@@ -5217,6 +5246,8 @@ impl App {
                 match code {
                     // `q` asks to quit from an open list as from the table; while typing it is typed.
                     KeyCode::Char('q') if list.idle() => self.ask_quit(),
+                    // The key that opens the dropdown also closes it, as every list's does.
+                    KeyCode::Char('d') if list.idle() => self.input = Input::None,
                     // `v` starts a range on Dev and Via, as in the table, and again cancels it.
                     KeyCode::Char('v') if list.idle() => {
                         if !matches!(*col, 1 | VIA) {
@@ -5559,13 +5590,16 @@ impl App {
                     }
                     _ if list.key(code, mods, &names, false) => {}
                     // Esc leaves the harnesses for f's grid they were opened from, on the same task.
-                    KeyCode::Esc if matches!(kind, Kind::Via | Kind::PickedVia) => match items.first() {
-                        Some((_, Effect::Via(key, _, Some(slot)))) => {
-                            let (key, slot) = (key.clone(), slot.clone());
-                            self.fav_at(&key, &slot);
+                    // `H`, which opens them, and `d`, which does on a harness in recommend, do as esc.
+                    KeyCode::Esc | KeyCode::Char('H' | 'd') if matches!(kind, Kind::Via | Kind::PickedVia) => {
+                        match items.first() {
+                            Some((_, Effect::Via(key, _, Some(slot)))) => {
+                                let (key, slot) = (key.clone(), slot.clone());
+                                self.fav_at(&key, &slot);
+                            }
+                            _ => self.input = Input::None,
                         }
-                        _ => self.input = Input::None,
-                    },
+                    }
                     KeyCode::Esc | KeyCode::Char('K') if *kind == Kind::Keys => {
                         self.input = std::mem::replace(&mut self.keys_from, Input::None);
                     }
@@ -5577,6 +5611,10 @@ impl App {
                     KeyCode::Char('f') if *kind == Kind::Fav => self.input = Input::None,
                     KeyCode::Char('o') if *kind == Kind::Open => self.input = Input::None,
                     KeyCode::Char('x') if *kind == Kind::Launch => self.input = Input::None,
+                    // `d` opens a tier's models, a task's benchmarks and your preferred harness in recommend.
+                    KeyCode::Char('d') if matches!(kind, Kind::Pick | Kind::Bench | Kind::Harness) => {
+                        self.input = Input::None;
+                    }
                     // And it is a tab, which tab leaves for the next.
                     KeyCode::Tab | KeyCode::BackTab if *kind == Kind::Theme => {
                         return self.step_tab(code == KeyCode::BackTab);
@@ -5831,6 +5869,49 @@ mod tests {
             };
         }
         App::new(Data { fetched: 0, models, ..Default::default() }, Store::default())
+    }
+
+    #[test]
+    fn help_and_the_issues_over_each_other_keep_the_panel_under_them() {
+        let mut a = app();
+        a.data.warning = Some("claude is not logged in".into());
+        press(&mut a, "R?!?");
+        assert_eq!(a.view, View::Help, "? on the issues goes back to the help under them");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Recommend);
+        press(&mut a, "!?!");
+        assert_eq!(a.view, View::Issues);
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.view, View::Recommend);
+    }
+
+    #[test]
+    fn d_closes_the_dropdown_it_opened() {
+        let mut a = app();
+        press(&mut a, "ld");
+        assert!(matches!(a.input, Input::Menu { .. }), "{:?}", a.input);
+        press(&mut a, "d");
+        assert_eq!(a.input, Input::None);
+    }
+
+    #[test]
+    fn alt_with_a_letter_is_no_key() {
+        let mut a = app();
+        let alt = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT);
+        assert_eq!((a.key(alt), a.store.excluded.len()), (None, 0));
+    }
+
+    #[test]
+    fn a_renamed_task_keeps_its_line() {
+        let mut a = app();
+        a.store.set_about("debugging", "finding and fixing a bug");
+        a.store.set_task_bench("debugging", Some("FrontierCode"));
+        a.rebuild();
+        let picks = |a: &App| a.tier_picks(TASKS.len()).map(|p| p.map(|(m, _)| m.key.clone()));
+        let before = picks(&a);
+        assert!(before.iter().any(Option::is_some));
+        assert_eq!(a.save_task("debugging", "bug-hunt", "finding and fixing a bug"), Ok(Some("bug-hunt".into())));
+        assert_eq!(picks(&a), before);
     }
 
     #[test]
@@ -7875,6 +7956,10 @@ mod tests {
         assert!(a.view == View::Table && a.theme_preview().is_some(), "theme's key opens its list over the table");
         code(&mut a, KeyCode::Esc);
         press(&mut a, "m");
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "a");
+        assert_eq!((&a.view, a.all), (&View::Table, true), "and a model's details, as it leaves every panel");
+        press(&mut a, "m");
         press(&mut a, "R2gg");
         code(&mut a, KeyCode::Enter);
         assert_eq!(keys(&a), ["mini"], "nor does the table");
@@ -8163,7 +8248,8 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!((a.task_cur, ticked(&a)), (TASKS.len(), false));
         // Nothing written adds nothing, and a description with no name says it needs one.
-        press(&mut a, "2ggfG");
+        assert_eq!(a.task_sel, 0, "on + new task, which has no tiers");
+        press(&mut a, "2gg4jfG");
         code(&mut a, KeyCode::Enter);
         assert_eq!(edit(&a), Some((String::new(), String::new())));
         assert_eq!((code(&mut a, KeyCode::Enter), edit(&a), a.store.custom_tasks().len()), (None, None, 0));
@@ -8388,8 +8474,18 @@ mod tests {
             press(&mut a, key);
             assert!(matches!(&a.input, Input::Choose { list: List { sel: s, .. }, .. } if *s == sel), "{key} to {sel}");
         }
-        // h skips nothing before low but free, which mini at $1 is dearer than, so stays.
-        press(&mut a, "h k");
+        // h skips free before low, which mini at $1 is dearer than, and goes round to high, the
+        // last, as $ does. l from there goes round to low, the first it can tick, as 0 does.
+        let col = |a: &App| a.open_list().map(|l| l.col);
+        press(&mut a, "h");
+        assert_eq!(col(&a), Some(BOXES - 1));
+        press(&mut a, "l");
+        assert_eq!(col(&a), Some(1));
+        press(&mut a, "$");
+        assert_eq!(col(&a), Some(BOXES - 1));
+        press(&mut a, "0");
+        assert_eq!(col(&a), Some(1));
+        press(&mut a, " k");
         assert_eq!((a.store.favorite("coding:low"), a.store.favorite("overall:low")), (None, Some("mini")));
         press(&mut a, " ");
         code(&mut a, KeyCode::Esc);

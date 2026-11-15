@@ -956,7 +956,7 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
                 return Some(Mouse::Item(row));
             }
             let x = usize::from(m.column.saturating_sub(rect.x + 2));
-            let Some(col) = x.checked_sub(fav_name_w(items) + 2).map(|x| x / BOX_W) else {
+            let Some(col) = x.checked_sub(fav_name_w(items, edit_room(area)) + 2).map(|x| x / BOX_W) else {
                 return Some(Mouse::Row(row));
             };
             return (col < BOXES).then_some(Mouse::Tick(row, col));
@@ -968,8 +968,10 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     // Not while something is typed or a key is waited for, which would take the key as text.
     let idle = plain && app.input == Input::None;
-    // The frame's ⚠ opens the issues, as `!` does, over a panel too.
+    let covered = app.panel.is_some_and(|r| r.contains(pos));
+    // The frame's ⚠ opens the issues, as `!` does, with a panel open too, unless it is under it.
     if idle
+        && !covered
         && more.is_none()
         && m.row == area.bottom() - 2
         && app.issues_at.as_ref().is_some_and(|r| r.contains(&m.column))
@@ -978,7 +980,6 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     }
     // The version opens modelcmp's GitHub page, as `O` does, or upgrades to the newer one
     // it names, as `U` does. Not under a panel drawn over it.
-    let covered = app.panel.is_some_and(|r| r.contains(pos));
     let on_version = version_at(app, area).is_some_and(|(row, cells)| m.row == row && cells.contains(&m.column));
     if idle && !covered && more.is_none() && on_version {
         let key = if app.data.update().is_some() { 'U' } else { 'O' };
@@ -1403,7 +1404,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     };
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.is_empty()).collect();
     // The tabs that do not fit above the frame, ahead of the way back, which a narrow terminal
-    // drops last. Off the table only the panels', whose keys work there.
+    // drops last. Over help and the issues only the panels', whose keys work there.
     if written_in_place(app) || matches!(app.input, Input::Bind { .. }) {
         return groups.join(&SEP);
     }
@@ -1411,7 +1412,7 @@ fn hints(app: &App, width: u16) -> Vec<&'static str> {
     for (i, (&(_, _, hint), end)) in TABS.iter().zip(tab_ends(app)).enumerate() {
         // Cut where its name is: one whose name shows whole is on the row, and not here too.
         if end > usize::from(width)
-            && (app.view == View::Table || i >= RECOMMEND)
+            && (!matches!(app.view, View::Help | View::Issues) || i >= RECOMMEND)
             && app.tab_has(i)
             && !app.tab_on(i)
             && !groups.iter().any(|g| g.contains(&hint))
@@ -2040,7 +2041,9 @@ fn draw(app: &mut App, f: &mut Frame) {
         let at = version_at(app, area);
         let below = at.as_ref().is_some_and(|(y, _)| *y != area.y + 1);
         // Where the count and what it waits for would run over the version, the count goes alone.
-        let room = usize::from(body.width).saturating_sub(3 + if below { version.width() } else { 0 });
+        // The columns' bar keeps its two arrows and a thumb left of it, so a narrow terminal
+        // cuts what is said here, not the bar.
+        let room = usize::from(body.width).saturating_sub(7 + if below { version.width() } else { 0 });
         let refreshing = |p: &str| format!("⟳ refreshing {p}{}", if p.is_empty() { "" } else { " " });
         let (state, color) = match (app.refreshing, app.refresh_failed, stale(app)) {
             (true, ..) if refreshing(&app.progress).chars().count() > room => {
@@ -2052,14 +2055,15 @@ fn draw(app: &mut App, f: &mut Frame) {
             (_, _, old) if app.loud() => {
                 // Without the key where naming it would run over the version.
                 let named = format!("⚠ {} issues · {age}", app.key_of('!'));
-                let fits = named.chars().count() <= room;
-                (if fits { named } else { format!("⚠ issues · {age}") }, if old { BAD } else { Color::Yellow })
+                let short = [named, format!("⚠ issues · {age}"), "⚠ issues".into()];
+                let said = short.into_iter().find(|s| s.chars().count() <= room).unwrap_or("⚠".into());
+                (said, if old { BAD } else { Color::Yellow })
             }
             (_, _, true) => (age, BAD),
             _ => (age, MUTED),
         };
         // Last on the bottom row, against the screen's edge: no corner follows it, nor a space.
-        let state = state.trim_end().to_string();
+        let state = truncate(state.trim_end(), room);
         let end = body.right();
         app.issues_at =
             state.starts_with('⚠').then(|| end.saturating_sub(Line::from(state.as_str()).width() as u16)..end);
@@ -2952,16 +2956,21 @@ fn menu_box(area: Rect, x: u16, col: usize, items: &[(String, usize)]) -> Option
     let label_w = items.iter().map(|(s, _)| s.chars().count() + tag(s)).max().unwrap_or(0);
     let n_w = items.iter().map(|(_, n)| n.to_string().len()).max().unwrap_or(0);
     let n = items.len();
-    let h = (n as u16 + 2).min(area.height.saturating_sub(1));
+    // A table too short for one entry has the box higher, over the header and the tabs.
+    let room = area.height.saturating_sub(1);
+    let h = (n as u16 + 2).min(room.max(3));
+    let y = (area.y + 1).saturating_sub(h.saturating_sub(room));
     // Room for where you are, when the entries may not all fit.
     let foot = if n + 2 > area.height.saturating_sub(1) as usize { position(n, 0, n).len() + 2 } else { 0 };
     // The ✗ box after the ✓ one, where an entry can be left out.
     let ex = if matches!(col, 1 | PRICE | VIA) { 2 } else { 0 };
     let w = ((label_w + n_w + 8 + ex).max(foot) as u16).min(area.width);
-    if h < 3 {
+    if h < 3 || y + h > area.bottom() {
         return None;
     }
-    Some((Rect::new(x.saturating_sub(2).min(area.right() - w).max(area.x), area.y + 1, w, h), (label_w, n_w)))
+    // A box cut to the table's width cuts its labels, the counts staying.
+    let label_w = label_w.min((w as usize).saturating_sub(n_w + 8 + ex));
+    Some((Rect::new(x.saturating_sub(2).min(area.right() - w).max(area.x), y, w, h), (label_w, n_w)))
 }
 
 /// The list under a header opened with `d`, each entry with how many models it would show,
@@ -3031,8 +3040,8 @@ fn dropdown(
             x += 2;
         }
         let at = x;
-        let x = put(buf, x, y, format!("{label:<label_w$}  "), label_w + 2, fg(color)).0;
-        if let Some(t) = tag(col, label) {
+        let x = put(buf, x, y, format!("{:<label_w$}  ", truncate(label, label_w)), label_w + 2, fg(color)).0;
+        if let Some(t) = tag(col, label).filter(|t| label.len() + 1 + t.len() <= label_w) {
             put(buf, at + label.len() as u16 + 1, y, t, t.len(), fg(MUTED));
         }
         // "all" is never a match.
@@ -3689,9 +3698,13 @@ fn edit_line(e: &Edit, prefix: Span<'static>, name: Style, room: usize, about_at
 /// the gap to the next.
 const BOX_W: usize = 6;
 
-/// How wide the names of `f`'s grid are: its boxes start two cells after.
-fn fav_name_w(items: &[(String, Effect)]) -> usize {
-    items.iter().map(|(label, _)| Span::raw(label.as_str()).width()).max().unwrap_or(0)
+/// How wide the names of `f`'s grid are: its boxes start two cells after. In `room` cells too
+/// few for the longest name and every box, the names are cut, so the last box stays on screen.
+/// ponytail: under 32 columns a name is cut to its `…` alone, and the line under the grid names
+/// the box; boxes closer together if that turns out to be used.
+fn fav_name_w(items: &[(String, Effect)], room: usize) -> usize {
+    let w = items.iter().map(|(label, _)| Span::raw(label.as_str()).width()).max().unwrap_or(0);
+    w.min(room.saturating_sub(BOXES * BOX_W + 1)).max(1)
 }
 
 /// The keys of an open choice list or `f`'s grid, for the status bar: the search's while one
@@ -3744,9 +3757,9 @@ fn kept_hint(hint: &str) -> String {
 /// each draw, so the boxes follow a change made anywhere.
 fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) -> Vec<Line<'static>> {
     let query = list.query.as_str();
-    let w = fav_name_w(items);
+    let w = fav_name_w(items, room);
     let head: String = crate::view::TIERS.iter().map(|t| format!(" {:<1$}", t.0, BOX_W - 1)).collect();
-    let mut lines = vec![Line::from(format!(" {:w$} {head}", "")).style(fg(MUTED))];
+    let mut lines = vec![Line::from(format!(" {:w$} {head}", "").trim_end().to_string()).style(fg(MUTED))];
     // The grid is for one model: looked up once, not per box.
     let key = items.iter().find_map(|(_, e)| if let Effect::Fav(k, _) = e { Some(k) } else { None });
     let model = key.and_then(|k| app.data.models.iter().find(|m| m.key == *k));
@@ -3786,9 +3799,10 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
             lines.push(Line::default());
             continue;
         }
+        let label = truncate(label, w);
         let name = lit(Line::from(Span::styled(label.clone(), fg(color))), query);
         // Padded by the cells the name takes, so a wide one keeps its boxes under the heading.
-        let pad = w - Span::raw(label.as_str()).width();
+        let pad = w.saturating_sub(Span::raw(label.as_str()).width());
         let mut spans = vec![Span::raw(" ")];
         spans.extend(name.spans);
         spans.push(Span::raw(" ".repeat(pad + 1)));
@@ -3806,12 +3820,14 @@ fn fav_lines(app: &App, items: &[(String, Effect)], list: &List, room: usize) ->
                 (None, None) => Span::styled("☐", fg(color)),
             };
             spans.extend(cursor(on && col == list.col, vec![mark]));
-            spans.push(Span::raw(" ".repeat(BOX_W - 3)));
+            if col + 1 < BOXES {
+                spans.push(Span::raw(" ".repeat(BOX_W - 3)));
+            }
         }
         // What a task of your own is about, in your words, cut to what the row has left of `room`.
         let left = room.saturating_sub(w + 2 + BOXES * BOX_W).min(48);
         if let Some(about) = app.store.about(task).filter(|_| left > 1) {
-            spans.push(Span::styled(truncate(about, left), fg(MUTED)));
+            spans.push(Span::styled(format!("{:1$}{2}", "", BOX_W - 3, truncate(about, left)), fg(MUTED)));
         }
         lines.push(Line::from(spans));
     }
@@ -4149,14 +4165,17 @@ fn overlay(
     // Where you are; the keys are in the status bar. The first `head` lines, a grid's heading,
     // and the last `tail`, a list's hint, are none of what is counted.
     let (top, n) = (*scroll as usize, lines.len() - head - tail);
-    let footer = if n + head > shown {
+    let footer = if n + head > shown && shown > 0 {
         position(top.saturating_sub(head), shown - head.saturating_sub(top).min(shown), n)
     } else {
         String::new()
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .title_top(Line::from(format!(" {title} ")).style(Style::new().add_modifier(BOLD)))
+        .title_top(
+            Line::from(format!(" {} ", truncate(title, usize::from(rect.width.saturating_sub(4)).max(1))))
+                .style(Style::new().add_modifier(BOLD)),
+        )
         .title_bottom(Line::from(footer).style(fg(MUTED)).right_aligned());
     // Inside the border, a cell of padding either side.
     let text = rect.inner(ratatui::layout::Margin::new(2, 1));
@@ -5139,7 +5158,8 @@ fn compare(
 }
 
 /// The verdict as a small table: question, winner in green, margin dimmed.
-/// A task's models that do not fit in `width` go on under the first, indented to it.
+/// A task's models that do not fit in `width` go on under the first, indented to it, or on the
+/// lines under the winner where the panel is too narrow to have one beside it.
 fn verdict_lines(models: &[&Model], store: &Store, width: usize) -> Vec<Line<'static>> {
     let rows = verdict(models, store);
     let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
@@ -5151,8 +5171,13 @@ fn verdict_lines(models: &[&Model], store: &Store, width: usize) -> Vec<Line<'st
                 Span::styled(format!("  {q:<w0$}  "), fg(KEY)),
                 Span::styled(format!("{win:<w1$}  "), fg(GOOD).add_modifier(BOLD)),
             ];
-            let items = margin.split(" · ").map(|m| Line::styled(m.to_string(), fg(MUTED))).collect();
-            wrapped(label, items, &glue, width)
+            let items: Vec<_> = margin.split(" · ").map(|m| Line::styled(m.to_string(), fg(MUTED))).collect();
+            if w0 + w1 + 6 + items.iter().map(Line::width).max().unwrap_or(0) <= width {
+                return wrapped(label, items, &glue, width);
+            }
+            let mut lines = vec![Line::from(label)];
+            lines.extend(wrapped(vec![Span::raw("    ")], items, &glue, width));
+            lines
         })
         .collect()
 }
@@ -6471,7 +6496,7 @@ mod tests {
         let rect = overlay_rect(within, "favorite for which tasks?", &lines);
         let rect = Rect { y: rect.y - 2, ..rect };
         let Input::Choose { items, .. } = &a.input else { panic!("f's grid is open") };
-        let boxes = rect.x + 2 + fav_name_w(items) as u16 + 2;
+        let boxes = rect.x + 2 + fav_name_w(items, usize::MAX) as u16 + 2;
         assert_eq!(hit(&a, area, click(boxes + 2 * BOX_W as u16 + 1, rect.y + 3)), Some(Mouse::Tick(1, 2)));
         assert_eq!(hit(&a, area, click(rect.x + 3, rect.y + 3)), Some(Mouse::Row(1)), "the name");
         let favs = a.store.favorite.clone();
