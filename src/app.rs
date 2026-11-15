@@ -3099,11 +3099,11 @@ impl App {
             None => ANY_HARNESS.to_string(),
         };
         let items: Vec<_> = std::iter::once((any, via(None)))
-            .chain(cmds.into_iter().map(|(h, c)| (c.join(" "), via(Some(h.to_string())))))
+            .chain(cmds.into_iter().map(|(h, _)| (h.to_string(), via(Some(h.to_string())))))
             .collect();
         let has = |e: &Effect| matches!(e, Effect::Via(_, h, _) if h.as_deref() == self.store.runs_on(key));
         let sel = items.iter().position(|(_, e)| has(e)).unwrap_or(0);
-        Some(Input::choose(format!("run {} on which harness?", m.name), kind, items, sel))
+        Some(Input::choose(format!("harness for {}?", m.name), kind, items, sel))
     }
 
     /// `f`'s grid for the model `key`, opened on the box of `slot`: where `f` starts, and where
@@ -8230,7 +8230,7 @@ mod tests {
         press(&mut a, "H");
         assert!(matches!(&a.input, Input::Choose { kind: Kind::Via, items, .. } if items.len() == 3));
         let Input::Choose { title, .. } = &a.input else { panic!() };
-        assert_eq!(title, &format!("run {name} on which harness?"), "the list names its model");
+        assert_eq!(title, &format!("harness for {name}?"), "the list names its model");
         code(&mut a, KeyCode::Esc);
         assert!(a.input == Input::None && a.view == View::Recommend, "esc: back on recommend");
         press(&mut a, "Hj");
