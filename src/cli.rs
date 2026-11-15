@@ -533,7 +533,10 @@ fn picked(data: &Data, store: &Store, o: &ListOpts, not: &[String]) -> Result<Ve
     if !found {
         // One task with none is no reason to stop: another task may have one.
         if let Some(c) = o.custom.as_deref() {
-            return Err(format!("{c} has no model for this request, run pick without --task for another task").into());
+            // With a tier asked, the task's other tiers come first: the next one up may have one.
+            let tier = o.tier.as_deref().map(|t| format!(" on {t}, run pick without --tier for its other tiers, or"));
+            let tier = tier.unwrap_or_else(|| ", run pick".into());
+            return Err(format!("{c} has no model for this request{tier} without --task for another task").into());
         }
         // A copy your machine runs is no pick on merit (`Model::local`).
         let local = !o.via.is_empty() && o.via.iter().all(|v| crate::data::runs_here(&v.to_lowercase()));
@@ -1656,6 +1659,21 @@ mod tests {
             "  free  no model  (★ favorite mini is not on pi, run it with: {QUIET} opencode run --model p/mini \"<prompt>\")"
         );
         assert!(lines.contains(&free), "{lines:?}");
+    }
+
+    /// A tier asked for that has no model sends the agent to the task's other tiers before
+    /// another task.
+    #[test]
+    fn pick_names_the_other_tiers_when_the_tier_asked_has_no_model() {
+        let mut data = Data { models: vec![model("gpt55", 90.0, 2.0)], ..Default::default() };
+        let m = &mut data.models[0];
+        (m.available, m.via, m.offers[0].via) = (true, vec!["pi".into()], vec!["pi".into()]);
+        let o = ListOpts { custom: Some("coding".into()), tier: Some("free".into()), ..Default::default() };
+        let e = picked(&data, &Store::default(), &o, &[]).err().unwrap();
+        assert_eq!(
+            e.msg,
+            "coding has no model for this request on free, run pick without --tier for its other tiers, or without --task for another task"
+        );
     }
 
     /// A model on your machine that scores higher than the free tier's pick takes it, run on
