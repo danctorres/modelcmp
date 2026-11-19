@@ -1260,6 +1260,8 @@ pub enum Stop {
     About(usize),
     /// Row `i` of `HELP` in `?`.
     Help(usize),
+    /// A filter's × on recommend's `from` line: a click drops the filter, as on the table's.
+    Unfilter(Filter),
 }
 
 /// `provider/model` as opencode takes it, else pi, else omp, when one has the model (`launch_cmd`):
@@ -4091,8 +4093,9 @@ impl App {
                 let search = matches!(self.input, Input::Search { .. });
                 self.input_key(if search { KeyCode::Enter } else { KeyCode::Esc }, KeyModifiers::NONE);
             }
-            let table = self.view == View::Table && self.input == Input::None;
-            return if table { self.drop_filter(f) } else { None };
+            // Where it is drawn: the table, and recommend, whose `from` line says them too.
+            let shown = matches!(self.view, View::Table | View::Recommend) && self.input == Input::None;
+            return if shown { self.drop_filter(f) } else { None };
         }
         // A prompt over the panel and the panel's filter take an esc of their own first. The
         // details' search is their own, the compare they were opened from getting its back as

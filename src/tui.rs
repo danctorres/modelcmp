@@ -1013,7 +1013,13 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // and a ctrl or shift one, with no highlight there to add to, moves to it. Elsewhere it still
     // clears the status, as a click does in the table.
     if matches!(app.view, View::Compare | View::Recommend | View::Help) {
-        let spot = app.spots.iter().find(|(r, _)| r.contains(pos)).map(|&(_, s)| s);
+        let spot = app.spots.iter().find(|(r, _)| r.contains(pos));
+        // A filter's × on recommend's `from` line drops it, once on a double click as the table's,
+        // the × cell naming the click wherever in its three cells it lands.
+        if let Some((r, Stop::Unfilter(f))) = spot {
+            return plain.then_some(Mouse::Unfilter(*f, r.right() - 2));
+        }
+        let spot = spot.map(|&(_, s)| s);
         return Some(spot.map_or(Mouse::Outside, |s| {
             if mark {
                 Mouse::MarkModel(s)
@@ -2041,6 +2047,8 @@ fn draw(app: &mut App, f: &mut Frame) {
     let note_at;
     // And of the search or a bound written on the line after the tab that is on, and its cells.
     let mut filter_at = None;
+    // And of a dropdown's search on its box, and of a choice list's.
+    let (mut menu_cursor, mut list_cursor) = (None, None);
     // The tabs have the first two lines, the frame the rest down to the status bar.
     let body = Rect { y: area.y + 2, height: area.height - 3, ..area };
     let bar = Rect { y: area.bottom() - 1, height: 1, ..area };
@@ -2212,8 +2220,17 @@ fn draw(app: &mut App, f: &mut Frame) {
         let across = cols.bar;
         let typing = table_of(buf, inner, app, cols).3;
         note_at = typing;
+        // The dropdown's search on its box's top line, the text cursor in it while typed.
+        let mut menu_search = None;
+        if let Input::Menu { col, items, list } = &app.input
+            && (list.typing || !list.query.is_empty())
+            && let Some((rect, _)) = menu_box(inner, menu_x(inner, &layout(inner.width, app), *col), *col, items)
+        {
+            menu_search = border_search(buf, rect, "", &list.query, list.typing.then_some(list.cur));
+            menu_cursor = menu_search.and_then(|m| m.1);
+        }
         // Where the note or the filter being written is drawn, which the details' panel draws next.
-        app.written_at = typing.map(|n| n.0).or(filter_at.map(|f| f.1));
+        app.written_at = typing.map(|n| n.0).or(filter_at.map(|f| f.1)).or(menu_search.map(|m| m.0));
         // The header's box closes at its two ends, and the rule under it is its foot: each
         // where the screen has a line for it.
         for (x, foot) in [(body.x, "╰"), (body.right() - 1, "╯")] {
@@ -2239,30 +2256,12 @@ fn draw(app: &mut App, f: &mut Frame) {
     // behind it.
     if matches!(app.view, View::Help | View::Issues) {
         app.under_help(|app| {
-            panel(app, buf, area, body);
+            panel(app, buf, area, body, true);
         });
     }
-    let text = panel(app, buf, area, body);
-    // Under a question the status bar has the key that confirms it where the hint that asked it
-    // was, found in the bar it was asked from.
-    app.asked_at = question(app).and_then(|(hint, _)| {
-        let at =
-            app.as_asked(|app| bar_layout(app, area.width).into_iter().find(|(_, h)| hint_key(h) == hint_key(hint)));
-        at.map(|(x, _)| x)
-    });
-    // Where the text cursor goes: in the status bar's prompt, on a note written in its place, on
-    // a cap in recommend or on an entry written in a list. After the panel's lines, as finding
-    // its search's match says so there.
-    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y)).or(note_at.map(|n| n.1)).or(filter_at.map(|f| f.0));
-    if let Some(at) = text {
-        cursor = at;
-    }
-    // `q`, `U`, `D`, `X` and `Z` ask first: the same box, confirmed by the same key again, each
-    // as it is bound now.
-    if let Some((hint, title)) = question(app) {
-        let lines = vec![ask_line(&bound_keys(split_hint(hint).0, &app.store.keys))];
-        overlay(buf, body, &title, lines, &mut 0, (0, 0, 0..0));
-    }
+    let text = panel(app, buf, area, body, false);
+    // A choice list, before the status bar, which says its search where its box has no room.
+    let mut choose_search = None;
     let chooser = chooser(app, area);
     if let (Some((within, lines)), Input::Choose { title, kind, items, list }) = (chooser, &mut app.input) {
         let rect = overlay_rect(within, title, &lines);
@@ -2293,6 +2292,11 @@ fn draw(app: &mut App, f: &mut Frame) {
         let room = edit_room(within);
         let (text, at) = overlay(buf, within, title, lines, &mut scroll, ends);
         *top = usize::from(scroll);
+        // Its search on its box's top line after its title, the text cursor in it while typed.
+        if list.typing || !list.query.is_empty() {
+            choose_search = border_search(buf, rect, title, &list.query, list.typing.then_some(list.cur));
+            list_cursor = choose_search.and_then(|c| c.1);
+        }
         // On the bottom border, as a dropdown says it, so it shows however the list scrolls.
         if none {
             put(buf, rect.x + 2, rect.bottom() - 1, " no match ", usize::from(rect.width / 2), fg(MUTED));
@@ -2313,10 +2317,36 @@ fn draw(app: &mut App, f: &mut Frame) {
             // An entry being written has the text cursor where `edit_line` puts it.
             if let Some(e) = &list.edit {
                 let (_, before) = edit_line(e, Span::raw(edit_prefix(e)), Style::new(), room, 0);
-                cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
+                list_cursor = Some(((rect.x + 2 + before as u16).min(rect.right().saturating_sub(2)), y));
             }
             vbar(buf, rect.right() - 1, text.y, at, Some(*sel + head));
         }
+    }
+    if matches!(app.input, Input::Choose { .. }) {
+        app.written_at = choose_search.map(|c| c.0);
+    }
+    // Under a question the status bar has the key that confirms it where the hint that asked it
+    // was, found in the bar it was asked from.
+    app.asked_at = question(app).and_then(|(hint, _)| {
+        let at =
+            app.as_asked(|app| bar_layout(app, area.width).into_iter().find(|(_, h)| hint_key(h) == hint_key(hint)));
+        at.map(|(x, _)| x)
+    });
+    // Where the text cursor goes: in the status bar's prompt, on a note written in its place, on
+    // a cap in recommend or on an entry written in a list. After the panel's lines, as finding
+    // its search's match says so there.
+    let mut cursor = status(buf, bar, app).map(|x| (x, bar.y)).or(note_at.map(|n| n.1)).or(filter_at.map(|f| f.0));
+    if let Some(at) = text {
+        cursor = at;
+    }
+    if let Some(at) = menu_cursor.or(list_cursor) {
+        cursor = Some(at);
+    }
+    // `q`, `U`, `D`, `X` and `Z` ask first: the same box, confirmed by the same key again, each
+    // as it is bound now.
+    if let Some((hint, title)) = question(app) {
+        let lines = vec![ask_line(&bound_keys(split_hint(hint).0, &app.store.keys))];
+        overlay(buf, body, &title, lines, &mut 0, (0, 0, 0..0));
     }
     if let Some(at) = cursor {
         f.set_cursor_position(at);
@@ -2326,7 +2356,7 @@ fn draw(app: &mut App, f: &mut Frame) {
 /// The open panel's box over the table in `body`, and the text cursor recommend has on a cap
 /// being written, or details on the note: `None` leaves the status bar's cursor, `Some(None)`
 /// hides it, the line being scrolled off.
-fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Option<(u16, u16)>> {
+fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect, beneath: bool) -> Option<Option<(u16, u16)>> {
     let mut cursor = None;
     // Where compare and recommend put each model, in their lines, and recommend the cursor's task.
     let (mut spots, mut block, mut pin) = (vec![], None, 0..0);
@@ -2501,6 +2531,22 @@ fn panel(app: &mut App, buf: &mut Buffer, area: Rect, body: Rect) -> Option<Opti
         }
         let under = pinned(lines.len(), body.height.saturating_sub(2) as usize, &pin);
         let (text, at) = overlay(buf, body, &title, lines, &mut app.scroll, (0, 0, pin.clone()));
+        // Its search on its box's top line after its title, the text cursor in it while typed.
+        // Under help the panel's own, which help's typing is not.
+        let typed = match app.input {
+            Input::Search { cur, .. } if !beneath => Some(cur),
+            _ => None,
+        };
+        let shown = (typed.is_some() || !app.overlay_query.is_empty()).then(|| {
+            let rect = Rect::new(text.x - 2, text.y - 1, text.width + 4, text.height + 2);
+            border_search(buf, rect, &title, &app.overlay_query, typed)
+        });
+        if !beneath {
+            app.written_at = shown.flatten().map(|s| s.0);
+            if let Some(c) = shown.flatten().and_then(|s| s.1) {
+                cursor = Some(Some(c));
+            }
+        }
         // Compare's columns, on the bottom border left of where the lines are.
         if let Some((across, col)) = across {
             let footer = if at.2 > at.1 { position(at.0, at.1, at.2).chars().count() as u16 } else { 0 };
@@ -3325,8 +3371,9 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     if let Some(by) = app.hidden_by() {
         parts.push(part(format!("hidden: {by}"), MUTED));
     }
-    // The filters the line after the tab that is on has no place for.
-    for (said, f) in filters(app).1 {
+    // The filters the line after the tab that is on has no place for. A panel says them where
+    // they narrow it, recommend on its `from` line, and the others show what they do whatever they are.
+    for (said, f) in filters(app).1.into_iter().filter(|_| app.view == View::Table) {
         if !app.unfilter_at.iter().any(|u| u.1 == f) {
             parts.push(part(said, Color::Yellow));
         }
@@ -3418,9 +3465,40 @@ fn note_in_place(app: &App) -> bool {
     matches!(app.input, Input::Note { .. }) && app.written_at.is_some()
 }
 
-/// Whether the table's search or a bound is written on the line after the tab that is on.
+/// Whether the search or a bound being typed is written in its place: the table's on the line
+/// after the tab that is on, a panel's on its box's top line.
 fn filter_in_place(app: &App) -> bool {
-    matches!(app.input, Input::Search { .. } | Input::Bound { .. }) && !app.overlay_search() && app.written_at.is_some()
+    matches!(app.input, Input::Search { .. } | Input::Bound { .. }) && app.written_at.is_some()
+}
+
+/// Whether the open list's search, typed or kept, is on its box's top line.
+fn list_search_in_place(app: &App) -> bool {
+    app.open_list().is_some_and(|l| l.typing || !l.query.is_empty()) && app.written_at.is_some()
+}
+
+/// A box's search on its top line after its title, if it has one, ` /opus `, in the yellow a
+/// match is, with the text cursor while `cur` is its byte offset. The cells it took and the
+/// cursor, or none where the line has no room: the status bar has it then.
+fn border_search(
+    buf: &mut Buffer,
+    rect: Rect,
+    title: &str,
+    query: &str,
+    cur: Option<usize>,
+) -> Option<(Rect, Option<(u16, u16)>)> {
+    // The title as `overlay` puts it, ` theme? `, then a line.
+    let title_w =
+        if title.is_empty() { 0 } else { Span::raw(title).width().min(usize::from(rect.width.saturating_sub(4))) + 3 };
+    let start = usize::from(rect.x) + 1 + title_w;
+    let room = usize::from(rect.right()).saturating_sub(2).saturating_sub(start);
+    if room < 8 {
+        return None;
+    }
+    let (shown, at) = in_view(2, query, cur.unwrap_or(query.len()), room - 1);
+    let text = format!(" /{shown} ");
+    put(buf, start as u16, rect.y, &text, room, fg(MATCH));
+    let cursor = cur.map(|_| ((start + 2 + at) as u16, rect.y));
+    Some((Rect::new(start as u16, rect.y, Span::raw(&text).width() as u16, 1), cursor))
 }
 
 /// Whether text is written on its entry, a note in its place, a tier's cap or a task of your own:
@@ -3483,6 +3561,8 @@ fn ask_line(key: &str) -> Line<'static> {
 fn prompt(app: &App) -> Option<(String, &str, usize)> {
     match &app.input {
         Input::Search { .. } | Input::Bound { .. } if filter_in_place(app) => None,
+        // Its search on its box, the bar names the dropdown.
+        Input::Menu { col, .. } if list_search_in_place(app) => Some((format!("{} ▾", base_col_name(*col)), "", 0)),
         Input::Search { cur, .. } => {
             let q = if app.overlay_search() { &app.overlay_query } else { &app.query };
             Some(("/".to_string(), q, *cur))
@@ -3532,6 +3612,7 @@ fn saying(app: &App) -> bool {
             | Input::DeleteTask(_)
             | Input::Choose { list: List { typing: false, .. }, .. }
     ) && app.open_list().is_none_or(|l| l.query.is_empty())
+        || matches!(app.input, Input::Choose { .. }) && list_search_in_place(app)
 }
 
 /// The keys the status bar has after its text starting at `x`, a prompt or `said` under a
@@ -3617,7 +3698,7 @@ fn status(buf: &mut Buffer, area: Rect, app: &App) -> Option<u16> {
             _ => "",
         };
         let typing = match &app.input {
-            Input::Menu { list, .. } | Input::Choose { list, .. } => list.typing,
+            Input::Menu { list, .. } | Input::Choose { list, .. } => list.typing && !list_search_in_place(app),
             _ => true,
         };
         let width = |s: &str| Span::raw(s).width();
@@ -4425,13 +4506,22 @@ fn recommend(
     });
     let (mut v, at) = wrapped_at(label("from:"), tabs.collect(), &Span::styled("·", fg(MUTED)), text);
     spots.extend(at.into_iter().enumerate().map(|(i, (l, x))| Spot { lines: l..l + 1, x, at: Stop::Among(i) }));
-    if app.filtered_too() {
-        let note = Span::styled(" (filtered)", fg(MUTED));
-        // On a line of its own under the tabs when the last has no room for it.
-        if v.last().unwrap().width() + note.width() > text {
+    // The filters after them, as after the table's tab, each with its × a click drops it with,
+    // on a line of its own under the tabs where the last has no room. Not the task, which
+    // narrows the table's rows to its line and not the tiers.
+    for (said, f) in filters(app).1.into_iter().filter(|f| f.1 != Filter::Task) {
+        let w = Span::raw(&said).width();
+        if v.last().unwrap().width() + w + 4 > text {
             v.push(Line::from(" ".repeat("from:".len())));
         }
-        v.last_mut().unwrap().push_span(note);
+        let (l, line) = (v.len() - 1, v.last_mut().unwrap());
+        // Two spaces from what is before, which may end in one: a tab's room for the cursor's bars.
+        let gap = if line.to_string().ends_with(' ') { " " } else { "  " };
+        let x = line.width() + gap.len() + w;
+        spots.push(Spot { lines: l..l + 1, x: x..x + 3, at: Stop::Unfilter(f) });
+        line.push_span(Span::raw(gap));
+        line.push_span(Span::styled(said, fg(MATCH)));
+        line.push_span(Span::styled(" ×", fg(MUTED)));
     }
     // Your preferred harness (`P`), for the models with none of their own, a dropdown: its ▾
     // grey but on the cursor's, as a tier's, and a click on it or the name opens it.
@@ -5419,12 +5509,13 @@ mod tests {
         let (top, bar) = lines(&mut a, 44);
         assert!(top.starts_with("╭╯        ╰─ /o ×  Dev≠google × ─") && !top.contains("Price"), "{top}");
         assert!(bar.starts_with(" Price≤9.0"), "{bar}");
-        // A line with no room for any, and a panel over it, leave them all to the status bar.
+        // A line with no room for any leaves them all to the status bar. Help, which they do not
+        // narrow, says none of them.
         let (top, bar) = lines(&mut a, 16);
         assert!(!top.contains("/o") && bar.starts_with(" /o"), "{top} {bar}");
         a.key(KeyCode::Char('?').into());
         let (_, bar) = lines(&mut a, 120);
-        assert!(a.unfilter_at.is_empty() && bar.starts_with(" /o · Dev≠google · Price≤9.0"), "{bar}");
+        assert!(a.unfilter_at.is_empty() && !bar.contains("/o") && !bar.contains("Price≤"), "{bar}");
         a.key(KeyCode::Esc.into());
         lines(&mut a, 44);
         // Each × drops its own filter, a dropdown's saved, a bound kept as `rebuild` keeps it.
@@ -5514,6 +5605,31 @@ mod tests {
     }
 
     #[test]
+    fn recommend_says_the_filters_on_its_from_line_and_a_x_drops_one() {
+        let mut a = app();
+        a.query = "o".into();
+        a.rebuild();
+        a.key(KeyCode::Char('R').into());
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20)).unwrap();
+        term.draw(|f| draw(&mut a, f)).unwrap();
+        let lines = text(term.backend().buffer());
+        let from = lines.iter().position(|l| l.contains("from:")).unwrap();
+        assert!(lines[from].contains("○ ✓ selected  /o ×"), "{}", lines[from]);
+        assert!(!lines[19].contains("/o"), "not in the status bar too: {}", lines[19]);
+        let x = Span::raw(&lines[from][..lines[from].find('×').unwrap()]).width() as u16;
+        let on = |column| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row: from as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+        let m = hit(&a, Rect::new(0, 0, 120, 20), on(x));
+        assert_eq!(m, Some(Mouse::Unfilter(Filter::Query, x)));
+        a.mouse(m.unwrap());
+        assert!(a.query.is_empty() && a.view == View::Recommend);
+    }
+
+    #[test]
     fn under_the_theme_list_the_filters_stop_before_its_tab() {
         let mut a = app();
         // 70 characters: it fits before the theme's tab, and the bound after it would run under it.
@@ -5531,20 +5647,62 @@ mod tests {
 
     #[test]
     fn a_long_prompt_scrolls_and_keeps_its_cursor_off_the_hint() {
-        // A panel's search is typed in the status bar.
+        // A note compare shows no place for is written in the status bar.
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
         let mut a = app();
-        a.key(KeyCode::Char('?').into());
-        a.key(KeyCode::Char('/').into());
-        for c in "🔥 a search far longer than the room it has".chars() {
-            a.key(KeyCode::Char(c).into());
-        }
+        a.store.marked = vec!["opus".into(), "flash".into()];
+        a.view = View::Compare;
+        let text = "🔥 a note far longer than the room it has".to_string();
+        let back = (a.col, a.hscroll);
+        a.input = Input::Note { key: "opus".into(), cur: text.len(), text, back };
         term.draw(|f| draw(&mut a, f)).unwrap();
         let pos = term.get_cursor_position().unwrap();
         let buf = term.backend().buffer();
         let line: String = (0..60).map(|x| buf[(x, pos.y)].symbol()).collect();
         let hint = Span::raw(&line[..line.find("enter apply").expect("the prompt's keys")]).width() as u16;
         assert!(pos.y == 7 && pos.x < hint && line.contains("room it has"), "cursor at {} on {line:?}", pos.x);
+    }
+
+    #[test]
+    fn a_panel_or_list_search_is_typed_on_its_box_after_its_title() {
+        let draw_at = |a: &mut App, w: u16| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 16)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            let pos = term.get_cursor_position().unwrap();
+            let lines = text(term.backend().buffer());
+            (pos, lines[pos.y as usize].clone(), lines[15].clone())
+        };
+        let type_in = |a: &mut App, keys: &str| keys.chars().for_each(|c| _ = a.key(KeyCode::Char(c).into()));
+        // Help's, long: scrolled sideways, the cursor after what was typed, the bar only its keys.
+        let mut a = app();
+        type_in(&mut a, "?/a search far longer than the room it has, so it scrolls sideways");
+        let (pos, line, bar) = draw_at(&mut a, 60);
+        assert!(line.contains("╭ keys ─ /") && line.contains("sideways ") && !line.contains("a search"), "{line}");
+        assert_eq!(pos.x, Span::raw(&line[..line.find("sideways").unwrap() + 8]).width() as u16, "{line}");
+        assert!(bar.starts_with(" SEARCH ") && !bar.contains("/a search") && bar.ends_with("esc cancel"), "{bar}");
+        // After enter it stays on the box, with no cursor there.
+        a.key(KeyCode::Enter.into());
+        let (_, _, bar) = draw_at(&mut a, 60);
+        assert!(!bar.contains("sideways"), "{bar}");
+        // A dropdown's, which has no title, the bar naming the dropdown.
+        let mut a = app();
+        a.col = 1;
+        type_in(&mut a, "d/an");
+        let (pos, line, bar) = draw_at(&mut a, 120);
+        assert!(line.contains("╭ /an ─"), "{line}");
+        assert_eq!(pos.x, Span::raw(&line[..line.find("/an").unwrap() + 3]).width() as u16, "{line}");
+        assert!(bar.contains("Dev ▾") && !bar.contains("/an"), "{bar}");
+        // A choice list's, after its title.
+        let mut a = app();
+        type_in(&mut a, "t/no");
+        let (_, line, bar) = draw_at(&mut a, 120);
+        assert!(line.contains("╭ theme? ─ /no ─"), "{line}");
+        assert!(!bar.contains("/no") && bar.ends_with("esc cancel"), "{bar}");
+        // With no room on the box's line the status bar has it.
+        let mut a = app();
+        type_in(&mut a, "t/no");
+        let (pos, _, bar) = draw_at(&mut a, 18);
+        assert!(pos.y == 15 && bar.contains("/no"), "{bar}");
     }
 
     #[test]
@@ -7800,8 +7958,15 @@ mod tests {
         a.overlay_query = "price".into();
         term.draw(|f| draw(&mut a, f)).unwrap();
         let buf = term.backend().buffer();
-        // But for the status bar, whose hints add `n N match`.
-        assert_eq!(text(buf)[..59], all[..59], "every line still shows");
+        // But for the status bar, whose hints add `n N match`, and the box's top line, which says
+        // the search after the title.
+        let now = text(buf);
+        let title = all.iter().position(|l| l.contains("╭ opus ")).unwrap();
+        assert!(now[title].contains("╭ opus ─ /price ─"), "{}", now[title]);
+        let but = |l: &[String]| {
+            l[..59].iter().enumerate().filter(|&(i, _)| i != title).map(|p| p.1.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(but(&now), but(&all), "every line still shows");
         assert!(buf.content.iter().any(|c| c.fg == MATCH && c.modifier.contains(Modifier::UNDERLINED)), "{all:#?}");
 
         // Too short for every line: a search scrolls to its first match and `n` to the next.
@@ -8552,15 +8717,23 @@ mod tests {
         let data = std::mem::take(&mut b.data);
         b.set_data(data);
         (b.view, b.task_sel) = (View::Recommend, 3);
-        // On the `from` line it is on a tab alone, the one in use bold, and "(filtered)" says a search narrows them.
+        // On the `from` line it is on a tab alone, the one in use bold, and the filters follow, each with its ×.
         (b.among, b.query) = (Some(1), "o".into());
         let (top, block, ..) = recommend(&b, 200, &mut vec![]);
         let on: Vec<&Span> = top.iter().flat_map(|l| l.spans.iter()).filter(|s| s.style.bg == Some(CURSOR)).collect();
         assert!(on.len() == 3 && on[1].content == "○ all" && block == Some(0..2), "{on:?} {block:?}");
         let mine = top[0].spans.iter().find(|s| s.content == "● mine").unwrap();
-        assert!(mine.style == TAB_ON && top[0].to_string().ends_with(" (filtered)"), "{}", top[0]);
-        let narrow = recommend(&b, 44, &mut vec![]).0;
-        assert_eq!(narrow[1].to_string(), "      (filtered)", "it wraps where the tabs fill the line");
+        assert!(mine.style == TAB_ON && top[0].to_string().ends_with("  /o ×"), "{}", top[0]);
+        let mut spots = vec![];
+        let narrow = recommend(&b, 40, &mut spots).0;
+        assert_eq!(narrow[1].to_string(), "      /o ×", "it wraps where the tabs fill the line");
+        let x = spots.iter().find(|s| s.at == Stop::Unfilter(Filter::Query)).map(|s| (s.lines.clone(), s.x.clone()));
+        assert_eq!(x, Some((1..2, 8..11)), "its × a click drops it with");
+        // Not the task, which narrows the table's rows to its line and not the tiers.
+        b.task = fit::task("agentic");
+        let top = recommend(&b, 200, &mut vec![]).0[0].to_string();
+        assert!(!top.contains("best for") && top.ends_with("  /o ×"), "{top}");
+        b.task = None;
         // On a tier, the cursor is on the cell of its line `h` `l` put it on: the model, the cap.
         (b.among, b.query) = (None, String::new());
         let lit = |b: &App| {
