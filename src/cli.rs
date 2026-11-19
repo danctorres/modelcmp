@@ -300,10 +300,11 @@ fn flagged(store: &Store, o: &ListOpts) -> Store {
     s
 }
 
-/// Says on stderr what of the TUI's filters hides models, as its status bar says it, so an
+/// Says on stderr what of the TUI's filters hides models, as it says it after its tab, so an
 /// agent finding fewer models than it expects knows why, and the `flags` that replace them.
 fn say_filters(store: &Store, flags: &str) {
-    let on: Vec<String> = crate::view::picks_said(store).into_iter().chain(crate::view::bounds_said(store)).collect();
+    let on: Vec<String> =
+        crate::view::picks_said(store).into_iter().map(|p| p.1).chain(crate::view::bounds_said(store)).collect();
     if !on.is_empty() {
         let flags = if flags.is_empty() { String::new() } else { format!("{flags} replace the matching ones, and ") };
         eprintln!("note: filters set in the TUI hide some models: {} ({flags}c in the TUI clears them)", on.join(" "));
@@ -1478,7 +1479,7 @@ mod tests {
         assert_eq!(listed(&store, &bound("coding", 50.0, f64::INFINITY)).len(), 2, "--min coding replaces it");
         assert_eq!(listed(&store, &bound("coding", f64::NEG_INFINITY, 100.0)), ["gpt55"], "--max coding does not");
         (store.bounds, store.price_pick) = (vec![], Some(0));
-        assert_eq!(crate::view::picks_said(&store), ["Price=free"]);
+        assert_eq!(crate::view::picks_said(&store), [(crate::view::Pick::Price, "Price=free".to_string())]);
     }
 
     /// A bound takes a score as the table shows it, in whole points: a model shown at 64 meets

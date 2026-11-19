@@ -1049,7 +1049,7 @@ fn bound_said_in(store: &Store, col: usize, lo: f64, hi: f64) -> String {
     bound_said(bench.unwrap_or_else(|| crate::app::base_col_name(col)), col, lo, hi, bench)
 }
 
-/// The bounds the store keeps that apply, as the status bar says them.
+/// The bounds the store keeps that apply, as the TUI says them after its tab.
 pub fn bounds_said(store: &Store) -> impl Iterator<Item = String> {
     store.bounds.iter().filter_map(|b| {
         let col = crate::app::TEXT + crate::app::COLS.iter().position(|c| c.id == b.col)?;
@@ -1059,7 +1059,7 @@ pub fn bounds_said(store: &Store) -> impl Iterator<Item = String> {
     })
 }
 
-/// A bound as the status bar says it, `Coding≥60` or `Price≤2.0`, `name` the header of the
+/// A bound as the TUI says it after its tab, `Coding≥60` or `Price≤2.0`, `name` the header of the
 /// column at cursor index `col`, `bench` picked in its dropdown.
 pub fn bound_said(name: &str, col: usize, lo: f64, hi: f64, bench: Option<&str>) -> String {
     // Via's bound is on the download's size, wherever it is said.
@@ -1075,32 +1075,43 @@ pub fn bound_said(name: &str, col: usize, lo: f64, hi: f64, bench: Option<&str>)
     format!("{name}{sign}{shown}")
 }
 
-/// The entries picked in the TUI's Dev, Price and Via dropdowns and left out of them, as its
-/// status bar says them: `Dev=OpenAI`, `Price≤$2`, `Via≠claude`.
-pub fn picks_said(store: &Store) -> Vec<String> {
+/// The entries picked in the TUI's Dev, Price and Via dropdowns and left out of them, as the
+/// TUI says them after its tab: `Dev=OpenAI`, `Price≤$2`, `Via≠claude`, each after its kind.
+pub fn picks_said(store: &Store) -> Vec<(Pick, String)> {
     let mut v = vec![];
     let list = |l: &[String]| l.join(",");
     if !store.dev_pick.is_empty() {
-        v.push(format!("Dev={}", list(&store.dev_pick)));
+        v.push((Pick::Dev, format!("Dev={}", list(&store.dev_pick))));
     }
     if let Some(l) = store.price_pick.filter(|_| crate::app::bound_applies(crate::app::PRICE, &store.hide)) {
         let l = level_label(l);
-        v.push(if l.starts_with('≤') { format!("Price{l}") } else { format!("Price={l}") });
+        v.push((Pick::Price, if l.starts_with('≤') { format!("Price{l}") } else { format!("Price={l}") }));
     }
     if !store.via_pick.is_empty() {
-        v.push(format!("Via={}", list(&store.via_pick)));
+        v.push((Pick::Via, format!("Via={}", list(&store.via_pick))));
     }
     if !store.dev_not.is_empty() {
-        v.push(format!("Dev≠{}", list(&store.dev_not)));
+        v.push((Pick::DevNot, format!("Dev≠{}", list(&store.dev_not))));
     }
     if let Some(l) = store.price_not.map(level_label) {
         // Leaving out a level's "up to" is asking for more than it: `Price>$2`, but `Price≠free`.
-        v.push(l.strip_prefix('≤').map_or(format!("Price≠{l}"), |above| format!("Price>{above}")));
+        v.push((Pick::PriceNot, l.strip_prefix('≤').map_or(format!("Price≠{l}"), |above| format!("Price>{above}"))));
     }
     if !store.via_not.is_empty() {
-        v.push(format!("Via≠{}", list(&store.via_not)));
+        v.push((Pick::ViaNot, format!("Via≠{}", list(&store.via_not))));
     }
     v
+}
+
+/// What of a dropdown filters: the entries picked in Dev, Price or Via, or the ones left out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pick {
+    Dev,
+    Price,
+    Via,
+    DevNot,
+    PriceNot,
+    ViaNot,
 }
 
 /// Whether a developer of `m` is left out (`Store::dev_not`).

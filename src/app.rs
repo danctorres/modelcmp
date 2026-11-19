@@ -1218,6 +1218,22 @@ pub enum Mouse {
     Open(Stop),
     /// Right click on it: move the cursor to it and do what `space` does where it does anything.
     MarkModel(Stop),
+    /// Click on a filter's × on the line after the tab that is on: drop that filter alone. With
+    /// the ×'s column, which tells a double click there from a click on another ×.
+    Unfilter(Filter, u16),
+}
+
+/// A filter the line after the tab that is on says, which a click on its × drops.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Filter {
+    /// The `/` search.
+    Query,
+    /// The task picked in recommend.
+    Task,
+    /// A pick or what is left out in a dropdown.
+    Pick(crate::view::Pick),
+    /// The bound on column `.0`, its minimum or its maximum: one of each a column has.
+    Bound(usize, bool),
 }
 
 /// Where the sideways cursor of compare or recommend can be.
@@ -1527,9 +1543,13 @@ pub struct App {
     pub panel: Option<ratatui::layout::Rect>,
     /// The columns of the frame's `⚠ issues` as last drawn, which a click opens.
     pub issues_at: Option<std::ops::Range<u16>>,
-    /// Where the last frame drew the note being written in its place, its cell or its line, so
-    /// the status bar does not and a click there leaves it be.
-    pub note_shown: Option<ratatui::layout::Rect>,
+    /// Where the last frame drew the text being written in its place, so the status bar does not
+    /// and a click there leaves it be: a note in its cell or on its line, the table's search or
+    /// a bound on the line after the tab that is on.
+    pub written_at: Option<ratatui::layout::Rect>,
+    /// The cells the last frame drew each filter in on the line after the tab that is on, its ×
+    /// and the space either side of it the last three.
+    pub unfilter_at: Vec<(std::ops::Range<u16>, Filter)>,
     /// Search of the open panel, compare, help, details or recommend, typed with `/` in any.
     pub overlay_query: String,
     /// The search of the panel details were opened from and the match it was on, for esc to
@@ -1629,7 +1649,8 @@ impl App {
             more: vec![],
             panel: None,
             issues_at: None,
-            note_shown: None,
+            written_at: None,
+            unfilter_at: vec![],
             overlay_query: String::new(),
             back_query: (String::new(), 0),
             help_back: None,
@@ -2140,9 +2161,13 @@ impl App {
         };
         match i {
             _ if panel.is_some() || i >= RECOMMEND => panel == Some(i),
-            MINE | ALL => self.only.is_none() && (i == ALL) == (self.all || self.no_access()),
-            _ => self.only == Some(i),
+            _ => i == self.table_tab(),
         }
+    }
+
+    /// The table's tab: mine, all, or the one of `S` `F` `E` that is on, under a panel's tab too.
+    pub fn table_tab(&self) -> usize {
+        self.only.unwrap_or(if self.all || self.no_access() { ALL } else { MINE })
     }
 
     /// The next tab with something to show, past the last back to the first; `back` the one
@@ -3617,13 +3642,53 @@ impl App {
         self.query.clear();
         self.clear_left_out();
         self.drop_benches(true);
-        // The task set the sort; back to the default.
-        if self.task.take().is_some() {
-            (self.sort_col, self.descending) = default_sort();
-        }
+        self.drop_task();
         self.only = None;
         self.rebuild();
         save.then_some(Effect::Save)
+    }
+
+    /// The open list closed with its search, as a click outside it closes it.
+    fn close_list(&mut self) -> Option<Effect> {
+        if let Input::Menu { list, .. } | Input::Choose { list, .. } = &mut self.input {
+            (list.typing, list.cur) = (false, 0);
+            list.query.clear();
+        }
+        self.input_key(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    /// The task gone, and the sort it set back to the default: whether there was one.
+    fn drop_task(&mut self) -> bool {
+        let had = self.task.take().is_some();
+        if had {
+            (self.sort_col, self.descending) = default_sort();
+        }
+        had
+    }
+
+    /// A click on a filter's ×: that filter gone, as `c` takes them all. A dropdown's is saved
+    /// here, and a bound as `rebuild` keeps it (`take_bounds_changed`).
+    fn drop_filter(&mut self, f: Filter) -> Option<Effect> {
+        use crate::view::Pick;
+        let s = &mut self.store;
+        match f {
+            Filter::Query => self.query.clear(),
+            Filter::Task => drop(self.drop_task()),
+            Filter::Pick(Pick::Dev) => s.dev_pick.clear(),
+            Filter::Pick(Pick::Price) => s.price_pick = None,
+            Filter::Pick(Pick::Via) => s.via_pick.clear(),
+            Filter::Pick(Pick::DevNot) => s.dev_not.clear(),
+            Filter::Pick(Pick::PriceNot) => s.price_not = None,
+            Filter::Pick(Pick::ViaNot) => s.via_not.clear(),
+            Filter::Bound(col, min) => self.bounds.retain(|&(c, lo, _)| c != col || lo.is_finite() != min),
+        }
+        // The price was the one on Via's harnesses, which `reprice` rebuilds with.
+        if matches!(f, Filter::Pick(Pick::Via | Pick::ViaNot)) {
+            self.reprice();
+        } else {
+            self.rebuild();
+        }
+        matches!(f, Filter::Pick(_)).then_some(Effect::Save)
     }
 
     /// The entries of `col`'s dropdown, each with how many models it would show, and the one
@@ -4016,6 +4081,19 @@ impl App {
         if let Mouse::Key(code) = m {
             return self.on_key(code.into());
         }
+        // A filter's × first leaves what is open or typed, as a click anywhere else does: a list
+        // closes, a search is kept as enter keeps it, anything else goes as esc takes it. Then
+        // the filter goes, where the table is all that is left.
+        if let Mouse::Unfilter(f, _) = m {
+            if self.open_list().is_some() {
+                self.close_list();
+            } else if self.input != Input::None {
+                let search = matches!(self.input, Input::Search { .. });
+                self.input_key(if search { KeyCode::Enter } else { KeyCode::Esc }, KeyModifiers::NONE);
+            }
+            let table = self.view == View::Table && self.input == Input::None;
+            return if table { self.drop_filter(f) } else { None };
+        }
         // A prompt over the panel and the panel's filter take an esc of their own first. The
         // details' search is their own, the compare they were opened from getting its back as
         // esc leaves them. An entry or a note being written is only left, its panel staying open.
@@ -4107,13 +4185,7 @@ impl App {
                     self.on_mouse(m)
                 }
                 // Outside, or anything else that is not an entry: close it, with its search.
-                _ => {
-                    if let Input::Menu { list, .. } | Input::Choose { list, .. } = &mut self.input {
-                        (list.typing, list.cur) = (false, 0);
-                        list.query.clear();
-                    }
-                    self.input_key(KeyCode::Esc, KeyModifiers::NONE)
-                }
+                _ => self.close_list(),
             };
         }
         // The sideways wheel does what h and l do: compare's columns, recommend's cells.
@@ -4311,6 +4383,7 @@ impl App {
                 self.select(n);
             }
             Mouse::Top => self.go_to(0),
+
             Mouse::Tab(i @ MARKED..RECOMMEND) => return self.table_key(KeyCode::Char(TABS[i].1), 1),
             Mouse::Header(c) if c < NCOLS => {
                 self.col = c;
@@ -4764,9 +4837,8 @@ impl App {
                 } else if self.only.take().is_some() {
                     // Back out of S, F or E to every model.
                     self.rebuild();
-                } else if self.task.take().is_some() {
+                } else if self.drop_task() {
                     // Back to recommend, where enter picked the task.
-                    (self.sort_col, self.descending) = default_sort();
                     self.rebuild();
                     self.view = View::Recommend;
                 }
@@ -4998,8 +5070,7 @@ impl App {
                     let key = first.as_ref().map(|(k, _)| k.clone());
                     // With no model to go to, recommend stays on the task, where d on a tier gives it
                     // one. A built-in task picked before would keep the table to its line, as esc undoes.
-                    if first.is_some() && self.task.take().is_some() {
-                        (self.sort_col, self.descending) = default_sort();
+                    if first.is_some() && self.drop_task() {
                         self.rebuild();
                     }
                     let row = key.and_then(|k| self.rows.iter().position(|&i| self.data.models[i].key == k));
