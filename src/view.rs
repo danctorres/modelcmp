@@ -1114,6 +1114,17 @@ pub enum Pick {
     ViaNot,
 }
 
+/// The entries of a pick or of what is left out, none for the price's level.
+pub fn pick_list(store: &Store, p: Pick) -> &[String] {
+    match p {
+        Pick::Dev => &store.dev_pick,
+        Pick::Via => &store.via_pick,
+        Pick::DevNot => &store.dev_not,
+        Pick::ViaNot => &store.via_not,
+        Pick::Price | Pick::PriceNot => &[],
+    }
+}
+
 /// Whether a developer of `m` is left out (`Store::dev_not`).
 pub fn dev_out(m: &Model, store: &Store) -> bool {
     m.devs().any(|d| store.dev_not.iter().any(|x| x == d))

@@ -1219,7 +1219,8 @@ pub enum Mouse {
     /// Right click on it: move the cursor to it and do what `space` does where it does anything.
     MarkModel(Stop),
     /// Click on a filter's × on the line after the tab that is on: drop that filter alone. With
-    /// the ×'s column, which tells a double click there from a click on another ×.
+    /// the column clicked, which tells the second press of a double click there from a click on
+    /// another ×, whatever × the line has moved under it.
     Unfilter(Filter, u16),
 }
 
@@ -1232,6 +1233,8 @@ pub enum Filter {
     Task,
     /// A pick or what is left out in a dropdown.
     Pick(crate::view::Pick),
+    /// Entry `.1` of a pick or what is left out in a dropdown, a list of more than one.
+    Entry(crate::view::Pick, usize),
     /// The bound on column `.0`, its minimum or its maximum: one of each a column has.
     Bound(usize, bool),
 }
@@ -1549,9 +1552,12 @@ pub struct App {
     /// and a click there leaves it be: a note in its cell or on its line, the table's search or
     /// a bound on the line after the tab that is on.
     pub written_at: Option<ratatui::layout::Rect>,
-    /// The cells the last frame drew each filter in on the line after the tab that is on, its ×
-    /// and the space either side of it the last three.
-    pub unfilter_at: Vec<(std::ops::Range<u16>, Filter)>,
+    /// The cells the last frame drew each filter in on the line after the tab that is on or a
+    /// line under it, its × and the space either side of it the last three.
+    pub unfilter_at: Vec<(ratatui::layout::Rect, Filter)>,
+    /// The lines the last frame gave the filters under the line after the tab that is on, which
+    /// push the table's header and rows down.
+    pub filter_lines: u16,
     /// Search of the open panel, compare, help, details or recommend, typed with `/` in any.
     pub overlay_query: String,
     /// The search of the panel details were opened from and the match it was on, for esc to
@@ -1653,6 +1659,7 @@ impl App {
             issues_at: None,
             written_at: None,
             unfilter_at: vec![],
+            filter_lines: 0,
             overlay_query: String::new(),
             back_query: (String::new(), 0),
             help_back: None,
@@ -3682,15 +3689,27 @@ impl App {
             Filter::Pick(Pick::DevNot) => s.dev_not.clear(),
             Filter::Pick(Pick::PriceNot) => s.price_not = None,
             Filter::Pick(Pick::ViaNot) => s.via_not.clear(),
+            // That entry alone, as the dropdown's space or `e` on it takes it back.
+            Filter::Entry(p, i) => {
+                let l = match p {
+                    Pick::Dev => &mut s.dev_pick,
+                    Pick::Via => &mut s.via_pick,
+                    Pick::DevNot => &mut s.dev_not,
+                    _ => &mut s.via_not,
+                };
+                if i < l.len() {
+                    l.remove(i);
+                }
+            }
             Filter::Bound(col, min) => self.bounds.retain(|&(c, lo, _)| c != col || lo.is_finite() != min),
         }
         // The price was the one on Via's harnesses, which `reprice` rebuilds with.
-        if matches!(f, Filter::Pick(Pick::Via | Pick::ViaNot)) {
+        if matches!(f, Filter::Pick(Pick::Via | Pick::ViaNot) | Filter::Entry(Pick::Via | Pick::ViaNot, _)) {
             self.reprice();
         } else {
             self.rebuild();
         }
-        matches!(f, Filter::Pick(_)).then_some(Effect::Save)
+        matches!(f, Filter::Pick(_) | Filter::Entry(..)).then_some(Effect::Save)
     }
 
     /// The entries of `col`'s dropdown, each with how many models it would show, and the one

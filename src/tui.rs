@@ -881,8 +881,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
         let on_bar = m.row == area.bottom() - 1 && (x..x + w).contains(&m.column);
         return if plain && (on_box || on_bar) { hint_key(hint).map(Mouse::Key) } else { Some(Mouse::Outside) };
     }
-    // Under the tabs' two lines and the frame's top border.
-    let inner = Rect::new(1, 3, area.width - 2, area.height.saturating_sub(5));
+    // Under the tabs' two lines, the frame's top border and the filters' lines under it.
+    let under = app.filter_lines;
+    let inner = Rect::new(1, 3 + under, area.width - 2, area.height.saturating_sub(5 + under));
     let l = layout(inner.width, app);
     // A drag goes along a bar's track, and not over one behind the open panel.
     let drag = m.kind == MouseEventKind::Drag(MouseButton::Left) && app.panel.is_none_or(|r| r.contains(pos));
@@ -908,8 +909,8 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     let tab = tab_ends(app).position(|end| on_tabs && (1..end).contains(&usize::from(m.column))).map(Mouse::Tab);
     // A filter's × and the space either side of it drop it alone, as `c` drops them all, once
     // what is open or typed is left as a click anywhere else leaves it (`App::mouse`).
-    let on_x = |r: &Range<u16>| m.row == area.y + 2 && (r.end - 3..r.end).contains(&m.column);
-    let unfilter = app.unfilter_at.iter().find(|(r, _)| plain && on_x(r)).map(|(r, f)| Mouse::Unfilter(*f, r.end - 2));
+    let on_x = |r: &Rect| r.contains(pos) && m.column + 3 >= r.right();
+    let unfilter = app.unfilter_at.iter().find(|(r, _)| plain && on_x(r)).map(|(_, f)| Mouse::Unfilter(*f, m.column));
     // An open list first: a click on an entry acts on it, on its frame nothing, and any click
     // outside closes it, one on a × dropping its filter too.
     let list = match &app.input {
@@ -1014,10 +1015,9 @@ fn hit(app: &App, area: Rect, m: MouseEvent) -> Option<Mouse> {
     // clears the status, as a click does in the table.
     if matches!(app.view, View::Compare | View::Recommend | View::Help) {
         let spot = app.spots.iter().find(|(r, _)| r.contains(pos));
-        // A filter's × on recommend's `from` line drops it, once on a double click as the table's,
-        // the × cell naming the click wherever in its three cells it lands.
-        if let Some((r, Stop::Unfilter(f))) = spot {
-            return plain.then_some(Mouse::Unfilter(*f, r.right() - 2));
+        // A filter's × on recommend's `from` line drops it, once on a double click as the table's.
+        if let Some((_, Stop::Unfilter(f))) = spot {
+            return plain.then_some(Mouse::Unfilter(*f, m.column));
         }
         let spot = spot.map(|&(_, s)| s);
         return Some(spot.map_or(Mouse::Outside, |s| {
@@ -1187,7 +1187,7 @@ fn double(last: &mut Option<(Instant, Mouse)>, m: Mouse, at: Instant) -> Option<
         Mouse::Open(s) => Mouse::Model(s),
         // A key's hint presses once on a double click: the first press puts a question's confirm
         // or `K`'s `esc` under the second, which a click out of habit must not press. A filter's
-        // × too, on the same cell, where the next filter's × takes its place.
+        // × too, on the same cell, where another × may be by then.
         Mouse::Key(_) | Mouse::Unfilter(..) => {
             let same = |was: Mouse| match (was, m) {
                 (Mouse::Unfilter(_, a), Mouse::Unfilter(_, b)) => a == b,
@@ -2133,9 +2133,8 @@ fn draw(app: &mut App, f: &mut Frame) {
         if below {
             frame = frame.title_bottom(version.clone());
         }
-        let inner = frame.inner(body);
+        let mut inner = frame.inner(body);
         let head = head(app);
-        app.page = inner.height.saturating_sub(head);
         let buf = f.buffer_mut();
         frame.render(body, buf);
         let w = (notice.width() as u16).min(body.width);
@@ -2151,8 +2150,10 @@ fn draw(app: &mut App, f: &mut Frame) {
         // it. While the table is in view, as a panel's box covers the line, and under the theme's
         // list, whose tab is on, after the table's tab as ever. The search or a bound
         // being typed is written there, first so it shows however many follow, scrolling
-        // sideways as a note in its cell does. Whole filters only: the status bar says the rest,
-        // and the one typed with no room for it.
+        // sideways as a note in its cell does. Whole filters only: those with no room there go
+        // on lines of their own under it, in the header's box above the header, as recommend's
+        // `from` line wraps them, leaving the table a row. The status bar says those that still
+        // have no room, and the one typed with no room for it.
         let (typed, said) = filters(app);
         let tab = app.table_tab();
         let after = if app.tab_on(tab) { hi } else { tab_ends(app).nth(tab).map_or(0, |e| e + 1) };
@@ -2172,26 +2173,71 @@ fn draw(app: &mut App, f: &mut Frame) {
                 x += cells(&tag);
                 spans.push(Span::styled(tag, fg(MATCH)));
             }
-            for (s, f) in said {
-                // Two spaces between two, and room for its ` ×` and a space before the line.
-                let at = if x > start + 1 { x + 2 } else { x };
-                if at + cells(&s) + 2 >= end {
-                    break;
+            // Each line's spans and where they end, the frame's first. As many under it as leave
+            // the table a row.
+            let room = usize::from((body.height.saturating_sub(2)).saturating_sub(head + 1));
+            let (mut done, mut first, mut end): (Vec<(Vec<Span>, usize)>, _, _) = (vec![], start + 1, end);
+            'said: for said in said {
+                // Each part with its ` ×`, a space between two.
+                let wide = said.iter().map(|(s, _)| cells(s) + 3).sum::<usize>() - 1;
+                // Where it starts, to take it off the lines whole where they run out on it.
+                let back = (done.len(), spans.len(), x, unfilter.len());
+                for (j, (mut s, f)) in said.into_iter().enumerate() {
+                    // Two spaces between two filters, one between the parts of one, and room for
+                    // its ` ×` and a space before the line. A filter goes whole on the next line
+                    // where this one has no room for it, from the frame's line too where the next
+                    // has room for it whole, and a part where this one has none for that part.
+                    let mut at = if x == first {
+                        x
+                    } else if j == 0 {
+                        x + 2
+                    } else {
+                        x + 1
+                    };
+                    if (j == 0 && at + wide >= end && (x > first || wide + 3 < width)) || at + cells(&s) + 2 >= end {
+                        // On the next line, between the box's sides, cut to it where longer.
+                        if x > first || done.is_empty() {
+                            // The status bar says it whole, not a part of it the lines have too.
+                            if done.len() == room || width < 7 {
+                                if done.len() > back.0 {
+                                    spans = done.drain(back.0..).next().unwrap().0;
+                                }
+                                spans.truncate(back.1);
+                                unfilter.truncate(back.3);
+                                x = back.2;
+                                break 'said;
+                            }
+                            done.push((std::mem::replace(&mut spans, vec![Span::raw(" ")]), x));
+                            (first, end, x, at) = (2, width - 1, 2, 2);
+                        }
+                        s = truncate_cells(&s, end - at - 3);
+                    }
+                    if at > x {
+                        spans.push(Span::raw(" ".repeat(at - x)));
+                    }
+                    x = at + cells(&s) + 2;
+                    let y = body.y + done.len() as u16;
+                    unfilter.push((Rect::new(body.x + at as u16, y, (x + 1 - at) as u16, 1), f));
+                    spans.push(Span::styled(s, fg(MATCH)));
+                    spans.push(Span::styled(" ×", fg(MUTED)));
                 }
-                if at > x {
-                    spans.push(Span::raw("  "));
-                }
-                x = at + cells(&s) + 2;
-                unfilter.push((body.x + at as u16..body.x + x as u16 + 1, f));
-                spans.push(Span::styled(s, fg(MATCH)));
-                spans.push(Span::styled(" ×", fg(MUTED)));
             }
-            if x > start + 1 {
-                spans.push(Span::raw(" "));
-                put_line(buf, &Line::from(spans), Rect::new(body.x + start as u16, body.y, (x + 1 - start) as u16, 1));
-                cut = Some((start - 1, x + 2));
+            done.push((spans, x));
+            cut = (done[0].1 > start + 1).then_some((start - 1, done[0].1 + 2));
+            // The table and its header under the lines they took.
+            let under = done.len() as u16 - 1;
+            (inner.y, inner.height) = (inner.y + under, inner.height - under);
+            for (i, (mut spans, x)) in done.into_iter().enumerate() {
+                let from = if i == 0 { start } else { 1 };
+                if x > from + 1 {
+                    spans.push(Span::raw(" "));
+                    let at = Rect::new(body.x + from as u16, body.y + i as u16, (x + 1 - from) as u16, 1);
+                    put_line(buf, &Line::from(spans), at);
+                }
             }
         }
+        app.filter_lines = inner.y - body.y - 1;
+        app.page = inner.height.saturating_sub(head);
         app.unfilter_at = unfilter;
         // What the column under the cursor means, centred and cut to clear the sort on either
         // side; where that would run under the tab that is on or the filters, centred in the
@@ -2231,10 +2277,11 @@ fn draw(app: &mut App, f: &mut Frame) {
         }
         // Where the note or the filter being written is drawn, which the details' panel draws next.
         app.written_at = typing.map(|n| n.0).or(filter_at.map(|f| f.1)).or(menu_search.map(|m| m.0));
-        // The header's box closes at its two ends, and the rule under it is its foot: each
-        // where the screen has a line for it.
+        // The header's box closes at its two ends, by the filters' lines too, and the rule under
+        // it is its foot: each where the screen has a line for it.
         for (x, foot) in [(body.x, "╰"), (body.right() - 1, "╯")] {
-            for (y, glyph) in [(inner.y, "│"), (inner.y + 1, foot)] {
+            for y in body.y + 1..inner.y + 2 {
+                let glyph = if y > inner.y { foot } else { "│" };
                 if y < inner.bottom() {
                     put(buf, x, y, glyph, 1, fg(MUTED));
                 }
@@ -3371,11 +3418,11 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     if let Some(by) = app.hidden_by() {
         parts.push(part(format!("hidden: {by}"), MUTED));
     }
-    // The filters the line after the tab that is on has no place for. A panel says them where
+    // The filters the lines after the tab that is on have no place for. A panel says them where
     // they narrow it, recommend on its `from` line, and the others show what they do whatever they are.
-    for (said, f) in filters(app).1.into_iter().filter(|_| app.view == View::Table) {
-        if !app.unfilter_at.iter().any(|u| u.1 == f) {
-            parts.push(part(said, Color::Yellow));
+    for said in filters(app).1.into_iter().filter(|_| app.view == View::Table) {
+        if said.iter().any(|(_, f)| !app.unfilter_at.iter().any(|u| u.1 == *f)) {
+            parts.push(part(said.into_iter().map(|p| p.0).collect::<Vec<_>>().join(","), Color::Yellow));
         }
     }
     if !app.status.is_empty() {
@@ -3384,13 +3431,27 @@ fn parts(app: &App) -> Vec<Line<'static>> {
     parts
 }
 
+/// `s` cut with a `…` to `n` cells on screen, where a wide letter takes two.
+fn truncate_cells(s: &str, n: usize) -> String {
+    let mut s = truncate(s, n);
+    while Span::raw(&s).width() > n {
+        s = truncate(&s, s.chars().count() - 1);
+    }
+    s
+}
+
 /// A filter being typed: its label, its text, the cursor's byte offset in it and its unit.
 type Typed<'a> = (String, &'a str, usize, &'static str);
+
+/// A filter as the line after the tab says it: its parts, each with the filter its × drops. A
+/// list of more than one entry picked or left out in a dropdown has a part per entry, the first
+/// after its kind, as `Via≠omp` `pi`, which its parts joined by a `,` say whole.
+type Said = Vec<(String, Filter)>;
 
 /// The search or the bound being typed in the table, as its label, its text, the cursor's byte
 /// offset in it and its unit, then the search, the task and what the filters exclude, as the
 /// CLI's note says it: the bounds the TUI's own, as one on a benchmark picked is. `c` clears them all.
-fn filters(app: &App) -> (Option<Typed<'_>>, Vec<(String, Filter)>) {
+fn filters(app: &App) -> (Option<Typed<'_>>, Vec<Said>) {
     let searching = matches!(app.input, Input::Search { .. }) && !app.overlay_search();
     let typed = match &app.input {
         Input::Search { cur, .. } if searching => Some(("/".to_string(), app.query.as_str(), *cur, "")),
@@ -3400,16 +3461,25 @@ fn filters(app: &App) -> (Option<Typed<'_>>, Vec<(String, Filter)>) {
         }
         _ => None,
     };
-    let query = (!app.query.is_empty() && !searching).then(|| (format!("/{}", app.query), Filter::Query));
-    let task = app.task.map(|t| (format!("best for {} per price", t.name), Filter::Task));
-    let picks = crate::view::picks_said(&app.store).into_iter().map(|(p, s)| (s, Filter::Pick(p)));
+    let query = (!app.query.is_empty() && !searching).then(|| vec![(format!("/{}", app.query), Filter::Query)]);
+    let task = app.task.map(|t| vec![(format!("best for {} per price", t.name), Filter::Task)]);
+    let picks = crate::view::picks_said(&app.store).into_iter().map(|(p, s)| {
+        let l = crate::view::pick_list(&app.store, p);
+        if l.len() < 2 {
+            return vec![(s, Filter::Pick(p))];
+        }
+        let kind = &s[..s.len() - l.join(",").len()];
+        let part =
+            |(i, e): (usize, &String)| (if i == 0 { format!("{kind}{e}") } else { e.clone() }, Filter::Entry(p, i));
+        l.iter().enumerate().map(part).collect()
+    });
     let hide = &app.store.hide;
     let bounds = app.bounds.iter().filter(|b| crate::app::bound_applies(b.0, hide));
     let bounds = bounds.map(|&(col, lo, hi)| {
-        (
+        vec![(
             crate::view::bound_said(app.bound_name(col), col, lo, hi, app.col_bench(col)),
             Filter::Bound(col, lo.is_finite()),
-        )
+        )]
     });
     (typed, query.into_iter().chain(task).chain(picks).chain(bounds).collect())
 }
@@ -4509,19 +4579,29 @@ fn recommend(
     // The filters after them, as after the table's tab, each with its × a click drops it with,
     // on a line of its own under the tabs where the last has no room. Not the task, which
     // narrows the table's rows to its line and not the tiers.
-    for (said, f) in filters(app).1.into_iter().filter(|f| f.1 != Filter::Task) {
-        let w = Span::raw(&said).width();
-        if v.last().unwrap().width() + w + 4 > text {
-            v.push(Line::from(" ".repeat("from:".len())));
+    for said in filters(app).1.into_iter().filter(|s| s[0].1 != Filter::Task) {
+        // A filter whole on the next line where the last has no room for it, and a part of one,
+        // each with its ×, where it has none for that part.
+        let wide = said.iter().map(|(s, _)| Span::raw(s).width() + 3).sum::<usize>() - 1;
+        for (j, (said, f)) in said.into_iter().enumerate() {
+            // Cut to a line of its own where longer, so its × shows.
+            let said = truncate_cells(&said, text.saturating_sub("from:".len() + 3));
+            let w = Span::raw(&said).width();
+            let (sep, need) = if j == 0 { (2, wide) } else { (1, w + 2) };
+            let last = v.last().unwrap().width();
+            if last > "from:".len() && last + sep + need > text {
+                v.push(Line::from(" ".repeat("from:".len())));
+            }
+            let (l, line) = (v.len() - 1, v.last_mut().unwrap());
+            // Two spaces from what is before, one from a part of the same filter, and one where
+            // that ends in one: a tab's room for the cursor's bars.
+            let gap = if line.to_string().ends_with(' ') || j > 0 { " " } else { "  " };
+            let x = line.width() + gap.len() + w;
+            spots.push(Spot { lines: l..l + 1, x: x..x + 3, at: Stop::Unfilter(f) });
+            line.push_span(Span::raw(gap));
+            line.push_span(Span::styled(said, fg(MATCH)));
+            line.push_span(Span::styled(" ×", fg(MUTED)));
         }
-        let (l, line) = (v.len() - 1, v.last_mut().unwrap());
-        // Two spaces from what is before, which may end in one: a tab's room for the cursor's bars.
-        let gap = if line.to_string().ends_with(' ') { " " } else { "  " };
-        let x = line.width() + gap.len() + w;
-        spots.push(Spot { lines: l..l + 1, x: x..x + 3, at: Stop::Unfilter(f) });
-        line.push_span(Span::raw(gap));
-        line.push_span(Span::styled(said, fg(MATCH)));
-        line.push_span(Span::styled(" ×", fg(MUTED)));
     }
     // Your preferred harness (`P`), for the models with none of their own, a dropdown: its ▾
     // grey but on the cursor's, as a tier's, and a click on it or the name opens it.
@@ -5490,34 +5570,48 @@ mod tests {
     }
 
     #[test]
-    fn the_filters_with_no_room_on_the_line_are_in_the_status_bar() {
+    fn the_filters_with_no_room_on_the_line_go_on_one_under_it() {
         let mut a = app();
         a.query = "o".into();
         a.store.dev_not = vec!["google".into()];
         a.bounds = vec![(PRICE, f64::NEG_INFINITY, 9.0)];
         a.rebuild();
-        let lines = |a: &mut App, width| {
-            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 6)).unwrap();
+        let lines = |a: &mut App, width, height| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
             term.draw(|f| draw(a, f)).unwrap();
-            let lines = text(term.backend().buffer());
-            (lines[2].clone(), lines[5].clone())
+            text(term.backend().buffer())
         };
-        let (top, bar) = lines(&mut a, 120);
-        assert!(top.starts_with("╭╯        ╰─ /o ×  Dev≠google ×  Price≤9.0 × ─"), "{top}");
-        assert!(!bar.contains("/o") && !bar.contains("Price≤"), "{bar}");
-        // Whole filters only, the rest in the status bar.
-        let (top, bar) = lines(&mut a, 44);
-        assert!(top.starts_with("╭╯        ╰─ /o ×  Dev≠google × ─") && !top.contains("Price"), "{top}");
-        assert!(bar.starts_with(" Price≤9.0"), "{bar}");
-        // A line with no room for any leaves them all to the status bar. Help, which they do not
-        // narrow, says none of them.
-        let (top, bar) = lines(&mut a, 16);
-        assert!(!top.contains("/o") && bar.starts_with(" /o"), "{top} {bar}");
+        let l = lines(&mut a, 120, 6);
+        assert!(l[2].starts_with("╭╯        ╰─ /o ×  Dev≠google ×  Price≤9.0 × ─"), "{}", l[2]);
+        assert!(!l[5].contains("/o") && !l[5].contains("Price≤"), "{}", l[5]);
+        // Whole filters only, the rest on a line under it in the header's box, which takes the
+        // header and the rows down with the clicks on them, and a click on its × drops it.
+        let l = lines(&mut a, 44, 12);
+        assert!(l[2].starts_with("╭╯        ╰─ /o ×  Dev≠google × ─") && !l[2].contains("Price"), "{}", l[2]);
+        assert!(l[3].starts_with("│ Price≤9.0 × ") && l[3].ends_with('│') && l[4].starts_with("│#"), "{l:?}");
+        assert!(!l[11].contains("Price≤"), "not in the status bar too: {}", l[11]);
+        let click = |a: &App, column, row| {
+            let e = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            hit(a, Rect::new(0, 0, 44, 12), e)
+        };
+        assert_eq!(click(&a, 12, 3), Some(Mouse::Unfilter(Filter::Bound(PRICE, false), 12)));
+        assert_eq!([click(&a, 12, 4), click(&a, 12, 6)], [Some(Mouse::Header(0)), Some(Mouse::Cell(0, 0))]);
+        // A screen with no row to spare for it leaves it to the status bar, and one with no room
+        // for any on the line leaves them all there. Help, which they do not narrow, says none.
+        let l = lines(&mut a, 44, 6);
+        assert!(!l[2].contains("Price") && l[5].starts_with(" Price≤9.0"), "{l:?}");
+        let l = lines(&mut a, 16, 6);
+        assert!(!l[2].contains("/o") && l[5].starts_with(" /o"), "{l:?}");
         a.key(KeyCode::Char('?').into());
-        let (_, bar) = lines(&mut a, 120);
-        assert!(a.unfilter_at.is_empty() && !bar.contains("/o") && !bar.contains("Price≤"), "{bar}");
+        let l = lines(&mut a, 120, 6);
+        assert!(a.unfilter_at.is_empty() && !l[5].contains("/o") && !l[5].contains("Price≤"), "{}", l[5]);
         a.key(KeyCode::Esc.into());
-        lines(&mut a, 44);
+        lines(&mut a, 44, 6);
         // Each × drops its own filter, a dropdown's saved, a bound kept as `rebuild` keeps it.
         let at = a.unfilter_at.clone();
         assert_eq!(
@@ -5530,6 +5624,53 @@ mod tests {
         assert_eq!(a.bounds.len(), 1, "a minimum, which it has none of, leaves its maximum");
         assert_eq!(a.mouse(Mouse::Unfilter(Filter::Bound(PRICE, false), 0)), None);
         assert!(a.bounds.is_empty() && a.query == "o" && a.take_bounds_changed());
+    }
+
+    #[test]
+    fn a_x_on_an_entry_of_a_list_takes_that_entry_back_alone() {
+        use crate::view::Pick;
+        let mut a = app();
+        a.store.dev_not = ["google", "openai", "meta"].map(String::from).to_vec();
+        a.rebuild();
+        let lines = |a: &mut App, width, height| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            term.draw(|f| draw(a, f)).unwrap();
+            text(term.backend().buffer())
+        };
+        let l = lines(&mut a, 120, 6);
+        assert!(l[2].starts_with("╭╯        ╰─ Dev≠google × openai × meta × ─"), "{}", l[2]);
+        let at: Vec<_> = a.unfilter_at.iter().map(|u| u.1).collect();
+        assert_eq!(at, (0..3).map(|i| Filter::Entry(Pick::DevNot, i)).collect::<Vec<_>>());
+        // The cell clicked, the space after the ×, which tells a double click by the cell, not by
+        // the × that moves under it as the line closes up.
+        let x = a.unfilter_at[1].0.right() - 1;
+        let e = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        let m = hit(&a, Rect::new(0, 0, 120, 6), e);
+        assert_eq!(m, Some(Mouse::Unfilter(Filter::Entry(Pick::DevNot, 1), x)));
+        assert_eq!(a.mouse(m.unwrap()), Some(Effect::Save));
+        assert_eq!(a.store.dev_not, ["google", "meta"]);
+        // Whole on the line under where the frame's has no room for all of it, and in the status
+        // bar, as the CLI says it, where the screen has no line for it.
+        let l = lines(&mut a, 30, 12);
+        assert!(!l[2].contains("Dev") && l[3].starts_with("│ Dev≠google × meta × "), "{l:?}");
+        let l = lines(&mut a, 30, 6);
+        assert!(!l[2].contains("Dev") && l[5].starts_with(" Dev≠google,meta "), "{l:?}");
+        // Lines that run out on it leave it whole to the status bar, none of it on them.
+        a.store.dev_not = ["google", "openai", "meta", "xai"].map(String::from).to_vec();
+        let l = lines(&mut a, 30, 9);
+        assert!(
+            !l[2].contains("Dev") && l[3].starts_with("│#") && l[8].starts_with(" Dev≠google,openai,meta"),
+            "{l:?}"
+        );
+        assert!(a.unfilter_at.is_empty() && a.filter_lines == 0);
+        // A part longer than its line is cut by the cells it takes, a wide letter two.
+        assert_eq!(truncate_cells("/日本語の検索", 6), "/日本…");
+        assert_eq!(truncate_cells("/abc", 6), "/abc");
     }
 
     #[test]
@@ -5560,11 +5701,11 @@ mod tests {
         let click = |a: &mut App, i: usize| {
             let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20)).unwrap();
             term.draw(|f| draw(a, f)).unwrap();
-            let x = a.unfilter_at[i].0.end - 2;
+            let (x, y) = (a.unfilter_at[i].0.right() - 2, a.unfilter_at[i].0.y);
             let on = MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: x,
-                row: 2,
+                row: y,
                 modifiers: KeyModifiers::NONE,
             };
             let m = hit(a, Rect::new(0, 0, 120, 20), on);
@@ -5632,7 +5773,8 @@ mod tests {
     #[test]
     fn under_the_theme_list_the_filters_stop_before_its_tab() {
         let mut a = app();
-        // 70 characters: it fits before the theme's tab, and the bound after it would run under it.
+        // 70 characters: it fits before the theme's tab, and the bound after it would run under
+        // it, so it goes on the line under.
         a.query = "a search long enough that the bound after it would run under the tab..".into();
         a.bounds = vec![(PRICE, f64::NEG_INFINITY, 9.0)];
         a.rebuild();
@@ -5642,7 +5784,8 @@ mod tests {
         let buf = term.backend().buffer();
         let lo = tab_ends(&a).nth(TABS.len() - 2).unwrap() as u16;
         assert_eq!(buf[(lo, 2)].symbol(), "┴", "{}", text(buf)[2]);
-        assert!(a.unfilter_at.len() == 1 && a.unfilter_at[0].0.end < lo, "{:?}", a.unfilter_at);
+        let at = &a.unfilter_at;
+        assert!(at.len() == 2 && at[0].0.right() < lo && at[1].0.y == 3, "{at:?}");
     }
 
     #[test]
