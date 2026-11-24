@@ -271,6 +271,9 @@ pub struct ListOpts {
     pub prompt: bool,
     /// With a tier: its pick on merit, your favorites aside.
     pub no_fav: bool,
+    /// Leave aside the entries picked in the TUI's dropdowns and the bounds typed there. The
+    /// entries left out of a dropdown still hold.
+    pub no_picks: bool,
     /// Keys of models to leave out, favorites too: `pick --not`.
     pub not: Vec<String>,
 }
@@ -281,9 +284,13 @@ fn max_price(o: &ListOpts) -> bool {
 }
 
 /// The store with what `o`'s flags replace taken out: `--dev`, `--via` and `--max price` the
-/// dropdowns' picks, and a `--min` or `--max` the bound of its kind on its column.
+/// dropdowns' picks, a `--min` or `--max` the bound of its kind on its column, and `--no-picks`
+/// every pick and bound.
 fn flagged(store: &Store, o: &ListOpts) -> Store {
     let mut s = store.clone();
+    if o.no_picks {
+        (s.dev_pick, s.via_pick, s.price_pick, s.bounds) = (vec![], vec![], None, vec![]);
+    }
     if !o.dev.is_empty() {
         s.dev_pick.clear();
     }
@@ -1422,6 +1429,7 @@ mod tests {
             prompt: false,
             cmd: false,
             no_fav: false,
+            no_picks: false,
             not: vec![],
         };
         assert!(list(&data, &store, &o).is_err());
@@ -1478,7 +1486,13 @@ mod tests {
         assert_eq!((line(&store), why(&store)), (vec!["gpt55".to_string()], Some("Coding≥80".into())));
         assert_eq!(listed(&store, &bound("coding", 50.0, f64::INFINITY)).len(), 2, "--min coding replaces it");
         assert_eq!(listed(&store, &bound("coding", f64::NEG_INFINITY, 100.0)), ["gpt55"], "--max coding does not");
-        (store.bounds, store.price_pick) = (vec![], Some(0));
+        // --no-picks leaves the picks and bounds aside, but not an entry left out of a dropdown.
+        store.dev_pick = vec!["openai".into()];
+        let no_picks = on_task(ListOpts { no_picks: true, ..Default::default() });
+        assert_eq!(listed(&store, &no_picks).len(), 2, "the Dev pick and the Coding bound are left aside");
+        (store.dev_pick, store.dev_not) = (vec![], vec!["openai".into()]);
+        assert_eq!(listed(&store, &no_picks), ["mini"], "openai is still left out");
+        (store.bounds, store.price_pick, store.dev_not) = (vec![], Some(0), vec![]);
         assert_eq!(crate::view::picks_said(&store), [(crate::view::Pick::Price, "Price=free".to_string())]);
     }
 
@@ -1543,6 +1557,7 @@ mod tests {
             prompt: false,
             cmd: false,
             no_fav: false,
+            no_picks: false,
             not: vec![],
         };
         assert!(list(&data, &store, &o).is_err(), "openai has no model for coding");
@@ -1594,6 +1609,7 @@ mod tests {
             prompt: false,
             cmd: false,
             no_fav: false,
+            no_picks: false,
             not: vec![],
         };
         assert!(list(&data, &store, &o).is_ok());

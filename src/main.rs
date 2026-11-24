@@ -76,6 +76,9 @@ enum Cmd {
         /// Ignore your favorites and print the tier's best model, for when the favorite is on no harness you can start
         #[arg(long, requires = "tier")]
         no_fav: bool,
+        /// Leave aside the entries picked in the TUI's Dev, Price and Via dropdowns and the bounds typed there with `>` and `<`, for a script whose answer should not depend on what you last browsed. The entries left out of a dropdown with `e` still hold, as do excluded models
+        #[arg(long)]
+        no_picks: bool,
         /// Print only the command that starts a harness on each model, one per line: `$(modelcmp list --task coding --tier mid --cmd)`. The harness is the one set on the model (`modelcmp harness <harness> <model>`), else your preferred harness, else the model's developer's own (claude for a Claude model), else the harness running modelcmp, as an agent's, else the first one that has the model, out of the --via ones when given. With --tier, only one whose own price fits the tier counts
         #[arg(long, conflicts_with_all = ["json", "id"])]
         cmd: bool,
@@ -347,7 +350,23 @@ fn run(cmd: Cmd, force: bool, silenced: &std::collections::BTreeSet<String>) -> 
     // Loaded after the download, which can take a minute: what the TUI or an agent saved meanwhile is kept.
     let mut store = Store::load();
     match cmd {
-        Cmd::List { task: t, tier, sort, min, max, all, selected, dev, via, limit, json, id, cmd, no_fav } => {
+        Cmd::List {
+            task: t,
+            tier,
+            sort,
+            min,
+            max,
+            all,
+            selected,
+            dev,
+            via,
+            limit,
+            json,
+            id,
+            cmd,
+            no_fav,
+            no_picks,
+        } => {
             let sort = sort.and_then(|s| app::COLS.iter().position(|c| c.id == s));
             let bounds: Vec<_> = min
                 .into_iter()
@@ -372,6 +391,7 @@ fn run(cmd: Cmd, force: bool, silenced: &std::collections::BTreeSet<String>) -> 
                 id,
                 cmd,
                 no_fav,
+                no_picks,
                 prompt: false,
                 not: vec![],
             };
